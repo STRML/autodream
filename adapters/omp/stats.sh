@@ -180,7 +180,9 @@ jq -R -s \
       transcript_bytes: $transcript_bytes,
       transcript_mtime: $transcript_mtime,
       isSidechain: (any($lines[]?; ((.customType? // "") == "agent") or ((.customType? // "") == "subagent"))),
-      is_advisor: ((([ $lines[] | select(.type == "autodream_meta") | .is_advisor ] | first) // $is_advisor_name) == true),
+      # `//` would turn a recorded false into the filename fallback, so test for the
+      # meta record itself. A linearized copy has a temp filename that says nothing.
+      is_advisor: (([ $lines[] | select(.type == "autodream_meta") ] | first) as $m | if $m != null then ($m.is_advisor == true) else $is_advisor_name end),
       nested: ((([ $lines[] | select(.type == "autodream_meta") | .nested ] | first) // false) == true),
       user_turn_timestamps: $user_turn_timestamps
     }

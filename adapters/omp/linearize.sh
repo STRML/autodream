@@ -23,8 +23,8 @@
 #        1 usage, unreadable input, jq missing, or dst is a directory
 #        2 not an OMP session (no session header with a string id in the first lines)
 #        3 produced no output
-#        4 unparseable line, entry without a string id, or a broken tree
-#          (cycle, or a parentId with no entry behind it)
+#        4 unparseable line, entry without a string id, a duplicated id, or a broken
+#          tree (cycle, or a parentId with no entry behind it)
 set -u
 
 [ "$#" -eq 2 ] || { echo "linearize: usage: linearize.sh <src> <dst>" >&2; exit 1; }
@@ -58,8 +58,13 @@ parent_candidate="$(dirname "$src").jsonl"
 nested=false
 parent=""
 if [ -f "$parent_candidate" ]; then nested=true; parent="$parent_candidate"; fi
-is_advisor=false
-[ "$(basename "$src")" = "__advisor.jsonl" ] && is_advisor=true
+# omp reserves both stems for a reviewer model that tails a primary session. The same
+# rule lives in stats.sh for a raw file, so a change to one must change the other
+# (tests/adapter-omp.sh pins both against `__advisor-<name>.jsonl`).
+case "$(basename "$src")" in
+  __advisor.jsonl|__advisor-*.jsonl) is_advisor=true ;;
+  *) is_advisor=false ;;
+esac
 
 t=$(mktemp "$dst.tmp.XXXXXX" 2>/dev/null) || { echo "linearize: cannot create a temp beside $dst" >&2; exit 1; }
 
@@ -79,6 +84,9 @@ if ! jq -R -s -c \
   | [ $rows[] | select(.type != "session" and .type != "title") ] as $entries
   | if any($entries[]; (.id | type) != "string") then bail("entry without a string id") else . end
   | ($entries | length) as $n
+  # Ids index the tree below, so a repeated id would let the later entry silently replace
+  # the earlier one and put the walk on a chain the file does not show.
+  | if ([ $entries[].id ] | length) != ([ $entries[].id ] | unique | length) then bail("duplicate entry id") else . end
   | ($entries | map({(.id): .}) | add // {}) as $by_id
   | (if $n == 0 then null else $entries[$n - 1].id end) as $leaf
   | ([ limit($n; $leaf | recurse(

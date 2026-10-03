@@ -72,6 +72,9 @@ C3="$tmp/cycle3.jsonl"
 # u1 is a real root here; make a loop that does not include the root: a1 -> u2 -> a3 -> a1
 { echo "$HDR_TITLE"; hdr_session 05 /tmp; umsg u1 null a; amsg a1 a3 b; umsg u2 a1 c; amsg a3 u2 d; } > "$C3"
 reject "a cycle that excludes the root" "$C3" 4
+DUP="$tmp/dupid.jsonl"
+{ echo "$HDR_TITLE"; hdr_session 15 /tmp; umsg u1 null a; amsg a1 u1 b; umsg u1 a1 c; } > "$DUP"
+reject "a duplicated entry id" "$DUP" 4
 NOID="$tmp/noid.jsonl"
 { echo "$HDR_TITLE"; hdr_session 06 /tmp; umsg u1 null a; printf '{"type":"message","parentId":"u1","message":{"role":"assistant","content":"x"}}\n'; } > "$NOID"
 reject "an entry without an id" "$NOID" 4
@@ -142,6 +145,17 @@ assert_eq "$(jq -r '"\(.is_advisor) \(.nested)"' "$tmp/stadv.json")" "true true"
 assert_eq "$(jq -r .is_advisor "$tmp/stadv2.json")" "true" "a raw advisor is flagged from its own filename"
 cp "$S1" "$tmp/__advisor-review.jsonl"; "$A" stats "$tmp/__advisor-review.jsonl" "$tmp/stadv3.json" >/dev/null 2>&1
 assert_eq "$(jq -r .is_advisor "$tmp/stadv3.json")" "true" "__advisor-<name>.jsonl is flagged too"
+# The path through normalize, which is the one the runner takes: the linearizer and stats
+# are two files holding one rule, and a recorded false must not fall back to the temp name.
+cp "$S1" "$NB/2026-01-02T12-00-00-000Z_01a0/__advisor-review.jsonl"
+"$A" normalize "$NB/2026-01-02T12-00-00-000Z_01a0/__advisor-review.jsonl" "$tmp/advn.out" >/dev/null 2>&1
+assert_eq "$(jq -r 'select(.type=="autodream_meta") | .is_advisor' "$tmp/advn.out")" "true" "the linearizer flags __advisor-<name>.jsonl"
+"$A" stats "$tmp/advn.out" "$tmp/stadvn.json" >/dev/null 2>&1
+assert_eq "$(jq -r .is_advisor "$tmp/stadvn.json")" "true" "and stats keeps it on the normalized copy"
+cp "$S1" "$NB/2026-01-02T12-00-00-000Z_01a0/Plain.jsonl"
+"$A" normalize "$NB/2026-01-02T12-00-00-000Z_01a0/Plain.jsonl" "$tmp/plainn.out" >/dev/null 2>&1
+"$A" stats "$tmp/plainn.out" "$tmp/stplain.json" >/dev/null 2>&1
+assert_eq "$(jq -r .is_advisor "$tmp/stplain.json")" "false" "a recorded false stays false even though the temp name is no advisor either"
 cp "$S1" "$tmp/my__advisor.jsonl"; "$A" stats "$tmp/my__advisor.jsonl" "$tmp/stadv4.json" >/dev/null 2>&1
 assert_eq "$(jq -r .is_advisor "$tmp/stadv4.json")" "false" "the stem is anchored: my__advisor.jsonl is a real session"
 SK="$tmp/skills.jsonl"
