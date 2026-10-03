@@ -81,7 +81,7 @@ Mutation checks run against three deliberate defects (leaf taken from the first 
 | 3 | network-outage deferral, bounded L1 workers, auth warmup, circuit breaker, `l1-no-advisor.yml` overlay | 2 |
 | 4 | per-session dispatch: source sidecar, normalize/stats/slim/is-self through the adapter, per-adapter L1 engine, flip `omp` on, advisor sidecar schema (omp-autodream #16), overlap exclusion, nested-transcript project from the first path segment (already in cc as `pin-projects.tsv`; verify) | 1, 3 |
 | 5 | one `SESSION_TRIAGE.md`, `facts.md` concatenated into the L2 prompt, skills inventory in `PROMPT.md` | 4 |
-| 6 | launchd label ownership and install hardening (`scheduler-label.sh`), adapter install hooks | none |
+| 6 | launchd label ownership and install hardening (`scheduler-label.sh`), template fix; adapter install hooks follow with PR 4 | none (done: https://github.com/STRML/cc-autodream/pull/82) |
 | 7 | three-harness changelog window | none |
 | 8 | review.sh cmux claim and confirmed-token dedup | none |
 

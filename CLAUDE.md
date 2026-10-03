@@ -71,6 +71,18 @@ Scripts/prompts are symlinked into `~/.claude/autodream/` by `install.sh`, so ed
 
 `install.sh` also installs that scheduled job by default (unless `--no-schedule`): it generates the plist with auto-detected label/PATH/dirs (same detection as `autodream-now.sh` — reuses an existing `*autodream*` plist's label if present, else synthesizes `com.<user>.autodream`), then `bootout`+`bootstrap`s it. `RunAtLoad` is false, so install *arms* the schedule without firing a run; the four morning triggers (03:15/06:15/09:15/12:15) match the example plist. It does not run `pmset` (sudo) — it only prints the `pmset repeat wake` recommendation. The `launchd/*.example` file is kept as a hand-editable fallback.
 
+### The label is owned by a runner, not by a name (omp-autodream#14, issue #60)
+
+`bin/scheduler-label.sh` decides which launchd label an install owns, and `install.sh` and `bin/autodream-now.sh` both call it. They used to answer separately and wrong: any `*autodream*.plist` whose body mentioned `run.sh` was treated as ours, so installing a second autodream on a host with a first one adopted the first one's label and rewrote that job. Nothing failed loudly. The overwritten job's triage sat dead for 18 days, and https://github.com/STRML/cc-autodream/issues/66 is the same blackout seen from this side.
+
+- **Ownership is the runner.** A plist is ours only when its `ProgramArguments` invoke a `run.sh` under this install's directory, compared with `pwd -P` so a trailing slash or a symlinked parent cannot cause a miss. A miss would be silent: a fresh label on every re-install.
+- **Our own label wins**, even when it is not the default, so a renamed job keeps its name. Every plist in the LaunchAgents dir is read, not an `*autodream*.plist` glob: launchd keys a job by its Label, so a filename glob missed both our job renamed to `nightly.plist` and a foreign job holding the default label in `backup.plist`.
+- **A conflict on the default name is refused.** `scheduler-label.sh` exits 3 and `install.sh` skips scheduling but still installs the symlinks. Any other nonzero from `install_schedule` (a plist failing `plutil -lint`, a bootstrap that did not take) fails the install.
+- **The on-demand label carries a hash of the install dir** (`<label>.ondemand.<8 hex>`), because the `bootout` before each on-demand run evicts whatever holds the label and another install's on-demand plist lives in its own `AUTODREAM_DIR`, where no scan sees it.
+- **The shipped template must be adoptable by this check.** It used `bash -lc "$HOME/.../run.sh"`, which runs but whose literal string never matches an install dir, so a job installed from the template got a second one beside it on the next `./install.sh`.
+
+The default label is `com.<user>.autodream`. The review LaunchAgent (the cmux popup job) is not ported yet; see `docs/plans/2026-10-03-omp-adapter.md`, PR 8.
+
 ## How claude is invoked — the lean-query pattern (do not use `--bare`)
 
 Both layers call `claude --print` with a composed set of minimal-footprint flags borrowed from claude-cells `internal/claude/query.go`. The point: strip per-call bloat (hooks, skills, MCP, CLAUDE.md auto-load) while KEEPING subscription/OAuth auth.
