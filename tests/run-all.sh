@@ -840,6 +840,25 @@ test_changelog(){
   rm -rf "$root"
 }
 
+test_autodream_now_from_a_checkout_uses_the_default_install(){
+  echo "# autodream-now.sh run from the repo must not adopt bin/ as its install dir"
+  local T; T=$(mktemp -d "${TMPDIR:-/tmp}/ccad.XXXXXX")
+  mkdir -p "$T/home/.claude/autodream"
+  local out
+  out=$(HOME="$T/home" bash "$REPO/bin/autodream-now.sh" 2020-01-02 --dry-run 2>&1)
+  if printf '%s' "$out" | grep -q "$T/home/.claude/autodream/"; then
+    ok "the dry run targets the default install dir"
+  else
+    no "the dry run targets the default install dir (got: $(printf '%s' "$out" | head -2))"
+  fi
+  if [ -d "$REPO/bin/logs" ]; then
+    no "autodream-now.sh created bin/logs inside the checkout"
+  else
+    ok "nothing was created inside the repo's bin/"
+  fi
+  rm -rf "$T"
+}
+
 test_prune_helper(){
   echo "# prune-self-sessions helper: list / filter / delete"
   local PR="$REPO/bin/prune-self-sessions.sh"
@@ -1708,6 +1727,7 @@ test_l2_model_pin_is_honoured
 test_framing
 test_changelog
 test_prune_helper
+test_autodream_now_from_a_checkout_uses_the_default_install
 test_self_session_excluded
 test_skip_empty_sessions
 test_skip_empty_disabled

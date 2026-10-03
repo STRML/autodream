@@ -390,5 +390,5 @@ else
   nope "the shipped template exists" "$TEMPLATE missing"
 fi
 
-printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+printf '\npassed: %d   failed: %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

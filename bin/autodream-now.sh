@@ -64,12 +64,16 @@ RUN_SH="$BIN_DIR/run.sh"
 AUTODREAM_DIR="${AUTODREAM_DIR:-}"
 if [ -z "$AUTODREAM_DIR" ]; then
   AUTODREAM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
-  if [ -z "$AUTODREAM_DIR" ] || { [ ! -f "$AUTODREAM_DIR/config" ] && [ ! -f "$AUTODREAM_DIR/run.sh" ]; }; then
+  # Only a directory that carries an install marker is trusted. run.sh exists in the repo's
+  # bin/ as well, so it cannot be the marker: from a checkout that would make bin/ the install
+  # dir. `config` is written by install.sh and PROMPT.md is one of its symlinks; neither is in bin/.
+  if [ -z "$AUTODREAM_DIR" ] || { [ ! -f "$AUTODREAM_DIR/config" ] && [ ! -f "$AUTODREAM_DIR/PROMPT.md" ]; }; then
     # Running straight from the checkout still lands in the default install.
     AUTODREAM_DIR="$HOME/.claude/autodream"
   fi
 fi
-DREAMS_DIR="${DREAMS_DIR:-$(dirname "$AUTODREAM_DIR")/dreams}"
+# The same default run.sh uses, so --watch and the plist point where run.sh writes.
+DREAMS_DIR="${DREAMS_DIR:-$HOME/.claude/dreams}"
 mkdir -p "$AUTODREAM_DIR/logs"
 
 # Target date: explicit arg, else "yesterday" computed exactly like run.sh does —
