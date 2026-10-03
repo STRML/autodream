@@ -3791,6 +3791,18 @@ test_skill_fields_dropped_with_a_partial_sidecar(){
   rm -rf "$root"
 }
 
+test_builtin_slash_commands_are_not_skill_invocations(){
+  echo "# a session that only ran /clear and /model invoked no skill"
+  local f="$TMPDIR/cc-builtin.$$.jsonl" out="$TMPDIR/cc-builtin.$$.out"
+  printf '%s\n' \
+    '{"type":"user","message":{"content":"<command-name>/clear</command-name>"}}' \
+    '{"type":"user","message":{"content":"<command-name>/model</command-name>"}}' \
+    '{"type":"user","message":{"content":"<command-name>/triage</command-name>"}}' > "$f"
+  "$REPO/bin/session-stats.sh" "$f" "$out"
+  assert_eq "$(jq -r '.skills_invoked | join(",")' "$out")" "triage" "only the real skill is counted"
+  trash "$f" "$out" 2>/dev/null || true
+}
+
 test_skill_fields_are_enforced_from_the_sidecar(){
   echo "# a worker that ignores the precomputed skill stats gets overwritten, not believed"
   local root; root=$(setup_env)
@@ -3814,6 +3826,7 @@ test_skill_fields_are_enforced_from_the_sidecar(){
     "the total counts invocations, not distinct skills"
   assert_eq "$(jq -r '.skills_authored | join(",")' "$(fdir "$root")/$h.json")" "fresh" \
     "authoring a skill is not invoking one"
+  assert_grep "$(fdir "$root")/run-stats.txt" 'skills_enforcement_failed: 0' "no rewrite failed"
   assert_grep "$(fdir "$root")/run-stats.txt" 'skills_unmeasured: 0' "a run with every sidecar present records zero unmeasured, not nothing"
   rm -rf "$root"
 }
@@ -4464,6 +4477,7 @@ test_enabled_adapters_resolves_once
 test_skill_fields_dropped_without_a_sidecar
 test_skill_fields_dropped_with_a_partial_sidecar
 test_skill_fields_are_enforced_from_the_sidecar
+test_builtin_slash_commands_are_not_skill_invocations
 test_omp_adapter_is_opt_in
 test_omp_session_is_linearized_for_the_worker
 test_omp_session_that_cannot_be_linearized_is_an_error_record

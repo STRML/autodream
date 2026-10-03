@@ -114,13 +114,17 @@ jq -R -s \
       | .message.content
       | if type == "string" then . elif type == "array" then ([.[]? | select(.type == "text") | .text] | join("\n")) else empty end
       | (try (capture("<command-name>/?(?<name>[^<\\s]+)</command-name>") | .name) catch empty)
+      # Claude Code records its own commands the same way as a skill. Without this list a session
+      # that only ran /clear or /model would measure as having invoked a skill. Best effort: a
+      # command added later shows up as a skill until it is named here.
+      | select(IN("add-dir","agents","bug","clear","compact","config","context","cost","doctor","exit","export","fast","help","hooks","ide","init","login","logout","mcp","memory","model","permissions","plugin","pr-comments","quit","release-notes","resume","review","rewind","status","statusline","terminal-setup","theme","todos","usage","vim") | not)
     ]) as $skills_invoked
   | ([
       $tool_uses[]
       | select(.name == "Write" or .name == "Edit" or .name == "MultiEdit")
       | .input.file_path?
       | select(type == "string")
-      | (try (capture("/skills/(?<name>[^/]+)/SKILL\\.md$") | .name) catch empty)
+      | (try (capture("(^|/)skills/(?<name>[^/]+)/SKILL\\.md$") | .name) catch empty)
     ]) as $skills_authored
   | {
       user_message_count: ($user_messages | length),

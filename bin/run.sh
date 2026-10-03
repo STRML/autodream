@@ -2597,6 +2597,9 @@ PY
   # rest. A sidecar with missing keys passes generation's type check and only breaks here.
   SKILLS_ENFORCED=0
   SKILLS_DROPPED=0
+  # Rewrites that failed (full disk, unwritable dir): the worker's own skill fields survive in
+  # those files, so the count has to be visible or L2 ranks guesses as measurements.
+  SKILLS_FAILED=0
   for fjson in "$FINDINGS_DIR"/*.json; do
     case "$fjson" in *.stats.json) continue ;; esac
     [ -s "$fjson" ] || continue
@@ -2610,6 +2613,7 @@ PY
         SKILLS_DROPPED=$((SKILLS_DROPPED + 1))
       else
         rm -f "$skilltmp"
+        SKILLS_FAILED=$((SKILLS_FAILED + 1))
       fi
       continue
     fi
@@ -2623,9 +2627,10 @@ PY
       SKILLS_ENFORCED=$((SKILLS_ENFORCED + 1))
     else
       rm -f "$skilltmp"
+      SKILLS_FAILED=$((SKILLS_FAILED + 1))
     fi
   done
-  log "enforced mechanical skill fields from sidecars on $SKILLS_ENFORCED findings file(s); removed unmeasured skill fields from $SKILLS_DROPPED whose sidecar was missing, unreadable, or incomplete"
+  log "enforced mechanical skill fields from sidecars on $SKILLS_ENFORCED findings file(s); removed unmeasured skill fields from $SKILLS_DROPPED whose sidecar was missing, unreadable, or incomplete; $SKILLS_FAILED rewrite(s) failed"
 
   # ---- Self-audit stats: runtime telemetry only the runner can see ----
   # The aggregator can't observe its own machinery — which sessions were autodream's
@@ -2751,10 +2756,11 @@ PY
     printf 'overlap_measured: %s\n' "$([ "$OVERLAP_MEASURED" = "1" ] && echo yes || echo no)"
     printf 'overlap_events: %s\n' "$OVERLAP_EVENTS"
     printf 'sessions_with_overlap: %s\n' "$SESSIONS_WITH_OVERLAP"
+    printf 'skills_unmeasured: %s\n' "${SKILLS_DROPPED:-0}"
+    printf 'skills_enforcement_failed: %s\n' "${SKILLS_FAILED:-0}"
     # Other dates that were triaged and never assembled (#36). Empty means none in the
     # window, which is the reading that matters — this is the key that gets a killed run
     # noticed the next morning instead of during an unrelated investigation two days on.
-    printf 'skills_unmeasured: %s\n' "${SKILLS_DROPPED:-0}"
     printf 'unassembled_dates: %s\n' "${UNASSEMBLED:-}"
     # Always emitted, even empty: a reader should never have to tell "no legacy reports"
     # apart from "this runner predates the key", which is the same ambiguity the epoch
