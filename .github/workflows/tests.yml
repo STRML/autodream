@@ -61,6 +61,9 @@ jobs:
       - name: review-cmux
         run: bash tests/review-cmux.sh
 
+      - name: notes-path
+        run: bash tests/notes-path.sh
+
       - name: x-bookmarks
         run: bash tests/x-bookmarks.sh
 
