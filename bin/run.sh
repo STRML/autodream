@@ -3115,7 +3115,7 @@ PY
   # Classify the LAST attempt too: the probe in the retry loop only runs between attempts, so a
   # route that dropped before the final attempt was never seen and the run would record
   # network_deferred_l2: no. Only probe when L2 failed; a delivered report needs no explanation.
-  if [ "$L2_DELIVERED" != "1" ] && ! net_up; then
+  if [ "${AUTODREAM_NETCHECK:-1}" != "0" ] && [ "$L2_DELIVERED" != "1" ] && ! net_up; then
     NET_DEFERRED=yes
     log "L2 produced no report and the API is unreachable; recording this as a network deferral"
   fi
