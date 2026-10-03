@@ -308,6 +308,15 @@ A report written from a run that could not reach the model looks complete, ships
 - `run-stats.txt` carries `network_down_seconds`, `network_deferred`, `network_flapped`, and after L2 `network_down_seconds_l2` / `network_deferred_l2` (both also on the deferral exit).
 - `run.sh` appends to the caller's `PATH` instead of replacing it, so a caller (or a test) can put a shim in front.
 
+### Several harnesses in one run: enabled is a host decision, and every session goes through its own adapter
+
+`AUTODREAM_ADAPTERS` (names, space or comma separated, or `all`; default `claude`) names the harnesses a run scans. An adapter that sits under `adapters/` is accepted, not enabled, so merging a harness never changes what a live nightly reads. For an enabled adapter the session's own adapter does the work:
+
+- `stats` comes from the adapter (omp records are not claude records). `AUTODREAM_STATS_BIN` still overrides, and a session with no recorded source keeps the claude script.
+- A manifest with `"normalize": true` (omp: an append-only tree) is linearized first and the worker reads `<hash>.norm.jsonl`, the live branch only. A tree the linearizer refuses (duplicate id, dangling parent, cycle) becomes a structured error record ("could not be normalized by the <adapter> adapter") and no worker is started. `findings.session_path` is rewritten back to the real session, and the copy is removed.
+- The substantive-session filter accepts both shapes: a claude user record, or an omp `message` record with role user and a text item.
+- The L1 engine, model and warmup come from the adapter (see "Who starts the L1 worker").
+
 ## Running / rerunning a date
 
 ```

@@ -52,6 +52,8 @@
 #   AUTODREAM_L2_ATTEMPTS max L2 attempts to produce a report        default: 3
 #   AUTODREAM_RETRY_WAIT seconds to pause between retry rounds       default: 60
 #   AUTODREAM_NETCHECK   set 0 to skip waiting-for-network on retry  default: 1
+#   AUTODREAM_ADAPTERS   harnesses to scan: names (space/comma) or all   default: claude
+#                        (an adapter under adapters/ is accepted, not enabled, until named)
 #   AUTODREAM_FORCE      set 1 to rebuild even if a report exists    default: 0
 #   AUTODREAM_SLIM_BYTES sessions larger than this are slimmed for L1  default: 262144
 #   AUTODREAM_L2_MODEL   pin the L2 aggregator model                 default: unset, so the CLI's own default is used
@@ -539,12 +541,10 @@ adapter_roots() { # $1=adapter name -> one root per line
 # manufactured back into the list and executed anyway, which turns every check in
 # adapters.sh into decoration.
 #
-# Until per-session dispatch is adapter-aware, only `claude` may be enabled. The
-# rest of the pipeline — the substantive filter, the stats sidecar, the slimmer
-# and the L1 engine — is still Claude-specific, so enumerating a second harness
-# here would hand its sessions to a Claude parser that reads them as empty and
-# drops them silently. Refusing out loud is the honest version of not supporting
-# it yet.
+# Which adapters run is a host decision: AUTODREAM_ADAPTERS, a space or comma separated list of
+# names (or `all`), default `claude`. A directory under adapters/ makes an adapter ACCEPTED, not
+# enabled, so merging a new harness never changes what a live nightly scans. The hosts that
+# want omp say so in their config.
 # Resolved ONCE into a global, by a function that prints nothing.
 #
 # The first version of this was a memoised `enabled_adapters` that every caller
@@ -584,15 +584,15 @@ _enabled_adapters_uncached() {
     printf ''                        # tree present, nothing accepted: a refusal
     return 0
   fi
-  local one keep=""
+  local one keep="" want
+  want=" $(printf '%s' "${AUTODREAM_ADAPTERS:-claude}" | tr ',' ' ') "
   for one in $a; do
-    if [ "$one" = "claude" ]; then keep="claude"; else
-      # stderr, NOT stdout: this function's stdout is its return channel, and
-      # log() is a bare echo. Writing a diagnostic here put the log text into the
-      # captured adapter list, where it was word-split into bogus adapter names
-      # and also masked the empty-list abort.
-      log "  adapter '$one' is enabled but per-session dispatch is not adapter-aware yet; not enumerating it" >&2
-    fi
+    case "$want" in
+      *" all "*|*" $one "*) keep="${keep:+$keep }$one" ;;
+      # stderr, NOT stdout: this function's stdout is its return channel, and log() is a bare
+      # echo. A diagnostic on stdout was word-split into bogus adapter names.
+      *) log "  adapter '$one' is accepted but not enabled (AUTODREAM_ADAPTERS=${AUTODREAM_ADAPTERS:-claude}); not enumerating it" >&2 ;;
+    esac
   done
   printf '%s' "$keep"
 }
@@ -620,7 +620,7 @@ scan_roots() {
     # containment or manifest failure that never happened.
     local accepted; accepted=$(adapters_list 2>/dev/null | tr '\n' ',' | sed 's/,$//')
     if [ -n "$accepted" ]; then
-      log_fatal "no usable adapter — accepted [$accepted] but per-session dispatch is claude-only, and claude is not among them. Refusing to scan."
+      log_fatal "no usable adapter — accepted [$accepted] but none is enabled (AUTODREAM_ADAPTERS=${AUTODREAM_ADAPTERS:-claude}). Refusing to scan."
     else
       log_fatal "the adapter loader ran and accepted no adapters (rejected: $(adapters_rejected 2>/dev/null)). Refusing to scan."
     fi
@@ -1103,7 +1103,10 @@ filter_empty_sessions() {
 session_is_substantive() {
   local sp="$1" verdict
   [ -r "$sp" ] || return 0
-  verdict=$(jq -s 'if any(.[]; .type=="user" and (.isMeta != true)) then 1 else 0 end' "$sp" 2>/dev/null) || return 0
+  # Both transcript shapes, because the worklist holds every enabled harness. Claude: a user
+  # record that is not meta. OMP: a `message` record with role user holding a text item;
+  # UI-only custom_message records never count. Unparseable files are kept (bias to triage).
+  verdict=$(jq -s 'if any(.[]; (.type=="user" and (.isMeta != true)) or ((.type=="message") and (.message.role=="user") and ([.message.content[]? | select(.type=="text")] | length > 0))) then 1 else 0 end' "$sp" 2>/dev/null) || return 0
   [ "$verdict" = "0" ] && return 1
   return 0
 }
@@ -1498,8 +1501,18 @@ compute_session_stats() {
     }
     stats="$FINDINGS_DIR/$hash.stats.json"
     rm -f "$stats"
-    if [ -x "$STATS" ] && "$STATS" "$session" "$stats" >/dev/null 2>&1 \
-      && [ -s "$stats" ] && jq -e 'type == "object"' "$stats" >/dev/null 2>&1; then
+    # The session's own adapter computes its stats (omp records are not claude records). The
+    # AUTODREAM_STATS_BIN override still wins, and a session with no recorded source keeps the
+    # claude script, so an install that predates the source sidecar degrades instead of failing.
+    local src stats_rc=1
+    src=$(awk -F'\t' -v h="$hash" '$1 == h { print $2; exit }' "$FINDINGS_DIR/sessions-source.txt" 2>/dev/null)
+    if [ -z "${AUTODREAM_STATS_BIN:-}" ] && [ -n "$src" ] && [ "$src" != "claude" ] \
+       && [ -x "$(adapters_root 2>/dev/null)/$src/adapter.sh" ]; then
+      adapter_run "$src" stats "$session" "$stats" >/dev/null 2>&1; stats_rc=$?
+    elif [ -x "$STATS" ]; then
+      "$STATS" "$session" "$stats" >/dev/null 2>&1; stats_rc=$?
+    fi
+    if [ "$stats_rc" -eq 0 ] && [ -s "$stats" ] && jq -e 'type == "object"' "$stats" >/dev/null 2>&1; then
       echo "stats: $session ($hash)" >&2
     else
       rm -f "$stats"
@@ -1619,10 +1632,30 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
     # findings session_path is rewritten back to the original after a successful run.
     readpath="$session"
     slimfile=""
-    sz=$(wc -c < "$session" | tr -d " ")
+    normfile=""
+    # An adapter whose sessions are not a flat transcript (omp: an append-only tree) is
+    # linearized to the live conversation first, and the worker reads that copy. Which adapters
+    # need it comes from the manifests via the environment, like the source map. A session the
+    # adapter cannot prove is the live conversation gets a deterministic error record rather
+    # than a worker reading abandoned branches.
+    wsrc=$(printf "%s\n" "$AUTODREAM_SOURCE_MAP" | awk -F"\t" -v h="$hash" "\$1 == h { print \$2; exit }")
+    case " $AUTODREAM_NORMALIZE_SOURCES " in
+      *" $wsrc "*)
+        normfile="$FINDINGS_DIR/$hash.norm.jsonl"
+        if ! "$ADAPTERS_DIR/$wsrc/adapter.sh" normalize "$session" "$normfile" 2>/dev/null || [ ! -s "$normfile" ]; then
+          rm -f "$normfile"
+          printf "{\"session_path\":\"%s\",\"error\":\"session could not be normalized by the %s adapter\",\"findings\":[]}\n" "$session" "$wsrc" > "$output"
+          rm -f "$errlog"
+          echo "skip (not normalizable): $session ($hash)" >&2
+          exit 0
+        fi
+        readpath="$normfile"
+        ;;
+    esac
+    sz=$(wc -c < "$readpath" | tr -d " ")
     if [ "${sz:-0}" -gt "${AUTODREAM_SLIM_BYTES:-262144}" ] && [ -x "$SLIM" ]; then
       slimfile="$FINDINGS_DIR/$hash.slim.jsonl"
-      if "$SLIM" "$session" "$slimfile" 2>/dev/null && [ -s "$slimfile" ]; then
+      if "$SLIM" "$readpath" "$slimfile" 2>/dev/null && [ -s "$slimfile" ]; then
         readpath="$slimfile"
         echo "slimmed: $session ($sz bytes) ($hash)" >&2
       else
@@ -1649,7 +1682,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
     if [ "${#argv[@]}" -eq 0 ]; then
       # Deterministic, so a structured error record that is left in place and skipped on re-run
       # (retrying would not change the answer) and counted by l1_findings_with_error.
-      [ -n "$slimfile" ] && rm -f "$slimfile"
+      rm -f "$slimfile" "$normfile"
       printf "{\"session_path\":\"%s\",\"error\":\"no L1 engine for this session (source [%s], model [%s])\",\"findings\":[]}\n" "$session" "$src" "$model" > "$output"
       rm -f "$errlog"
       echo "skip (no engine): $session ($hash)" >&2
@@ -1729,12 +1762,15 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       # the slim file (regenerable; keeps the findings dir clean).
       if [ -n "$slimfile" ]; then
         sed -i "" "s#$slimfile#$session#g" "$output" 2>/dev/null || true
-        rm -f "$slimfile"
       fi
+      if [ -n "$normfile" ]; then
+        sed -i "" "s#$normfile#$session#g" "$output" 2>/dev/null || true
+      fi
+      rm -f "$slimfile" "$normfile"
       rm -f "$errlog" "$outlog"
       echo "ok: $session ($hash) [$(($(date +%s) - t0))s]"
     else
-      [ -n "$slimfile" ] && rm -f "$slimfile"
+      rm -f "$slimfile" "$normfile"
       # Worker exited without writing findings JSON. Record a diagnostic so the
       # failure is visible.
       printf "worker produced no findings JSON for %s (incomplete run: the engine exited without writing output)\n" "$session" >> "$errlog"
@@ -2197,7 +2233,13 @@ EOF
     [ -n "$_model" ] || log "WARNING: no L1 model resolves for adapter $_src; its sessions will not be triaged"
     log "L1 model for $_src: ${_model:-<none>}"
   done < <(printf '%s\n' "$AUTODREAM_SOURCE_MAP" | awk -F'\t' 'NF >= 2 && !seen[$2]++ { print $2 }')
-  export ADAPTERS_DIR AUTODREAM_SOURCE_MAP AUTODREAM_L1_MODELS
+  AUTODREAM_NORMALIZE_SOURCES=""
+  while IFS= read -r _src; do
+    [ -n "$_src" ] || continue
+    [ "$(adapter_manifest_get "$_src" '.normalize' 2>/dev/null)" = "true" ] \
+      && AUTODREAM_NORMALIZE_SOURCES="${AUTODREAM_NORMALIZE_SOURCES:+$AUTODREAM_NORMALIZE_SOURCES }$_src"
+  done < <(printf '%s\n' "$AUTODREAM_SOURCE_MAP" | awk -F'\t' 'NF >= 2 && !seen[$2]++ { print $2 }')
+  export ADAPTERS_DIR AUTODREAM_SOURCE_MAP AUTODREAM_L1_MODELS AUTODREAM_NORMALIZE_SOURCES
   # AUTODREAM_L1_ROUNDS is referenced by the dispatcher subshell to decide
   # whether this is the last retry round (gates the metadata-stub fallback).
   export AUTODREAM_L1_ROUNDS

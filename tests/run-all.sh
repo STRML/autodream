@@ -3636,7 +3636,7 @@ test_no_usable_adapter_leaves_a_trace(){
 # Left in because the warning multiplying IS worth pinning, and said plainly so
 # the next reader does not mistake this for coverage of the subshell trap.
 test_enabled_adapters_resolves_once(){
-  echo "# adapters: a second installed adapter warns once per run, not once per caller"
+  echo "# adapters: an accepted but not enabled adapter warns once per run, not once per caller"
   local root; root=$(setup_env)
   mk_session "$root" a
   local ad="$root/adapters"
@@ -3653,10 +3653,86 @@ test_enabled_adapters_resolves_once(){
     /bin/bash "$RUN" "$DATE" > "$root/run.out" 2>&1
   cat "$root/autodream/logs/run-$DATE.log" >> "$root/run.out" 2>/dev/null || true
   local n
-  n=$(grep -c "is enabled but per-session dispatch" "$root/run.out" 2>/dev/null || true)
+  n=$(grep -c "is accepted but not enabled" "$root/run.out" 2>/dev/null || true)
   n=${n:-0}
-  assert_eq "$n" "1" "the not-adapter-aware warning is emitted exactly once"
+  assert_eq "$n" "1" "the not-enabled warning is emitted exactly once"
   assert_nonempty "$root/dreams/$DATE.md" "the run still produced a report"
+  rm -rf "$root"
+}
+
+# ---- omp sessions through the adapter seam --------------------------------------------------
+# An omp session is an append-only tree, so the worker has to read the linearized live branch,
+# the stats come from the omp record shapes, and none of it may be switched on for a host that
+# did not ask (AUTODREAM_ADAPTERS).
+mk_omp_session(){ # $1=root $2=name [$3=cwd]  -> path on stdout; abandoned branch written first
+  local d="$1/home/.omp/agent/sessions/proj-o" f cwd="${3:-/tmp/proj-o}"
+  mkdir -p "$d"; f="$d/2020-01-02T10-00-00-000Z_$2.jsonl"
+  {
+    printf '%s\n' '{"type":"title","title":"t","v":1}'
+    printf '{"type":"session","id":"01a00000-0000-7000-8000-000000000001","cwd":"%s","timestamp":"2020-01-02T10:00:00.000Z"}\n' "$cwd"
+    printf '%s\n' '{"type":"message","id":"u1","parentId":null,"timestamp":"2020-01-02T10:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"start the omp task"}]}}'
+    printf '%s\n' '{"type":"message","id":"ax","parentId":"u1","timestamp":"2020-01-02T10:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"ABANDONED_BRANCH_MARKER"}]}}'
+    printf '%s\n' '{"type":"message","id":"a1","parentId":"u1","timestamp":"2020-01-02T10:00:03.000Z","message":{"role":"assistant","content":[{"type":"text","text":"LIVE_BRANCH_MARKER"}]}}'
+    printf '%s\n' '{"type":"message","id":"u2","parentId":"a1","timestamp":"2020-01-02T10:05:04.000Z","message":{"role":"user","content":[{"type":"text","text":"keep going"}]}}'
+    printf '%s\n' '{"type":"message","id":"a2","parentId":"u2","timestamp":"2020-01-02T10:05:05.000Z","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}'
+  } > "$f"
+  touch -t "$STAMP" "$f"
+  printf '%s' "$f"
+}
+run_dream_omp(){ # $1=root ; claude + omp enabled, a sandbox HOME, both engines are the mock
+  mkdir -p "$1/home"
+  HOME="$1/home" AUTODREAM_ADAPTERS="${AUTODREAM_ADAPTERS:-claude,omp}" AUTODREAM_L1_MODEL_OMP=omp/test-model \
+    AUTODREAM_CHANGELOG=0 CLAUDE_BIN="$MOCK" OMP_BIN="$MOCK" \
+    AUTODREAM_CONFIG="$1/autodream/config" AUTODREAM_CONSUME_DATE="$DATE" \
+    AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1 \
+    PROJECTS_DIR="$1/projects" AUTODREAM_DIR="$1/autodream" DREAMS_DIR="$1/dreams" \
+    /bin/bash "$RUN" "$DATE" > "$1/run.out" 2>&1
+  cat "$1/autodream/logs/run-$DATE.log" >> "$1/run.out" 2>/dev/null || true
+}
+
+test_omp_adapter_is_opt_in(){
+  echo "# an accepted omp adapter is not enabled unless the host asks for it"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local o; o=$(mk_omp_session "$root" aaaa)
+  AUTODREAM_ADAPTERS=claude run_dream_omp "$root"
+  local fd; fd=$(fdir "$root")
+  assert_grep   "$fd/run-stats.txt" 'adapters_enabled: claude$' "only claude is enabled by default"
+  assert_nogrep "$fd/sessions.txt" 'proj-o' "the omp session is not enumerated"
+  assert_grep   "$root/run.out" "adapter 'omp' is accepted but not enabled" "and the log says why"
+  rm -rf "$root"
+}
+
+test_omp_session_is_linearized_for_the_worker(){
+  echo "# an enabled omp adapter: the worker reads the live branch, stats come from omp records"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local o; o=$(mk_omp_session "$root" bbbb); local h; h=$(hash_of "$o")
+  export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap"; run_dream_omp "$root"; unset FANOUT MOCK_CAPTURE_DIR
+  local fd; fd=$(fdir "$root")
+  assert_grep   "$fd/run-stats.txt" 'adapters_enabled: claude,omp' "both adapters are recorded as enabled"
+  assert_grep   "$fd/sessions-source.txt" "^$h	omp$" "the omp session's provenance is omp"
+  assert_file   "$root/cap/l1-read-$h.txt" "the omp worker was started"
+  assert_grep   "$root/cap/l1-read-$h.txt" 'LIVE_BRANCH_MARKER' "it read the live branch"
+  assert_nogrep "$root/cap/l1-read-$h.txt" 'ABANDONED_BRANCH_MARKER' "and never the abandoned one"
+  assert_grep   "$fd/$h.stats.json" '"user_message_count"' "the stats sidecar came from the omp stats script"
+  assert_nogrep "$fd/$h.json" '"error"' "the session was triaged"
+  assert_nogrep "$fd/$h.json" 'norm.jsonl' "the findings name the real session, not the temporary copy"
+  assert_no_file "$fd/$h.norm.jsonl" "the normalized copy is removed"
+  assert_grep   "$root/cap/l1-args-$h.txt" '^omp/test-model$' "the omp worker ran the omp adapter's model"
+  assert_grep   "$root/cap/l1-args-$h.txt" '^--allow-home$' "and the omp adapter's own flags"
+  rm -rf "$root"
+}
+
+test_omp_session_that_cannot_be_linearized_is_an_error_record(){
+  echo "# an omp tree the linearizer refuses is a deterministic error record, never a worker run"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local o; o=$(mk_omp_session "$root" cccc); local h; h=$(hash_of "$o")
+  printf '%s\n' '{"type":"message","id":"u2","parentId":"u1","message":{"role":"user","content":[]}}' >> "$o"   # duplicate id
+  touch -t "$STAMP" "$o"
+  export FANOUT=1 MOCK_CALL_LOG="$root/calls.log"; run_dream_omp "$root"; unset FANOUT MOCK_CALL_LOG
+  local fd; fd=$(fdir "$root")
+  assert_grep   "$fd/$h.json" 'could not be normalized by the omp adapter' "the session carries a structured error"
+  assert_nogrep "$root/calls.log" "$h" "no worker was started for it"
+  assert_file   "$root/dreams/$DATE.md" "the run still reports"
   rm -rf "$root"
 }
 
@@ -4303,6 +4379,9 @@ test_unrepresentable_characters_are_refused
 test_failing_enumerator_aborts_the_run
 test_one_failed_root_does_not_kill_the_night
 test_enabled_adapters_resolves_once
+test_omp_adapter_is_opt_in
+test_omp_session_is_linearized_for_the_worker
+test_omp_session_that_cannot_be_linearized_is_an_error_record
 test_no_usable_adapter_leaves_a_trace
 test_fatal_does_not_clobber_a_complete_date
 test_partial_enumeration_keeps_what_it_read
