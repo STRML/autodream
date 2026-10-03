@@ -4,9 +4,11 @@
 # Two-layer pipeline:
 #   L1: For each of yesterday's session JSONLs, spawn a parallel `claude --model haiku`
 #       running SESSION_TRIAGE.md → writes one findings.json per session.
-#   L2: One `claude` (CLI default model) running PROMPT.md → reads all findings JSONs,
-#       writes $DREAMS_DIR/YYYY-MM-DD.md and pins.jsonl; run.sh then stores the pins in
-#       Mnemopi via apply-pins.sh.
+#   L2: One `claude` (CLI default model) running PROMPT.md with Glob and Read only → reads
+#       all findings JSONs and prints the report on stdout, ending with AUTODREAM_REPORT_END,
+#       then an optional AUTODREAM_PINS_BEGIN/END block. run.sh is the only writer: it strips
+#       the sentinel into $DREAMS_DIR/YYYY-MM-DD.md, writes pins.jsonl from the block, and
+#       stores the pins in Mnemopi via apply-pins.sh.
 #
 # Usage:
 #   ./run.sh             # process yesterday
@@ -2974,9 +2976,19 @@ PY
   fi
 
   L2_ATTEMPTS="${AUTODREAM_L2_ATTEMPTS:-3}"
+  # Delivery gate across attempts. L2_ATTEMPTED separates a fresh run that actually spawned the
+  # aggregator from the legacy short-circuits above (the idempotency guard and the COUNT=0 stub
+  # both return before L2); L2_DELIVERED flips to 1 only when an attempt's capture carried the
+  # AUTODREAM_REPORT_END sentinel. Both default to 0 so the move-aside below can tell "this run
+  # confirmed delivery" from "this run never reached L2": a marker-bearing report left by an
+  # earlier night must not be read as this run's output.
+  L2_ATTEMPTED=0
+  L2_DELIVERED=0
   L2_START=$(date +%s)
+  L2_STDOUT="$FINDINGS_DIR/report.stdout"   # L2 holds no Write tool: the report arrives on stdout
   L2_RC=1
   for attempt in $(seq 1 "$L2_ATTEMPTS"); do
+    L2_ATTEMPTED=1
     log "L2 aggregation attempt $attempt/$L2_ATTEMPTS..."
     # A pins.jsonl already here came from an earlier run or an earlier attempt, and no
     # complete report from THIS attempt stands behind it. Move it aside before every
@@ -2998,35 +3010,91 @@ PY
         fi
       fi
     fi
-    # Same literal-path framing and brace-group assembly as L1 (see the L1 worker
-    # comment): keep the paths as literal data the aggregator hands to Glob/Read/Write,
-    # and preserve the blank-line separator before PROMPT.md instead of letting a
-    # `prompt=$(...)` capture strip it and glue the doc onto the report-path line.
-    # Subshell so the cwd change (isolating the AI-title stub into $WORK_BUCKET, same
-    # as L1) is scoped to this call and doesn't leak into the notify/pin steps below.
-    # $? after the subshell is the pipeline's exit (claude's), exactly as before.
+    # Same literal-path framing and brace-group assembly as L1 (see the L1 worker comment): keep
+    # the paths as literal data the aggregator reads with Glob/Read, and preserve the blank-line
+    # separator before PROMPT.md instead of letting a `prompt=$(...)` capture strip it and glue
+    # the doc onto the report-path line. Subshell so the cwd change (isolating the AI-title stub
+    # into $WORK_BUCKET, same as L1) is scoped to this call. $? after the subshell is the
+    # pipeline's exit (claude's).
+    #
+    # L2 holds Glob and Read only. It cannot write the report, pins, or anything else under the
+    # findings directory, so the one hostile-input surface that used to need a quarantine (an L2
+    # that rewrote sessions-source.txt or forged a pin) is closed at the tool grant, and the
+    # runner is the only writer of $REPORT_PATH and pins.jsonl.
     (
       cd "$WORK_DIR" 2>/dev/null || true
       {
         printf "Findings directory to aggregate (literal absolute path): %s\n" "$FINDINGS_DIR"
-        printf "Write the report to this literal absolute path: %s\n\n" "$REPORT_PATH"
+        printf "Report destination (literal absolute path): %s\n\n" "$REPORT_PATH"
         cat "$AUTODREAM_DIR/PROMPT.md"
       } | "$CLAUDE_BIN" \
         --print \
         --permission-mode bypassPermissions \
         ${L2_MODEL_ARGS[@]+"${L2_MODEL_ARGS[@]}"} \
         --no-session-persistence \
-        --tools Glob Read Write Edit \
+        --tools Glob Read \
         --disable-slash-commands \
         --strict-mcp-config \
         --settings '{"disableAllHooks":true}' \
-        --append-system-prompt "Headless aggregator. Read the per-session findings JSONs from the findings directory given on line 1 of the prompt, then write the report, via the Write tool, to the literal report path given on line 2. Those paths are literal strings, not shell variables — never \$-expand them. May write pins.jsonl in the findings directory per the prompt rules; never edit MEMORY.md. Print report path and 3-line summary, then exit."
-    )
+        --append-system-prompt "Headless aggregator. Read the per-session findings JSONs from the findings directory given on line 1 of the prompt, then produce the COMPLETE report only on standard output, ending with a line containing exactly AUTODREAM_REPORT_END. After that line, if you propose memory pins, print them between a line AUTODREAM_PINS_BEGIN and a line AUTODREAM_PINS_END, one JSON object per line. Do not use Write or Edit anywhere. Those paths are literal strings, not shell variables — never \$-expand them. After the pin block print one line: report: <literal path from line 2 of the prompt> then a 3-line summary (sessions reviewed, findings, pins proposed), then exit."
+    ) > "$L2_STDOUT"
 
     L2_RC=$?
-    report_complete && break
+    # ---- The runner writes the report from L2's stdout ----
+    # The AUTODREAM_REPORT_END sentinel is the completion gate: everything before the LAST
+    # occurrence is the report body, and a capture without one is a degraded report whether or
+    # not it carries the open-questions marker, because the marker alone cannot prove the output
+    # reached the end. Both writes are staged to a .tmp and renamed so a half-staged file never
+    # lands at $REPORT_PATH. Lines after the sentinel (the pin block, the report path, the
+    # summary) are appended to the run log so a stripped capture never loses them.
+    L2_COMPLETE=0
+    if grep -q '^AUTODREAM_REPORT_END$' "$L2_STDOUT" 2>/dev/null; then
+      if awk '/^AUTODREAM_REPORT_END$/ { last=NR } { line[NR]=$0 } END { for (i=1; i<last; i++) print line[i] }' "$L2_STDOUT" > "$REPORT_PATH.tmp" && mv "$REPORT_PATH.tmp" "$REPORT_PATH"; then
+        L2_COMPLETE=1
+      else
+        log "WARNING: could not stage the sentinel-stripped report at $REPORT_PATH"
+      fi
+    elif [ -s "$L2_STDOUT" ]; then
+      log "WARNING: L2 stdout carried no AUTODREAM_REPORT_END sentinel; keeping the whole capture as a degraded report (incomplete, will retry)"
+      cat "$L2_STDOUT" > "$REPORT_PATH.tmp" && mv "$REPORT_PATH.tmp" "$REPORT_PATH" 2>/dev/null || true
+    fi
+    awk '/^AUTODREAM_REPORT_END$/ { f=1; next } f { print }' "$L2_STDOUT" >> "$RUN_LOG" 2>/dev/null || true
+    L2_DELIVERED=$L2_COMPLETE
+    # ---- Pins: the block after the sentinel becomes pins.jsonl, written by the runner ----
+    # Only a delivered report carries pins, and only the block that follows the LAST sentinel
+    # counts, so a report that quotes the markers in its body cannot inject one. The block needs
+    # its END line: a capture cut off inside it proposes nothing, rather than half a pin. Only
+    # lines that open a JSON object are kept; apply-pins.sh validates each one against the
+    # authorization list that was fixed before any model ran.
+    if [ "$L2_DELIVERED" = "1" ] && [ "$PINS_SAFE" = "1" ]; then
+      if awk '
+            /^AUTODREAM_REPORT_END$/ { last = NR }
+            { line[NR] = $0 }
+            END {
+              for (i = last + 1; i <= NR; i++) {
+                if (!inb && line[i] == "AUTODREAM_PINS_BEGIN") { inb = 1; continue }
+                if (inb && line[i] == "AUTODREAM_PINS_END") { closed = 1; break }
+                if (inb) buf[++n] = line[i]
+              }
+              if (closed) for (j = 1; j <= n; j++) if (buf[j] ~ /^\{/) print buf[j]
+            }' "$L2_STDOUT" > "$FINDINGS_DIR/pins.jsonl.tmp" 2>/dev/null \
+         && [ -s "$FINDINGS_DIR/pins.jsonl.tmp" ] && mv -f "$FINDINGS_DIR/pins.jsonl.tmp" "$FINDINGS_DIR/pins.jsonl"; then
+        log "wrote $(wc -l < "$FINDINGS_DIR/pins.jsonl" | tr -d ' ') proposed pin(s) from the L2 pin block"
+      else
+        rm -f "$FINDINGS_DIR/pins.jsonl.tmp"
+      fi
+    fi
+    # Break only on a sentinel-validated capture that also carries the open-questions marker;
+    # a degraded capture (sentinel absent) never satisfies the loop.
+    if [ "$L2_DELIVERED" = "1" ] && report_complete; then
+      break
+    fi
     if [ -s "$REPORT_PATH" ]; then
-      log "L2 attempt $attempt left a report with no open-questions marker — treating it as truncated and retrying (exit $L2_RC)"
+      if report_complete; then
+        log "L2 attempt $attempt wrote a complete-looking report but no AUTODREAM_REPORT_END sentinel; not a validated delivery, retrying (exit $L2_RC)"
+      else
+        log "L2 attempt $attempt left a report with no open-questions marker; treating it as truncated and retrying (exit $L2_RC)"
+      fi
     else
       log "L2 attempt $attempt wrote no report (exit $L2_RC)"
     fi
@@ -3044,6 +3112,13 @@ PY
   clean_work_bucket  # all workers have exited; remove their AI-title stubs
 
   # L2-scoped network health, appended because the block above was closed before L2 ran.
+  # Classify the LAST attempt too: the probe in the retry loop only runs between attempts, so a
+  # route that dropped before the final attempt was never seen and the run would record
+  # network_deferred_l2: no. Only probe when L2 failed; a delivered report needs no explanation.
+  if [ "$L2_DELIVERED" != "1" ] && ! net_up; then
+    NET_DEFERRED=yes
+    log "L2 produced no report and the API is unreachable; recording this as a network deferral"
+  fi
   printf 'network_down_seconds_l2: %s\n' "$(( NET_DOWN_SECONDS - NET_DOWN_SECONDS_PRE_L2 ))" >> "$FINDINGS_DIR/run-stats.txt"
   printf 'network_deferred_l2: %s\n' "$NET_DEFERRED" >> "$FINDINGS_DIR/run-stats.txt"
 
@@ -3062,7 +3137,7 @@ PY
   # Move it aside rather than delete it: it may hold most of a report, and a partial
   # report is worth reading even though it must not block a retry. The stub written when
   # COUNT=0 returns long before this line, so it is never affected.
-  if [ -f "$REPORT_PATH" ] && ! report_complete; then
+  if [ -f "$REPORT_PATH" ] && [ "$L2_ATTEMPTED" = "1" ] && { [ "$L2_DELIVERED" != "1" ] || ! report_complete; }; then
     PARTIAL_REPORT="$REPORT_PATH.partial-$(date +%s)"
     if mv "$REPORT_PATH" "$PARTIAL_REPORT"; then
       log "WARNING: every L2 attempt left an incomplete report; moved it to $PARTIAL_REPORT so a later trigger retries this date"
@@ -3227,7 +3302,19 @@ PY
   fi
 
   log "===== autodream end: $(date) ====="
-  return $L2_RC
+  # A validated delivery is the only success, and it is the same predicate the move-aside and
+  # consume gates use: a sentinel-validated capture (L2_DELIVERED) that also carries the
+  # open-questions marker (report_complete). A degraded night can leave the aggregator's own
+  # exit code at 0, which would tell the launchd job (the only watcher this unattended run has)
+  # that the night produced a usable report when it produced none. Anything short of validated
+  # keeps the aggregator's status when it was non-zero, else 1.
+  if [ "$L2_DELIVERED" = "1" ] && report_complete; then
+    return 0
+  fi
+  if [ "${L2_RC:-0}" -ne 0 ]; then
+    return "$L2_RC"
+  fi
+  return 1
 }
 
 # ---- The logger must not be able to take the run down with it ----

@@ -3809,6 +3809,54 @@ PY
   rm -rf "$root"
 }
 
+test_l2_is_read_only_and_the_runner_writes_the_report(){
+  echo "# L2 holds Glob and Read only; the report is written by the runner from stdout"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  export MOCK_CAPTURE_DIR="$root/cap"; run_dream "$root"; unset MOCK_CAPTURE_DIR
+  assert_grep   "$root/cap/l2-args.txt" '^Glob$' "L2 is given the Glob tool"
+  assert_grep   "$root/cap/l2-args.txt" '^Read$' "and Read"
+  assert_nogrep "$root/cap/l2-args.txt" '^Write$' "and not Write"
+  assert_nogrep "$root/cap/l2-args.txt" '^Edit$' "and not Edit"
+  assert_grep   "$root/cap/l2-stdin.txt" 'Report destination' "the prompt names the destination, it does not ask for a write"
+  assert_nogrep "$root/dreams/$DATE.md" 'AUTODREAM_REPORT_END' "the sentinel is stripped from the report"
+  assert_grep   "$root/dreams/$DATE.md" 'open-questions=0' "the report body is intact"
+  assert_grep   "$root/run.out" 'report: ' "the lines after the sentinel reach the run log"
+  rm -rf "$root"
+}
+
+test_l2_report_with_a_marker_but_no_sentinel_is_not_delivered(){
+  echo "# a complete-looking report with no sentinel is a degraded capture: moved aside, date retried"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  export MOCK_MODE=l2_partial_marker AUTODREAM_L2_ATTEMPTS=1; run_dream "$root"; unset MOCK_MODE AUTODREAM_L2_ATTEMPTS
+  assert_no_file "$root/dreams/$DATE.md" "no report stands at the live path"
+  local n; n=$(find "$root/dreams" -maxdepth 1 -name "$DATE.md.partial-*" | wc -l | tr -d ' ')
+  assert_eq "$n" "1" "the capture was kept as a partial"
+  assert_grep "$root/run.out" 'no AUTODREAM_REPORT_END sentinel' "the log says why"
+  assert_eq "$(cat "$root/run.exit")" "1" "a night that delivered nothing exits non-zero even though the aggregator exited 0"
+  rm -rf "$root"
+}
+
+test_pin_block_must_follow_the_sentinel_and_be_closed(){
+  echo "# pins come only from a closed block after the last sentinel"
+  local root
+  # unterminated block: nothing stored
+  root=$(setup_env); mk_session "$root" sess1
+  export MOCK_MODE=pins_unterminated; run_dream "$root"; unset MOCK_MODE
+  assert_no_file "$(fdir "$root")/pins.jsonl" "an unterminated pin block proposes nothing"
+  rm -rf "$root"
+  # a block quoted inside the report body: nothing stored
+  root=$(setup_env); mk_session "$root" sess1
+  export MOCK_MODE=pins_in_body; run_dream "$root"; unset MOCK_MODE
+  assert_no_file "$(fdir "$root")/pins.jsonl" "a pin block quoted in the report body is not a block"
+  assert_file   "$root/dreams/$DATE.md" "while the report itself was delivered"
+  rm -rf "$root"
+  # a well-formed block: the runner writes pins.jsonl
+  root=$(setup_env); mk_session "$root" sess1
+  export MOCK_MODE=pins; run_dream "$root"; unset MOCK_MODE
+  assert_eq "$(wc -l < "$(fdir "$root")/pins.jsonl" | tr -d ' ')" "1" "a closed block after the sentinel becomes pins.jsonl, written by the runner"
+  rm -rf "$root"
+}
+
 test_skill_fields_dropped_without_a_sidecar(){
   echo "# a session with no stats sidecar keeps no worker-written skill fields (Codex review of 0129fc0)"
   local root; root=$(setup_env); mk_session "$root" sess1
@@ -4477,18 +4525,19 @@ test_no_markdown_memory_writer_remains(){
   echo "# pins: the MEMORY.md writer and the claude-memory GC are gone"
   assert_nogrep "$REPO/prompts/PROMPT.md" 'touched-projects' "PROMPT.md has no touched-projects sidecar"
   assert_nogrep "$REPO/prompts/PROMPT.md" 'MAY edit the relevant project' "PROMPT.md does not tell L2 to edit MEMORY.md"
-  assert_grep   "$REPO/prompts/PROMPT.md" 'pins.jsonl' "PROMPT.md tells L2 to write pins.jsonl"
+  assert_grep   "$REPO/prompts/PROMPT.md" 'AUTODREAM_PINS_BEGIN' "PROMPT.md tells L2 to print a pin block"
+  assert_nogrep "$REPO/prompts/PROMPT.md" 'one Write call' "and not to write a pins file itself"
   assert_nogrep "$RUN" 'claude-memory' "run.sh no longer runs claude-memory"
   assert_nogrep "$RUN" 'touched-projects' "run.sh no longer reads touched-projects"
-  # pins.jsonl before the report: a kill between the two writes must leave no complete
-  # report claiming pins that were never written.
-  local pin_step report_step
-  pin_step=$(grep -n 'add a pin to `<findings-dir>/pins.jsonl`' "$REPO/prompts/PROMPT.md" | head -1 | cut -d: -f1)
-  report_step=$(grep -n 'Write the report to the literal report path' "$REPO/prompts/PROMPT.md" | head -1 | cut -d: -f1)
-  if [ -n "$pin_step" ] && [ -n "$report_step" ] && [ "$pin_step" -lt "$report_step" ]; then
-    ok "PROMPT.md writes pins before the report"
+  # The pin block follows the report sentinel: a capture cut off before the sentinel is
+  # retried whole, so a pin can never be stored for a report that was never delivered.
+  local sentinel_step pin_step
+  sentinel_step=$(grep -n 'Print the complete report to stdout, then a line containing exactly' "$REPO/prompts/PROMPT.md" | head -1 | cut -d: -f1)
+  pin_step=$(grep -n 'print `AUTODREAM_PINS_BEGIN`' "$REPO/prompts/PROMPT.md" | head -1 | cut -d: -f1)
+  if [ -n "$pin_step" ] && [ -n "$sentinel_step" ] && [ "$sentinel_step" -lt "$pin_step" ]; then
+    ok "PROMPT.md prints the pin block after the report sentinel"
   else
-    no "PROMPT.md writes pins before the report (pins step line [$pin_step], report step line [$report_step])"
+    no "PROMPT.md prints the pin block after the report sentinel (sentinel step line [$sentinel_step], pin step line [$pin_step])"
   fi
   # L2 exits before any pin is applied, and the runner can still refuse one, so the report
   # may only say a pin was proposed.
@@ -4533,6 +4582,9 @@ test_enabled_adapters_resolves_once
 test_l2_gets_the_skills_inventory_and_per_source_facts
 test_unavailable_skills_inventory_says_so
 test_harness_addendum_reaches_only_that_harnesss_workers
+test_l2_is_read_only_and_the_runner_writes_the_report
+test_l2_report_with_a_marker_but_no_sentinel_is_not_delivered
+test_pin_block_must_follow_the_sentinel_and_be_closed
 test_skill_fields_dropped_without_a_sidecar
 test_skill_fields_dropped_with_a_partial_sidecar
 test_skill_fields_are_enforced_from_the_sidecar

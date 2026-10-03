@@ -10,7 +10,7 @@ Every harness on the host (Claude Code, OMP, Codex) reads one shared Mnemopi sto
 
 ## Shape
 
-L2 keeps its tools for now. It writes pins to a file, and the runner applies them. Migration step 4 of the adapter design later changes only the transport (file to stdout block). The line format and the runner side stay.
+L2 keeps its tools for now. It writes pins to a file, and the runner applies them. Migration step 4 of the adapter design changed only the transport, and has landed: L2 holds Glob and Read, prints the pins in an `AUTODREAM_PINS_BEGIN`/`AUTODREAM_PINS_END` block after the report sentinel, and the runner writes `pins.jsonl` from it. The line format and the runner side stay.
 
 1. L2 writes `<findings-dir>/pins.jsonl`, one JSON object per line:
 
