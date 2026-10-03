@@ -3,7 +3,7 @@
 #
 # WHY THIS EXISTS
 #
-# `autodream-note.sh` appends to ~/.claude/autodream/notes.md, which only works from a
+# `autodream-note.sh` appends to $AUTODREAM_DIR/notes.md, which only works from a
 # terminal on this Mac. Notes worth leaving for the nightly run mostly occur away from
 # the terminal — reading on a phone, mid-meeting, in bed. An Obsidian vault folder syncs
 # to the phone and takes a note from anything that can write a file (Obsidian mobile,
@@ -52,7 +52,21 @@
 #   AUTODREAM_ICLOUD_WAIT seconds to wait for dataless files to materialize   default 30
 set -euo pipefail
 
-AUTODREAM_DIR="${AUTODREAM_DIR:-$HOME/.claude/autodream}"
+# Resolve the install dir the way notify.sh, review.sh and run.sh do: env first, else this
+# script's own directory when it carries an install marker (install.sh writes `config` and links
+# PROMPT.md), else the legacy default with a warning. BASH_SOURCE stays unresolved on purpose:
+# install.sh symlinks the scripts into $TARGET, so the link's directory IS the install dir.
+# Hard-coding $HOME/.claude/autodream here made the writer and the reader disagree the moment an
+# install lived anywhere else: vault-notes.sh takes AUTODREAM_DIR from the launchd plist, so every
+# note landed in a file the nightly never opened. No error, no missing note reported.
+AUTODREAM_DIR="${AUTODREAM_DIR:-}"
+if [ -z "$AUTODREAM_DIR" ]; then
+  AUTODREAM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+  if [ -z "$AUTODREAM_DIR" ] || { [ ! -f "$AUTODREAM_DIR/config" ] && [ ! -f "$AUTODREAM_DIR/PROMPT.md" ]; }; then
+    echo "vault-notes.sh: WARNING no install markers next to $0; falling back to legacy $HOME/.claude/autodream" >&2
+    AUTODREAM_DIR="$HOME/.claude/autodream"
+  fi
+fi
 
 # Source the config here too, not only in run.sh. `status` exists to be run by hand, and
 # a status command that reports "vault: not configured" about a vault the user configured
