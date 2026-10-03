@@ -3884,6 +3884,15 @@ test_l2_engine_comes_from_an_adapter(){
   assert_grep   "$root/run.out" 'AUTODREAM_L2_ENGINE=nonesuch is not an accepted adapter' "an unknown engine is refused"
   assert_no_file "$root/dreams/$DATE.md" "and no report is produced"
   rm -rf "$root"
+
+  # an engine that cannot print a command is refused before L1 as well
+  root=$(setup_env); mk_session "$root" sess1
+  local ad="$root/adapters"; cp -R "$REPO/adapters" "$ad"
+  jq 'del(.l2_model)' "$ad/omp/manifest.json" > "$ad/omp/manifest.json.new" && mv "$ad/omp/manifest.json.new" "$ad/omp/manifest.json"
+  export ADAPTERS_ROOT="$ad" AUTODREAM_L2_ENGINE=omp; run_dream_omp "$root"; unset ADAPTERS_ROOT AUTODREAM_L2_ENGINE
+  assert_grep   "$root/run.out" 'omp adapter cannot produce an L2 command' "omp with no model resolved is refused"
+  assert_no_file "$(fdir "$root")/$(hash_of "$root/projects/proj-a/sess1.jsonl").json" "before any worker ran"
+  rm -rf "$root"
 }
 
 test_skill_fields_dropped_without_a_sidecar(){

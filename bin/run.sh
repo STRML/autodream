@@ -2103,6 +2103,16 @@ run() {
     log_fatal "AUTODREAM_L2_ENGINE=$AUTODREAM_L2_ENGINE is not an accepted adapter (accepted: $(adapters_list 2>/dev/null | tr '\n' ' ')). Refusing to start."
     fatal_exit; return 1
   fi
+  # And an engine that cannot print a command at all (omp with no model resolved, an adapter
+  # without l2-argv) is refused for the same reason. claude is exempt: it has a built-in fallback.
+  _l2e="${AUTODREAM_L2_ENGINE:-${ENABLED_ADAPTERS%% *}}"
+  if [ "$_l2e" != "claude" ] && [ -n "$_l2e" ]; then
+    _l2m=$(adapter_l2_model "$_l2e" 2>/dev/null) || _l2m=""
+    if ! adapter_run "$_l2e" l2-argv ${_l2m:+"$_l2m"} 2>/dev/null | head -c 1 | grep -q .; then
+      log_fatal "the $_l2e adapter cannot produce an L2 command (model [${_l2m:-none}]); set AUTODREAM_L2_MODEL_$(printf '%s' "$_l2e" | tr 'a-z-' 'A-Z_'). Refusing to start."
+      fatal_exit; return 1
+    fi
+  fi
 
   # Exclude autodream's OWN headless worker/aggregator transcripts. New runs leave none
   # (--no-session-persistence), but runs predating that fix littered ~/.claude/projects/
