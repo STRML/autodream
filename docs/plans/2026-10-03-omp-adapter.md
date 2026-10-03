@@ -86,11 +86,11 @@ Mutation checks run against three deliberate defects (leaf taken from the first 
 | 5 | one `SESSION_TRIAGE.md`, `facts.md` concatenated into the L2 prompt, skills inventory in `PROMPT.md` | not started, after 4 |
 | 6b | the review LaunchAgent (cmux popup job) that omp's `install.sh` provisions | not started |
 
-Merged work follows the plan's own rule: each PR passed `omp-review.sh` on its final commit and CI, and the review found real defects in four of the five (one blocking P1 in the adapter, one in `autodream-now.sh`).
+Merged work follows the plan's own rule: each PR passed `omp-review.sh` on its final commit and CI. The review found real defects in three of the five before merge: a blocking P1 in the adapter (two files held one advisor rule), a blocking P1 in `autodream-now.sh` (a run from the checkout adopted `bin/` as the install dir), and in the changelog port a window-wide dedupe that dropped repeated headings, which led to finding that a force-pushed fork made the OMP pull fail every night.
 
 ## Why PR 2 is not a port
 
-The 35 generic fixes cannot be lifted commit by commit. A trial `git cherry-pick` of the first one conflicts in six files, and a trial `git merge omp/main` leaves 62 conflict hunks in 12 files that look mechanical but are not. They are the same decision seen in different places:
+The 35 generic fixes cannot be lifted commit by commit. A trial `git cherry-pick` of the first one conflicts in six files, and a trial `git merge omp/main` leaves 61 conflict hunks in 12 files that look mechanical but are not. They are the same decision seen in different places:
 
 - **The L2 delivery protocol differs.** omp-autodream's L2 has no `Write` tool: it prints the report on stdout, `run.sh` slices at an `AUTODREAM_REPORT_END` sentinel, and `report_complete` requires it. cc-autodream's L2 still runs `Glob Read Write Edit`, writes the report file itself, and writes `pins.jsonl` for the Mnemopi pin step (#68). The design doc wants stdout and a sentinel, with pins in a block after it, but cc has not built that, so every L2-touching hunk of the merge picks a side of an unmade decision.
 - **Engine invocations are woven through the omp additions.** The warmup, the worker, the version stamp and the fatal "omp not found" check all name `OMP_BIN` and omp flags. In cc they have to become "the L1 engine of this session's adapter". The adapter manifest already lists the flags; nothing builds the command from it yet.
