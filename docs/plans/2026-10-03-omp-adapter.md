@@ -1,7 +1,7 @@
 # Plan 2: the OMP adapter, and the omp-autodream work cc-autodream lacks
 
 Date: 2026-10-03
-Status: in progress (5 of 8 PRs merged; the rest wait on four decisions below)
+Status: in progress (5 of 9 PRs merged; the other 4 wait on four decisions below)
 Design: `docs/design/unify-harness-adapters-2026-08-23.md` (approved), Migration steps 2, 3 and the facts half of 4.
 Decision (Sam, 2026-10-03): cc-autodream survives and becomes `STRML/autodream`. omp-autodream is archived after the cutover.
 
