@@ -1321,6 +1321,218 @@ test_a_nested_error_key_is_not_a_failed_triage(){
   rm -rf "$root"
 }
 
+test_l1_hang_is_bounded(){
+  echo "# a hung L1 worker is killed with its process group instead of wedging the run"
+  # The 2026-08-19 and 2026-08-22 runs each sat for days with every xargs -P slot
+  # held by a worker that never exited: no error, no report. Nothing failed, the
+  # run simply stopped, and launchd would not start a replacement while the label
+  # was still running, so the catch-up triggers were suppressed too.
+  if [ -z "$(command -v timeout || command -v gtimeout)" ]; then
+    echo "  skip - no timeout binary (brew install coreutils)"; return 0
+  fi
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local pidfile="$root/hang-pids.txt"; : > "$pidfile"
+  export MOCK_MODE=l1_hang MOCK_HANG_PIDS="$pidfile" AUTODREAM_L1_TIMEOUT=3 AUTODREAM_L1_ROUNDS=1
+  run_dream "$root"
+  unset MOCK_MODE MOCK_HANG_PIDS AUTODREAM_L1_TIMEOUT AUTODREAM_L1_ROUNDS
+
+  assert_grep "$root/run.out" 'l1 timeout' "run logged the bound it was using"
+  local h; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  assert_grep "$(fdir "$root")/$h.json.err" 'exceeded AUTODREAM_L1_TIMEOUT' \
+    "the timeout is named in the errlog, not left as a generic empty-output failure"
+  assert_grep "$(fdir "$root")/run-stats.txt" 'l1_timed_out: 1' \
+    "run-stats counts the timed-out worker"
+  # The run has to REACH L2 at all. That is the whole regression: before the
+  # timeout, control never returned from dispatch_l1.
+  assert_file "$root/dreams/$DATE.md" "run completed and produced a report despite the hang"
+
+  # The mock's child proves the signal reached the process group. A kill aimed at
+  # the worker alone would leave it alive and reparented to init, which is how 57
+  # node_repl and mnemopi_embed orphans accumulated on the real host.
+  # kill -0 succeeds on a zombie, and a child whose parent just died sits as one
+  # until init reaps it. Checking once immediately would fail a correct kill on
+  # timing alone, so give each pid a bounded grace before calling it leaked.
+  local leaked=0 p i
+  while read -r p; do
+    [ -n "$p" ] || continue
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      kill -0 "$p" 2>/dev/null || break
+      sleep 0.5
+    done
+    kill -0 "$p" 2>/dev/null && { leaked=$((leaked + 1)); kill -9 "$p" 2>/dev/null; }
+  done < "$pidfile"
+  assert_eq "$leaked" "0" "the hung worker's child was reaped with the group, not orphaned"
+  rm -rf "$root"
+}
+
+test_intrinsic_124_is_not_a_timeout(){
+  echo "# a worker that exits 124 or 137 on its own is not recorded as a timeout"
+  # GNU timeout propagates the exit status of the child, so a worker that exits 124
+  # by itself, or that the OOM killer SIGKILLs, reaches the caller looking identical
+  # to a fired deadline. Only the elapsed interval separates them, and it has to be
+  # measured from the launch of timeout rather than from the top of the worker, or
+  # preprocessing time closes the gap on a short bound.
+  if [ -z "$(command -v timeout || command -v gtimeout)" ]; then
+    echo "  skip - no timeout binary (brew install coreutils)"; return 0
+  fi
+  local root; root=$(setup_env); mk_session "$root" sess1
+  export MOCK_MODE=l1_exit124 AUTODREAM_L1_TIMEOUT=900 AUTODREAM_L1_ROUNDS=1
+  run_dream "$root"
+  unset MOCK_MODE AUTODREAM_L1_TIMEOUT AUTODREAM_L1_ROUNDS
+
+  assert_grep "$(fdir "$root")/run-stats.txt" 'l1_timed_out: 0' \
+    "an intrinsic 124 well inside the bound is not counted as a timeout"
+  local h errf; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  errf="$(fdir "$root")/$h.json.err"
+  if grep -q 'exceeded AUTODREAM_L1_TIMEOUT' "$errf" 2>/dev/null; then
+    no "the errlog claims a timeout that never happened"
+  else
+    ok "the errlog does not claim a timeout that never happened"
+  fi
+  rm -rf "$root"
+}
+
+test_l1_timeout_must_be_positive(){
+  echo "# a zero or non-numeric L1 timeout is refused at startup, not at 03:15"
+  # GNU timeout reads 0 as "no timeout", so an unvalidated 0 restores the wedge
+  # while the startup log still claims a bound is in force.
+  local root; root=$(setup_env); mk_session "$root" sess1
+  export AUTODREAM_L1_TIMEOUT=0; run_dream "$root"; unset AUTODREAM_L1_TIMEOUT
+  assert_grep "$root/run.out" 'must be greater than 0' "zero timeout is rejected with a reason"
+  assert_no_file "$root/dreams/$DATE.md" "the run refuses to start rather than running unbounded"
+
+  local root2; root2=$(setup_env); mk_session "$root2" sess1
+  export AUTODREAM_L1_TIMEOUT=abc; run_dream "$root2"; unset AUTODREAM_L1_TIMEOUT
+  assert_grep "$root2/run.out" 'must be a positive integer' "a non-numeric timeout is rejected"
+  rm -rf "$root" "$root2"
+}
+
+test_l1_warmup_timeout_must_be_positive(){
+  echo "# a zero or non-numeric warmup timeout is refused at startup (Codex review of #25)"
+  # The warmup runs ahead of every recovery path, so a 0 that GNU timeout reads as
+  # "no deadline" can wedge the run before the network wait, retries or breaker.
+  local root; root=$(setup_env); mk_session "$root" sess1
+  export AUTODREAM_L1_WARMUP_TIMEOUT=0; run_dream "$root"; unset AUTODREAM_L1_WARMUP_TIMEOUT
+  assert_grep "$root/run.out" 'AUTODREAM_L1_WARMUP_TIMEOUT must be greater than 0' "zero warmup timeout is rejected with a reason"
+  assert_no_file "$root/dreams/$DATE.md" "the run refuses to start rather than risk an unbounded warmup"
+
+  local root2; root2=$(setup_env); mk_session "$root2" sess1
+  export AUTODREAM_L1_WARMUP_TIMEOUT=abc; run_dream "$root2"; unset AUTODREAM_L1_WARMUP_TIMEOUT
+  assert_grep "$root2/run.out" 'AUTODREAM_L1_WARMUP_TIMEOUT must be a positive integer' "a non-numeric warmup timeout is rejected"
+  rm -rf "$root" "$root2"
+}
+
+test_warmup_can_be_disabled(){
+  echo "# AUTODREAM_L1_WARMUP=0 skips the call and says so rather than reporting a pass"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  AUTODREAM_L1_WARMUP=0 run_dream "$root"
+  # 'skipped' and 'ok' must never be the same token: a self-audit reading l1_warmup has
+  # to be able to tell a warmup that passed from one that never ran.
+  assert_grep   "$(fdir "$root")/run-stats.txt" 'l1_warmup: skipped' "a disabled warmup is recorded as skipped"
+  assert_nogrep "$root/run.out" 'L1 auth warmup'                     "and nothing is dispatched for it"
+  assert_file   "$root/dreams/$DATE.md"                              "the run still completes normally"
+  rm -rf "$root"
+}
+
+test_warmup_diagnostic_stdout_is_a_failure_not_ok(){
+  echo "# a warmup that exits 0 with a diagnostic instead of the reply is a failure (debate review of e95e2f2)"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  export MOCK_MODE=warmup_diag
+  AUTODREAM_L1_ROUNDS=1 run_dream "$root"
+  unset MOCK_MODE
+  assert_grep "$(fdir "$root")/run-stats.txt" 'l1_warmup: failed' "non-empty stdout that is not the reply records failed"
+  rm -rf "$root"
+}
+
+test_warmup_empty_stdout_is_a_failure_not_ok(){
+  echo "# the warmup must not read omp's stderr chatter as a successful reply"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  # l1_incomplete writes nothing to stdout. omp prints 'Working...' on stderr on every run,
+  # so a warmup that captured 2>&1 saw non-empty output and recorded `ok` for precisely the
+  # exit-0/empty-stdout failure it was added to expose.
+  export MOCK_MODE=l1_incomplete
+  AUTODREAM_L1_ROUNDS=1 run_dream "$root"
+  unset MOCK_MODE
+  assert_nogrep "$(fdir "$root")/run-stats.txt" 'l1_warmup: ok' "an empty-stdout warmup is never recorded as ok"
+  rm -rf "$root"
+}
+
+test_warmup_runs_before_the_fanout(){
+  echo "# the auth warmup is one serial call that lands before round 1 dispatches"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  run_dream "$root"
+  # Ordering is the whole feature. A warmup that runs alongside the fanout refreshes
+  # nothing, because the workers it was meant to protect are already racing it.
+  local warm round
+  warm=$(grep -n 'L1 auth warmup' "$root/run.out" | head -1 | cut -d: -f1)
+  round=$(grep -n 'L1 triage round 1/' "$root/run.out" | head -1 | cut -d: -f1)
+  assert_grep "$root/run.out" 'L1 auth warmup'          "the warmup is logged"
+  [ -n "$warm" ] && [ -n "$round" ] && [ "$warm" -lt "$round" ] \
+    && ok "the warmup completes before the first round dispatches" \
+    || no "the warmup completes before the first round dispatches (warmup line $warm, round line $round)"
+  assert_grep "$(fdir "$root")/run-stats.txt" 'l1_warmup: ok' "run-stats records the warmup result"
+  rm -rf "$root"
+}
+
+test_breaker_needs_two_barren_rounds_not_one(){
+  echo "# a round that recovered sessions must not be counted barren by the round after it"
+  local root; root=$(setup_env)
+  mk_session "$root" sess1; mk_session "$root" sess2; mk_session "$root" sess3
+  mkdir -p "$root/mockstate"
+  # Exactly one session ever succeeds: round 1 goes 3 missing -> 2, rounds 2+ recover none.
+  # The first version of the breaker compared each round's ending count against the PREVIOUS
+  # round's ending count, so round 2 alone (2 == 2) tripped it and logged that rounds 1 and 2
+  # both recovered nothing — false, round 1 recovered one. The streak must reach 2, so the
+  # earliest honest trip is round 3.
+  export MOCK_MODE=l1_partial_then_stall MOCK_STATE_DIR="$root/mockstate"
+  AUTODREAM_L1_ROUNDS=5 run_dream "$root"
+  unset MOCK_MODE MOCK_STATE_DIR
+
+  assert_grep   "$root/run.out" 'L1 triage round 3/5' "round 3 still runs — round 2 alone cannot trip the breaker"
+  assert_nogrep  "$root/run.out" 'rounds 1 and 2 both recovered nothing' "the breaker never claims a productive round was barren"
+  assert_grep   "$(fdir "$root")/run-stats.txt" 'l1_breaker_fired: yes' "it does still fire once two rounds really are barren"
+  assert_grep   "$(fdir "$root")/run-stats.txt" 'l1_missing_after_retries: 0' "the stub round still lands"
+  rm -rf "$root"
+}
+
+test_a_deterministic_failure_trips_the_breaker(){
+  echo "# two rounds recovering nothing cut the retry budget instead of spending all five"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local h; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  # l1_incomplete never writes output, so every round fails identically — the 2026-09-05
+  # through 2026-09-10 shape, where five rounds bought sixteen empty stubs and the stats
+  # they left read as a healthy retry loop.
+  export MOCK_MODE=l1_incomplete
+  AUTODREAM_L1_ROUNDS=5 run_dream "$root"
+  unset MOCK_MODE
+  local stats="$(fdir "$root")/run-stats.txt"
+  assert_grep   "$root/run.out" 'L1 circuit breaker'      "the breaker announces itself"
+  assert_grep   "$stats" 'l1_breaker_fired: yes'          "run-stats records that the budget was cut"
+  assert_grep   "$root/run.out" 'L1 triage round 2/5'     "round 2 still runs (one bad round proves nothing)"
+  assert_nogrep "$root/run.out" 'L1 triage round 3/5'     "rounds 3 and 4 are skipped"
+  assert_nogrep "$root/run.out" 'L1 triage round 4/5'     "no further retry round is dispatched"
+  # The stub round is not optional. Without it the slot stays empty, which the deferral
+  # logic reads as a dead network rather than a dead worker.
+  assert_file   "$(fdir "$root")/$h.json"                 "the stub round still writes the metadata stub"
+  assert_grep   "$stats" 'l1_missing_after_retries: 0'    "no session is left in a missing state"
+  rm -rf "$root"
+}
+
+test_a_flaky_worker_does_not_trip_the_breaker(){
+  echo "# a worker that recovers on retry must keep its retry budget"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  # l1_flaky fails the first dispatch per session and succeeds on the second. Round 2
+  # recovers the session, so the breaker's two-rounds-of-no-progress condition is never
+  # met — this is the case the retry loop exists for and the breaker must not steal.
+  export MOCK_MODE=l1_flaky
+  AUTODREAM_L1_ROUNDS=5 run_dream "$root"
+  unset MOCK_MODE
+  assert_grep   "$(fdir "$root")/run-stats.txt" 'l1_breaker_fired: no' "the breaker stays out of a recovering run"
+  assert_nogrep "$root/run.out" 'L1 circuit breaker'                   "and never announces itself"
+  assert_file   "$root/dreams/$DATE.md"                                "the run produces its report"
+  rm -rf "$root"
+}
+
 test_changelog(){
   echo "# upstream changelog window (offline, local fixture remote)"
   command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
@@ -2449,6 +2661,17 @@ test_oversized_gate_script_silent
 test_oversized_gate_script_stdout_section_boundary
 test_oversized_gate_script_unmeasurable_only
 test_a_nested_error_key_is_not_a_failed_triage
+test_l1_hang_is_bounded
+test_intrinsic_124_is_not_a_timeout
+test_l1_timeout_must_be_positive
+test_l1_warmup_timeout_must_be_positive
+test_warmup_can_be_disabled
+test_warmup_diagnostic_stdout_is_a_failure_not_ok
+test_warmup_empty_stdout_is_a_failure_not_ok
+test_warmup_runs_before_the_fanout
+test_breaker_needs_two_barren_rounds_not_one
+test_a_deterministic_failure_trips_the_breaker
+test_a_flaky_worker_does_not_trip_the_breaker
 test_changelog
 test_changelog_multi_source
 test_changelog_refuses_foreign_cache_dir

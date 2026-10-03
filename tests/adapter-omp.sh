@@ -221,5 +221,12 @@ else
 fi
 assert_eq "$("$A" l1-env | wc -c | tr -d ' ')" "0" "omp needs no environment for its L1 worker"
 
+echo "# warmup-argv reproduces omp-autodream's warmup invocation"
+printf '%s\0' /opt/test/omp --allow-home -p --approval-mode yolo --no-session --config /opt/test/overlay.yml \
+  --model deepseek/deepseek-flash --append-system-prompt "Reply with the single word ok and exit." > "$tmp/old-w"
+OMP_BIN=/opt/test/omp NO_ADVISOR_CFG=/opt/test/overlay.yml "$A" warmup-argv deepseek/deepseek-flash > "$tmp/new-w"
+if cmp -s "$tmp/old-w" "$tmp/new-w"; then ok "the omp warmup argv is byte for byte omp-autodream's"
+else no "the omp warmup argv is byte for byte omp-autodream's"; fi
+
 printf '\npassed: %s   failed: %s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

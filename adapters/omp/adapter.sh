@@ -116,6 +116,21 @@ case "$cmd" in
       --append-system-prompt 'Headless triage worker. Read the session transcript and write exactly one findings JSON object, via the Write tool, to the literal output path given on line 2 of the prompt. Those paths are literal strings, not shell variables — never $-expand them. Print only the literal word done and exit.'
     ;;
 
+  warmup-argv) # $1=model -> NUL-delimited argv for the auth warmup call; the word ping arrives on stdin
+    [ "$#" -ge 1 ] && [ -n "$1" ] || exit 2
+    # omp-autodream's warmup: the worker's flags minus --tools, and a system prompt that asks for
+    # one word. It carries the same overlay, so the call that refreshes the token is the call a
+    # worker would have made.
+    printf '%s\0' "$(omp_bin)" \
+      --allow-home \
+      -p \
+      --approval-mode yolo \
+      --no-session \
+      --config "${NO_ADVISOR_CFG:-$ADIR/l1-no-advisor.yml}" \
+      --model "$1" \
+      --append-system-prompt 'Reply with the single word ok and exit.'
+    ;;
+
   l1-env) # -> KEY=VALUE lines the engine needs in its environment: none for omp
     :
     ;;

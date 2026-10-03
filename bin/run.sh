@@ -35,6 +35,20 @@
 #   CLAUDE_CODE_REPO     persistent cache for the claude-code clone  default: $AUTODREAM_DIR/cache/claude-code
 #   CHANGELOG_REMOTE     git remote to clone/pull       default: https://github.com/anthropics/claude-code.git
 #   AUTODREAM_L1_ROUNDS  max L1 retry rounds for missing sessions    default: 5
+#                        Two consecutive rounds that recover no session trip a circuit
+#                        breaker: the run jumps straight to the stub round rather than
+#                        spending the rest of the budget on an identical failure.
+#   AUTODREAM_L1_TIMEOUT seconds before an L1 worker is killed with     default: 1200
+#                        its process group; needs timeout or gtimeout on PATH.
+#                        Must be a positive integer (0 would disable the timeout).
+#                        SIGKILL follows 30s after the SIGTERM, so the worst-case
+#                        bound is AUTODREAM_L1_TIMEOUT + 30.
+#   AUTODREAM_L1_WARMUP  set 0 to skip the pre-fanout auth warmup     default: 1
+#                        One serial model call per adapter before the parallel dispatch, so
+#                        a cold OAuth token is refreshed once instead of by FANOUT workers
+#                        at once. Never fatal; result lands in run-stats as l1_warmup.
+#   AUTODREAM_L1_WARMUP_TIMEOUT seconds before the warmup is killed    default: 120
+#                        Must be a positive integer (0 would disable the deadline).
 #   AUTODREAM_L2_ATTEMPTS max L2 attempts to produce a report        default: 3
 #   AUTODREAM_RETRY_WAIT seconds to pause between retry rounds       default: 60
 #   AUTODREAM_NETCHECK   set 0 to skip waiting-for-network on retry  default: 1
@@ -127,6 +141,37 @@ fi
 DREAMS_DIR="${DREAMS_DIR:-$HOME/.claude/dreams}"
 LOG_DIR="$AUTODREAM_DIR/logs"
 FANOUT="${FANOUT:-8}"
+
+# Bound every L1 worker. A worker that never exits holds its xargs -P slot forever, so FANOUT
+# hung workers stop the whole run with no error and no report: 2026-08-19 and 2026-08-22 each
+# sat wedged for days with all 8 slots taken by workers blocked on their own node_repl and
+# mnemopi_embed children (omp-autodream).
+#
+# GNU timeout, invoked without --foreground, runs the command in a new process group and
+# signals the group, so it reaps those grandchildren. A bare kill on the engine process would
+# leave them reparented (to launchd on macOS) and running. macOS ships no timeout in its base
+# install, so this degrades to unbounded rather than becoming a hard coreutils dependency;
+# run-stats records which way it went. TIMEOUT_BIN itself is resolved after the PATH
+# augmentation below.
+AUTODREAM_L1_TIMEOUT="${AUTODREAM_L1_TIMEOUT:-1200}"
+# GNU timeout treats a duration of 0 as "no timeout", so an unvalidated 0 restores the exact
+# hang this bounds while the startup log still reports a timeout is set. A non-numeric value is
+# worse: timeout rejects it and every worker fails. Refuse both at startup rather than
+# discovering it at 03:15.
+case "$AUTODREAM_L1_TIMEOUT" in
+  ''|*[!0-9]*) echo "FATAL: AUTODREAM_L1_TIMEOUT must be a positive integer (got '$AUTODREAM_L1_TIMEOUT')" >&2; exit 1 ;;
+  *) [ "$AUTODREAM_L1_TIMEOUT" -gt 0 ] || { echo "FATAL: AUTODREAM_L1_TIMEOUT must be greater than 0 (0 disables the timeout entirely)" >&2; exit 1; } ;;
+esac
+# The warmup runs before every recovery path (see "auth warmup" below), so an unbounded warmup
+# wedges the run. Same two failure modes as the L1 timeout: 0 means no deadline under GNU
+# timeout, and a non-numeric value fails the call. Refuse both here.
+AUTODREAM_L1_WARMUP_TIMEOUT="${AUTODREAM_L1_WARMUP_TIMEOUT:-120}"
+case "$AUTODREAM_L1_WARMUP_TIMEOUT" in
+  ''|*[!0-9]*) echo "FATAL: AUTODREAM_L1_WARMUP_TIMEOUT must be a positive integer (got '$AUTODREAM_L1_WARMUP_TIMEOUT')" >&2; exit 1 ;;
+  *) [ "$AUTODREAM_L1_WARMUP_TIMEOUT" -gt 0 ] || { echo "FATAL: AUTODREAM_L1_WARMUP_TIMEOUT must be greater than 0 (0 disables the warmup deadline entirely)" >&2; exit 1; } ;;
+esac
+# SIGKILL grace after the SIGTERM. The worst-case bound is AUTODREAM_L1_TIMEOUT + L1_KILL_GRACE.
+L1_KILL_GRACE=30
 
 # Isolated cwd for every `claude --print` worker (see "AI-title stubs" below). The
 # workers all read/write by ABSOLUTE path, so their cwd is functionally irrelevant —
@@ -321,6 +366,7 @@ fi
 mkdir -p "$FINDINGS_DIR" "$DREAMS_DIR" "$LOG_DIR" "$WORK_DIR"
 
 export PATH="$HOME/.cargo/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
 cd "$HOME" || exit 1
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
@@ -1586,6 +1632,16 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
     # Launch from the isolated worker cwd so any AI-title stub lands in $WORK_BUCKET,
     # not the real session bucket. All paths below are absolute, so cd is safe here.
     cd "$WORK_DIR" 2>/dev/null || true
+    # An array rather than ${TIMEOUT_BIN:+...}: both behave correctly, including for a path with
+    # spaces, but the array says plainly that this is an optional argv prefix. Set OUTSIDE the
+    # brace group below: a brace group in a pipeline runs in a subshell, so an assignment made in
+    # there is invisible to the right-hand side and the wrapper would silently disappear.
+    l1wrap=()
+    [ -n "$TIMEOUT_BIN" ] && l1wrap=("$TIMEOUT_BIN" -k "$L1_KILL_GRACE" "$AUTODREAM_L1_TIMEOUT")
+    # Stamped here, NOT reused from t0. t0 is taken before validation, the noise gate and
+    # slimming, so a large transcript can burn real time before timeout is even launched;
+    # counting that as worker runtime lets an intrinsic 124 or 137 clear the elapsed check with
+    # no deadline having fired. Only the interval timeout itself was running can answer that.
     l1start=$(date +%s)
     {
       printf "Session transcript to analyze (literal absolute path): %s\n" "$readpath"
@@ -1596,10 +1652,31 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
         cat "$FINDINGS_DIR/$hash.stats.json"
         printf "\n\`\`\`\n"
       fi
-    } | env "${envs[@]}" "${argv[@]}" > "$outlog" 2> "$errlog"
+    } | "${l1wrap[@]}" env "${envs[@]}" "${argv[@]}" > "$outlog" 2> "$errlog"
     # Index 1 is the engine side of the pipe; index 0 is the brace group.
     l1rc="${PIPESTATUS[1]}"
     l1elapsed=$(($(date +%s) - l1start))
+    # 124 is timeout reporting that it fired; 137 is 128+SIGKILL, which is what the -k grace
+    # period escalates to. Elapsed is the positive evidence that the deadline actually fired: GNU
+    # timeout propagates the exit status of the child, so a worker that exits 124 by itself, or
+    # that the OOM killer SIGKILLs at second zero, arrives here looking identical to a real
+    # timeout (verified against coreutils 9.11: a self-killed child returned 137 after 0s under a
+    # 100s bound). Only trust 137 as a timeout when the wrapper is actually in the pipeline.
+    # Second resolution leaves a one-second boundary window, against a bound of twenty minutes.
+    if [ -n "$TIMEOUT_BIN" ] && { [ "$l1rc" = "124" ] || [ "$l1rc" = "137" ]; } \
+       && [ "$l1elapsed" -ge "$AUTODREAM_L1_TIMEOUT" ]; then
+      printf "worker exceeded AUTODREAM_L1_TIMEOUT=%ss and was killed with its process group (rc=%s)\n" \
+        "$AUTODREAM_L1_TIMEOUT" "$l1rc" >> "$errlog"
+      # The errlog cannot carry this fact: it is truncated by the next retry and deleted outright
+      # whenever the worker leaves any output, so a timeout that later succeeds, or that wrote
+      # something before dying, would vanish from the stats. The ledger is per-run and
+      # append-only, so neither can erase it.
+      printf "%s\n" "$hash" >> "$FINDINGS_DIR/l1-timeouts.txt"
+      # A worker killed mid-write leaves a truncated findings JSON. That is not a result: kept,
+      # it reads as success, deletes the errlog, and feeds partial input to L2. Drop it so this
+      # session retries like any other failure.
+      rm -f "$output"
+    fi
 
     # Non-empty is not the same as valid. A worker that writes malformed JSON, or JSON with no
     # .findings array, used to take the success branch below: both diagnostics were deleted and
@@ -1733,6 +1810,11 @@ run() {
   log "report:      $REPORT_PATH"
   log "fanout:      $FANOUT"
   log "claude:      $CLAUDE_BIN"
+  if [ -n "$TIMEOUT_BIN" ]; then
+    log "l1 timeout:  $AUTODREAM_L1_TIMEOUT s via $TIMEOUT_BIN"
+  else
+    log "WARNING: no timeout binary found (brew install coreutils); L1 workers run unbounded and one hang stops the run"
+  fi
 
   # ---- Session roots (which $HOME/.claude*/projects dirs we scan) ----
   probe_roots
@@ -1905,6 +1987,11 @@ run() {
       printf 'gated: 0\n'
       printf 'l1_rounds_max: %s\n' "${AUTODREAM_L1_ROUNDS:-5}"
       printf 'l1_rounds_used: 0\n'
+      printf 'l1_timeout_bin: %s\n' "${TIMEOUT_BIN:-none}"
+      printf 'l1_timeout_seconds: %s\n' "$AUTODREAM_L1_TIMEOUT"
+      printf 'l1_timed_out: 0\n'
+      printf 'l1_warmup: not_reached\n'
+      printf 'l1_breaker_fired: not_reached\n'
       printf 'l1_findings_written: 0\n'
       printf 'l1_missing_after_retries: 0\n'
       printf 'l1_err_files: 0\n'
@@ -2031,6 +2118,14 @@ EOF
   # AUTODREAM_L1_ROUNDS is referenced by the dispatcher subshell to decide
   # whether this is the last retry round (gates the metadata-stub fallback).
   export AUTODREAM_L1_ROUNDS
+  # Read by the dispatcher subshell to bound each worker. TIMEOUT_BIN is empty when no timeout
+  # binary exists, which the worker treats as run-unbounded.
+  export TIMEOUT_BIN AUTODREAM_L1_TIMEOUT L1_KILL_GRACE
+
+  # Truncate the timeout ledger here rather than where FINDINGS_DIR is created: this point is
+  # past the idempotency guard, so a catch-up trigger that no-ops on a finished date cannot wipe
+  # that date's record of what timed out.
+  : > "$FINDINGS_DIR/l1-timeouts.txt"
 
   clean_work_bucket  # start clean: drop any stub left by a prior run's workers
 
@@ -2043,19 +2138,106 @@ EOF
   L1_PRECACHED=$(l1_missing_count)
   L1_PRECACHED=$(( COUNT - L1_PRECACHED ))
 
+  # ---- Auth warmup: one serial model call per adapter before the parallel dispatch ----
+  # FANOUT workers starting cold at once all find the same expired token and all try to refresh
+  # it. One serial call first means the refresh happens once. It never fails the run; the verdict
+  # lands in run-stats as l1_warmup. Bounded by its own deadline, because it runs ahead of every
+  # recovery path (the retry loop, the circuit breaker, wait_for_network): an unbounded warmup
+  # that hangs on exactly the cold-start condition it targets wedges the run before all of them,
+  # with launchd suppressing later triggers while the job stays alive. With no timeout binary it
+  # is skipped, not run unbounded.
+  L1_WARMUP=skipped
+  if [ "${AUTODREAM_L1_WARMUP:-1}" = "0" ]; then
+    :
+  elif [ -z "$TIMEOUT_BIN" ]; then
+    L1_WARMUP=skipped_no_timeout
+    log "L1 auth warmup skipped: no timeout binary, and an unbounded warmup can wedge the run before every retry path"
+  else
+    L1_WARMUP=ok
+    while IFS=$'\t' read -r _wsrc _wmodel; do
+      [ -n "$_wsrc" ] && [ -n "$_wmodel" ] || continue
+      _wargv=(); _wenv=()
+      while IFS= read -r -d "" _a; do _wargv+=("$_a"); done < <(adapter_run "$_wsrc" warmup-argv "$_wmodel" 2>/dev/null)
+      while IFS= read -r _l; do [ -n "$_l" ] && _wenv+=("$_l"); done < <(adapter_run "$_wsrc" l1-env 2>/dev/null)
+      if [ "${#_wargv[@]}" -eq 0 ]; then
+        L1_WARMUP=failed
+        log "L1 auth warmup FAILED for $_wsrc: the adapter printed no warmup command"
+        continue
+      fi
+      _werr="$FINDINGS_DIR/l1-warmup.$_wsrc.err"
+      _wout=$(printf 'ping\n' | env "${_wenv[@]}" "$TIMEOUT_BIN" -k 10 "$AUTODREAM_L1_WARMUP_TIMEOUT" "${_wargv[@]}" 2>"$_werr")
+      _wrc=$?
+      # The warmup asks for the single word ok. Anything else on stdout with exit 0 is a
+      # diagnostic, not a reply, and must not read as a healthy provider. Case and surrounding
+      # whitespace or punctuation are tolerated.
+      _wword=$(printf '%s' "$_wout" | tr -d '[:space:][:punct:]' | tr '[:upper:]' '[:lower:]')
+      if [ "$_wrc" -eq 0 ] && [ "$_wword" = "ok" ]; then
+        log "L1 auth warmup ok ($_wsrc)"
+      else
+        L1_WARMUP=failed
+        # The point of the warmup is that this line exists before 8 workers repeat the failure in
+        # parallel and bury it. Name both streams: an empty stdout IS the finding.
+        log "L1 auth warmup FAILED for $_wsrc (exit $_wrc): stdout=[${_wout:-<empty>}] stderr=[$(head -c 300 "$_werr" 2>/dev/null | tr '\n' ' ')]"
+      fi
+    done < <(printf '%s' "$AUTODREAM_L1_MODELS")
+    unset _wsrc _wmodel _wargv _wenv _a _l _werr _wout _wrc _wword
+  fi
+
   L1_START=$(date +%s)
   L1_ROUNDS="${AUTODREAM_L1_ROUNDS:-5}"
   MISSING=$COUNT
+  LAST_ROUND_RUN=0
+  # Consecutive rounds that recovered nothing. A streak, not a comparison against the last
+  # round's ending count: comparing end-to-end counts calls two rounds barren whenever the SECOND
+  # one is, because round 1 having recovered sessions is invisible in its own ending number.
+  # Round 1 taking 3 missing down to 1 and round 2 recovering none leaves both ends equal at 1,
+  # which tripped the breaker after a single bad round and logged the lie that rounds 1 and 2
+  # both recovered nothing. Any recovery resets the streak to zero.
+  L1_NOPROGRESS=0
+  L1_BREAKER=no
   for round in $(seq 1 "$L1_ROUNDS"); do
     log "L1 triage round $round/$L1_ROUNDS (fanout=$FANOUT)..."
     # The dispatcher's subshell reads this to decide whether the last-round
     # metadata-stub fallback should fire for sessions that produced no output.
     export AUTODREAM_CURRENT_ROUND="$round"
+    # Sampled before the dispatch, so "did THIS round recover anything" is answerable without
+    # inferring it from the previous round's ending count.
+    round_start_missing=$(l1_missing_count)
     dispatch_l1
+    LAST_ROUND_RUN="$round"
     MISSING=$(l1_missing_count)
     L1_DONE=$(findings_json_count)
     log "L1 round $round: $L1_DONE done, $MISSING still missing"
     [ "$MISSING" -eq 0 ] && break
+    if [ "$MISSING" -lt "$round_start_missing" ]; then
+      L1_NOPROGRESS=0
+    else
+      L1_NOPROGRESS=$((L1_NOPROGRESS + 1))
+    fi
+    # Circuit breaker. The retry budget is built for a Mac sleeping through a round, and against
+    # that it works. Against a worker that dies the same way every time it buys nothing and hides
+    # the shape: 2026-09-08 spent all five rounds and 405s to write 16 empty stubs, and the
+    # run-stats it left (l1_rounds_used 5 of 5, l1_timed_out 0) read as a healthy retry loop
+    # rather than as five identical failures. Two consecutive rounds that recover no session
+    # means deterministic, not transient.
+    #
+    # It still has to dispatch once more. The metadata-stub fallback fires only when the
+    # dispatcher sees AUTODREAM_CURRENT_ROUND at the budget, so breaking out here without that
+    # round would leave the slots empty, and an empty slot is not a stub. So jump to the last
+    # round rather than skipping to the end: three dispatches instead of five, with the same
+    # artifacts on disk. The -lt guard matters at AUTODREAM_L1_ROUNDS=2 (the suite runs low
+    # budgets): there the final round IS the stub round and has already run.
+    if [ "$L1_NOPROGRESS" -ge 2 ] && [ "$round" -lt "$L1_ROUNDS" ]; then
+      L1_BREAKER=yes
+      log "L1 circuit breaker: $L1_NOPROGRESS consecutive rounds recovered nothing ($MISSING still missing) as of round $round. Failure is deterministic; skipping $((L1_ROUNDS - round - 1)) retry round(s) and dispatching the stub round."
+      export AUTODREAM_CURRENT_ROUND="$L1_ROUNDS"
+      dispatch_l1
+      LAST_ROUND_RUN="$L1_ROUNDS"
+      MISSING=$(l1_missing_count)
+      L1_DONE=$(findings_json_count)
+      log "L1 stub round: $L1_DONE done, $MISSING still missing"
+      break
+    fi
     if [ "$round" -lt "$L1_ROUNDS" ]; then
       log "L1 retrying $MISSING missing session(s) after a network/sleep check..."
       wait_for_network
@@ -2303,8 +2485,19 @@ PY
     printf 'sessions_dropped_to_collision: %s\n' "$COLLIDED_DROPPED"
     printf 'sidecar_stale_rows: %s\n' "$SIDECAR_STALE_ROWS"
     printf 'sessions_dropped_after_failures: %s\n' "$DROPPED_AFTER_FAILURES"
-    printf 'l1_rounds_used: %s\n' "$round"
+    # LAST_ROUND_RUN, not $round: the loop variable is assigned before a round dispatches, so a
+    # loop that stopped before dispatching would still read as having used that round.
+    printf 'l1_rounds_used: %s\n' "$LAST_ROUND_RUN"
     printf 'l1_rounds_max: %s\n' "$L1_ROUNDS"
+    printf 'l1_timeout_bin: %s\n' "${TIMEOUT_BIN:-none}"
+    printf 'l1_timeout_seconds: %s\n' "$AUTODREAM_L1_TIMEOUT"
+    printf 'l1_timed_out: %s\n' "$(sort -u "$FINDINGS_DIR/l1-timeouts.txt" 2>/dev/null | grep -c . || true)"
+    # How the auth warmup went: ok, failed, skipped (disabled) or skipped_no_timeout. A failed
+    # warmup that precedes a night of empty stubs is the diagnosis; an ok one rules it out.
+    printf 'l1_warmup: %s\n' "${L1_WARMUP:-not_reached}"
+    # yes when the circuit breaker cut the retry budget, so a short l1_rounds_used is not
+    # mistaken for a run that finished early and cleanly.
+    printf 'l1_breaker_fired: %s\n' "${L1_BREAKER:-not_reached}"
     printf 'l1_findings_written: %s\n' "$L1_OK"
     printf 'l1_findings_with_error: %s\n' "$L1_ERRORED"
     # Why those stubs exist, by class. A silent worker death (exit 0, empty stdout), a provider
