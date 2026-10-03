@@ -298,6 +298,16 @@ Three controls on the L1 loop, each from a night that went wrong in a way the re
 - **The auth warmup** is one serial `ping` per adapter before the parallel dispatch, so `FANOUT` cold workers do not all refresh the same expired token at once. Each adapter prints its own `warmup-argv`: the worker's flags with a system prompt that asks for one word. It is bounded by its own deadline (`AUTODREAM_L1_WARMUP_TIMEOUT`, default 120) because it runs ahead of every recovery path; with no `timeout` binary it is skipped, never run unbounded. The reply must be the word `ok` on stdout with exit 0: a worker that dies prints nothing and exits 0 with only chatter on stderr, which an exit-code check alone calls healthy. `l1_warmup` in run-stats says `ok`, `failed`, `skipped` or `skipped_no_timeout`.
 - **The circuit breaker** stops the retry budget after two consecutive rounds that each recovered nothing. The budget is built for a Mac sleeping through a round; against a worker that dies the same way every time it buys nothing and hides the shape (2026-09-08 spent five rounds and 405s writing 16 empty stubs, and the run-stats read as a healthy retry loop). It is a streak, not a comparison of ending counts, which tripped it after one bad round when round 1 had recovered something. It still dispatches once more, at the budget, because the metadata-stub fallback only fires there and an empty slot is not a stub. `l1_breaker_fired: yes` and `l1_rounds_used` (the last round that actually dispatched) keep a short run from reading as a clean one.
 
+### A dead network or a refusing provider defers the date; it never publishes a short corpus (omp-autodream 2026-09-04, #37)
+
+A report written from a run that could not reach the model looks complete, ships open questions, and its own self-audit cannot tell the corpus is missing. So:
+
+- `wait_for_network` runs before every L1 round (round 1 included) and returns 1 once `AUTODREAM_NETCHECK_CAP` is spent. The run then sets `NET_DEFERRED=yes`, writes no report and exits 1, so `unassembled_dates()` names the date and a later trigger retries it.
+- A worker failure probes `curl` once. No route, or a permanent provider refusal (`provider_is_permanent` in `failure-class.sh`: no balance or quota, Z.ai 1113, DeepSeek 402), is ledgered in `l1-netdown.txt` as `<hash> <round> true|provider` and gets no metadata stub. A stub fills the slot, so the session would never be retried.
+- Only the LAST round that dispatched decides the deferral, so one transient flap is ridden out by the next round. A curl that is absent or not executable (exit 127/126) is "cannot tell", never "down".
+- `run-stats.txt` carries `network_down_seconds`, `network_deferred`, `network_flapped`, and after L2 `network_down_seconds_l2` / `network_deferred_l2` (both also on the deferral exit).
+- `run.sh` appends to the caller's `PATH` instead of replacing it, so a caller (or a test) can put a shim in front.
+
 ## Running / rerunning a date
 
 ```

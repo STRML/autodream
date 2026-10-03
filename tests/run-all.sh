@@ -222,12 +222,25 @@ run_dream(){ # $1=root ; inherits MOCK_MODE/MOCK_CAPTURE_DIR/FANOUT + changelog 
   # AUTODREAM_VAULT_DIR could reach the nightly run; without this pin a developer whose
   # config points at a real Obsidian vault would have the suite writing into it.
   # Individual tests override this by exporting AUTODREAM_CONFIG before calling.
+  # The worker failure path probes the network with a real curl, so every test with a failing
+  # worker would make real outbound calls at 5s apiece. Default every run to a curl that
+  # reports a reachable host; the tests that care about an outage set TEST_CURL_SHIMMED=1 and
+  # put their own shim on PATH first.
+  if [ -z "${TEST_CURL_SHIMMED:-}" ]; then
+    mkdir -p "$1/shim-default"
+    printf '#!/bin/bash\nprintf %s "200"\n' "'%s'" > "$1/shim-default/curl"
+    chmod +x "$1/shim-default/curl"
+    PATH="$1/shim-default:$PATH"
+  fi
   AUTODREAM_CHANGELOG="${AUTODREAM_CHANGELOG:-0}" CLAUDE_BIN="$MOCK" \
   AUTODREAM_CONFIG="${AUTODREAM_CONFIG:-$1/autodream/config}" \
   AUTODREAM_CONSUME_DATE="${AUTODREAM_CONSUME_DATE:-$DATE}" \
-  AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS="${AUTODREAM_L1_ROUNDS:-2}" \
+  AUTODREAM_NETCHECK="${AUTODREAM_NETCHECK:-0}" AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS="${AUTODREAM_L1_ROUNDS:-2}" \
   PROJECTS_DIR="$1/projects" AUTODREAM_DIR="$1/autodream" DREAMS_DIR="$1/dreams" \
   /bin/bash "$RUN" "$DATE" > "$1/run.out" 2>&1
+  # The run's own exit code, captured while $? still holds it: an unattended run has no other
+  # signal for "delivered nothing", so the exit code is part of the contract.
+  printf '%s' "$?" > "$1/run.exit"
   # An unattended run logs to its file rather than through a pipe, so that stdout carries
   # only a pointer now. Fold the real log in, so every assertion below still reads what a
   # nightly run actually recorded rather than what a tty run happens to echo.
@@ -1515,6 +1528,7 @@ test_a_deterministic_failure_trips_the_breaker(){
   # logic reads as a dead network rather than a dead worker.
   assert_file   "$(fdir "$root")/$h.json"                 "the stub round still writes the metadata stub"
   assert_grep   "$stats" 'l1_missing_after_retries: 0'    "no session is left in a missing state"
+  assert_grep   "$stats" 'network_deferred: no'           "a deterministic worker failure is not an outage"
   rm -rf "$root"
 }
 
@@ -1551,6 +1565,216 @@ PY
   export ADAPTERS_ROOT="$ad"; run_dream "$root"; unset ADAPTERS_ROOT
   assert_grep "$(fdir "$root")/run-stats.txt" 'l1_warmup: ok' "the warmup ran and succeeded"
   assert_nogrep "$root/run.out" 'warmup FAILED' "and no failure was logged"
+  rm -rf "$root"
+}
+
+shim_curl(){ # $1=sandbox root, $2=http_code to report
+  mkdir -p "$1/shim"
+  printf '#!/bin/bash\nprintf %s "%s"\n' "'%s'" "$2" > "$1/shim/curl"
+  chmod +x "$1/shim/curl"
+  printf '%s' "$1/shim"
+}
+
+test_network_down_defers_the_date(){
+  echo "# a round that cannot be dispatched defers the date instead of reporting on a short corpus"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local shim; shim=$(shim_curl "$root" 000)
+  # CAP=0 makes wait_for_network give up on its first check, so the test never sleeps.
+  TEST_CURL_SHIMMED=1   PATH="$shim:$PATH" AUTODREAM_NETCHECK=1 AUTODREAM_NETCHECK_CAP=0 run_dream "$root"
+  local h; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  assert_eq      "$(cat "$root/run.exit")" "1"         "a deferred run exits non-zero"
+  assert_no_file "$root/dreams/$DATE.md"               "no report is written from a dead-network run"
+  assert_no_file "$(fdir "$root")/$h.json"             "no worker was dispatched at all"
+  assert_grep    "$(fdir "$root")/run-stats.txt" 'network_deferred: yes' "run-stats records the deferral"
+  assert_grep    "$root/run.out" 'Deferring'           "the log says the date was deferred"
+  rm -rf "$root"
+}
+
+test_oversized_gate_script_deferred(){
+  echo "# oversized-gate.sh: a network-deferred date is excluded, never read as a clean 0%"
+  local GATE="$REPO/bin/oversized-gate.sh"
+  [ -x "$GATE" ] || { no "oversized-gate.sh executable"; return 0; }
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local shim; shim=$(shim_curl "$root" 000)
+  TEST_CURL_SHIMMED=1 PATH="$shim:$PATH" AUTODREAM_SLIM_BYTES=100 AUTODREAM_NETCHECK=1 AUTODREAM_NETCHECK_CAP=0 run_dream "$root"
+  local fd; fd=$(fdir "$root")
+  assert_grep "$fd/run-stats.txt" 'network_deferred: yes' "precondition: the run really deferred"
+  local out; out=$(AUTODREAM_SLIM_BYTES=100 bash "$GATE" "$fd" 2>&1)
+  printf '%s' "$out" > "$root/gate.out"
+  assert_grep   "$root/gate.out" 'network-deferred run, excluded' "the deferred date is named and excluded"
+  assert_nogrep "$root/gate.out" 'GATE CLOSED'                    "a date where no worker ran must not close the gate"
+  # Every date excluded is not the same as nothing oversized (Auditor verification of 6ca1584).
+  # A dir with no sessions.txt is the other way a date drops out, so the window holds both.
+  local empty="$root/2020-01-03"; mkdir -p "$empty"
+  out=$(AUTODREAM_SLIM_BYTES=100 bash "$GATE" "$fd" "$empty" 2>&1)
+  printf '%s' "$out" > "$root/gate.out"
+  assert_nogrep "$root/gate.out" 'No oversized transcripts' "an all-excluded window does not claim nothing was oversized"
+  assert_grep   "$root/gate.out" 'No date in this window could be measured' "it says no date was measurable"
+  rm -rf "$root"
+}
+
+test_route_lost_after_the_precheck_still_defers(){
+  echo "# a route lost AFTER the pre-dispatch check must defer, not publish a short corpus"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local shim; shim=$(shim_curl "$root" 000)
+  local h; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  # NETCHECK=0 skips the pre-dispatch check, which is precisely the gap: the check only
+  # proves the route was up when the round started. The worker then fails while the
+  # failure-path probe sees no route — the round-5 shape from 2026-09-04.
+  # ROUNDS=1 means this is also the final round, where the stub used to be written.
+  export MOCK_MODE=l1_incomplete
+  TEST_CURL_SHIMMED=1   PATH="$shim:$PATH" AUTODREAM_NETCHECK=0 AUTODREAM_SLIM_BYTES=10 AUTODREAM_L1_ROUNDS=1 run_dream "$root"
+  unset MOCK_MODE
+  local stats="$(fdir "$root")/run-stats.txt"
+  # No stub. A stub carries a .findings key, and jq -e counts an empty array as present,
+  # so writing one marks the session done: MISSING hits zero, the run stops deferring, and
+  # the next run skips the session forever because its slot is filled.
+  assert_no_file "$(fdir "$root")/$h.json"   "no findings stub is written for a network-down failure"
+  assert_no_file "$root/dreams/$DATE.md"     "no report is published on an outage-short corpus"
+  assert_eq      "$(cat "$root/run.exit")" "1" "the run exits non-zero"
+  assert_grep    "$stats" 'network_deferred: yes'   "run-stats records the post-dispatch deferral"
+  assert_grep    "$stats" 'oversized_errored: 0'    "an unstubbed session cannot reach the oversized-error counter"
+  assert_grep    "$(fdir "$root")/$h.json.err" 'no route to api.anthropic.com' ".err names the real cause"
+  # Ledger carries hash + round + verdict so a later round can overrule an earlier one.
+  assert_grep    "$(fdir "$root")/l1-netdown.txt" "^$h 1 true\$" "the ledger records the round and the verdict"
+  rm -rf "$root"
+}
+
+test_missing_curl_is_not_read_as_an_outage(){
+  echo "# a host without curl must not have every failure classified as a network outage"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local h; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  # An empty shim dir placed FIRST on PATH cannot hide curl, so hide it by pointing PATH
+  # at a dir holding only the binaries run.sh needs. Simpler and more honest: a curl that
+  # does not exist is simulated by a shim that exits 127 the way a missing command does.
+  mkdir -p "$root/nocurl"
+  printf '#!/bin/bash\nexit 127\n' > "$root/nocurl/curl"; chmod +x "$root/nocurl/curl"
+  export MOCK_MODE=l1_incomplete
+  TEST_CURL_SHIMMED=1   PATH="$root/nocurl:$PATH" AUTODREAM_NETCHECK=0 AUTODREAM_SLIM_BYTES=10 AUTODREAM_L1_ROUNDS=1 run_dream "$root"
+  unset MOCK_MODE
+  # A curl that cannot run answers nothing. Classifying that as an outage would defer
+  # every date forever on a machine without curl, so the failure stays unclassified: no
+  # ledger entry, no deferral, and the .err says why rather than leaving it to inference.
+  assert_grep    "$(fdir "$root")/$h.json.err" 'curl could not be run here' ".err says the check could not answer"
+  assert_nogrep  "$(fdir "$root")/l1-netdown.txt" "^$h " "an unclassifiable failure is never ledgered as an outage"
+  assert_grep    "$(fdir "$root")/run-stats.txt" 'network_deferred: no' "and it does not defer the date"
+  rm -rf "$root"
+}
+
+test_a_transient_outage_is_ridden_out_not_deferred(){
+  echo "# a network blip in one round must burn a retry, not defer the whole date"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  # A curl that reports no route on its first call and a reachable host afterwards. The
+  # first version of this fix broke out of the retry loop the moment any worker failed
+  # with a network flavour, which threw the retry budget away: one transient DNS timeout
+  # deferred the date for three hours instead of succeeding on round 2.
+  mkdir -p "$root/shim"
+  printf '#!/bin/bash\nc="$root/shim/n"\nn=$(cat "$c" 2>/dev/null || echo 0)\necho $((n+1)) > "$c"\nif [ "$n" -lt 1 ]; then printf %s "000"; else printf %s "200"; fi\n' "'%s'" "'%s'" \
+    | sed "s|\$root|$root|g" > "$root/shim/curl"
+  chmod +x "$root/shim/curl"
+  # l1_flaky fails the first dispatch per session and succeeds on the retry, so round 1
+  # fails while curl says no route and round 2 succeeds while it says 200.
+  export MOCK_MODE=l1_flaky
+  TEST_CURL_SHIMMED=1 PATH="$root/shim:$PATH" AUTODREAM_NETCHECK=0 AUTODREAM_L1_ROUNDS=2 run_dream "$root"
+  unset MOCK_MODE
+  local h; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  assert_file "$(fdir "$root")/$h.json"  "the retry succeeded rather than being cut short"
+  assert_file "$root/dreams/$DATE.md"    "a recovered run still publishes its report"
+  assert_grep "$(fdir "$root")/run-stats.txt" 'network_deferred: no' "a blip that recovered is not a deferral"
+  rm -rf "$root"
+}
+
+test_no_curl_does_not_defer_a_healthy_run(){
+  echo "# a host without curl must not defer every run for 1800s of unanswerable checks"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  # net_up ran curl unconditionally and read its empty output as "no route", so a machine
+  # without curl looped to the full cap and deferred a run that was working fine. The
+  # worker-failure path grew the command -v guard first; net_up did not have it.
+  mkdir -p "$root/shim"
+  printf '#!/bin/bash\nexit 127\n' > "$root/shim/curl"; chmod +x "$root/shim/curl"
+  # NETCHECK=1 with a tiny cap: if the guard is missing this defers, and fast.
+  TEST_CURL_SHIMMED=1 PATH="$root/shim:$PATH" AUTODREAM_NETCHECK=1 AUTODREAM_NETCHECK_CAP=0 run_dream "$root"
+  assert_file "$root/dreams/$DATE.md" "the run completed instead of deferring on an unrunnable check"
+  assert_grep "$(fdir "$root")/run-stats.txt" 'network_deferred: no' "an unanswerable check is not an outage"
+  rm -rf "$root"
+}
+
+test_unexecutable_curl_is_not_read_as_an_outage(){
+  echo "# a curl that exists but cannot be executed (exit 126) is unclassifiable, not down"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  mkdir -p "$root/shim"
+  # Return 126 directly. Some shells skip a non-executable PATH entry and run the next
+  # curl, which made this offline fixture depend on whether the host network was up.
+  printf '#!/bin/bash\nexit 126\n' > "$root/shim/curl"; chmod 755 "$root/shim/curl"
+  TEST_CURL_SHIMMED=1 PATH="$root/shim:$PATH" AUTODREAM_NETCHECK=1 AUTODREAM_NETCHECK_CAP=0 run_dream "$root"
+  assert_file "$root/dreams/$DATE.md" "the run completed rather than deferring on an unrunnable curl"
+  assert_grep "$(fdir "$root")/run-stats.txt" 'network_deferred: no' "126 is treated the same as 127"
+  rm -rf "$root"
+}
+
+test_provider_refusal_defers_without_a_stub(){
+  echo "# a provider refusal on a reachable network defers the date and leaves no stub (Z.ai 1113, 2026-10-01 and 10-02)"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local shim; shim=$(shim_curl "$root" 200)
+  local h; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  # The route is up, so netdown is false. Without the provider carve-out the final round
+  # wrote a stub, MISSING hit zero, L2 published an empty report, and every later run
+  # skipped the session because its slot was filled.
+  export MOCK_MODE=l1_provider_refusal
+  TEST_CURL_SHIMMED=1   PATH="$shim:$PATH" AUTODREAM_NETCHECK=0 AUTODREAM_SLIM_BYTES=10 AUTODREAM_L1_ROUNDS=1 run_dream "$root"
+  unset MOCK_MODE
+  local stats="$(fdir "$root")/run-stats.txt"
+  assert_no_file "$(fdir "$root")/$h.json"   "no findings stub is written for a provider refusal"
+  assert_no_file "$root/dreams/$DATE.md"     "no report is published on a corpus the provider refused"
+  assert_eq      "$(cat "$root/run.exit")" "1" "the run exits non-zero"
+  assert_grep    "$stats" 'network_deferred: yes' "run-stats records the deferral"
+  assert_grep    "$(fdir "$root")/$h.json.err" 'provider refusal when this worker failed' ".err names the cause"
+  assert_grep    "$(fdir "$root")/l1-netdown.txt" "^$h 1 provider\$" "the ledger records the round and the verdict"
+  rm -rf "$root"
+}
+
+test_provider_402_and_missing_curl_still_defer(){
+  echo "# DeepSeek's 402 Insufficient Balance defers the date, with or without curl"
+  local root h shim stats
+  root=$(setup_env); mk_session "$root" sess1
+  h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  shim=$(shim_curl "$root" 200)
+  export MOCK_MODE=l1_provider_402
+  TEST_CURL_SHIMMED=1   PATH="$shim:$PATH" AUTODREAM_NETCHECK=0 AUTODREAM_SLIM_BYTES=10 AUTODREAM_L1_ROUNDS=1 run_dream "$root"
+  unset MOCK_MODE
+  assert_no_file "$(fdir "$root")/$h.json" "a 402 balance refusal leaves no stub even though classify_failure has no 402 pattern"
+  assert_grep    "$(fdir "$root")/l1-netdown.txt" "^$h 1 provider\$" "the ledger records the verdict"
+  rm -rf "$root"
+  # A host without curl: netdown stays unknown, and the permanent check must still run.
+  root=$(setup_env); mk_session "$root" sess1
+  h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  mkdir -p "$root/nocurl"
+  printf '#!/bin/bash\nexit 127\n' > "$root/nocurl/curl"; chmod +x "$root/nocurl/curl"
+  export MOCK_MODE=l1_provider_refusal
+  TEST_CURL_SHIMMED=1   PATH="$root/nocurl:$PATH" AUTODREAM_NETCHECK=0 AUTODREAM_SLIM_BYTES=10 AUTODREAM_L1_ROUNDS=1 run_dream "$root"
+  unset MOCK_MODE
+  assert_no_file "$(fdir "$root")/$h.json" "a permanent refusal leaves no stub when curl cannot answer"
+  rm -rf "$root"
+  # Talking about balances is not a refusal: the match needs an error-shaped line.
+  root=$(setup_env)
+  printf 'worker said: the invoice shows insufficient balance for the Q3 ledger\nworker exit code: 1 after 3s\n' > "$root/talk.err"
+  if bash -c ". \"$REPO/bin/failure-class.sh\"; provider_is_permanent \"$root/talk.err\""; then
+    no "a transcript that mentions insufficient balance was read as a permanent refusal"
+  else
+    ok "a transcript that mentions insufficient balance is not a permanent refusal"
+  fi
+  rm -rf "$root"
+}
+
+test_rounds_used_counts_rounds_that_dispatched(){
+  echo "# a round that deferred before dispatching must not be counted as a round used"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local shim; shim=$(shim_curl "$root" 000)
+  TEST_CURL_SHIMMED=1 PATH="$shim:$PATH" AUTODREAM_NETCHECK=1 AUTODREAM_NETCHECK_CAP=0 run_dream "$root"
+  assert_grep "$(fdir "$root")/run-stats.txt" 'l1_rounds_used: 0' "zero rounds dispatched is reported as zero"
+  # And the L2-scoped keys exist even though the run returned before the aggregator.
+  assert_grep "$(fdir "$root")/run-stats.txt" 'network_deferred_l2: no'      "the L2 keys are written on the L1-deferral path too"
+  assert_grep "$(fdir "$root")/run-stats.txt" 'network_down_seconds_l2: 0'   "an L2 that never ran waited zero seconds"
   rm -rf "$root"
 }
 
@@ -2694,6 +2918,16 @@ test_breaker_needs_two_barren_rounds_not_one
 test_a_deterministic_failure_trips_the_breaker
 test_a_flaky_worker_does_not_trip_the_breaker
 test_warmup_works_for_an_adapter_with_no_environment
+test_network_down_defers_the_date
+test_oversized_gate_script_deferred
+test_route_lost_after_the_precheck_still_defers
+test_missing_curl_is_not_read_as_an_outage
+test_a_transient_outage_is_ridden_out_not_deferred
+test_no_curl_does_not_defer_a_healthy_run
+test_unexecutable_curl_is_not_read_as_an_outage
+test_provider_refusal_defers_without_a_stub
+test_provider_402_and_missing_curl_still_defer
+test_rounds_used_counts_rounds_that_dispatched
 test_changelog
 test_changelog_multi_source
 test_changelog_refuses_foreign_cache_dir
@@ -3468,10 +3702,10 @@ test_upgrade_lag_install_still_produces_a_report(){
 # every assertion passes whether the collision handling works or not — which is
 # exactly what happened while this branch was patched across four review rounds.
 #
-# The stub goes in $HOME/.local/bin because run.sh hard-overrides PATH to a fixed
-# list ("$HOME/.cargo/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:...").
-# A stub anywhere else is simply not seen — the first version of this test put it
-# in a temp dir on PATH and silently measured nothing.
+# The stub goes in $HOME/.local/bin and run_dream_collision puts that directory first on
+# PATH, because run.sh appends its own fixed list after the caller's PATH. A stub that is not
+# first on PATH is simply not seen: the first version of this test put it in a temp dir
+# behind the system one and silently measured nothing.
 collision_sandbox(){ # -> a root whose HOME holds a constant-hash shasum stub
   local root; root=$(setup_env)
   mkdir -p "$root/home/.local/bin"
@@ -3481,7 +3715,8 @@ collision_sandbox(){ # -> a root whose HOME holds a constant-hash shasum stub
   printf '%s' "$root"
 }
 run_dream_collision(){ # $1=root
-  HOME="$1/home" AUTODREAM_CHANGELOG=0 CLAUDE_BIN="$MOCK" \
+  # run.sh appends to the caller's PATH, so the constant-hash stub has to be first on it.
+  PATH="$1/home/.local/bin:$PATH" HOME="$1/home" AUTODREAM_CHANGELOG=0 CLAUDE_BIN="$MOCK" \
     AUTODREAM_CONFIG="$1/autodream/config" AUTODREAM_CONSUME_DATE="$DATE" \
     AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1 \
     PROJECTS_DIR="$1/projects" AUTODREAM_DIR="$1/autodream" DREAMS_DIR="$1/dreams" \
