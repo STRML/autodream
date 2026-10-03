@@ -102,6 +102,9 @@ case "$cmd" in
     ;;
   engine-bin) printf '%s\n' true ;;
 
+  l2-argv) # [$1=model]
+    printf '%s\0' true ${1:+"$1"}
+    ;;
   l1-argv) # $1=model
     [ "$#" -ge 1 ] && [ -n "$1" ] || exit 2
     printf '%s\0' true "$1"

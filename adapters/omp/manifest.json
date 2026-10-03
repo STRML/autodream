@@ -7,5 +7,6 @@
   "engine_bin": "omp",
   "l1_model": "deepseek/deepseek-flash",
   "writes_memory": false,
-  "normalize": true
+  "normalize": true,
+  "l2_model": "anthropic/claude-opus-5"
 }

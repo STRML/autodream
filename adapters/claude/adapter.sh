@@ -203,6 +203,23 @@ case "$cmd" in
     printf '%s\n' CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1
     ;;
 
+  l2-argv) # [$1=model] -> NUL-delimited argv for the L2 aggregator; the prompt arrives on stdin
+    # Glob and Read only: the report and the pins come back on stdout and the runner is the only
+    # writer. The model is optional, and absent means the CLI's own default, so an upgrade of the
+    # account upgrades the nightly report with nothing edited here.
+    set -- ${1:+--model "$1"}
+    printf '%s\0' "${CLAUDE_BIN:-$HOME/.local/bin/claude}" \
+      --print \
+      --permission-mode bypassPermissions \
+      "$@" \
+      --no-session-persistence \
+      --tools Glob Read \
+      --disable-slash-commands \
+      --strict-mcp-config \
+      --settings '{"disableAllHooks":true}' \
+      --append-system-prompt 'Headless aggregator. Read the per-session findings JSONs from the findings directory given on line 1 of the prompt, then produce the COMPLETE report only on standard output, ending with a line containing exactly AUTODREAM_REPORT_END. After that line, if you propose memory pins, print them between a line AUTODREAM_PINS_BEGIN and a line AUTODREAM_PINS_END, one JSON object per line. Do not use Write or Edit anywhere. Those paths are literal strings, not shell variables — never $-expand them. After the pin block print one line: report: <literal path from line 2 of the prompt> then a 3-line summary (sessions reviewed, findings, pins proposed), then exit.'
+    ;;
+
   skills-inventory)
     for d in "$HOME"/.claude/skills/*/ "$HOME"/.claude/plugins/*/skills/*/; do
       [ -f "$d/SKILL.md" ] || continue

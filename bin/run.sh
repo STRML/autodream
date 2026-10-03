@@ -58,7 +58,9 @@
 #                        (an adapter under adapters/ is accepted, not enabled, until named)
 #   AUTODREAM_FORCE      set 1 to rebuild even if a report exists    default: 0
 #   AUTODREAM_SLIM_BYTES sessions larger than this are slimmed for L1  default: 262144
-#   AUTODREAM_L2_MODEL   pin the L2 aggregator model                 default: unset, so the CLI's own default is used
+#   AUTODREAM_L2_ENGINE  adapter whose engine runs L2                default: the first enabled adapter
+#   AUTODREAM_L2_MODEL   pin the L2 aggregator model (every engine)   default: the adapter's own (claude: the CLI default)
+#   AUTODREAM_L2_MODEL_<NAME> / AUTODREAM_L1_MODEL_<NAME>  the same for one adapter only
 #   AUTODREAM_MARKER_EPOCH    first date whose report is REQUIRED to carry the
 #                             open-questions marker; earlier unmarked reports are treated
 #                             as complete (legacy) rather than abandoned
@@ -2095,6 +2097,12 @@ run() {
   : > "$ADAPTERS_REJECT_LOG" 2>/dev/null || true
   scan_roots || { fatal_exit; return 1; }
   build_source_sidecar || { fatal_exit; return 1; }
+  # A named L2 engine that is not an accepted adapter is refused now, before any model has been
+  # paid for, not after L1 has finished and L2 has nothing to run.
+  if [ -n "${AUTODREAM_L2_ENGINE:-}" ] && ! adapters_list 2>/dev/null | grep -qxF "$AUTODREAM_L2_ENGINE"; then
+    log_fatal "AUTODREAM_L2_ENGINE=$AUTODREAM_L2_ENGINE is not an accepted adapter (accepted: $(adapters_list 2>/dev/null | tr '\n' ' ')). Refusing to start."
+    fatal_exit; return 1
+  fi
 
   # Exclude autodream's OWN headless worker/aggregator transcripts. New runs leave none
   # (--no-session-persistence), but runs predating that fix littered ~/.claude/projects/
@@ -2769,6 +2777,12 @@ PY
     # How the auth warmup went: ok, failed, skipped (disabled) or skipped_no_timeout. A failed
     # warmup that precedes a night of empty stubs is the diagnosis; an ok one rules it out.
     printf 'l1_warmup: %s\n' "${L1_WARMUP:-not_reached}"
+    # Which model each adapter's workers ran, so a report that reads differently can be traced to
+    # the engine that produced it. One key per source that had sessions tonight.
+    while IFS=$'\t' read -r _msrc _mval; do
+      [ -n "$_msrc" ] || continue
+      printf 'l1_model_%s: %s\n' "$(printf '%s' "$_msrc" | tr '-' '_')" "${_mval:-none}"
+    done <<< "$AUTODREAM_L1_MODELS"
     # yes when the circuit breaker cut the retry budget, so a short l1_rounds_used is not
     # mistaken for a run that finished early and cleanly.
     printf 'l1_breaker_fired: %s\n' "${L1_BREAKER:-not_reached}"
@@ -2921,24 +2935,44 @@ PY
   # bare "claude-fable-5" was one of those, where "fable" and the [1m]-suffixed
   # form both worked). A silent fallback is why the value is recorded below.
   #
-  # bash 3.2 with set -u treats "${a[@]}" on an EMPTY array as an unbound
-  # variable, so the flag is carried in a guarded array rather than an unquoted
-  # string. An unquoted string would word-split a model name containing a space
-  # and shellcheck would be right to object.
-  L2_MODEL_ARGS=()
-  if [ -n "${AUTODREAM_L2_MODEL:-}" ]; then
-    L2_MODEL_ARGS=(--model "$AUTODREAM_L2_MODEL")
-  fi
-  log "L2 model: ${AUTODREAM_L2_MODEL:-<CLI default>}"
-  # Recorded because the model is no longer fixed by this file. When a report's
-  # character changes, the first question is what produced it, and the answer has
-  # to survive in the artifact rather than only in a log nobody reads — the same
-  # argument as runner_commit. `default` is the honest value: the CLI picks, and
-  # this script is not told what it picked.
+  # The engine that runs L2 is an adapter, chosen by AUTODREAM_L2_ENGINE and by default the
+  # first enabled adapter. It prints its own argv (adapters/<name>/adapter.sh l2-argv), so this
+  # file names no binary. The model resolves per adapter (AUTODREAM_L2_MODEL_<NAME>, then
+  # AUTODREAM_L2_MODEL, then the manifest); none at all is legitimate and means the engine's own
+  # default. A model id belongs to one engine, which is why the per-adapter form exists.
   #
-  # Absent on a zero-session night, which is correct rather than the missing-key
-  # bug this file has been bitten by: that path returns before L2 runs at all.
-  printf 'l2_model: %s\n' "${AUTODREAM_L2_MODEL:-default}" >> "$FINDINGS_DIR/run-stats.txt"
+  # bash 3.2 with set -u treats "${a[@]}" on an EMPTY array as an unbound variable, so every
+  # expansion of the argv and env arrays below is guarded.
+  L2_ENGINE="${AUTODREAM_L2_ENGINE:-${ENABLED_ADAPTERS%% *}}"
+  L2_MODEL=$(adapter_l2_model "$L2_ENGINE" 2>/dev/null) || L2_MODEL=""
+  log "L2 engine: $L2_ENGINE, model: ${L2_MODEL:-<engine default>}"
+  # Recorded because neither is fixed by this file. When a report's character changes, the first
+  # question is what produced it, and the answer has to survive in the artifact rather than only
+  # in a log nobody reads. `default` is the honest value when no model was named: the engine
+  # picks, and this script is not told what it picked. Absent on a zero-session night, which is
+  # correct: that path returns before L2 runs at all.
+  printf 'l2_engine: %s\n' "$L2_ENGINE" >> "$FINDINGS_DIR/run-stats.txt"
+  printf 'l2_model: %s\n' "${L2_MODEL:-default}" >> "$FINDINGS_DIR/run-stats.txt"
+  L2_ARGV=()
+  while IFS= read -r -d "" _a; do L2_ARGV+=("$_a"); done < <(adapter_run "$L2_ENGINE" l2-argv ${L2_MODEL:+"$L2_MODEL"} 2>/dev/null)
+  L2_ENVS=()
+  while IFS= read -r _l; do [ -n "$_l" ] && L2_ENVS+=("$_l"); done < <(adapter_run "$L2_ENGINE" l1-env 2>/dev/null)
+  unset _a _l
+  if [ "${#L2_ARGV[@]}" -eq 0 ] && [ "$L2_ENGINE" = "claude" ]; then
+    # An install whose adapters/ tree predates l2-argv (the per-file symlink installs this script
+    # supports, see enumerate_for) still has to deliver the night. The fallback is claude-only,
+    # for the same reason enumerate_for's is: it hardcodes one engine's invocation.
+    log "  the claude adapter has no l2-argv here; using the built-in claude invocation"
+    L2_ARGV=("$CLAUDE_BIN" --print --permission-mode bypassPermissions ${L2_MODEL:+--model "$L2_MODEL"} \
+      --no-session-persistence --tools Glob Read --disable-slash-commands --strict-mcp-config \
+      --settings '{"disableAllHooks":true}' \
+      --append-system-prompt "Headless aggregator. Read the per-session findings JSONs from the findings directory given on line 1 of the prompt, then produce the COMPLETE report only on standard output, ending with a line containing exactly AUTODREAM_REPORT_END. After that line, if you propose memory pins, print them between a line AUTODREAM_PINS_BEGIN and a line AUTODREAM_PINS_END, one JSON object per line. Do not use Write or Edit anywhere. Those paths are literal strings, not shell variables — never \$-expand them. After the pin block print one line: report: <literal path from line 2 of the prompt> then a 3-line summary (sessions reviewed, findings, pins proposed), then exit.")
+  fi
+  if [ "${#L2_ARGV[@]}" -eq 0 ]; then
+    log "WARNING: the $L2_ENGINE adapter produced no L2 command; every L2 attempt will fail"
+    # An empty argv would run a bare `env`, which prints the environment into the report capture.
+    L2_ARGV=(false)
+  fi
 
   # ---- Move a stale report aside before attempting L2 ----
   # The only way to reach this line with $REPORT_PATH already non-empty is
@@ -3027,16 +3061,7 @@ PY
         printf "Findings directory to aggregate (literal absolute path): %s\n" "$FINDINGS_DIR"
         printf "Report destination (literal absolute path): %s\n\n" "$REPORT_PATH"
         cat "$AUTODREAM_DIR/PROMPT.md"
-      } | "$CLAUDE_BIN" \
-        --print \
-        --permission-mode bypassPermissions \
-        ${L2_MODEL_ARGS[@]+"${L2_MODEL_ARGS[@]}"} \
-        --no-session-persistence \
-        --tools Glob Read \
-        --disable-slash-commands \
-        --strict-mcp-config \
-        --settings '{"disableAllHooks":true}' \
-        --append-system-prompt "Headless aggregator. Read the per-session findings JSONs from the findings directory given on line 1 of the prompt, then produce the COMPLETE report only on standard output, ending with a line containing exactly AUTODREAM_REPORT_END. After that line, if you propose memory pins, print them between a line AUTODREAM_PINS_BEGIN and a line AUTODREAM_PINS_END, one JSON object per line. Do not use Write or Edit anywhere. Those paths are literal strings, not shell variables — never \$-expand them. After the pin block print one line: report: <literal path from line 2 of the prompt> then a 3-line summary (sessions reviewed, findings, pins proposed), then exit."
+      } | env ${L2_ENVS[@]+"${L2_ENVS[@]}"} ${L2_ARGV[@]+"${L2_ARGV[@]}"}
     ) > "$L2_STDOUT"
 
     L2_RC=$?

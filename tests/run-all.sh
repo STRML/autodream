@@ -3857,6 +3857,35 @@ test_pin_block_must_follow_the_sentinel_and_be_closed(){
   rm -rf "$root"
 }
 
+test_l2_engine_comes_from_an_adapter(){
+  echo "# the L2 engine is an adapter: default the first enabled one, AUTODREAM_L2_ENGINE picks another"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  export MOCK_CAPTURE_DIR="$root/cap"; run_dream "$root"; unset MOCK_CAPTURE_DIR
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l2_engine: claude$' "default: the first enabled adapter"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l2_model: default$' "claude names no L2 model, so the CLI default runs"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_model_claude: claude-haiku-4-5$' "run-stats records each adapter's L1 model"
+  assert_nogrep "$root/cap/l2-args.txt" '^--model$' "no --model reached the claude engine"
+  rm -rf "$root"
+
+  root=$(setup_env); mk_session "$root" sess1
+  export MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L2_ENGINE=omp AUTODREAM_L2_MODEL_OMP=omp/l2-model AUTODREAM_L2_MODEL=generic/ignored
+  run_dream_omp "$root"; unset MOCK_CAPTURE_DIR AUTODREAM_L2_ENGINE AUTODREAM_L2_MODEL_OMP AUTODREAM_L2_MODEL
+  local fd; fd=$(fdir "$root")
+  assert_grep "$fd/run-stats.txt" '^l2_engine: omp$' "AUTODREAM_L2_ENGINE selects the engine"
+  assert_grep "$fd/run-stats.txt" '^l2_model: omp/l2-model$' "the per-adapter model beats the generic one"
+  assert_grep "$root/cap/l2-args.txt" '^--allow-home$' "the omp adapter's own flags reached L2"
+  assert_grep "$root/cap/l2-args.txt" '^--tools=Glob,Read$' "and its read-only tool grant"
+  assert_grep "$root/cap/l2-args.txt" '^omp/l2-model$' "and the model"
+  assert_file "$root/dreams/$DATE.md" "the report was delivered through the omp engine"
+  rm -rf "$root"
+
+  root=$(setup_env); mk_session "$root" sess1
+  AUTODREAM_L2_ENGINE=nonesuch run_dream "$root"
+  assert_grep   "$root/run.out" 'AUTODREAM_L2_ENGINE=nonesuch is not an accepted adapter' "an unknown engine is refused"
+  assert_no_file "$root/dreams/$DATE.md" "and no report is produced"
+  rm -rf "$root"
+}
+
 test_skill_fields_dropped_without_a_sidecar(){
   echo "# a session with no stats sidecar keeps no worker-written skill fields (Codex review of 0129fc0)"
   local root; root=$(setup_env); mk_session "$root" sess1
@@ -4585,6 +4614,7 @@ test_harness_addendum_reaches_only_that_harnesss_workers
 test_l2_is_read_only_and_the_runner_writes_the_report
 test_l2_report_with_a_marker_but_no_sentinel_is_not_delivered
 test_pin_block_must_follow_the_sentinel_and_be_closed
+test_l2_engine_comes_from_an_adapter
 test_skill_fields_dropped_without_a_sidecar
 test_skill_fields_dropped_with_a_partial_sidecar
 test_skill_fields_are_enforced_from_the_sidecar

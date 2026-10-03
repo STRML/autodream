@@ -214,3 +214,20 @@ adapter_l1_model() { # $1=name -> model on stdout, exit 1 when none resolves
   [ -n "$v" ] || return 1
   printf '%s' "$v"
 }
+
+# The same, for the L2 aggregator. The manifest's l2_model may be absent, which for claude means
+# "let the CLI pick", so this exits 1 with no output and the caller passes no model at all.
+#   AUTODREAM_L2_MODEL_<NAME>  that adapter only
+#   AUTODREAM_L2_MODEL         every adapter
+#   the manifest's l2_model    the adapter's own default
+adapter_l2_model() { # $1=name -> model on stdout, exit 1 when none resolves
+  local name="$1" up var v
+  _adapter_name_safe "$name" || return 1
+  up=$(printf '%s' "$name" | tr 'a-z-' 'A-Z_')
+  var="AUTODREAM_L2_MODEL_$up"
+  v="${!var:-}"
+  [ -n "$v" ] || v="${AUTODREAM_L2_MODEL:-}"
+  [ -n "$v" ] || v=$(adapter_manifest_get "$name" '.l2_model' 2>/dev/null) || v=""
+  [ -n "$v" ] || return 1
+  printf '%s' "$v"
+}
