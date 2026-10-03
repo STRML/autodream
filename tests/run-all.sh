@@ -1787,7 +1787,8 @@ test_overlap_drops_advisor_sidecars(){
   local out; out=$(bash "$REPO/bin/overlap-stats.sh" "$d")
   assert_eq "$(printf '%s' "$out" | jq -r .sessions_with_overlap)" "2" "the advisor is not counted as an overlapping session"
   assert_eq "$(printf '%s' "$out" | jq -r .overlap_events)" "1" "and forms no pairs"
-  # A sidecar with no is_advisor field (every Claude sidecar, and every pre-2026-08-21 one) is kept.
+  # A sidecar with no is_advisor field (every Claude sidecar, and every pre-2026-08-21 one) is kept:
+  # the parent and other fixtures above omit it. An explicit false is kept too, which this adds.
   printf '{"is_advisor":false,"user_turn_timestamps":[1784541900]}\n' > "$d/third.stats.json"
   out=$(bash "$REPO/bin/overlap-stats.sh" "$d")
   assert_eq "$(printf '%s' "$out" | jq -r .sessions_with_overlap)" "3" "is_advisor false is kept"
