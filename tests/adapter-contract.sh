@@ -257,6 +257,12 @@ run_contract(){ # $1=adapter name
   assert_eq "$(tr '\0' '\n' < "$tmp/argv" | head -1)" "$eb" "[$name] l1-argv starts with the engine-bin"
   "$A" l1-argv >/dev/null 2>&1; assert_eq "$?" "2" "[$name] l1-argv with no model is a usage error"
   "$A" l1-argv "" >/dev/null 2>&1; assert_eq "$?" "2" "[$name] l1-argv with an empty model is a usage error"
+  "$A" warmup-argv "model/x" > "$tmp/wargv" 2>/dev/null; rc=$?
+  assert_eq "$rc" "0" "[$name] warmup-argv exits 0 for a model"
+  if tr '\0' '\n' < "$tmp/wargv" | grep -qxF "model/x"; then ok "[$name] warmup-argv carries the model it was given"
+  else no "[$name] warmup-argv carries the model it was given"; fi
+  assert_eq "$(tr '\0' '\n' < "$tmp/wargv" | head -1)" "$eb" "[$name] warmup-argv starts with the engine-bin"
+  "$A" warmup-argv >/dev/null 2>&1; assert_eq "$?" "2" "[$name] warmup-argv with no model is a usage error"
   "$A" l1-env > "$tmp/env" 2>/dev/null; rc=$?
   assert_eq "$rc" "0" "[$name] l1-env exits 0"
   if grep -qvE '^[A-Za-z_][A-Za-z0-9_]*=' "$tmp/env"; then no "[$name] l1-env lines are all KEY=VALUE"

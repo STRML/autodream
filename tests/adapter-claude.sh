@@ -246,5 +246,12 @@ assert_eq "$(CLAUDE_BIN=/opt/test/claude "$A" engine-bin)" "/opt/test/claude" "e
 assert_eq "$(env -u CLAUDE_BIN HOME=/h "$A" engine-bin)" "/h/.local/bin/claude" "engine-bin defaults to the installer's location"
 assert_eq "$("$A" l1-env | tr '\n' ' ')" "CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 " "l1-env is the lean-query environment"
 
+echo "# warmup-argv: the worker's flags with a one-word system prompt"
+WA=$(CLAUDE_BIN=/opt/test/claude "$A" warmup-argv claude-haiku-4-5 | tr '\0' '\n')
+assert_eq "$(printf '%s\n' "$WA" | tail -1)" "Reply with the single word ok and exit." "the system prompt asks for one word"
+LA=$(CLAUDE_BIN=/opt/test/claude "$A" l1-argv claude-haiku-4-5 | tr '\0' '\n')
+# Everything but the tools list and the system prompt must match the worker's, so the warmup takes the same auth path.
+assert_eq "$(printf '%s\n' "$WA" | sed -n '1,/^--tools$/p' | sed '$d')" "$(printf '%s\n' "$LA" | sed -n '1,/^--tools$/p' | sed '$d')" "the flags before --tools match the worker's"
+
 printf '\npassed: %s   failed: %s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

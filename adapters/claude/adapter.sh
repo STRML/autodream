@@ -180,6 +180,23 @@ case "$cmd" in
       --append-system-prompt 'Headless triage worker. Read the session transcript and write exactly one findings JSON object, via the Write tool, to the literal output path given on line 2 of the prompt. Those paths are literal strings, not shell variables — never $-expand them. Print only the literal word done and exit.'
     ;;
 
+  warmup-argv) # $1=model -> NUL-delimited argv for the auth warmup call; the word ping arrives on stdin
+    [ "$#" -ge 1 ] && [ -n "$1" ] || exit 2
+    # The same flags as an L1 worker, so the warmup exercises the same auth and settings path,
+    # with a system prompt that asks for one word instead of a findings file. A warmup that took
+    # a different path would refresh a token the workers never use.
+    printf '%s\0' "${CLAUDE_BIN:-$HOME/.local/bin/claude}" \
+      --print \
+      --permission-mode bypassPermissions \
+      --model "$1" \
+      --no-session-persistence \
+      --tools Read \
+      --disable-slash-commands \
+      --strict-mcp-config \
+      --settings '{"disableAllHooks":true}' \
+      --append-system-prompt 'Reply with the single word ok and exit.'
+    ;;
+
   l1-env) # -> KEY=VALUE lines the engine needs in its environment
     # Lean-query env: keep subscription auth, strip per-call bloat (no CLAUDE.md auto-load,
     # no telemetry or error reporting). See CLAUDE.md, "How claude is invoked".
