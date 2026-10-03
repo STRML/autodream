@@ -196,5 +196,30 @@ echo "# unknown subcommand and arity"
 "$A" normalize "$S1" >/dev/null 2>&1; assert_rc "$?" 2 "normalize with one argument is a usage error, not a skip"
 "$A" stats "$S1" >/dev/null 2>&1; assert_rc "$?" 2 "stats with one argument is a usage error"
 
+echo "# l1-argv reproduces omp-autodream's worker invocation"
+OLD_SYS="Headless triage worker. Read the session transcript and write exactly one findings JSON object, via the Write tool, to the literal output path given on line 2 of the prompt. Those paths are literal strings, not shell variables — never \$-expand them. Print only the literal word done and exit."
+printf '%s\0' /opt/test/omp --allow-home -p --approval-mode yolo --no-session --config /opt/test/overlay.yml \
+  --model deepseek/deepseek-flash --tools=Read,Write --append-system-prompt "$OLD_SYS" > "$tmp/old-argv"
+OMP_BIN=/opt/test/omp NO_ADVISOR_CFG=/opt/test/overlay.yml "$A" l1-argv deepseek/deepseek-flash > "$tmp/new-argv"
+if cmp -s "$tmp/old-argv" "$tmp/new-argv"; then ok "the omp L1 argv is byte for byte omp-autodream's"
+else no "the omp L1 argv is byte for byte omp-autodream's"; fi
+# The overlay defaults to the one beside the adapter, and it is the file that turns recall off.
+ov=$(OMP_BIN=/opt/test/omp "$A" l1-argv m | tr '\0' '\n' | sed -n '/^--config$/{n;p;}')
+assert_eq "$(basename "$ov")" "l1-no-advisor.yml" "the overlay defaults to the adapter's own"
+if grep -q 'autoRecall: false' "$ov" && grep -q 'enabled: false' "$ov"; then ok "the overlay turns off recall and the advisor"
+else no "the overlay turns off recall and the advisor"; fi
+assert_eq "$(OMP_BIN=/opt/pinned/omp "$A" engine-bin)" "/opt/pinned/omp" "an explicit OMP_BIN wins"
+mkdir -p "$tmp/fakehome/.bun/bin"; printf '#!/bin/sh\n' > "$tmp/fakehome/.bun/bin/omp"; chmod +x "$tmp/fakehome/.bun/bin/omp"
+assert_eq "$(env -u OMP_BIN HOME="$tmp/fakehome" PATH=/usr/bin:/bin "$A" engine-bin)" "$tmp/fakehome/.bun/bin/omp" "with no PATH omp, a known install location is found"
+# The absolute candidates are real paths on a developer machine, so the bare-name fallback is
+# only observable on a host that has none of them. Asserting it unconditionally made the suite
+# depend on where omp happens to be installed.
+if [ ! -x /opt/homebrew/bin/omp ] && [ ! -x /usr/local/bin/omp ]; then
+  assert_eq "$(env -u OMP_BIN HOME="$tmp/nohome" PATH=/usr/bin:/bin "$A" engine-bin)" "omp" "with nothing found it falls back to the bare name"
+else
+  ok "the bare-name fallback is not observable here: omp is installed at a candidate path"
+fi
+assert_eq "$("$A" l1-env | wc -c | tr -d ' ')" "0" "omp needs no environment for its L1 worker"
+
 printf '\npassed: %s   failed: %s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

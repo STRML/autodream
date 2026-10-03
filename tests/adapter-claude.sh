@@ -231,5 +231,20 @@ echo "# claude adapter: an unknown subcommand exits 2, never 0"
 
 # $tmp and any parked delegate are removed by the EXIT trap, which also covers
 # the paths that never reach this line.
+echo "# l1-argv reproduces the invocation run.sh hard-coded before the engine moved behind the adapter"
+# The expected text is copied from run.sh as it stood at 7f4... (the dispatch_l1 call), not
+# derived from the adapter, so this fails if the adapter and the old nightly ever disagree.
+OLD_SYSPROMPT="Headless triage worker. Read the session transcript and write exactly one findings JSON object, via the Write tool, to the literal output path given on line 2 of the prompt. Those paths are literal strings, not shell variables — never \$-expand them. Print only the literal word done and exit."
+OLD_SETTINGS="{\"disableAllHooks\":true}"
+printf '%s\0' /opt/test/claude --print --permission-mode bypassPermissions --model claude-haiku-4-5 \
+  --no-session-persistence --tools Read Write --disable-slash-commands --strict-mcp-config \
+  --settings "$OLD_SETTINGS" --append-system-prompt "$OLD_SYSPROMPT" > "$tmp/old-argv"
+CLAUDE_BIN=/opt/test/claude "$A" l1-argv claude-haiku-4-5 > "$tmp/new-argv"
+if cmp -s "$tmp/old-argv" "$tmp/new-argv"; then ok "the claude L1 argv is byte for byte the old hard-coded one"
+else no "the claude L1 argv is byte for byte the old hard-coded one"; fi
+assert_eq "$(CLAUDE_BIN=/opt/test/claude "$A" engine-bin)" "/opt/test/claude" "engine-bin honors CLAUDE_BIN"
+assert_eq "$(env -u CLAUDE_BIN HOME=/h "$A" engine-bin)" "/h/.local/bin/claude" "engine-bin defaults to the installer's location"
+assert_eq "$("$A" l1-env | tr '\n' ' ')" "CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 " "l1-env is the lean-query environment"
+
 printf '\npassed: %s   failed: %s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
