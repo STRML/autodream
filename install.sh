@@ -33,7 +33,7 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -gt 0 ] && [ -n "$1" ] || { echo "install: $a needs a value" >&2; exit 64; }
       case "$a" in --adapters) ADAPTERS_ARG="$1" ;; *) L2_ENGINE_ARG="$1" ;; esac
       shift ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     -*) echo "install: unknown flag '$a'" >&2; exit 64 ;;
     *) TARGET_PARENT="$a" ;;
   esac
@@ -59,6 +59,12 @@ fi
 # Anything that only READS (the label ownership check, the cmux and claude lookups, the
 # validations in link) still runs, so a dry run reports the refusals a real install would hit.
 dry() { printf '  [dry-run] %s\n' "$*"; }
+# One scratch directory for the generated plists, removed on every exit path.
+DRY_SCRATCH=""
+if [ "$DRY" = 1 ]; then
+  DRY_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/ccad-dry.XXXXXX")
+  trap 'rm -rf "$DRY_SCRATCH"' EXIT
+fi
 if [ "$DRY" = 1 ]; then
   echo "DRY RUN: nothing below is written, linked, loaded or run."
   dry "mkdir -p $TARGET $TARGET_PARENT/dreams $TARGET/findings $TARGET/inbox $TARGET/logs"
@@ -203,6 +209,12 @@ fi
 # still beats these.
 if [ -n "$ADAPTERS_ARG" ] || [ -n "$L2_ENGINE_ARG" ]; then
   CONFIG="$TARGET/config"
+  # The key whose flag is absent keeps its present value: re-running with one flag must not drop
+  # the host's other choice.
+  if [ -f "$CONFIG" ]; then
+    [ -n "$ADAPTERS_ARG" ] || ADAPTERS_ARG=$(sed -n 's/^AUTODREAM_ADAPTERS=//p' "$CONFIG" | tail -n 1)
+    [ -n "$L2_ENGINE_ARG" ] || L2_ENGINE_ARG=$(sed -n 's/^AUTODREAM_L2_ENGINE=//p' "$CONFIG" | tail -n 1)
+  fi
   if [ "$DRY" = 1 ]; then
     dry "write to $CONFIG: ${ADAPTERS_ARG:+AUTODREAM_ADAPTERS=$ADAPTERS_ARG }${L2_ENGINE_ARG:+AUTODREAM_L2_ENGINE=$L2_ENGINE_ARG}"
   else
@@ -246,7 +258,7 @@ install_schedule() {
     # Generate and lint the plists in a scratch dir, so the dry run shows exactly what would be
     # written without touching the real LaunchAgents directory. The ownership check below still
     # reads the real one.
-    la_dir=$(mktemp -d "${TMPDIR:-/tmp}/ccad-dry.XXXXXX")
+    la_dir="$DRY_SCRATCH"
   else
     mkdir -p "$la_dir"
   fi
@@ -429,7 +441,7 @@ PLIST
     # on disk brings the failing job back at the next login.
     if [ "$DRY" = 1 ]; then
       [ -e "$real_la_dir/$review_label.plist" ] && dry "rm $real_la_dir/$review_label.plist"
-      rm -rf "$la_dir"
+      :
     else
       rm -f "$la_dir/$review_label.plist"
     fi
@@ -509,7 +521,6 @@ PLIST
     return 1
   }
   echo "  scheduled: $review_label  (daily 08:00/09:15/12:15/15:30/18:15)  -> $review_plist"
-  [ "$DRY" = 1 ] && rm -rf "$la_dir"
   return 0
 }
 

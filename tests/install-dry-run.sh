@@ -51,6 +51,8 @@ assert_grep "$SANDBOX/install.out" "would write $LA/" "and where each plist woul
 assert_grep "$SANDBOX/install.out" 'exec "$1" "$(date -v-1d +%Y-%m-%d)"' "it shows the review plist it generated"
 assert_nogrep "$SANDBOX/install.out" "ERROR" "with no errors"
 
+echo "# a dry run leaves no scratch directory behind, even when it refuses"
+LEFT_BEFORE=$(ls -d "${TMPDIR:-/tmp}"/ccad-dry.* 2>/dev/null | wc -l | tr -d ' ')
 echo "# a dry run reports the refusal a real install would hit"
 new_sandbox
 U=$(id -un | tr -dc 'a-zA-Z0-9')
@@ -65,6 +67,8 @@ run_install --dry-run "$SANDBOX/target"; rc=$?
 assert_eq "$rc" "0" "the dry run still exits 0"
 assert_grep "$SANDBOX/install.out" "already scheduled by" "and names the conflict"
 assert_eq "$(cat "$LA/com.$U.autodream.plist")" "$BEFORE" "the foreign plist is untouched"
+assert_eq "$(ls -d "${TMPDIR:-/tmp}"/ccad-dry.* 2>/dev/null | wc -l | tr -d ' ')" "$LEFT_BEFORE" "no ccad-dry scratch directory was left in TMPDIR"
+"$REPO/install.sh" --help | grep -q 'set -eu' && no "--help prints only the usage block" || ok "--help prints only the usage block"
 
 echo "# --adapters and --l2-engine write one managed section, replaced on re-install"
 new_sandbox
@@ -77,6 +81,7 @@ run_install --no-schedule --adapters claude "$SANDBOX/target"
 assert_eq "$(grep -c '^AUTODREAM_ADAPTERS=' "$C")" "1" "a re-install replaces the adapters line, it does not stack another"
 assert_grep "$C" "AUTODREAM_ADAPTERS=claude" "with the new value"
 assert_eq "$(grep -c '^# adapters (managed by install.sh)' "$C")" "1" "and keeps a single marker"
+assert_grep "$C" "AUTODREAM_L2_ENGINE=omp" "and the L2 engine given earlier is kept, not dropped"
 run_install --no-schedule "$SANDBOX/target"
 assert_grep "$C" "AUTODREAM_ADAPTERS=claude" "an install with no flags leaves the section alone"
 assert_grep "$C" "SESSION_ROOTS=" "and the session-roots section is still there"
