@@ -26,7 +26,21 @@
 
 set -u
 
-AUTODREAM_DIR="${AUTODREAM_DIR:-$HOME/.claude/autodream}"
+# The install symlinks the scripts INTO $AUTODREAM_DIR (install.sh), so on a
+# bare shell invocation with no env the script's own location IS the install
+# dir. This is what lets `review.sh <date>` run from a terminal without the
+# launchd plist's env: an install under another prefix (the omp-autodream one lived in
+# ~/.omp/agent/{autodream,dreams}) made the legacy ~/.claude/{autodream,dreams} defaults
+# fail every manual invocation with "could not locate" the report. Env still wins; the derived dir is
+# only trusted when it carries an install marker file (install.sh writes both).
+AUTODREAM_DIR="${AUTODREAM_DIR:-}"
+if [ -z "$AUTODREAM_DIR" ]; then
+  AUTODREAM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+  if [ -z "$AUTODREAM_DIR" ] || { [ ! -f "$AUTODREAM_DIR/config" ] && [ ! -f "$AUTODREAM_DIR/l1-no-advisor.yml" ]; }; then
+    echo "review.sh: WARNING no install markers next to $0; falling back to legacy $HOME/.claude/autodream" >&2
+    AUTODREAM_DIR="$HOME/.claude/autodream"
+  fi
+fi
 
 # Load the config file first, then let any env-provided values win over it.
 __env_dreams="${DREAMS_DIR:-}"; __env_claude="${CLAUDE_BIN:-}"
@@ -41,7 +55,8 @@ CONFIG_FILE="${AUTODREAM_CONFIG:-$AUTODREAM_DIR/config}"
 [ -n "$__env_cmux" ] && CMUX_BIN="$__env_cmux"
 [ -n "$__env_focus" ] && AUTODREAM_TRIAGE_FOCUS="$__env_focus"
 
-DREAMS_DIR="${DREAMS_DIR:-$HOME/.claude/dreams}"
+# Reports live in the sibling of the install dir (~/.omp/agent/dreams here).
+DREAMS_DIR="${DREAMS_DIR:-$(dirname "$AUTODREAM_DIR")/dreams}"
 CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
 AUTODREAM_TRIAGE_SURFACE="${AUTODREAM_TRIAGE_SURFACE:-inline}"
 CMUX_BIN="${CMUX_BIN:-/Applications/cmux.app/Contents/Resources/bin/cmux}"
@@ -159,7 +174,141 @@ fi
 # falls through to the normal `exec claude` below.
 if [ "$AUTODREAM_TRIAGE_SURFACE" = "cmux" ]; then
   CMUX="$CMUX_BIN"; [ -x "$CMUX" ] || CMUX=$(command -v cmux 2>/dev/null || true)
+  # Runtime cmux discovery does NOT depend on PATH: CMUX_BIN's default is the
+  # hardcoded /Applications bundle (config-load section above), so the launchd
+  # job's minimal env resolves cmux whenever install.sh's preflight accepted it.
+  # Config CMUX_BIN takes precedence (review.sh preserves it from the config);
+  # install.sh provisions the review job iff the same three-way resolution
+  # (config → PATH → default) finds an executable, so runtime can never diverge
+  # from install time.
   if [ -n "$CMUX" ] && [ -x "$CMUX" ]; then
+    # Same-day dedup for the review job's catch-up triggers (08:00/09:15/12:15/
+    # 15:30/18:15, provisioned by install.sh like the run job). Whichever trigger fires first
+    # after the report lands opens the workspace and stamps a confirmed marker;
+    # later triggers for the same date honor it instead of opening a second
+    # workspace on top of the first. --force bypasses the marker, so a
+    # deliberately relaunched triage still works.
+    #
+    # The marker binds to the REPORT's content digest (not just the date):
+    # rebuilding a date with AUTODREAM_FORCE=1 produces a new report, whose new
+    # digest invalidates the old marker and lets the popup re-trigger. The claim
+    # is atomic (mkdir, which fails if the dir already exists) so two
+    # overlapping triggers cannot both pass the check before either stamps.
+    LOGS_DIR="$AUTODREAM_DIR/logs"
+    # Fail loudly if the logs dir can't be made: a subsequent claim-mkdir
+    # failure would otherwise be misreported as "another invocation" and
+    # silently drop triage.
+    if ! mkdir -p "$LOGS_DIR"; then
+      echo "review.sh: cannot create logs dir $LOGS_DIR" >&2
+      exit 1
+    fi
+    # Report identity key: a content digest, not mtime. mtime is
+    # seconds-resolution, so a same-second rebuild shares a marker and its
+    # triage is silently swallowed. The digest changes whenever the report
+    # content changes, which is exactly the rebuild signal. A missing shasum is
+    # a hard error (fail closed), never a silent regression to mtime — see the
+    # emptiness check below.
+    REPORT_KEY=$(shasum -a 256 "$REPORT" 2>/dev/null | awk '{print $1}')
+    # The assignment's exit status is awk's (0 even on empty input), so a
+    # failing/missing shasum must be detected by emptiness, not rc — an empty
+    # key would collapse every report that day to the same marker. Fail CLOSED
+    # rather than regressing to seconds-resolution mtime: that would silently
+    # reintroduce the exact same-second collision the digest contract exists to
+    # prevent (executor 5.8). shasum ships with macOS; a host without it is a
+    # host that cannot run a content-bound review.
+    if [ -z "$REPORT_KEY" ]; then
+      echo "review.sh: shasum unavailable; cannot compute report digest, aborting triage" >&2
+      exit 1
+    fi
+    LAUNCH_MARKER="$LOGS_DIR/review-launched-$DATE-$REPORT_KEY"
+    # Confirmation lives as a SIBLING file, not inside the claim dir: the
+    # stale-reap below uses `find -delete` (rmdir semantics), which silently
+    # fails on a non-empty dir. Kept separate, the claim dir stays empty and
+    # both names still match the review-launched-* prune glob.
+    LAUNCH_CONFIRMED="$LAUNCH_MARKER.confirmed"
+    # Users upgrading from the round-1 code carry a touch-created FILE
+    # review-launched-$DATE (date-bound, no content key). Honor it as a real
+    # launch and migrate it to the confirmed token so the new key owns state
+    # from here on — otherwise the same report opens a second workspace
+    # post-upgrade on the very day it was already triaged.
+    #
+    if [ ! -f "$CLAUDE_BIN" ] || [ ! -x "$CLAUDE_BIN" ]; then
+      echo "review.sh: claude binary not found or not executable ($CLAUDE_BIN); not launching triage workspace" >&2
+      exit 1
+    fi
+    # Legacy round-1 marker migration, gated on the SAME preflight as a real
+    # launch: stamping a confirmed token for a workspace whose claude cannot run
+    # would make every later trigger dedupe a report that was never triaged
+    # (deepseek 7.4). The mv PRESERVES the legacy marker's mtime, which on a
+    # late upgrade (>14 days) would be pruned immediately by the reap below —
+    # touch rebinds the token's mtime to now so the just-created migration
+    # survives (deepseek 7.3).
+    #
+    # But only when the marker is strictly NEWER than the current report: a
+    # date was triaged, then the report rebuilt for that date (new content, new
+    # digest), the legacy date-only marker must NOT be migrated onto the new
+    # report's key — that would mark unreviewed content as confirmed and
+    # swallow its triage. Compare mtimes; same-second ties (a rebuild landing in
+    # the same wall-clock second as the legacy touch) are treated as
+    # not-newer — migrate only when the legacy launch is unambiguously after the
+    # current report, letting a tied/older report open for triage (executor 6.1).
+    LEGACY_MARKER="$LOGS_DIR/review-launched-$DATE"
+    if [ -f "$LEGACY_MARKER" ]; then
+      LEGACY_MTIME=$(stat -f %m "$LEGACY_MARKER" 2>/dev/null || echo 0)
+      if [ "$LEGACY_MTIME" -gt "$(stat -f %m "$REPORT" 2>/dev/null || echo 0)" ]; then
+        echo "review.sh: migrating legacy marker $LEGACY_MARKER -> $LAUNCH_CONFIRMED"
+        mv "$LEGACY_MARKER" "$LAUNCH_CONFIRMED" 2>/dev/null && touch "$LAUNCH_CONFIRMED"
+      else
+        echo "review.sh: legacy marker $LEGACY_MARKER not newer than the current report; not migrated (may be rebuilt content)"
+      fi
+    fi
+    CLAIM_GRACE=900
+    CLAIMED_OWN=0
+    # Reap stale state so it cannot grow unbounded: claim dirs and confirmed
+    # tokens older than 14 days. `-delete` handles both the empty dir and its
+    # sibling file. Unconditional on --force: the force path is exactly the
+    # retry-after-failure route and must not be the one path that skips the
+    # forest cleanup (all three --force occasions leave the old claim in place).
+    find "$LOGS_DIR" -maxdepth 1 -name 'review-launched-*' -mtime +14 -delete 2>/dev/null || true
+    if [ "$FORCE" -eq 0 ]; then
+      # Already confirmed -> definitely launched. Skip.
+      if [ -e "$LAUNCH_CONFIRMED" ]; then
+        echo "review.sh: $DATE triage already launched for this report (marker $LAUNCH_CONFIRMED)"
+        echo "  open anyway: $(basename "$0") --force $DATE"
+        exit 0
+      fi
+      # A claim dir with no confirmed token is either an in-flight launch or
+      # an abandoned one (the process died while cmux was blocked). Age
+      # bounds it: younger than CLAIM_GRACE is in-progress; older is a dead
+      # claim to reclaim, so a killed popup can never suppress triggers
+      # forever.
+      if [ -d "$LAUNCH_MARKER" ]; then
+        MARKER_AGE=$(( $(date +%s) - $(stat -f %m "$LAUNCH_MARKER" 2>/dev/null || echo "$(date +%s)") ))
+        if [ "$MARKER_AGE" -ge "$CLAIM_GRACE" ]; then
+          echo "review.sh: reclaiming abandoned claim $LAUNCH_MARKER"
+          rmdir "$LAUNCH_MARKER" 2>/dev/null || true
+        else
+          echo "review.sh: $DATE triage launch already in progress by another invocation"
+          exit 0
+        fi
+      fi
+      # Atomic claim: mkdir fails if another invocation won the race. But a
+      # failed mkdir is ALSO what a read-only/space-full logs dir produces —
+      # reporting that as "in progress" and exiting 0 silently drops triage.
+      # `mkdir -p $LOGS_DIR` above does not catch an already-existing-but-
+      # unwritable dir, so distinguish the claim's mkdir outcomes: if the
+      # claim dir now exists it was a genuine race (exit 0); otherwise it is
+      # an I/O error (fail loudly).
+      if ! mkdir "$LAUNCH_MARKER" 2>/dev/null; then
+        if [ -d "$LAUNCH_MARKER" ]; then
+          echo "review.sh: $DATE triage launch already in progress by another invocation"
+          exit 0
+        fi
+        echo "review.sh: cannot create claim $LAUNCH_MARKER" >&2
+        exit 1
+      fi
+      CLAIMED_OWN=1
+    fi
     SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
     # Workspace + tab are named after the triaged date (ISO, i.e. the report's
     # own YYYY-MM-DD — the date of the questions being addressed, not today).
@@ -172,16 +321,75 @@ if [ "$AUTODREAM_TRIAGE_SURFACE" = "cmux" ]; then
     # The workspace re-runs this script with the surface forced to inline so it
     # falls through to the exec claude below. CLAUDE_CODE_DISABLE_TERMINAL_TITLE
     # stops claude live-rewriting the tab title over our pinned date.
+    #
+    # The inner command is a shell string cmux will run, so every interpolated
+    # value is %q-quoted: paths (DREAMS_DIR, CLAUDE_BIN, SELF) and DATE may
+    # legitimately contain apostrophes (e.g. an install under /tmp/O'Brien),
+    # and an unquoted one would break the inner shell parse. $FORCE_ARG is
+    # generated here and can only be empty or " --force", so it stays literal.
+    shq(){ printf '%q' "$1"; }
+    INNER_CMD="env AUTODREAM_TRIAGE_SURFACE=inline CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 DREAMS_DIR=$(shq "$DREAMS_DIR") CLAUDE_BIN=$(shq "$CLAUDE_BIN") $(shq "$SELF") $(shq "$DATE")$FORCE_ARG"
     WS_OUT=$("$CMUX" workspace create \
       --name "$DATE Autodream Triage" \
       --cwd "$HOME" \
-      --command "env AUTODREAM_TRIAGE_SURFACE=inline CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 DREAMS_DIR='$DREAMS_DIR' CLAUDE_BIN='$CLAUDE_BIN' '$SELF' '$DATE'$FORCE_ARG" \
+      --command "$INNER_CMD" \
       --focus "$AUTODREAM_TRIAGE_FOCUS" 2>&1)
+    WS_RC=$?
     echo "$WS_OUT"
+    # A failed create must not be treated as a launch: release the claim so the
+    # next trigger retries, and exit non-zero so a scheduled job can't think the
+    # triage happened. Without the exit check, a cmux that fails but prints
+    # workspace-like output would also satisfy the ref parse below and latch a
+    # false marker.
+    if [ "$WS_RC" -ne 0 ]; then
+      # Release the claim only if THIS process owns it, or if it is an
+      # abandoned one (older than the grace window). A --force run never
+      # claims, so it must not delete a LIVE claim acquired by a concurrent
+      # normal invocation whose cmux is still running (auditor 6.3 / executor
+      # 6.3) — but it still releases a stale claim left by a killed normal run
+      # (executor 5.2), so scheduled triggers don't stall on "in progress".
+      if [ "$CLAIMED_OWN" -eq 1 ]; then
+        rmdir "$LAUNCH_MARKER" 2>/dev/null || true
+      elif [ -d "$LAUNCH_MARKER" ]; then
+        MARKER_AGE=$(( $(date +%s) - $(stat -f %m "$LAUNCH_MARKER" 2>/dev/null || echo "$(date +%s)") ))
+        [ "$MARKER_AGE" -ge "$CLAIM_GRACE" ] && rmdir "$LAUNCH_MARKER" 2>/dev/null || true
+      fi
+      echo "review.sh: cmux workspace create failed (exit $WS_RC); triage not opened" >&2
+      exit 1
+    fi
+    # cmux returned 0: per the tool's contract a workspace was created. Bind
+    # the confirmed token NOW — before any further parsing — so the dedup fact
+    # is durable regardless of what happens next (a kill between create and
+    # confirm, or a stdout format change). Age-based reclaim must never treat a
+    # created-but-unconfirmed launch as abandoned and spawn a second workspace.
+    # This is unconditional on the claim (a --force run skipped the claim mkdir
+    # but is still a real launch, and round-1 stamped on any successful create).
+    #
+    # Auditor race: a concurrent --force rebuild can replace $REPORT between
+    # our launch-time hash and the workspace actually reading it. We bind the
+    # confirmed token to the LAUNCH-TIME digest (REPORT_KEY) — the digest we
+    # decided to triage — never re-hash after create to chase the current file.
+    # The child reads the mutable path at spawn, so the parent cannot know
+    # which bytes it consumed; rewriting the token to a post-race digest (an
+    # earlier revision did this) could mark a report B "confirmed" when the
+    # workspace triaged the older A, silently swallowing B's new questions.
+    # Bound to A, a genuine B that the child did not read has no token of its
+    # its own and its own later trigger surfaces it — at worst a duplicate
+    # popup for a same-instant rebuild, never a lost triage.
+    # touch failure is warned, not fatal: the workspace IS created at this
+    # point; the unconfirmed claim (if any) is grace-bounded and the next
+    # trigger's reclaim would open a duplicate, so report it loudly but do not
+    # claim the launch failed.
+    if ! touch "$LAUNCH_CONFIRMED"; then
+      echo "review.sh: WARNING could not write confirmed token $LAUNCH_CONFIRMED" >&2
+    fi
     # Pin the tab title to the date. The shell sets a startup title (the cwd) a
     # beat after creation, so rename a few times across that window; with claude's
     # own title updates disabled above, the rename then holds. Detached + best
     # effort so review.sh returns immediately and a failure never affects triage.
+    # WS_REF is cosmetic here — confirmation is already bound above — so an
+    # unparseable/absent ref (cmux stdout changed shape) only skips the title
+    # rename, never the launch.
     WS_REF=$(printf '%s\n' "$WS_OUT" | sed -n 's/.*\(workspace:[0-9][0-9]*\).*/\1/p' | head -1)
     if [ -n "$WS_REF" ]; then
       ( for _ in 1 2 3; do
@@ -191,7 +399,18 @@ if [ "$AUTODREAM_TRIAGE_SURFACE" = "cmux" ]; then
     fi
     exit 0
   fi
-  echo "review.sh: cmux not found ($CMUX_BIN); falling back to inline triage" >&2
+  if [ -t 0 ]; then
+    # Interactive manual run (terminal): falling through to the inline claude
+    # session below is right — the user is watching this terminal.
+    echo "review.sh: cmux not found ($CMUX_BIN); falling back to inline triage" >&2
+  else
+    # Non-interactive (the launchd review job, ssh, a script): a headless
+    # `exec claude` has no TTY to talk to — the session hangs or exits
+    # uselessly and the marker was never confirmed, so every trigger retries
+    # forever and no popup ever happens. Fail the trigger loudly instead.
+    echo "review.sh: cmux not found ($CMUX_BIN) and stdin is not a TTY; aborting scheduled triage (no headless launch)" >&2
+    exit 1
+  fi
 fi
 
 REPORT_BYTES=$(wc -c < "$REPORT" | tr -d ' ')
