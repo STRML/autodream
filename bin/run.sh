@@ -26,6 +26,12 @@
 #   DREAMS_DIR     where final reports are written     default: $HOME/.claude/dreams
 #   FANOUT         L1 parallelism                      default: 8
 #   AUTODREAM_CHANGELOG  set 0 to skip the upstream-changelog check  default: 1
+#   AUTODREAM_CHANGELOG_SOURCES  override the watched harnesses. Semicolon-separated
+#                        records of name|remote|path-in-repo|cache-dir. Default watches
+#                        Claude Code, Codex and OMP (OMP is a monorepo with no root
+#                        CHANGELOG, hence the per-source path). CHANGELOG_REMOTE selects
+#                        one source alone and suppresses the others.
+#   AUTODREAM_CHANGELOG_MAX_LINES  per-source cap on inserted lines          default: 400
 #   CLAUDE_CODE_REPO     persistent cache for the claude-code clone  default: $AUTODREAM_DIR/cache/claude-code
 #   CHANGELOG_REMOTE     git remote to clone/pull       default: https://github.com/anthropics/claude-code.git
 #   AUTODREAM_L1_ROUNDS  max L1 retry rounds for missing sessions    default: 5
@@ -1045,56 +1051,182 @@ session_is_substantive() {
 # git is the only dependency. Any failure is recorded in the output file, never aborts the
 # pipeline. Window matches the session scan exactly, so each release is reported once.
 # Disable with AUTODREAM_CHANGELOG=0; point CHANGELOG_REMOTE at a local repo for offline tests.
+#
+# Three harnesses are watched, not one: the user works across Claude Code, Codex and OMP,
+# and a release note only earns its place in the report when it lands in a tool actually
+# in use. OMP keeps no root CHANGELOG — it is a monorepo and the CLI's log lives at
+# packages/coding-agent/CHANGELOG.md — so the path is per-source rather than assumed.
+#
+# One source's failure never silences the others: each gets its own cache, its own
+# clone/pull and its own section, and a dead remote writes an explicit failure line into
+# that section rather than an empty file that reads like a quiet night upstream.
+changelog_sources() {
+  # An explicit CHANGELOG_REMOTE selects a SINGLE source and suppresses the defaults.
+  # Back-compat for the old one-repo knob, and load-bearing for the test suite: the
+  # changelog test points this at a local fixture, and a default list that still ran
+  # would have the suite cloning three real remotes — the promise that it never touches
+  # the network, broken silently.
+  if [ -n "${CHANGELOG_REMOTE:-}" ]; then
+    printf '%s|%s|%s|%s\n' "Claude Code" "$CHANGELOG_REMOTE" "CHANGELOG.md" \
+      "${CLAUDE_CODE_REPO:-$AUTODREAM_DIR/cache/claude-code}"
+    return 0
+  fi
+  if [ -n "${AUTODREAM_CHANGELOG_SOURCES:-}" ]; then
+    printf '%s\n' "$AUTODREAM_CHANGELOG_SOURCES" | tr ';' '\n' | sed '/^[[:space:]]*$/d'
+    return 0
+  fi
+  printf '%s|%s|%s|%s\n' \
+    "Claude Code" "https://github.com/anthropics/claude-code.git" "CHANGELOG.md" "${CLAUDE_CODE_REPO:-$AUTODREAM_DIR/cache/claude-code}"
+  printf '%s|%s|%s|%s\n' \
+    "Codex" "https://github.com/openai/codex.git" "CHANGELOG.md" "$AUTODREAM_DIR/cache/codex"
+  printf '%s|%s|%s|%s\n' \
+    "OMP" "https://github.com/STRML/oh-my-pi.git" "packages/coding-agent/CHANGELOG.md" "$AUTODREAM_DIR/cache/oh-my-pi"
+  # STRML/oh-my-pi is the fork this host runs, which is rebased onto upstream on every sync, so
+  # it carries the build in use. To watch upstream itself set AUTODREAM_CHANGELOG_SOURCES.
+}
+
+# True only when $1's parent directory resolves, symlinks and all, inside $AUTODREAM_DIR/cache.
+# A `..` anywhere is refused before resolving, so the basename cannot climb out either.
+cache_owns() {
+  local cache parent
+  case "$1" in *..*) return 1 ;; esac
+  cache=$(cd "$AUTODREAM_DIR/cache" 2>/dev/null && pwd -P) || return 1
+  parent=$(cd "$(dirname "$1")" 2>/dev/null && pwd -P) || return 1
+  case "$parent/" in "$cache"/*) return 0 ;; esac
+  return 1
+}
+
+# Append one source's section to $5. Never returns non-zero — a source that cannot be
+# reached says so in its own section and the run carries on.
+#
+# The section goes to a named file rather than stdout, and that is not a style choice:
+# log() writes to stdout, so a stdout-emitting version run inside a `{ … } > "$out"`
+# block silently interleaves every "cloning …" progress line into the changelog L2 then
+# reads as release notes. Caught in a live run against all three remotes.
+changelog_one() { # $1=name $2=remote $3=path $4=repo $5=out
+  local name="$1" remote="$2" path="$3" repo="$4" out="$5"
+  local head_sha n added
+
+  if [ -d "$repo/.git" ]; then
+    # A cache this install owns is disposable, so it follows the remote even when the remote
+    # was rewritten. `pull --ff-only` failed forever once a fork was rebased and force-pushed
+    # (the OMP fork is, on every upstream sync): the section then read "pull failed" every
+    # night. A repo outside the cache keeps the conservative pull, because resetting it would
+    # discard someone's work.
+    local sync='git pull --ff-only --quiet'
+    if cache_owns "$repo"; then sync='git fetch --quiet origin && git reset --hard --quiet FETCH_HEAD'; fi
+    if ! ( cd "$repo" && eval "$sync" ) 2>>"$RUN_LOG"; then
+      log "changelog[$name]: pull failed"
+      printf '## %s\n\nGit pull failed; %s changes not checked this run.\n\n' "$name" "$name" >> "$out"
+      return 0
+    fi
+  else
+    # Only a cache this install owns may be cleared. AUTODREAM_CHANGELOG_SOURCES names the
+    # path, so a typo pointing at a real non-git directory must not be deleted to make room
+    # for a clone (debate review of e95e2f2).
+    # The path as written proves nothing: `$AUTODREAM_DIR/cache/../x` matches the prefix,
+    # and so does `$AUTODREAM_DIR/cache/link/x` where link points elsewhere, and rm -rf
+    # follows both (Codex review of 0129fc0). Resolve the parent physically and compare
+    # that. Outside the cache nothing is deleted at all; git clone accepts a missing or
+    # empty target directory.
+    if cache_owns "$repo"; then rm -rf "$repo"; fi
+    if [ -e "$repo" ] && [ -n "$(ls -A "$repo" 2>/dev/null)" ]; then
+      log "changelog[$name]: $repo exists, is not a git repo and is outside $AUTODREAM_DIR/cache; refusing to delete it"
+      printf '## %s\n\nCache path %s is a non-empty directory that is not a git clone; %s changes not checked this run.\n\n' "$name" "$repo" "$name" >> "$out"
+      return 0
+    fi
+    log "changelog[$name]: cloning $remote -> $repo..."
+    # blob:none + sparse keeps a monorepo clone cheap — oh-my-pi carries Cargo, bazel and
+    # a node_modules tree, and we want one markdown file out of it. Blobs for the path we
+    # actually log are fetched on demand. Real remotes only: git ignores --filter on a
+    # local clone, and the suite's offline fixture must behave the same either way.
+    local cloneargs=()
+    case "$remote" in
+      *://*|*@*:*) cloneargs=(--filter=blob:none --sparse) ;;
+    esac
+    if ! git clone --quiet "${cloneargs[@]+"${cloneargs[@]}"}" "$remote" "$repo" 2>>"$RUN_LOG"; then
+      log "changelog[$name]: clone failed"
+      printf '## %s\n\nGit clone failed; %s changes not checked this run.\n\n' "$name" "$name" >> "$out"
+      return 0
+    fi
+    if [ "${#cloneargs[@]}" -gt 0 ]; then
+      # A file, not a directory: cone mode refuses a file path outright (the old call failed and
+      # `|| true` hid it), so ask for non-cone mode and anchor the pattern with a leading slash.
+      ( cd "$repo" && git sparse-checkout set --no-cone "/$path" ) >/dev/null 2>>"$RUN_LOG" || true
+    fi
+  fi
+
+  head_sha=$( cd "$repo" && git rev-parse --short HEAD 2>/dev/null ) || head_sha="?"
+  n=$( cd "$repo" && git log --format=%H \
+         --since="$TARGET_DATE 00:00:00" --until="$NEXT_DATE 00:00:00" \
+         -- "$path" 2>/dev/null | wc -l | tr -d ' ' )
+  # Inserted changelog lines (new version headers + bullets), oldest-first; strip the
+  # diff's leading '+' but drop the '+++ b/<path>' file header.
+  # Dedupe non-blank lines, keep every blank. A changelog edited across many commits in one
+  # window re-inserts the same lines repeatedly: OMP's log moved 119 commits for 2026-09-08
+  # through 09-10 and emitted `## [18.1.16]` three times with its bullets under each. Blank
+  # lines are exempt or the markdown collapses into one paragraph. The key is the line AND the
+  # release header it sits under: `### Fixed` and `- Fixed a crash` repeat across releases, and
+  # a window-wide key dropped them from the second release, leaving its bullets under no
+  # heading or the first release's (review of https://github.com/STRML/cc-autodream/pull/83).
+  added=$( cd "$repo" && git log -p --reverse \
+             --since="$TARGET_DATE 00:00:00" --until="$NEXT_DATE 00:00:00" \
+             -- "$path" 2>/dev/null \
+           | grep '^+' | grep -v '^+++' | sed 's/^+//' \
+           | awk '!NF { print; next } /^## \[/ { hdr = $0 } !seen[hdr SUBSEP $0]++' )
+  # Cap per source. One chatty monorepo must not crowd the other harnesses out of L2's
+  # context; the cap is per section, so a quiet source is never truncated for a loud one.
+  local cap="${AUTODREAM_CHANGELOG_MAX_LINES:-400}" total
+  # A non-numeric cap made the -gt test below error out as false under set -u without -e,
+  # so the section went out uncapped (debate review of e95e2f2). Fall back to the default.
+  # Compare numerically, not by pattern: "00" is all digits and still zero, and head -n 00
+  # then fails and drops the section's content.
+  local cap_ok=no
+  case "$cap" in
+    ''|*[!0-9]*) ;;
+    *) [ "$cap" -gt 0 ] 2>/dev/null && cap_ok=yes ;;
+  esac
+  if [ "$cap_ok" = no ]; then
+    log "changelog[$name]: AUTODREAM_CHANGELOG_MAX_LINES='$cap' is not a positive integer; using 400"
+    cap=400
+  fi
+  total=$(printf '%s\n' "$added" | wc -l | tr -d ' ')
+  if [ "${total:-0}" -gt "$cap" ]; then
+    added=$(printf '%s\n' "$added" | head -n "$cap")
+    added="$added
+[...truncated: $total lines in window, showing first $cap. Raise AUTODREAM_CHANGELOG_MAX_LINES to see the rest.]"
+    log "changelog[$name]: $total lines truncated to $cap"
+  fi
+
+  if [ "${n:-0}" -gt 0 ] && [ -n "$added" ]; then
+    printf '## %s\n# Source: %s @ %s (%s)\n# Commits touching the changelog in window: %s\n\n%s\n\n' \
+      "$name" "$remote" "$head_sha" "$path" "$n" "$added" >> "$out"
+    log "changelog[$name]: $n commit(s) in window"
+  else
+    printf '## %s\n# Source: %s @ %s (%s)\n\nNo changelog commits in this window.\n\n' \
+      "$name" "$remote" "$head_sha" "$path" >> "$out"
+    log "changelog[$name]: no commits in window"
+  fi
+}
+
 changelog_window() {
   local out="$FINDINGS_DIR/changelog-window.md"
   [ "${AUTODREAM_CHANGELOG:-1}" != "0" ] || { log "changelog check disabled (AUTODREAM_CHANGELOG=0)"; return 0; }
   command -v git >/dev/null 2>&1 || { log "changelog: git not found; skipping"; return 0; }
 
-  local remote="${CHANGELOG_REMOTE:-https://github.com/anthropics/claude-code.git}"
-  local repo="${CLAUDE_CODE_REPO:-$AUTODREAM_DIR/cache/claude-code}"
-
-  if [ -d "$repo/.git" ]; then
-    log "changelog: updating cache ($repo)..."
-    if ! ( cd "$repo" && git pull --ff-only --quiet ) 2>>"$RUN_LOG"; then
-      log "changelog: pull failed"
-      printf '# Claude Code changelog\n\nGit pull failed; upstream changes not checked this run.\n' > "$out"
-      return 0
-    fi
-  else
-    log "changelog: cloning $remote -> $repo..."
-    rm -rf "$repo"
-    if ! git clone --quiet "$remote" "$repo" 2>>"$RUN_LOG"; then
-      log "changelog: clone failed"
-      printf '# Claude Code changelog\n\nGit clone failed; upstream changes not checked this run.\n' > "$out"
-      return 0
-    fi
-  fi
-
-  local head_sha n added
-  head_sha=$( cd "$repo" && git rev-parse --short HEAD 2>/dev/null ) || head_sha="?"
-  n=$( cd "$repo" && git log --format=%H \
-         --since="$TARGET_DATE 00:00:00" --until="$NEXT_DATE 00:00:00" \
-         -- CHANGELOG.md 2>/dev/null | wc -l | tr -d ' ' )
-  # Inserted changelog lines (new version headers + bullets), oldest-first; strip the
-  # diff's leading '+' but drop the '+++ b/CHANGELOG.md' file header.
-  added=$( cd "$repo" && git log -p --reverse \
-             --since="$TARGET_DATE 00:00:00" --until="$NEXT_DATE 00:00:00" \
-             -- CHANGELOG.md 2>/dev/null \
-           | grep '^+' | grep -v '^+++' | sed 's/^+//' )
-
-  if [ "${n:-0}" -gt 0 ] && [ -n "$added" ]; then
-    {
-      printf '# Claude Code changelog — commits in [%s, %s)\n' "$TARGET_DATE" "$NEXT_DATE"
-      printf '# Source: %s @ %s\n' "$remote" "$head_sha"
-      printf '# Commits touching CHANGELOG.md in window: %s\n\n' "$n"
-      printf '%s\n' "$added"
-    } > "$out"
-    log "changelog: $n commit(s) in window -> $out"
-  else
-    printf '# Claude Code changelog — commits in [%s, %s)\n# Source: %s @ %s\n\nNo changelog commits in this window.\n' \
-      "$TARGET_DATE" "$NEXT_DATE" "$remote" "$head_sha" > "$out"
-    log "changelog: no commits in window"
-  fi
+  local srcs; srcs=$(changelog_sources)
+  # Truncate once here, then every section appends. Nothing in this function may wrap the
+  # loop in a `> "$out"` block: log() writes to stdout, so that would file the runner's
+  # own progress lines as upstream release notes.
+  printf '# Harness changelogs — commits in [%s, %s)\n\n' "$TARGET_DATE" "$NEXT_DATE" > "$out"
+  local name remote path repo
+  # Here-string rather than a pipe: a piped while-read runs in a subshell, which is a trap
+  # the moment this loop needs to set a variable the caller reads.
+  while IFS='|' read -r name remote path repo; do
+    [ -n "$name" ] || continue
+    changelog_one "$name" "$remote" "$path" "$repo" "$out"
+  done <<< "$srcs"
+  log "changelog: window written -> $out"
 }
 
 # ---- Sleep/network resilience helpers ----

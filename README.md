@@ -37,8 +37,9 @@ ranked patterns, five open questions). The shape:
 2. **$() in Bash triggers permission prompts** ×4  ·  medium
 3. **Assuming the host TZ is Pacific** ×2  ·  medium
 
-## Upstream Claude Code changes
-- v2.x.y added `--foo`; relevant to the rush project's deploy script.
+## Upstream harness changes
+- Claude Code v2.x.y added `--foo`; relevant to the rush project's deploy script.
+- No releases in the window: Codex, OMP.
 
 ## Open questions for the user
 1. Add a Read-before-Edit reminder to the project CLAUDE.md?
@@ -220,8 +221,10 @@ going after you disconnect:
 
 Two layers: a cheap per-session pass (`haiku`) extracts structured findings from each
 transcript, then a single smarter pass (`opus`) ranks them across the whole day and
-writes the report. It also diffs the upstream Claude Code changelog over the day so
-the report can flag releases that change how you work.
+writes the report. It also diffs the changelog of each harness you work across (Claude
+Code, Codex, OMP) over the day, so the report can flag releases that change how you work.
+Each source has its own cache and its own section, so one unreachable remote never
+silences the others. Override the watched set with `AUTODREAM_CHANGELOG_SOURCES`.
 
 Everything lives on disk (findings JSON, the report, run logs, stats) and every step
 is idempotent, so you can rerun any date. Configuration knobs are documented in
@@ -254,8 +257,8 @@ the adapter contract is defined by.
   (e.g. `subl`, `code -g`, `open -a Obsidian`) to pick a specific editor.
 - Runs in `bypassPermissions` mode (workers Write findings). Don't run it in a
   shared environment.
-- The first run clones `anthropics/claude-code` (small) for the changelog window; it
-  degrades gracefully with no git/network.
+- The first run clones the watched harness repos for the changelog window (the OMP one
+  is a sparse, blob-less clone of one file); it degrades gracefully with no git/network.
 
 ## License
 
