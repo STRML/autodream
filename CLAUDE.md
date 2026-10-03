@@ -325,6 +325,10 @@ A report written from a run that could not reach the model looks complete, ships
 
 Both files are written by `write_adapter_inputs` just before L2, from the adapters. `skills-inventory.txt` unions every enabled adapter's `skills-inventory` output (name, optionally a TAB and a description), deduplicated by name; if every adapter fails it says `# skills-inventory.txt unavailable` and PROMPT.md tells L2 not to file coverage gaps from it, because an empty list would claim no skills are installed. `adapter-facts.md` holds one `## Source: <name>` section per harness that had sessions tonight, taken from the source map captured before any model ran: a remedy for a finding has to be a surface that exists for the harness the evidence came from. A new harness adds an `adapters/<name>/facts.md` and a `skills-inventory` subcommand, not code in `run.sh`.
 
+### One triage document, one addendum per harness that differs
+
+`prompts/SESSION_TRIAGE.md` is the single L1 prompt. A harness whose transcripts differ from the claude shape it describes adds `adapters/<name>/triage.md`; the worker appends it for that adapter's sessions only (it says it wins where it disagrees), so a claude worker receives exactly SESSION_TRIAGE.md plus the stats block. `adapters/omp/triage.md` carries omp's record shapes, the harness-tool rule, the retired `compliance_markers`, `is_advisor` and `skills_authored`, and the restricted schema for advisor sidecars (no `sandbox_friction`, `tool_loop` or `missed_skill`). PROMPT.md excludes advisor turns from the session-turn total and files any advisor tool-behavior finding under Triage failures.
+
 ## Running / rerunning a date
 
 ```

@@ -1731,6 +1731,13 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       printf "Session transcript to analyze (literal absolute path): %s\n" "$readpath"
       printf "Write your findings JSON to this literal absolute path: %s\n\n" "$output"
       cat "$AUTODREAM_DIR/SESSION_TRIAGE.md"
+      # One triage document for every harness. A harness whose transcripts differ from the
+      # claude shape the document describes adds adapters/<name>/triage.md, appended here for
+      # that adapter sessions only, so claude workers receive exactly the text they always did.
+      if [ -n "$src" ] && [ -r "$ADAPTERS_DIR/$src/triage.md" ]; then
+        printf "\n"
+        cat "$ADAPTERS_DIR/$src/triage.md"
+      fi
       if [ -s "$FINDINGS_DIR/$hash.stats.json" ]; then
         printf "\n## Precomputed session stats (authoritative — copy these into your output)\n\n\`\`\`json\n"
         cat "$FINDINGS_DIR/$hash.stats.json"

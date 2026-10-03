@@ -3788,6 +3788,27 @@ test_unavailable_skills_inventory_says_so(){
   rm -rf "$root"
 }
 
+test_harness_addendum_reaches_only_that_harnesss_workers(){
+  echo "# an adapter's triage.md is appended for its own sessions only; claude workers get the document unchanged"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local o; o=$(mk_omp_session "$root" ffff)
+  local hc ho; hc=$(hash_of "$root/projects/proj-a/sess1.jsonl"); ho=$(hash_of "$o")
+  export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap"; run_dream_omp "$root"; unset FANOUT MOCK_CAPTURE_DIR
+  assert_grep   "$root/cap/l1-stdin-$ho.txt" '^## Harness addendum: OMP transcripts' "the omp worker got the omp addendum"
+  assert_grep   "$root/cap/l1-stdin-$ho.txt" 'RESTRICTED SCHEMA: advisor sidecars' "including the advisor rules"
+  assert_grep   "$root/cap/l1-stdin-$ho.txt" '^# Session Triage' "after the shared document"
+  assert_nogrep "$root/cap/l1-stdin-$hc.txt" 'Harness addendum' "the claude worker got no addendum"
+  python3 - "$root/cap/l1-stdin-$hc.txt" "$REPO/prompts/SESSION_TRIAGE.md" <<'PY' && ok "and its prompt is exactly SESSION_TRIAGE.md plus the stats block" || no "and its prompt is exactly SESSION_TRIAGE.md plus the stats block"
+import sys
+got = open(sys.argv[1]).read()
+doc = open(sys.argv[2]).read()
+i = got.index(doc)                      # the shared document is present verbatim
+rest = got[i + len(doc):].strip()
+sys.exit(0 if rest == "" or rest.startswith("## Precomputed session stats") else 1)
+PY
+  rm -rf "$root"
+}
+
 test_skill_fields_dropped_without_a_sidecar(){
   echo "# a session with no stats sidecar keeps no worker-written skill fields (Codex review of 0129fc0)"
   local root; root=$(setup_env); mk_session "$root" sess1
@@ -4511,6 +4532,7 @@ test_one_failed_root_does_not_kill_the_night
 test_enabled_adapters_resolves_once
 test_l2_gets_the_skills_inventory_and_per_source_facts
 test_unavailable_skills_inventory_says_so
+test_harness_addendum_reaches_only_that_harnesss_workers
 test_skill_fields_dropped_without_a_sidecar
 test_skill_fields_dropped_with_a_partial_sidecar
 test_skill_fields_are_enforced_from_the_sidecar
