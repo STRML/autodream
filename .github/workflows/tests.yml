@@ -63,6 +63,8 @@ jobs:
 
       - name: notes-path
         run: bash tests/notes-path.sh
+      - name: install-review-agent
+        run: bash tests/install-review-agent.sh
 
       - name: x-bookmarks
         run: bash tests/x-bookmarks.sh
