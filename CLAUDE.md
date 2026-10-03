@@ -317,6 +317,10 @@ A report written from a run that could not reach the model looks complete, ships
 - The substantive-session filter accepts both shapes: a claude user record, or an omp `message` record with role user and a text item.
 - The L1 engine, model and warmup come from the adapter (see "Who starts the L1 worker").
 
+### Skill fields are measured, not guessed (omp-autodream 2026-09-04)
+
+`skills_invoked`, `skills_invoked_count`, `skills_invoked_counts` and `skills_authored` come from the stats sidecar (`session-stats.sh` for claude: a `Skill` tool call or a `<command-name>` slash line is an invocation, a Write or Edit of a `SKILL.md` is authoring). After L1 the runner overwrites those four fields in every findings JSON from the sidecar. A sidecar that is missing, unreadable or lacks any of the four means the skills were not measured, so all four are removed from that findings JSON and counted in `skills_unmeasured`. A worker's own list was how a report concluded a 200-skill inventory never fires.
+
 ## Running / rerunning a date
 
 ```

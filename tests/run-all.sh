@@ -695,7 +695,7 @@ test_session_stats(){
     '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"b","content":"result"}]}}' > "$fixture"
   "$REPO/bin/session-stats.sh" "$fixture" "$out"
   assert_eq "$(jq -r 'keys | sort | join(",")' "$out")" \
-    "compliance_markers,duration_minutes,isSidechain,models_used,tool_call_count,tools_used,transcript_bytes,transcript_mtime,turn_count,user_message_count,user_turn_timestamps" \
+    "compliance_markers,duration_minutes,isSidechain,models_used,skills_authored,skills_invoked,skills_invoked_count,skills_invoked_counts,tool_call_count,tools_used,transcript_bytes,transcript_mtime,turn_count,user_message_count,user_turn_timestamps" \
     "stats output has exactly the specified fields"
   assert_eq "$(jq -r '.user_turn_timestamps | length' "$out")" "0" "no timestamped user turns in this fixture -> empty user_turn_timestamps"
   assert_eq "$(jq -r .user_message_count "$out")" "1" "tool_result carriers are excluded from user message count"
@@ -3753,6 +3753,71 @@ test_omp_session_that_cannot_be_linearized_is_an_error_record(){
   rm -rf "$root"
 }
 
+test_skill_fields_dropped_without_a_sidecar(){
+  echo "# a session with no stats sidecar keeps no worker-written skill fields (Codex review of 0129fc0)"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  # mock-claude writes skills_invoked:[] itself. With no sidecar to overwrite it, that list
+  # is the model's guess, and L2 would rank it as a mechanical count.
+  export AUTODREAM_STATS_BIN="$root/does-not-exist.sh"
+  run_dream "$root"
+  unset AUTODREAM_STATS_BIN
+  local h; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  local fj="$(fdir "$root")/$h.json"
+  assert_eq "$(jq -r 'has("skills_invoked") or has("skills_invoked_count") or has("skills_invoked_counts") or has("skills_authored")' "$fj")" "false" \
+    "the unmeasured skill fields are removed rather than believed"
+  assert_eq "$(jq -r '.findings | type' "$fj")" "array" "the rest of the findings JSON survives"
+  # Absence alone cannot say why: gated stubs and older findings carry no skill fields
+  # either. The runner records the count (Codex review of 1ee66e4).
+  assert_grep "$(fdir "$root")/run-stats.txt" 'skills_unmeasured: 1' "run-stats counts the session whose skills went unmeasured"
+  rm -rf "$root"
+}
+
+test_skill_fields_dropped_with_a_partial_sidecar(){
+  echo "# a sidecar missing any of the four skill keys is unmeasured, not half-enforced (Codex review of 33bf9b1)"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  # skills_invoked present, skills_invoked_count(s) and skills_authored absent: copying the
+  # one key and keeping the worker's other three would rank guesses as counts.
+  local stub="$root/stats-partial.sh"
+  printf '%s\n' '#!/bin/bash' 'printf %s "{\"transcript_bytes\":10,\"user_message_count\":5,\"tool_call_count\":9,\"skills_invoked\":[\"x\"]}" > "$2"' > "$stub"
+  chmod +x "$stub"
+  export AUTODREAM_STATS_BIN="$stub"
+  run_dream "$root"
+  unset AUTODREAM_STATS_BIN
+  local fj; fj="$(fdir "$root")/$(hash_of "$root/projects/proj-a/sess1.jsonl").json"
+  assert_eq "$(jq -r 'has("skills_invoked") or has("skills_invoked_count") or has("skills_invoked_counts") or has("skills_authored")' "$fj")" "false" \
+    "every skill field is removed when the sidecar lacks any of them"
+  assert_grep "$(fdir "$root")/run-stats.txt" 'skills_unmeasured: 1' "and the session is counted as unmeasured"
+  assert_nogrep "$root/run.out" 'with no sidecar' "the log does not claim the sidecar was missing"
+  rm -rf "$root"
+}
+
+test_skill_fields_are_enforced_from_the_sidecar(){
+  echo "# a worker that ignores the precomputed skill stats gets overwritten, not believed"
+  local root; root=$(setup_env)
+  # A session that really did invoke skills. mock-claude always writes skills_invoked:[]
+  # (see write_findings), the worker behaviour behind the 2026-09-04 "zero skills across
+  # 3,988 tool calls" claim. The runner must not take it.
+  local f="$root/projects/proj-a/sess1.jsonl"
+  printf '%s\n' \
+    '{"type":"user","cwd":"/tmp/proj-a","message":{"content":"<command-name>/triage</command-name>"}}' \
+    '{"type":"user","message":{"content":"keep going"}}' \
+    '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"triage"}},{"type":"tool_use","name":"Skill","input":{"skill":"deslop"}},{"type":"tool_use","name":"Write","input":{"file_path":"/h/.claude/skills/fresh/SKILL.md"}}]}}' \
+    > "$f"
+  touch -t "$STAMP" "$f"
+  run_dream "$root"
+  local h; h=$(hash_of "$f")
+  assert_eq "$(jq -r '.skills_invoked | join(",")' "$(fdir "$root")/$h.json")" "deslop,triage" \
+    "the findings JSON carries the measured skills, not the worker's empty list"
+  assert_eq "$(jq -r '.skills_invoked_counts.triage' "$(fdir "$root")/$h.json")" "2" \
+    "per-skill counts survive into the findings so top-5-by-count can be ranked"
+  assert_eq "$(jq -r '.skills_invoked_count' "$(fdir "$root")/$h.json")" "3" \
+    "the total counts invocations, not distinct skills"
+  assert_eq "$(jq -r '.skills_authored | join(",")' "$(fdir "$root")/$h.json")" "fresh" \
+    "authoring a skill is not invoking one"
+  assert_grep "$(fdir "$root")/run-stats.txt" 'skills_unmeasured: 0' "a run with every sidecar present records zero unmeasured, not nothing"
+  rm -rf "$root"
+}
+
 # ---- Upgrade lag: run.sh is a symlink, the libraries are not there yet -------
 # The live install symlinks each script individually into ~/.claude/autodream, so
 # merging a branch changes run.sh the instant it lands while lib-project.sh,
@@ -4396,6 +4461,9 @@ test_unrepresentable_characters_are_refused
 test_failing_enumerator_aborts_the_run
 test_one_failed_root_does_not_kill_the_night
 test_enabled_adapters_resolves_once
+test_skill_fields_dropped_without_a_sidecar
+test_skill_fields_dropped_with_a_partial_sidecar
+test_skill_fields_are_enforced_from_the_sidecar
 test_omp_adapter_is_opt_in
 test_omp_session_is_linearized_for_the_worker
 test_omp_session_that_cannot_be_linearized_is_an_error_record

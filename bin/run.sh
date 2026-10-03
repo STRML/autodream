@@ -2582,6 +2582,51 @@ PY
     log "python3 not found; skipping project-field normalization (L2 grouping may show dupes)"
   fi
 
+  # ---- Enforce the mechanical skill fields from the sidecars ----
+  # Deliberately NOT inside the python3 block above. The prompt asks the worker to copy
+  # these from the precomputed stats, but asking is not enforcing, and gating enforcement
+  # on an optional interpreter meant that on a host without python3 the pipeline quietly
+  # returned to believing whatever the model wrote — the exact failure this replaced.
+  # jq is already a hard dependency of this script, so this cannot silently degrade.
+  # compute_session_stats regenerates every sidecar each run, so a sidecar that is missing,
+  # unreadable, or lacks any of the four skill keys means session-stats.sh did not measure
+  # this session's skills, and whatever skill fields the findings JSON carries are the
+  # worker's own guess. All four are removed and counted, never kept, or L2 ranks them as
+  # mechanical counts (Codex reviews of 0129fc0, cd309b6 and 33bf9b1). Checking one key
+  # was not enough: copying the keys that exist would leave the worker's guesses for the
+  # rest. A sidecar with missing keys passes generation's type check and only breaks here.
+  SKILLS_ENFORCED=0
+  SKILLS_DROPPED=0
+  for fjson in "$FINDINGS_DIR"/*.json; do
+    case "$fjson" in *.stats.json) continue ;; esac
+    [ -s "$fjson" ] || continue
+    jq -e ".findings | arrays" "$fjson" >/dev/null 2>&1 || continue
+    sidecar="${fjson%.json}.stats.json"
+    skilltmp="$fjson.skills.tmp"
+    if ! jq -e 'type == "object" and (["skills_invoked", "skills_invoked_count", "skills_invoked_counts", "skills_authored"] - keys | length == 0)' "$sidecar" >/dev/null 2>&1; then
+      if jq 'del(.skills_invoked, .skills_invoked_count, .skills_invoked_counts, .skills_authored)' \
+          "$fjson" > "$skilltmp" 2>/dev/null && [ -s "$skilltmp" ]; then
+        mv "$skilltmp" "$fjson"
+        SKILLS_DROPPED=$((SKILLS_DROPPED + 1))
+      else
+        rm -f "$skilltmp"
+      fi
+      continue
+    fi
+    if jq --slurpfile sc "$sidecar" '
+          . as $f
+          | (($sc[0]) // {}) as $st
+          | reduce ("skills_invoked", "skills_invoked_count", "skills_authored", "skills_invoked_counts") as $k
+              ($f; if ($st | has($k)) then .[$k] = $st[$k] else . end)
+        ' "$fjson" > "$skilltmp" 2>/dev/null && [ -s "$skilltmp" ]; then
+      mv "$skilltmp" "$fjson"
+      SKILLS_ENFORCED=$((SKILLS_ENFORCED + 1))
+    else
+      rm -f "$skilltmp"
+    fi
+  done
+  log "enforced mechanical skill fields from sidecars on $SKILLS_ENFORCED findings file(s); removed unmeasured skill fields from $SKILLS_DROPPED whose sidecar was missing, unreadable, or incomplete"
+
   # ---- Self-audit stats: runtime telemetry only the runner can see ----
   # The aggregator can't observe its own machinery — which sessions were autodream's
   # own (already excluded), how many workers failed, how many retry rounds it took.
@@ -2709,6 +2754,7 @@ PY
     # Other dates that were triaged and never assembled (#36). Empty means none in the
     # window, which is the reading that matters — this is the key that gets a killed run
     # noticed the next morning instead of during an unrelated investigation two days on.
+    printf 'skills_unmeasured: %s\n' "${SKILLS_DROPPED:-0}"
     printf 'unassembled_dates: %s\n' "${UNASSEMBLED:-}"
     # Always emitted, even empty: a reader should never have to tell "no legacy reports"
     # apart from "this runner predates the key", which is the same ambiguity the epoch
