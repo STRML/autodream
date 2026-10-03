@@ -28,6 +28,18 @@ mk_session_claude(){ # $1=dir $2=cwd
   printf '%s\n' "{\"type\":\"user\",\"cwd\":\"$2\",\"message\":{\"content\":\"hi\"}}" > "$f"
   printf '%s' "$f"
 }
+mk_session_omp(){ # $1=dir $2=cwd - a title slot, a session header, then a short linear tree
+  mkdir -p "$1/store/-bucket"
+  local f="$1/store/-bucket/2026-01-02T12-00-00-000Z_01a00000-0000-7000-8000-000000000001.jsonl"
+  {
+    printf '%s\n' '{"type":"title","title":"t","v":1}'
+    printf '%s\n' "{\"type\":\"session\",\"id\":\"01a00000-0000-7000-8000-000000000001\",\"cwd\":\"$2\",\"timestamp\":\"2026-01-02T12:00:00.000Z\"}"
+    printf '%s\n' '{"type":"model_change","id":"m1","parentId":null,"model":"x/y","timestamp":"2026-01-02T12:00:01.000Z"}'
+    printf '%s\n' '{"type":"message","id":"u1","parentId":"m1","timestamp":"2026-01-02T12:00:02.000Z","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}'
+    printf '%s\n' '{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-01-02T12:00:03.000Z","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}'
+  } > "$f"
+  printf '%s' "$f"
+}
 mk_session__fixture(){ # $1=dir $2=cwd
   mkdir -p "$1/store"
   local f="$1/store/s.fixture"
@@ -236,6 +248,7 @@ run_contract(){ # $1=adapter name
 }
 
 run_contract claude
+run_contract omp
 run_contract _fixture
 
 printf '\npassed: %s   failed: %s\n' "$pass" "$fail"

@@ -2036,10 +2036,21 @@ test_install_deploys_the_adapter_runtime(){
   # where adapters/ sits beside adapters.sh rather than one level up.
   local got
   got=$(cd "$target" && bash -c '. ./adapters.sh; adapters_list' 2>/dev/null)
-  assert_eq "$got" "claude" "the installed runner resolves the claude adapter"
+  assert_eq "$got" "$(printf 'claude\nomp')" "the installed runner resolves the claude and omp adapters"
   # Resolving the adapter is not the same as being able to RUN it. The installed
   # adapter finds its helper scripts through a relative path, so exercise a
   # subcommand that actually shells out to one rather than stopping at discovery.
+  # The omp adapter keeps its helpers beside itself (linearize.sh, stats.sh), so it must
+  # work through the installed symlink too, not only from the repo.
+  local osess="$T/o.jsonl"
+  printf '%s\n%s\n%s\n' '{"type":"title","title":"t","v":1}' \
+    '{"type":"session","id":"01a00000-0000-7000-8000-000000000001","cwd":"/tmp"}' \
+    '{"type":"message","id":"u1","parentId":null,"message":{"role":"user","content":"x"}}' > "$osess"
+  if "$target/adapters/omp/adapter.sh" normalize "$osess" "$T/o.norm" 2>/dev/null && [ -s "$T/o.norm" ]; then
+    ok "an installed omp adapter reaches its linearizer"
+  else
+    no "an installed omp adapter reaches its linearizer"
+  fi
   local sess="$T/s.jsonl" out="$T/s.stats.json"
   mkdir -p "$T/proj"
   printf '%s\n' "{\"type\":\"user\",\"cwd\":\"$T/proj\",\"message\":{\"content\":\"x\"}}" > "$sess"
@@ -3081,7 +3092,7 @@ test_all_excluded_corpus_says_so
 # Their counts fold into the totals below, so a red unit suite fails this script.
 echo
 echo "===== unit suites ====="
-for _suite in lib-project preflight adapters adapter-claude adapter-contract slim-transcript apply-pins; do
+for _suite in lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript apply-pins; do
   _out=$(bash "$HERE/$_suite.sh" 2>&1)
   _rc=$?
   _p=$(printf '%s\n' "$_out" | sed -n 's/^passed: *\([0-9][0-9]*\).*/\1/p' | tail -1)
