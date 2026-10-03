@@ -157,6 +157,7 @@ rm -f "$(_adapter_reject_broken_marker)"
 # shellcheck disable=SC2086
 rm -rf $TMPROOTS
 echo "# adapter_l1_model: per-adapter override, then the generic one, then the manifest default"
+l1counts=$(mktemp "${TMPDIR:-/tmp}/l1model.XXXXXX")
 (
   export ADAPTERS_ROOT="$REPO/adapters"
   . "$REPO/bin/adapters.sh"
@@ -172,9 +173,13 @@ echo "# adapter_l1_model: per-adapter override, then the generic one, then the m
   adapter_l1_model ../evil >/dev/null 2>&1; assert_eq "$?" "1" "an unsafe name resolves nothing"
   unset AUTODREAM_L1_MODEL AUTODREAM_L1_MODEL_OMP
   adapter_l1_model nonesuch >/dev/null 2>&1; assert_eq "$?" "1" "an adapter with no manifest and no override resolves nothing"
-  echo "$pass $fail" > "$TMPDIR/l1model.counts"
+  printf '%s %s\n' "$pass" "$fail" > "$l1counts"
 )
-read -r _p _f < "$TMPDIR/l1model.counts" 2>/dev/null && { pass=$_p; fail=$_f; }
+# A missing counts file means the subshell died before reporting, which is a failure, not a
+# pass: the assertions inside it never reached the totals.
+if read -r _p _f < "$l1counts" 2>/dev/null; then pass=$_p; fail=$_f
+else no "adapter_l1_model assertions did not report their counts"; fi
+trash "$l1counts" 2>/dev/null
 
 printf '\npassed: %s   failed: %s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -232,7 +232,7 @@ echo "# claude adapter: an unknown subcommand exits 2, never 0"
 # $tmp and any parked delegate are removed by the EXIT trap, which also covers
 # the paths that never reach this line.
 echo "# l1-argv reproduces the invocation run.sh hard-coded before the engine moved behind the adapter"
-# The expected text is copied from run.sh as it stood at 7f4... (the dispatch_l1 call), not
+# The expected text is copied from run.sh as it stood at b473c6f6d (the dispatch_l1 call), not
 # derived from the adapter, so this fails if the adapter and the old nightly ever disagree.
 OLD_SYSPROMPT="Headless triage worker. Read the session transcript and write exactly one findings JSON object, via the Write tool, to the literal output path given on line 2 of the prompt. Those paths are literal strings, not shell variables — never \$-expand them. Print only the literal word done and exit."
 OLD_SETTINGS="{\"disableAllHooks\":true}"

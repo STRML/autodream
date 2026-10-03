@@ -92,7 +92,7 @@ case "$cmd" in
     exec "$BIN/prune-self-sessions.sh" --is-self "$1"
     ;;
 
-  engine-bin) # -> the absolute path of the omp this adapter runs
+  engine-bin) # -> the omp this adapter runs: an absolute path, or the bare name when none was found
     printf '%s\n' "$(omp_bin)"
     ;;
 
