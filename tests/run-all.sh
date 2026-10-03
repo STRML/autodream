@@ -939,6 +939,58 @@ test_framing(){
   rm -rf "$root"
 }
 
+test_l1_engine_comes_from_the_adapter(){
+  echo "# the L1 worker is started from the adapter's l1-argv, with the adapter's model and environment"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap"; run_dream "$root"; unset FANOUT MOCK_CAPTURE_DIR
+  local args="$root/cap/l1-args.txt"
+  assert_file "$args" "captured the L1 argv"
+  assert_eq "$(sed -n '/^--model$/{n;p;}' "$args")" "claude-haiku-4-5" "the manifest's default model is used"
+  assert_grep "$args" '^--no-session-persistence$' "the adapter's flags are present"
+  assert_grep "$root/cap/l1-env.txt" '^CLAUDE_CODE_DISABLE_CLAUDE_MDS=1$' "the adapter's l1-env reaches the worker"
+  rm -rf "$root"
+
+  root=$(setup_env); mk_session "$root" sess1
+  export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_MODEL=generic/override; run_dream "$root"
+  unset FANOUT MOCK_CAPTURE_DIR AUTODREAM_L1_MODEL
+  assert_eq "$(sed -n '/^--model$/{n;p;}' "$root/cap/l1-args.txt")" "generic/override" "AUTODREAM_L1_MODEL overrides the default"
+  rm -rf "$root"
+
+  root=$(setup_env); mk_session "$root" sess1
+  export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_MODEL=generic/override AUTODREAM_L1_MODEL_CLAUDE=per/adapter; run_dream "$root"
+  unset FANOUT MOCK_CAPTURE_DIR AUTODREAM_L1_MODEL AUTODREAM_L1_MODEL_CLAUDE
+  assert_eq "$(sed -n '/^--model$/{n;p;}' "$root/cap/l1-args.txt")" "per/adapter" "the per-adapter override beats the generic one"
+  rm -rf "$root"
+}
+
+test_l1_engine_cannot_be_redirected_by_a_worker(){
+  echo "# a worker that rewrites sessions-source.txt cannot change which engine the next worker runs"
+  local root; root=$(setup_env); mk_session "$root" sess1; mk_session "$root" sess2
+  local h1 h2
+  h1=$(hash_of "$root/projects/proj-a/sess1.jsonl"); h2=$(hash_of "$root/projects/proj-a/sess2.jsonl")
+  export FANOUT=1 MOCK_MODE=l1_rewrite_source; run_dream "$root"; unset FANOUT MOCK_MODE
+  local fd; fd=$(fdir "$root")
+  assert_grep "$fd/sessions-source.txt" '	evil$' "precondition: the hostile worker really did rewrite the file"
+  assert_nogrep "$fd/$h1.json" '"error"' "the first session was triaged"
+  assert_nogrep "$fd/$h2.json" '"error"' "the second session still ran on the real engine, not the rewritten one"
+  rm -rf "$root"
+}
+
+test_l1_session_with_no_resolvable_engine_is_an_error_record(){
+  echo "# a session whose adapter yields no model gets a structured error, and the run still reports"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local h; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  # A claude adapter with no l1_model anywhere: no manifest default, no override.
+  local ad="$root/adapters"; cp -R "$REPO/adapters" "$ad"
+  jq 'del(.l1_model)' "$ad/claude/manifest.json" > "$ad/claude/manifest.json.new" && mv "$ad/claude/manifest.json.new" "$ad/claude/manifest.json"
+  export ADAPTERS_ROOT="$ad"; run_dream "$root"; unset ADAPTERS_ROOT
+  local fd; fd=$(fdir "$root")
+  assert_grep "$fd/$h.json" 'no L1 engine for this session' "the session carries a deterministic error record"
+  assert_grep "$fd/run-stats.txt" 'l1_findings_with_error: 1' "and it is counted"
+  assert_file "$root/dreams/$DATE.md" "the run still produced a report"
+  rm -rf "$root"
+}
+
 test_changelog(){
   echo "# upstream changelog window (offline, local fixture remote)"
   command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
@@ -2047,6 +2099,9 @@ test_no_sessions
 test_l2_uses_the_default_model
 test_l2_model_pin_is_honoured
 test_framing
+test_l1_engine_comes_from_the_adapter
+test_l1_engine_cannot_be_redirected_by_a_worker
+test_l1_session_with_no_resolvable_engine_is_an_error_record
 test_changelog
 test_changelog_multi_source
 test_changelog_refuses_foreign_cache_dir

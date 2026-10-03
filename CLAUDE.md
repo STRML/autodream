@@ -98,6 +98,14 @@ plus env `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REP
 
 **Do NOT switch to `--bare` or `CLAUDE_CODE_SIMPLE=1`.** Verified (2026-05) with a control on this host: plain `claude --print` authenticates, but both `--bare` and `CLAUDE_CODE_SIMPLE=1` return "Not logged in". They disable OAuth/keychain auth and require `ANTHROPIC_API_KEY` (or an apiKeyHelper), and `--bare`'s toolset is only Bash+Edit (no Read/Write/Glob). The composed flags above give the same minimal footprint without breaking auth or the file tools. (claude-cells uses simple mode only inside containers, where creds are a mounted `.credentials.json` file, not the macOS keychain.)
 
+### Who starts the L1 worker (decision 2 of the consolidation)
+
+`dispatch_l1` no longer names an engine. For each session it takes the adapter from the source map, the adapter's argv from `adapter.sh l1-argv <model>`, and its environment from `l1-env`, and runs `env <env> <argv>` with the prompt on stdin. The claude adapter's argv is the invocation listed above, byte for byte (`tests/adapter-claude.sh` pins it against the old literal text).
+
+- **The source map is held in the environment, not read from the findings dir.** `AUTODREAM_SOURCE_MAP` (hash and adapter per session) and `AUTODREAM_L1_MODELS` (model per adapter) are built before the first model call. An L1 worker holds the Write tool and could rewrite `sessions-source.txt`, and the source decides which binary the next worker executes. `test_l1_engine_cannot_be_redirected_by_a_worker` has a worker do exactly that and checks the next session still runs on the real engine; reading the file instead fails it.
+- **The model** resolves `AUTODREAM_L1_MODEL_<ADAPTER>`, then `AUTODREAM_L1_MODEL`, then the manifest's `l1_model` (`adapter_l1_model`). A model id belongs to one engine, which is why a host with two engines pins them per adapter.
+- **No engine is a deterministic error.** A session whose adapter is not executable, or resolves no model, gets a findings record with `error: no L1 engine for this session`, left in place and counted by `l1_findings_with_error`. Retrying cannot change the answer, and the run still reports.
+
 ## Self-pollution (the eating-its-own-tail bug)
 
 Every `claude --print` call used to persist its own session JSONL into `~/.claude/projects/-Users-<you>/`. So a run that triaged ~190 sessions left ~190 worker transcripts, and the NEXT night's run enumerated those as "sessions" to triage. On a real day, ~90% of the corpus was autodream looking at itself (215 enumerated vs. 21 real on 2026-05-29).

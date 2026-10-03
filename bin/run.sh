@@ -1515,6 +1515,32 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       fi
     fi
 
+    # The engine is the session adapter, not a constant. The source comes from the map the
+    # runner built before any model ran (AUTODREAM_SOURCE_MAP), never from a file under the
+    # findings dir: an L1 worker holds the Write tool and could rewrite those, and the source
+    # decides which binary the NEXT worker executes. The adapter prints its own argv and
+    # environment (tests/adapter-contract.sh), so nothing here names claude or omp.
+    src=$(printf "%s\n" "$AUTODREAM_SOURCE_MAP" | awk -F"\t" -v h="$hash" "\$1 == h { print \$2; exit }")
+    model=$(printf "%s\n" "$AUTODREAM_L1_MODELS" | awk -F"\t" -v s="$src" "\$1 == s { print \$2; exit }")
+    argv=()
+    envs=()
+    case "$src" in
+      ""|*[!abcdefghijklmnopqrstuvwxyz0123456789_-]*) src="" ;;
+    esac
+    if [ -n "$src" ] && [ -n "$model" ] && [ -x "$ADAPTERS_DIR/$src/adapter.sh" ]; then
+      while IFS= read -r -d "" arg; do argv+=("$arg"); done < <("$ADAPTERS_DIR/$src/adapter.sh" l1-argv "$model" 2>/dev/null)
+      while IFS= read -r line; do [ -n "$line" ] && envs+=("$line"); done < <("$ADAPTERS_DIR/$src/adapter.sh" l1-env 2>/dev/null)
+    fi
+    if [ "${#argv[@]}" -eq 0 ]; then
+      # Deterministic, so a structured error record that is left in place and skipped on re-run
+      # (retrying would not change the answer) and counted by l1_findings_with_error.
+      [ -n "$slimfile" ] && rm -f "$slimfile"
+      printf "{\"session_path\":\"%s\",\"error\":\"no L1 engine for this session (source [%s], model [%s])\",\"findings\":[]}\n" "$session" "$src" "$model" > "$output"
+      rm -f "$errlog"
+      echo "skip (no engine): $session ($hash)" >&2
+      exit 0
+    fi
+
     # Pass the paths as LITERAL data (not KEY=value) so the worker hands them
     # straight to the Read/Write tools and never tries to $-expand them in a shell
     # (there is no such env var, so it would expand to nothing and fail — exactly
@@ -1534,17 +1560,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
         cat "$FINDINGS_DIR/$hash.stats.json"
         printf "\n\`\`\`\n"
       fi
-    } | "$CLAUDE_BIN" \
-      --print \
-      --permission-mode bypassPermissions \
-      --model claude-haiku-4-5 \
-      --no-session-persistence \
-      --tools Read Write \
-      --disable-slash-commands \
-      --strict-mcp-config \
-      --settings "{\"disableAllHooks\":true}" \
-      --append-system-prompt "Headless triage worker. Read the session transcript and write exactly one findings JSON object, via the Write tool, to the literal output path given on line 2 of the prompt. Those paths are literal strings, not shell variables — never \$-expand them. Print only the literal word done and exit." \
-      > /dev/null 2> "$errlog"
+    } | env "${envs[@]}" "${argv[@]}" > /dev/null 2> "$errlog"
 
     if [ -s "$output" ]; then
       # Reported path should be the real session, not the temp slim copy. Then drop
@@ -1927,6 +1943,21 @@ EOF
   # call inherit it.
   export CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1
   export CLAUDE_BIN AUTODREAM_DIR FINDINGS_DIR SLIM WORK_DIR
+  # Which adapter runs each session, and which model each adapter's workers use, fixed here
+  # before the first model call and held in the environment (see the worker comment). The
+  # models are resolved once per adapter, not per session.
+  ADAPTERS_DIR=$(adapters_root)
+  AUTODREAM_SOURCE_MAP=$(cat "$FINDINGS_DIR/sessions-source.txt" 2>/dev/null)
+  AUTODREAM_L1_MODELS=""
+  local _src _model
+  while IFS= read -r _src; do
+    [ -n "$_src" ] || continue
+    _model=$(adapter_l1_model "$_src" 2>/dev/null) || _model=""
+    AUTODREAM_L1_MODELS="${AUTODREAM_L1_MODELS}${_src}"$'\t'"${_model}"$'\n'
+    [ -n "$_model" ] || log "WARNING: no L1 model resolves for adapter $_src; its sessions will not be triaged"
+    log "L1 model for $_src: ${_model:-<none>}"
+  done < <(printf '%s\n' "$AUTODREAM_SOURCE_MAP" | awk -F'\t' 'NF >= 2 && !seen[$2]++ { print $2 }')
+  export ADAPTERS_DIR AUTODREAM_SOURCE_MAP AUTODREAM_L1_MODELS
   # AUTODREAM_L1_ROUNDS is referenced by the dispatcher subshell to decide
   # whether this is the last retry round (gates the metadata-stub fallback).
   export AUTODREAM_L1_ROUNDS

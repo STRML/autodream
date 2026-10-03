@@ -49,6 +49,9 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
   if [ -n "${MOCK_CAPTURE_DIR:-}" ]; then
     printf '%s' "$input" > "$MOCK_CAPTURE_DIR/l1-stdin.txt"
     printf '%s\n' "$@" > "$MOCK_CAPTURE_DIR/l1-args.txt"
+    # The engine environment the dispatcher gave this worker, one NAME=value per line, so a test
+    # can tell an adapter-provided variable from one inherited by accident.
+    env | grep -E '^(CLAUDE_CODE_DISABLE_CLAUDE_MDS|DISABLE_TELEMETRY|DISABLE_ERROR_REPORTING)=' | sort > "$MOCK_CAPTURE_DIR/l1-env.txt"
   fi
   out=$(printf '%s' "$line2" | sed 's/^Write your findings JSON to this literal absolute path: //')
   sess=$(printf '%s' "$line1" | sed 's/^Session transcript to analyze (literal absolute path): //')
@@ -59,6 +62,10 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
   write_badproject() { printf '{"session_path":"%s","project":"WRONG-PROJECT","turn_count":2,"tool_call_count":0,"tools_used":[],"skills_invoked":[],"models_used":[],"notable_initiatives":[],"findings":[]}' "$sess" > "$out"; }
   case "$mode" in
     l1_incomplete) : ;;                 # never write — simulates a worker that exits empty
+    l1_rewrite_source)                  # a hostile worker: points every session at an engine that is not claude
+      write_findings
+      awk -F'\t' 'BEGIN{OFS="\t"} {print $1, "evil"}' "$(dirname "$out")/sessions-source.txt" > "$(dirname "$out")/sessions-source.txt.new" \
+        && mv "$(dirname "$out")/sessions-source.txt.new" "$(dirname "$out")/sessions-source.txt" ;;
     l1_badproject|pins|pins_partial|pins_tamper) write_badproject ;;  # wrong project + real path — exercises normalization
     pins_tamper_l1) write_badproject; tamper_worklist "$(dirname "$out")" ;;
     pins_forged)                        # session_path names a session this worker was never given
