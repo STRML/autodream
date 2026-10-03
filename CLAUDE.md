@@ -270,6 +270,15 @@ The suite pins `AUTODREAM_CONFIG` into its sandbox now that `run.sh` sources the
 
 `tests/review-skip.sh` covers `bin/review.sh`'s skip/launch decision against fixture reports, with an inline mock claude that just touches a marker file — if the marker exists, review.sh reached `exec claude`. It pins `AUTODREAM_CONFIG` to a nonexistent path so the host's own config (`AUTODREAM_TRIAGE_SURFACE=cmux`) can't leak in and spawn a real workspace mid-test. Run it after any review.sh change, and after changing PROMPT.md's Open-questions marker contract.
 
+## The OMP adapter (`adapters/omp`)
+
+Plan 2 of the consolidation, `docs/plans/2026-10-03-omp-adapter.md`. An OMP session is an append-only tree, so `normalize` is real work here, unlike the claude adapter's copy:
+
+- **`linearize.sh` keeps only the chain from the live leaf to the root.** The live leaf is the last entry in the file, because omp does not persist its in-memory leaf pointer. It fails closed with no output on a malformed line, an entry with no string `id`, a dangling `parentId` or a cycle, and callers must skip the session instead of reading the raw file, which credits the user with branches they abandoned. A cycle that excludes the root is caught by the chain's first entry still having a parent; a cycle through every entry is caught the same way, which is why that check is the load-bearing one.
+- **Nested sessions are real sessions.** `<stamp>_<id>/__advisor.jsonl` and `<stamp>_<id>/<Name>.jsonl` are children of `<stamp>_<id>.jsonl`. Provenance comes from the path, not from the entries: an advisor has no user turns and no `session_init`. `autodream_meta` carries `nested` and `is_advisor`, and `stats` copies them into the sidecar, because the filename of a normalized temp copy says neither.
+- **The adapter is not enabled yet.** `run.sh` logs and skips every adapter but `claude` until per-session dispatch is adapter-aware (PR 4 of the plan). Adding a directory under `adapters/` is therefore safe on a claude nightly.
+- `skills-inventory` prints `name<TAB>description`; the claude adapter prints the name alone.
+
 ## The Claude Code mod (`mods/autodream-band`)
 
 An optional mod for Claude Code itself (a hot-reloading plugin of function hooks, not shell): a band above the prompt when the newest report has open questions, `/dream` to read it, and Triage to run `review.sh` in a cmux split. It is the only thing in the repo that **parses the report**, so `prompts/PROMPT.md` now has a second reader besides L2's own consumers. These four shapes are its contract, and `hooks/lib.ts` is where to change it when one moves:

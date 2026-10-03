@@ -45,7 +45,7 @@ jobs:
         run: |
           rc=0
           for t in tests/lib-project.sh tests/preflight.sh tests/adapters.sh \
-                   tests/adapter-claude.sh tests/adapter-contract.sh \
+                   tests/adapter-claude.sh tests/adapter-omp.sh tests/adapter-contract.sh \
                    tests/slim-transcript.sh tests/apply-pins.sh; do
             echo "== $t"
             bash "$t" || rc=1
@@ -71,7 +71,7 @@ jobs:
       # cannot afford a swallowed exit code, and that is the class shellcheck
       # actually catches (SC2164, SC2155).
       - name: shellcheck bin + install
-        run: shellcheck --severity=warning bin/*.sh adapters/*/adapter.sh install.sh
+        run: shellcheck --severity=warning bin/*.sh adapters/*/*.sh install.sh
 
       # Test code is held at `error` only. tests/run-all.sh has ~24 SC2155
       # hits from `local x=$(cmd)` in assertion helpers, where masking a return
