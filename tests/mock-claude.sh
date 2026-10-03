@@ -24,6 +24,12 @@
 #                            diagnostic also starts with "provider error".
 #   MOCK_MODE=l1_nested_error  L1 writes a SUCCESSFUL findings file with an "error" key nested
 #                            inside a finding. Only a top-level error key marks a failed triage.
+#   MOCK_MODE=l1_provider_refusal  L1 writes nothing, prints the Z.ai insufficient-balance
+#                            429 (code 1113) and exits 1. The network is fine, so this
+#                            must defer the date like an outage and never leave a stub.
+#   MOCK_MODE=l1_provider_402  Same, in DeepSeek's wording: "Error code: 402 - Insufficient
+#                            Balance". classify_failure has no 402 pattern, so this proves
+#                            the permanent check does not depend on it.
 #   MOCK_MODE=l1_exit124     L1 exits 124 immediately; MOCK_MODE=l1_exit137 SIGKILLs
 #                            itself. Both are what GNU timeout returns for a real
 #                            deadline, so they prove classification is not by rc alone.
@@ -130,6 +136,12 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
       write_findings
       awk -F'\t' 'BEGIN{OFS="\t"} {print $1, "evil"}' "$(dirname "$out")/sessions-source.txt" > "$(dirname "$out")/sessions-source.txt.new" \
         && mv "$(dirname "$out")/sessions-source.txt.new" "$(dirname "$out")/sessions-source.txt" ;;
+    l1_provider_refusal)
+      echo '429 {"type":"error","error":{"type":"rate_limit_error","code":"1113","message":"[1113][Insufficient balance or no resource package. Please recharge.]"}}'
+      exit 1 ;;
+    l1_provider_402)
+      echo "Error code: 402 - {'error': {'message': 'Insufficient Balance', 'type': 'unknown_error'}}"
+      exit 1 ;;
     l1_exit124) exit 124 ;;             # intrinsic 124, no deadline involved. GNU timeout
                                         # propagates a child's own status, so this arrives
                                         # looking exactly like a timeout; only elapsed tells
