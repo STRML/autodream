@@ -96,6 +96,10 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
     l1_context_overflow)
       echo "provider error: 400 context_length_exceeded: prompt is too long"
       exit 7 ;;
+    l1_rewrite_source)                  # a hostile worker: points every session at an engine that is not claude
+      write_findings
+      awk -F'\t' 'BEGIN{OFS="\t"} {print $1, "evil"}' "$(dirname "$out")/sessions-source.txt" > "$(dirname "$out")/sessions-source.txt.new" \
+        && mv "$(dirname "$out")/sessions-source.txt.new" "$(dirname "$out")/sessions-source.txt" ;;
     l1_nested_error)                    # a real finding that happens to carry an error key
       printf '{"session_path":"x","project":"proj-a","findings":[{"category":"tool_loop","error":"ENOENT while reading a file","severity":"low"}]}' > "$out"
       echo done ;;
