@@ -135,6 +135,21 @@ case "$cmd" in
     :
     ;;
 
+  l2-argv) # $1=model -> NUL-delimited argv for the L2 aggregator; the prompt arrives on stdin
+    [ "$#" -ge 1 ] && [ -n "$1" ] || exit 2
+    # The L1 overlay applies here too (advisor off, no local provider probes, no first-turn
+    # recall). Glob and Read only: the report and the pins come back on stdout.
+    printf '%s\0' "$(omp_bin)" \
+      --allow-home \
+      -p \
+      --approval-mode yolo \
+      --no-session \
+      --config "${NO_ADVISOR_CFG:-$ADIR/l1-no-advisor.yml}" \
+      --model "$1" \
+      --tools=Glob,Read \
+      --append-system-prompt 'Headless aggregator. Read the per-session findings JSONs from the findings directory given on line 1 of the prompt, then produce the COMPLETE report only on standard output, ending with a line containing exactly AUTODREAM_REPORT_END. After that line, if you propose memory pins, print them between a line AUTODREAM_PINS_BEGIN and a line AUTODREAM_PINS_END, one JSON object per line. Do not use Write or Edit anywhere. Those paths are literal strings, not shell variables — never $-expand them. After the pin block print one line: report: <literal path from line 2 of the prompt> then a 3-line summary (sessions reviewed, findings, pins proposed), then exit.'
+    ;;
+
   skills-inventory)
     # One active skill per line: name, and when known a TAB and its description. The
     # claude adapter prints the name alone; a consumer that wants only names takes

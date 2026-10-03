@@ -231,6 +231,14 @@ echo "# claude adapter: an unknown subcommand exits 2, never 0"
 
 # $tmp and any parked delegate are removed by the EXIT trap, which also covers
 # the paths that never reach this line.
+echo "# l2-argv: Glob and Read only, and no model unless one is named"
+L2=$(CLAUDE_BIN=/opt/test/claude "$A" l2-argv | tr '\0' '\n')
+assert_eq "$(printf '%s\n' "$L2" | sed -n '1p')" "/opt/test/claude" "the engine binary comes first"
+assert_eq "$(printf '%s\n' "$L2" | sed -n '/^--tools$/{n;p;n;p;}' | tr '\n' ' ')" "Glob Read " "L2 holds Glob and Read"
+case "$L2" in *--model*) no "no --model without a model" ;; *) ok "no --model without a model" ;; esac
+assert_eq "$(CLAUDE_BIN=/opt/test/claude "$A" l2-argv opus | tr '\0' '\n' | sed -n '/^--model$/{n;p;}')" "opus" "a named model is passed through"
+case "$L2" in *AUTODREAM_REPORT_END*AUTODREAM_PINS_BEGIN*) ok "the system prompt carries the sentinel grammar" ;; *) no "the system prompt carries the sentinel grammar" ;; esac
+
 echo "# l1-argv reproduces the invocation run.sh hard-coded before the engine moved behind the adapter"
 # The expected text is copied from run.sh as it stood at b473c6f6d (the dispatch_l1 call), not
 # derived from the adapter, so this fails if the adapter and the old nightly ever disagree.

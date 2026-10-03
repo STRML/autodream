@@ -347,6 +347,10 @@ report: <path>
 - Pins come only from a closed block after the last sentinel, so a report that quotes the markers cannot inject one, and a block cut off before its END line proposes nothing. `apply-pins.sh` still validates every line against the authorization list fixed before any model ran.
 - The run exits 0 only for a validated delivery (sentinel plus marker); otherwise the aggregator's own non-zero status, else 1, so the launchd job sees a night that produced nothing.
 
+### Which engine runs L2
+
+L2 is an adapter too. `AUTODREAM_L2_ENGINE=<adapter name>` picks it (default: the first enabled adapter, so `claude` on an untouched install); a name that is not an accepted adapter stops the run before L1, not after. The adapter prints the command (`adapter.sh l2-argv [model]`, NUL-delimited, prompt on stdin, tools Glob and Read only) and `l1-env` supplies its environment. The model resolves `AUTODREAM_L2_MODEL_<NAME>`, then `AUTODREAM_L2_MODEL`, then the manifest's `l2_model`; none at all is valid and means the engine's own default (claude). `run-stats.txt` records `l2_engine`, `l2_model` (`default` when none was named) and one `l1_model_<adapter>` per source that had sessions, so a report that reads differently can be traced to the engine that wrote it. An install whose `adapters/` tree predates `l2-argv` keeps the built-in claude invocation, for claude only.
+
 ## Running / rerunning a date
 
 ```
