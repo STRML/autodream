@@ -81,7 +81,7 @@ Scripts/prompts are symlinked into `~/.claude/autodream/` by `install.sh`, so ed
 - **The on-demand label carries a hash of the install dir** (`<label>.ondemand.<8 hex>`), because the `bootout` before each on-demand run evicts whatever holds the label and another install's on-demand plist lives in its own `AUTODREAM_DIR`, where no scan sees it.
 - **The shipped template must be adoptable by this check.** It used `bash -lc "$HOME/.../run.sh"`, which runs but whose literal string never matches an install dir, so a job installed from the template got a second one beside it on the next `./install.sh`.
 
-The default label is `com.<user>.autodream`. The review LaunchAgent (the cmux popup job) is not ported yet; see `docs/plans/2026-10-03-omp-adapter.md`, PR 8.
+The default label is `com.<user>.autodream`; the review LaunchAgent takes `<label>-review` (see "The review triage LaunchAgent" below).
 
 ## How claude is invoked — the lean-query pattern (do not use `--bare`)
 
@@ -355,6 +355,10 @@ L2 is an adapter too. `AUTODREAM_L2_ENGINE=<adapter name>` picks it (default: th
 
 `install.sh` provisions a second agent, `<nightly label>-review`, next to the nightly one: it runs `review.sh <yesterday>` at 08:00, 09:15, 12:15, 15:30 and 18:15 with `AUTODREAM_TRIAGE_SURFACE=cmux`, and review.sh's launch marker keeps it to one workspace per report. The date is a `$(date -v-1d ...)` evaluated at fire time (the installer refuses to write the plist if that expression was frozen). cmux and claude are resolved the way review.sh resolves them (config, then PATH, then `AUTODREAM_CMUX_DEFAULT` or the app bundle path) and pinned absolutely in the agent's environment; with either missing the agent is skipped and a previously provisioned one is booted out, so a machine that lost cmux does not keep firing a failing trigger. A refused nightly schedule provisions no review agent. `tests/install-review-agent.sh` drives the real installer against a sandbox HOME with a shimmed `launchctl`.
 
+### Rehearsing an install: `--dry-run`, `--adapters`, `--l2-engine`
+
+`install.sh --dry-run` runs the same code with every write replaced by a `[dry-run]` line: the links, the config sections, the plists (generated and `plutil`-linted in a scratch directory, then shown with the path they would be written to) and each `launchctl` call. What only reads still runs, so a dry run reports the refusal a real install would hit (a foreign job holding the label, a non-empty real directory where a link goes) and still exits 0 for the survivable one. `tests/install-dry-run.sh` asserts the sandbox tree is identical afterwards and that `launchctl` was never invoked. `--adapters <names|all>` and `--l2-engine <name>` write one managed `# adapters (managed by install.sh)` section into the config, replaced in place on re-install and left alone when the flags are absent; both are validated against `adapters/` before anything is written (exit 64). run.sh sources the config with the caller's environment winning, so an exported variable still beats it.
+
 ## Running / rerunning a date
 
 ```
@@ -418,7 +422,7 @@ Plan 2 of the consolidation, `docs/plans/2026-10-03-omp-adapter.md`. An OMP sess
 
 - **`linearize.sh` keeps only the chain from the live leaf to the root.** The live leaf is the last entry in the file, because omp does not persist its in-memory leaf pointer. It fails closed with no output on a malformed line, an entry with no string `id`, a dangling `parentId` or a cycle, and callers must skip the session instead of reading the raw file, which credits the user with branches they abandoned. A cycle that excludes the root is caught by the chain's first entry still having a parent; a cycle through every entry is caught the same way, which is why that check is the load-bearing one.
 - **Nested sessions are real sessions.** `<stamp>_<id>/__advisor.jsonl` and `<stamp>_<id>/<Name>.jsonl` are children of `<stamp>_<id>.jsonl`. Provenance comes from the path, not from the entries: an advisor has no user turns and no `session_init`. `autodream_meta` carries `nested` and `is_advisor`, and `stats` copies them into the sidecar, because the filename of a normalized temp copy says neither.
-- **The adapter is not enabled yet.** `run.sh` logs and skips every adapter but `claude` until per-session dispatch is adapter-aware (PR 4 of the plan). Adding a directory under `adapters/` is therefore safe on a claude nightly.
+- **Accepted is not enabled.** `run.sh` scans only the adapters named in `AUTODREAM_ADAPTERS` (default `claude`), so a directory under `adapters/` is safe on a claude nightly. `install.sh --adapters claude,omp` writes the choice into the config.
 - `skills-inventory` prints `name<TAB>description`; the claude adapter prints the name alone.
 
 ## The Claude Code mod (`mods/autodream-band`)

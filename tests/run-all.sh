@@ -3895,6 +3895,23 @@ test_l2_engine_comes_from_an_adapter(){
   rm -rf "$root"
 }
 
+test_config_written_by_install_enables_adapters_and_l2_engine(){
+  echo "# AUTODREAM_ADAPTERS and AUTODREAM_L2_ENGINE set in the config reach the run"
+  local root; root=$(setup_env); mk_session "$root" sess1; mk_omp_session "$root" gggg >/dev/null
+  printf '# adapters (managed by install.sh)\nAUTODREAM_ADAPTERS=claude,omp\nAUTODREAM_L2_ENGINE=omp\nAUTODREAM_L2_MODEL_OMP=omp/cfg-model\n' > "$root/autodream/config"
+  mkdir -p "$root/home"
+  HOME="$root/home" AUTODREAM_CHANGELOG=0 CLAUDE_BIN="$MOCK" OMP_BIN="$MOCK" AUTODREAM_L1_MODEL_OMP=omp/test-model \
+    AUTODREAM_CONFIG="$root/autodream/config" AUTODREAM_CONSUME_DATE="$DATE" \
+    AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1 \
+    PROJECTS_DIR="$root/projects" AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
+    /bin/bash "$RUN" "$DATE" > "$root/run.out" 2>&1
+  local fd; fd=$(fdir "$root")
+  assert_grep "$fd/run-stats.txt" 'adapters_enabled: claude,omp' "the config enabled both harnesses"
+  assert_grep "$fd/run-stats.txt" '^l2_engine: omp$' "and chose the omp engine for L2"
+  assert_grep "$fd/run-stats.txt" '^l2_model: omp/cfg-model$' "with the model from the config"
+  rm -rf "$root"
+}
+
 test_skill_fields_dropped_without_a_sidecar(){
   echo "# a session with no stats sidecar keeps no worker-written skill fields (Codex review of 0129fc0)"
   local root; root=$(setup_env); mk_session "$root" sess1
@@ -4624,6 +4641,7 @@ test_l2_is_read_only_and_the_runner_writes_the_report
 test_l2_report_with_a_marker_but_no_sentinel_is_not_delivered
 test_pin_block_must_follow_the_sentinel_and_be_closed
 test_l2_engine_comes_from_an_adapter
+test_config_written_by_install_enables_adapters_and_l2_engine
 test_skill_fields_dropped_without_a_sidecar
 test_skill_fields_dropped_with_a_partial_sidecar
 test_skill_fields_are_enforced_from_the_sidecar
@@ -4656,7 +4674,7 @@ test_all_excluded_corpus_says_so
 # Their counts fold into the totals below, so a red unit suite fails this script.
 echo
 echo "===== unit suites ====="
-for _suite in lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript apply-pins scheduler-label review-skip review-cmux notes-path install-review-agent; do
+for _suite in lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript apply-pins scheduler-label review-skip review-cmux notes-path install-review-agent install-dry-run; do
   _out=$(bash "$HERE/$_suite.sh" 2>&1)
   _rc=$?
   _p=$(printf '%s\n' "$_out" | sed -n 's/^passed: *\([0-9][0-9]*\).*/\1/p' | tail -1)

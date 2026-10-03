@@ -9,6 +9,9 @@
 #   ./install.sh                 # symlink into $HOME/.claude/ + schedule nightly job
 #   ./install.sh /path/to        # symlink into /path/to/autodream/ instead
 #   ./install.sh --no-schedule   # symlink only; don't touch launchd
+#   ./install.sh --adapters claude,omp   # harnesses a run scans (names or `all`); written to config
+#   ./install.sh --l2-engine omp         # adapter whose engine runs L2; written to config
+#   ./install.sh --dry-run       # show every change, make none (no links, config, plist, launchctl)
 #   ./install.sh -h|--help
 
 set -eu
@@ -17,18 +20,51 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ----------------------------------------------------------------- arg parsing --
 SCHEDULE=1
+DRY=0
+ADAPTERS_ARG=""
+L2_ENGINE_ARG=""
 TARGET_PARENT="$HOME/.claude"
-for a in "$@"; do
+while [ "$#" -gt 0 ]; do
+  a="$1"; shift
   case "$a" in
     --no-schedule) SCHEDULE=0 ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    --dry-run) DRY=1 ;;
+    --adapters|--l2-engine)
+      [ "$#" -gt 0 ] && [ -n "$1" ] || { echo "install: $a needs a value" >&2; exit 64; }
+      case "$a" in --adapters) ADAPTERS_ARG="$1" ;; *) L2_ENGINE_ARG="$1" ;; esac
+      shift ;;
+    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
     -*) echo "install: unknown flag '$a'" >&2; exit 64 ;;
     *) TARGET_PARENT="$a" ;;
   esac
 done
 TARGET="$TARGET_PARENT/autodream"
 
-mkdir -p "$TARGET" "$TARGET_PARENT/dreams" "$TARGET/findings" "$TARGET/inbox" "$TARGET/logs"
+# Every adapter name given must be a directory under adapters/ (or `all` for --adapters): a typo
+# written into the config would make the nightly enable nothing and refuse to scan.
+valid_adapter() { [ -d "$REPO_DIR/adapters/$1" ] && [ -f "$REPO_DIR/adapters/$1/manifest.json" ]; }
+if [ -n "$ADAPTERS_ARG" ]; then
+  ADAPTERS_ARG=$(printf '%s' "$ADAPTERS_ARG" | tr ' ' ',')
+  for _n in $(printf '%s' "$ADAPTERS_ARG" | tr ',' ' '); do
+    [ "$_n" = "all" ] && continue
+    case "$_n" in *[!a-z0-9_-]*|_*) echo "install: '$_n' is not a valid adapter name" >&2; exit 64 ;; esac
+    valid_adapter "$_n" || { echo "install: no adapter '$_n' under $REPO_DIR/adapters" >&2; exit 64; }
+  done
+fi
+if [ -n "$L2_ENGINE_ARG" ]; then
+  valid_adapter "$L2_ENGINE_ARG" || { echo "install: no adapter '$L2_ENGINE_ARG' under $REPO_DIR/adapters" >&2; exit 64; }
+fi
+
+# Dry run: the same code path, with every write replaced by a line saying what it would do.
+# Anything that only READS (the label ownership check, the cmux and claude lookups, the
+# validations in link) still runs, so a dry run reports the refusals a real install would hit.
+dry() { printf '  [dry-run] %s\n' "$*"; }
+if [ "$DRY" = 1 ]; then
+  echo "DRY RUN: nothing below is written, linked, loaded or run."
+  dry "mkdir -p $TARGET $TARGET_PARENT/dreams $TARGET/findings $TARGET/inbox $TARGET/logs"
+else
+  mkdir -p "$TARGET" "$TARGET_PARENT/dreams" "$TARGET/findings" "$TARGET/inbox" "$TARGET/logs"
+fi
 
 link() {
   local src="$1" dst="$2"
@@ -45,6 +81,14 @@ link() {
   # $dst/<basename> — a nested adapters/adapters — while printing the same
   # success line, after which the loader finds an empty directory, rejects the
   # nested link on containment, and every nightly run fails.
+  if [ "$DRY" = 1 ]; then
+    if [ -d "$dst" ] && [ ! -L "$dst" ] && [ -n "$(ls -A "$dst" 2>/dev/null)" ]; then
+      echo "  ERROR: $dst is a non-empty real directory; refusing to install over it." >&2
+      return 1
+    fi
+    dry "link $dst -> $src"
+    return 0
+  fi
   if [ -L "$dst" ] || [ -f "$dst" ]; then
     rm -f "$dst"
   elif [ -d "$dst" ]; then
@@ -104,12 +148,14 @@ link "$REPO_DIR/adapters"                     "$TARGET/adapters"
 link "$REPO_DIR/prompts/PROMPT.md"      "$TARGET/PROMPT.md"
 link "$REPO_DIR/prompts/SESSION_TRIAGE.md" "$TARGET/SESSION_TRIAGE.md"
 
+if [ "$DRY" = 1 ]; then dry "chmod +x bin/*.sh adapters/*/adapter.sh"; else
 chmod +x "$REPO_DIR/bin/"*.sh
 # The adapters too. _adapter_ok requires -x on adapter.sh, and the loader treats a
 # non-executable adapter as a REFUSAL rather than as "adapters absent" — so a
 # distribution path that loses the exec bit (a zip, a restrictive umask) turns
 # into a hard FATAL nightly with no report instead of a degraded run.
 chmod +x "$REPO_DIR/adapters/"*/adapter.sh 2>/dev/null || true
+fi
 
 # --------------------------------------------------- session roots --
 # autodream scans every $HOME/.claude*/projects dir that has a session store. At
@@ -118,7 +164,9 @@ chmod +x "$REPO_DIR/adapters/"*/adapter.sh 2>/dev/null || true
 # non-TTY install (CI, an automated shell), unasked roots default to indexed so the
 # install silently covers everything; the log line says what was chosen. The
 # SESSION_ROOTS line below is the managed section run.sh sources.
-if [ -x "$TARGET/root-probe.sh" ]; then
+if [ "$DRY" = 1 ]; then
+  dry "root-probe --default-index, then rewrite the managed SESSION_ROOTS section of $TARGET/config"
+elif [ -x "$TARGET/root-probe.sh" ]; then
   CONFIG="$TARGET/config"
   if [ -t 1 ]; then
     AUTODREAM_DIR="$TARGET" "$TARGET/root-probe.sh" --ask
@@ -144,15 +192,64 @@ fi
 # under that name instead of "terminal-notifier". No-op if terminal-notifier isn't
 # installed (notify.sh falls back to plain terminal-notifier / an osascript banner) or
 # if the bundle already exists. notify.sh also bootstraps this on first run.
+if [ "$DRY" = 1 ]; then dry "build the notifier bundle (make-notifier.sh)"; else
 AUTODREAM_DIR="$TARGET" "$REPO_DIR/bin/make-notifier.sh" || true
+fi
+
+# --------------------------------------------------- adapters and L2 engine --
+# A managed section of the config, replaced in place so a re-install converges. Absent flags leave
+# the section alone: re-running the installer must not silently drop a host's choice. run.sh
+# sources the config with the caller's environment winning, so a variable exported by a caller
+# still beats these.
+if [ -n "$ADAPTERS_ARG" ] || [ -n "$L2_ENGINE_ARG" ]; then
+  CONFIG="$TARGET/config"
+  if [ "$DRY" = 1 ]; then
+    dry "write to $CONFIG: ${ADAPTERS_ARG:+AUTODREAM_ADAPTERS=$ADAPTERS_ARG }${L2_ENGINE_ARG:+AUTODREAM_L2_ENGINE=$L2_ENGINE_ARG}"
+  else
+    touch "$CONFIG"
+    awk '
+      /^# adapters \(managed by install.sh\)/{skip=1; next}
+      skip && /^(AUTODREAM_ADAPTERS|AUTODREAM_L2_ENGINE)=/{next}
+      skip && /^[^#]/{skip=0}
+      {print}
+    ' "$CONFIG" > "$CONFIG.new" && mv "$CONFIG.new" "$CONFIG"
+    {
+      echo
+      echo "# adapters (managed by install.sh)"
+      [ -n "$ADAPTERS_ARG" ] && echo "AUTODREAM_ADAPTERS=$ADAPTERS_ARG"
+      [ -n "$L2_ENGINE_ARG" ] && echo "AUTODREAM_L2_ENGINE=$L2_ENGINE_ARG"
+    } >> "$CONFIG"
+    echo "  adapters written to $CONFIG"
+  fi
+fi
 
 # --------------------------------------------------- nightly launchd schedule --
 # Builds and bootstraps a LaunchAgent that runs run.sh on several morning triggers
 # (catch-up for a Mac asleep at 03:15; the idempotency guard no-ops all but the
 # first to complete). Everything is auto-detected — no REPLACE_WITH_USERNAME edit.
+# launchctl, or a line saying what it would have been asked to do.
+lctl() {
+  if [ "$DRY" = 1 ]; then dry "launchctl $*"; return 0; fi
+  launchctl "$@"
+}
+# In a dry run, show the plist that would be installed and where.
+show_plist() { # $1=generated file
+  [ "$DRY" = 1 ] || return 0
+  dry "would write $real_la_dir/$(basename "$1"):"
+  sed 's/^/        /' "$1"
+}
+
 install_schedule() {
-  local la_dir="$HOME/Library/LaunchAgents"
-  mkdir -p "$la_dir"
+  local la_dir="$HOME/Library/LaunchAgents" real_la_dir
+  real_la_dir="$la_dir"
+  if [ "$DRY" = 1 ]; then
+    # Generate and lint the plists in a scratch dir, so the dry run shows exactly what would be
+    # written without touching the real LaunchAgents directory. The ownership check below still
+    # reads the real one.
+    la_dir=$(mktemp -d "${TMPDIR:-/tmp}/ccad-dry.XXXXXX")
+  else
+    mkdir -p "$la_dir"
+  fi
 
   # Which label this install owns. scheduler-label.sh reuses our own prior label when
   # there is one (so a re-install stays idempotent), never adopts a plist that runs
@@ -231,15 +328,16 @@ PLIST
       return 1
     }
   fi
+  show_plist "$target_plist"
 
   # Clear any prior instance, then bootstrap. RunAtLoad is false, so this arms the
   # schedule without firing a run now.
-  launchctl bootout   "$domain/$label" 2>/dev/null || true
+  lctl bootout   "$domain/$label" 2>/dev/null || true
   # Guarded explicitly rather than left to `set -e`: the caller invokes this function as
   # `install_schedule || rc=$?` to catch the exit-3 refusal, and that form disables errexit
   # for the whole body. An unguarded failure here would print "scheduled:" over a job
   # that was never bootstrapped.
-  launchctl bootstrap "$domain" "$target_plist" || {
+  lctl bootstrap "$domain" "$target_plist" || {
     echo "  ERROR: launchctl bootstrap failed for $label ($target_plist)" >&2
     return 1
   }
@@ -326,10 +424,15 @@ PLIST
     # Unload any previously-provisioned review job even though we're skipping —
     # a machine that had cmux/claude at install and lost one would otherwise
     # keep the stale scheduled service firing a failing trigger forever.
-    launchctl bootout "$domain/$review_label" 2>/dev/null || true
+    lctl bootout "$domain/$review_label" 2>/dev/null || true
     # Unloading is not enough: launchd loads every plist in LaunchAgents at login, so a plist left
     # on disk brings the failing job back at the next login.
-    rm -f "$la_dir/$review_label.plist"
+    if [ "$DRY" = 1 ]; then
+      [ -e "$real_la_dir/$review_label.plist" ] && dry "rm $real_la_dir/$review_label.plist"
+      rm -rf "$la_dir"
+    else
+      rm -f "$la_dir/$review_label.plist"
+    fi
     return 0
   fi
   local review_plist="$la_dir/$review_label.plist"
@@ -399,12 +502,15 @@ PLIST
       return 1
     }
   fi
-  launchctl bootout   "$domain/$review_label" 2>/dev/null || true
-  launchctl bootstrap "$domain" "$review_plist" || {
+  show_plist "$review_plist"
+  lctl bootout   "$domain/$review_label" 2>/dev/null || true
+  lctl bootstrap "$domain" "$review_plist" || {
     echo "  ERROR: launchctl bootstrap failed for $review_label ($review_plist)" >&2
     return 1
   }
   echo "  scheduled: $review_label  (daily 08:00/09:15/12:15/15:30/18:15)  -> $review_plist"
+  [ "$DRY" = 1 ] && rm -rf "$la_dir"
+  return 0
 }
 
 echo
