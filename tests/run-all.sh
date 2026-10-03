@@ -3753,6 +3753,41 @@ test_omp_session_that_cannot_be_linearized_is_an_error_record(){
   rm -rf "$root"
 }
 
+test_l2_gets_the_skills_inventory_and_per_source_facts(){
+  echo "# L2 reads a skills inventory and the facts of every harness that contributed sessions"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  mkdir -p "$root/home/.claude/skills/alpha" "$root/home/.claude/skills/beta"
+  printf -- '---\nname: alpha\n---\n' > "$root/home/.claude/skills/alpha/SKILL.md"
+  printf -- '---\nname: beta\n---\n' > "$root/home/.claude/skills/beta/SKILL.md"
+  run_dream_omp "$root"   # both adapters enabled, but only a claude session exists
+  local fd; fd=$(fdir "$root")
+  assert_grep   "$fd/skills-inventory.txt" '^# skills-inventory.txt' "the inventory is written with its header"
+  assert_grep   "$fd/skills-inventory.txt" '^alpha' "an installed skill is listed"
+  assert_grep   "$fd/skills-inventory.txt" '^beta' "and the other one"
+  assert_grep   "$fd/adapter-facts.md" '^## Source: claude$' "the contributing source has a facts section"
+  assert_grep   "$fd/adapter-facts.md" 'permissions.allow' "carrying that harness's remedy surfaces"
+  assert_nogrep "$fd/adapter-facts.md" 'Oh My Pi' "a source that contributed nothing is absent"
+  rm -rf "$root"
+
+  root=$(setup_env); mk_session "$root" sess1; mk_omp_session "$root" eeee >/dev/null
+  run_dream_omp "$root"
+  fd=$(fdir "$root")
+  assert_grep   "$fd/adapter-facts.md" '^## Source: omp$' "a second harness that contributed gets its own section"
+  assert_grep   "$fd/adapter-facts.md" '^## Source: claude$' "alongside the first"
+  rm -rf "$root"
+}
+
+test_unavailable_skills_inventory_says_so(){
+  echo "# when no adapter can list skills the file says unavailable instead of claiming none are installed"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local ad="$root/adapters"; cp -R "$REPO/adapters" "$ad"
+  # claude's skills-inventory subcommand fails
+  sed -i.bak 's|^  skills-inventory)$|  skills-inventory)\n    exit 1|' "$ad/claude/adapter.sh"; trash "$ad/claude/adapter.sh.bak"
+  export ADAPTERS_ROOT="$ad"; AUTODREAM_ADAPTERS=claude run_dream_omp "$root"; unset ADAPTERS_ROOT
+  assert_grep "$(fdir "$root")/skills-inventory.txt" '^# skills-inventory.txt unavailable' "the sentinel line is written"
+  rm -rf "$root"
+}
+
 test_skill_fields_dropped_without_a_sidecar(){
   echo "# a session with no stats sidecar keeps no worker-written skill fields (Codex review of 0129fc0)"
   local root; root=$(setup_env); mk_session "$root" sess1
@@ -4474,6 +4509,8 @@ test_unrepresentable_characters_are_refused
 test_failing_enumerator_aborts_the_run
 test_one_failed_root_does_not_kill_the_night
 test_enabled_adapters_resolves_once
+test_l2_gets_the_skills_inventory_and_per_source_facts
+test_unavailable_skills_inventory_says_so
 test_skill_fields_dropped_without_a_sidecar
 test_skill_fields_dropped_with_a_partial_sidecar
 test_skill_fields_are_enforced_from_the_sidecar

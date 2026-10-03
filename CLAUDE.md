@@ -321,6 +321,10 @@ A report written from a run that could not reach the model looks complete, ships
 
 `skills_invoked`, `skills_invoked_count`, `skills_invoked_counts` and `skills_authored` come from the stats sidecar (`session-stats.sh` for claude: a `Skill` tool call or a `<command-name>` slash line is an invocation, a Write or Edit of a `SKILL.md` is authoring). After L1 the runner overwrites those four fields in every findings JSON from the sidecar. A sidecar that is missing, unreadable or lacks any of the four means the skills were not measured, so all four are removed from that findings JSON and counted in `skills_unmeasured`. A worker's own list was how a report concluded a 200-skill inventory never fires.
 
+### What L2 is told about each harness (`skills-inventory.txt`, `adapter-facts.md`)
+
+Both files are written by `write_adapter_inputs` just before L2, from the adapters. `skills-inventory.txt` unions every enabled adapter's `skills-inventory` output (name, optionally a TAB and a description), deduplicated by name; if every adapter fails it says `# skills-inventory.txt unavailable` and PROMPT.md tells L2 not to file coverage gaps from it, because an empty list would claim no skills are installed. `adapter-facts.md` holds one `## Source: <name>` section per harness that had sessions tonight, taken from the source map captured before any model ran: a remedy for a finding has to be a surface that exists for the harness the evidence came from. A new harness adds an `adapters/<name>/facts.md` and a `skills-inventory` subcommand, not code in `run.sh`.
+
 ## Running / rerunning a date
 
 ```
