@@ -10,6 +10,27 @@
 #   MOCK_MODE=good           write findings (L1) / report (L2). [default]
 #   MOCK_MODE=l1_incomplete  L1 writes nothing (simulates a worker that exits
 #                            without producing JSON); L2 still writes its report.
+#   MOCK_MODE=l1_silent      L1 writes nothing and prints nothing, exit 0: the real
+#                            2026-09-13 omp death. l1_incomplete still prints "done".
+#   MOCK_MODE=l1_malformed   L1 writes a non-empty file that is not JSON.
+#   MOCK_MODE=l1_wrongtype   L1 writes {"findings":"oops"}: present, but not an array.
+#   MOCK_MODE=l1_noisy_fail  L1 writes nothing, says why on stdout, exits 7.
+#   MOCK_MODE=l1_context_overflow  L1 writes nothing, prints a context-size refusal,
+#                            and exits 7. This must count as size even though the
+#                            diagnostic also starts with "provider error".
+#   MOCK_MODE=l1_provider_refusal  L1 writes nothing, prints the Z.ai insufficient-balance
+#                            429 (code 1113) and exits 1. The network is fine, so this
+#                            must defer the date like an outage and never leave a stub.
+#   MOCK_MODE=l1_provider_402  Same, in DeepSeek's wording: "Error code: 402 - Insufficient
+#                            Balance". classify_failure has no 402 pattern, so this proves
+#                            the permanent check does not depend on it.
+#   MOCK_MODE=l1_exit124     L1 exits 124 immediately; MOCK_MODE=l1_exit137 SIGKILLs
+#                            itself. Both are what GNU timeout returns for a real
+#                            deadline, so they prove classification is not by rc alone.
+#   MOCK_MODE=l1_hang        L1 never exits and leaves a child behind, which is the
+#                            shape of the 2026-08-19/08-22 wedge. Pair with a small
+#                            AUTODREAM_L1_TIMEOUT and MOCK_HANG_PIDS=<file> to assert
+#                            the child was reaped with the process group.
 #   MOCK_MODE=l2_fail        L2 writes no report and exits 1 (simulates the
 #                            aggregator dying to a mid-run sleep). L1 is unaffected.
 #                            Pair with AUTODREAM_L2_ATTEMPTS=1 so the test doesn't
@@ -62,6 +83,47 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
   write_badproject() { printf '{"session_path":"%s","project":"WRONG-PROJECT","turn_count":2,"tool_call_count":0,"tools_used":[],"skills_invoked":[],"models_used":[],"notable_initiatives":[],"findings":[]}' "$sess" > "$out"; }
   case "$mode" in
     l1_incomplete) : ;;                 # never write — simulates a worker that exits empty
+    l1_silent) exit 0 ;;                # never write AND print nothing: the 2026-09-13 omp
+                                        # death (first-turn recall), exit 0 with empty stdout.
+                                        # l1_incomplete still echoes "done" below, so it is not.
+    l1_malformed)                       # non-empty output that is not a findings JSON.
+      # The runner used to accept any non-empty file as success, delete both diagnostics,
+      # and hand this to L2 on the final round.
+      printf 'this is not json at all\n' > "$out"
+      echo done
+      exit 0 ;;
+    l1_wrongtype)                       # .findings present but a STRING, not an array.
+      # jq -e .findings is truthy for this, so it used to pass both the idempotency read
+      # and the outbound validation and reach L2 as a successful result.
+      printf '{"session_path":"x","findings":"oops"}' > "$out"
+      echo done
+      exit 0 ;;
+    l1_noisy_fail)                      # writes nothing, but says WHY on stdout and exits
+      # nonzero. This is the real shape: omp puts its diagnosis on stdout and only
+      # "Working..." on stderr, and run.sh sent stdout to /dev/null, so every failure
+      # arrived looking identical. Pins the exit-code and stdout capture.
+      echo "provider error: 429 rate_limit_exceeded"
+      exit 7 ;;
+    l1_context_overflow)
+      echo "provider error: 400 context_length_exceeded: prompt is too long"
+      exit 7 ;;
+    l1_provider_refusal)
+      echo '429 {"type":"error","error":{"type":"rate_limit_error","code":"1113","message":"[1113][Insufficient balance or no resource package. Please recharge.]"}}'
+      exit 1 ;;
+    l1_provider_402)
+      echo "Error code: 402 - {'error': {'message': 'Insufficient Balance', 'type': 'unknown_error'}}"
+      exit 1 ;;
+    l1_exit124) exit 124 ;;             # intrinsic 124, no deadline involved. GNU timeout
+                                        # propagates a child's own status, so this arrives
+                                        # looking exactly like a timeout; only elapsed tells
+                                        # them apart.
+    l1_exit137) kill -9 $$ ;;           # intrinsic 137, same reasoning
+    l1_hang)                            # never exit, and leave a child behind. The child is
+      # the point: it outlives a kill aimed at this process alone, so a test that
+      # finds it gone proves the timeout signalled the whole process group, which
+      # is what stops the real node_repl/mnemopi_embed orphans from piling up.
+      sleep 600 & printf '%s\n' "$!" >> "${MOCK_HANG_PIDS:-/dev/null}"
+      sleep 600 ;;
     l1_rewrite_source)                  # a hostile worker: points every session at an engine that is not claude
       write_findings
       awk -F'\t' 'BEGIN{OFS="\t"} {print $1, "evil"}' "$(dirname "$out")/sessions-source.txt" > "$(dirname "$out")/sessions-source.txt.new" \
