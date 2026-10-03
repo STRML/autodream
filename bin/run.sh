@@ -1873,6 +1873,51 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
   ' _ {}
 }
 
+# What L2 needs to know about each harness that contributed sessions tonight, and which skills are
+# installed. Both come from the adapters, so adding a harness adds no code here.
+#
+# skills-inventory.txt: one `name<TAB>description` line per active skill (an adapter that knows
+# no description prints the name alone), deduplicated by name across adapters, first wins. If
+# EVERY adapter failed the file says so, and PROMPT.md tells L2 not to file coverage gaps from
+# an unavailable inventory: an empty inventory would claim no skills are installed.
+#
+# adapter-facts.md: each contributing source's facts.md under a heading, so L2 proposes a
+# remedy that exists for that harness (a permissions.allow entry means nothing to omp). Only
+# sources that actually had sessions are included, taken from the map captured before any
+# model ran, never from a file a worker could have rewritten.
+write_adapter_inputs() {
+  local inv="$FINDINGS_DIR/skills-inventory.txt" facts="$FINDINGS_DIR/adapter-facts.md"
+  local srcs src out any_ok=0 body
+  srcs=$(printf '%s\n' "$AUTODREAM_SOURCE_MAP" | awk -F'\t' 'NF >= 2 && !seen[$2]++ { print $2 }')
+  body=""
+  for src in $ENABLED_ADAPTERS; do
+    if out=$(adapter_run "$src" skills-inventory 2>/dev/null); then
+      any_ok=1
+      body="${body}${out}"$'\n'
+    else
+      log "  skills inventory unavailable from the $src adapter"
+    fi
+  done
+  if [ "$any_ok" = "1" ]; then
+    {
+      printf '# skills-inventory.txt — authoritative active on-disk skill list for L2 (adapters: %s)\n' "$(printf '%s' "$ENABLED_ADAPTERS" | tr ' ' ',')"
+      printf '%s' "$body" | awk -F'\t' 'NF && !seen[$1]++'
+    } > "$inv" 2>/dev/null || printf '# skills-inventory.txt unavailable\n' > "$inv"
+  else
+    printf '# skills-inventory.txt unavailable\n' > "$inv"
+  fi
+  : > "$facts" 2>/dev/null || return 0
+  for src in $srcs; do
+    [ -f "$(adapters_root 2>/dev/null)/$src/facts.md" ] || continue
+    {
+      printf '## Source: %s\n\n' "$src"
+      cat "$(adapters_root)/$src/facts.md"
+      printf '\n'
+    } >> "$facts" 2>/dev/null || true
+  done
+  return 0
+}
+
 # Dates in the trailing window whose findings were produced but never assembled into a
 # complete report (#36). Echoes "unassembled|legacy", both comma-separated, either empty.
 #
@@ -2841,6 +2886,9 @@ PY
     [ -n "$XQID_SOURCE" ] || XQID_SOURCE=not_attempted
   fi
   printf 'x_queryid_source: %s\n' "$XQID_SOURCE" >> "$FINDINGS_DIR/run-stats.txt"
+
+  # ---- Skills inventory and per-source facts (written for L2 to read) ----
+  write_adapter_inputs
 
   # ---- Layer 2: opus aggregate, retried until a report lands ----
   # The aggregator call can also die to a mid-run sleep (this is what left exit 1 +
