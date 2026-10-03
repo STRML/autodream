@@ -7,7 +7,8 @@
 # network. Which layer we are is decided by line 1 of the prompt.
 #
 # Env knobs (all optional):
-#   MOCK_MODE=good           write findings (L1) / report (L2). [default]
+#   MOCK_MODE=good           write findings (L1) / print the report on stdout (L2), ending with
+#                            the AUTODREAM_REPORT_END sentinel. [default]
 #   MOCK_MODE=l1_partial_then_stall  exactly ONE session ever succeeds (claimed via an
 #                            atomic mkdir under MOCK_STATE_DIR, which the test must set);
 #                            round 1 recovers something, every later round recovers
@@ -37,7 +38,9 @@
 #                            shape of the 2026-08-19/08-22 wedge. Pair with a small
 #                            AUTODREAM_L1_TIMEOUT and MOCK_HANG_PIDS=<file> to assert
 #                            the child was reaped with the process group.
-#   MOCK_MODE=l2_fail        L2 writes no report and exits 1 (simulates the
+#   MOCK_MODE=l2_partial_marker  L2 prints a COMPLETE-LOOKING report (it carries the
+#                            open-questions marker) but no sentinel, then exits 0.
+#   MOCK_MODE=l2_fail        L2 prints no report and exits 1 (simulates the
 #                            aggregator dying to a mid-run sleep). L1 is unaffected.
 #                            Pair with AUTODREAM_L2_ATTEMPTS=1 so the test doesn't
 #                            sit through the retry loop.
@@ -49,6 +52,9 @@
 #   MOCK_MODE=pins_tamper    as pins, and L2 also appends $MOCK_FORGED_SESSION to sessions.txt,
 #                            sessions-source.txt and a findings JSON, as an injected L2 could.
 #   MOCK_MODE=pins_tamper_l1 the same tampering, done by L1 instead of L2.
+#   MOCK_MODE=pins_unterminated  as pins, but the pin block has no AUTODREAM_PINS_END line.
+#   MOCK_MODE=pins_in_body   the report BODY quotes the pin markers and a pin line; no block after
+#                            the sentinel. Nothing may be stored.
 #   MOCK_CAPTURE_DIR=<dir>   dump each layer's stdin + argv to <dir>/l{1,2}-*.txt
 #                            so tests can assert on the exact prompt framing.
 #   MOCK_CALL_LOG=<file>     append the L1 output path for every invocation of
@@ -187,31 +193,52 @@ else
     printf '%s' "$input" > "$MOCK_CAPTURE_DIR/l2-stdin.txt"
     printf '%s\n' "$@" > "$MOCK_CAPTURE_DIR/l2-args.txt"
   fi
-  rep=$(printf '%s' "$line2" | sed 's/^Write the report to this literal absolute path: //')
+  rep=$(printf '%s' "$line2" | sed 's/^Report destination (literal absolute path): //')
   if [ "$mode" = "l2_fail" ]; then
     echo "mock: aggregator failed" >&2
     exit 1
   fi
   case "$mode" in
-    pins|pins_partial|pins_forged|pins_tamper|pins_tamper_l1) writes_pins=1 ;;
+    pins|pins_partial|pins_forged|pins_tamper|pins_tamper_l1|pins_unterminated|pins_in_body) writes_pins=1 ;;
     *) writes_pins=0 ;;
   esac
-  if [ "$writes_pins" = 1 ]; then
-    fdir=$(printf '%s' "$line1" | sed 's/^Findings directory to aggregate (literal absolute path): //')
-    [ "$mode" = "pins_tamper" ] && tamper_worklist "$fdir"
-    printf '{"project":"%s","title":"Mock lesson","body":"Mock evidence and rule.","kind":"correction"}\n' "${MOCK_PIN_PROJECT:-proj-a}" > "$fdir/pins.jsonl"
-  fi
-  # l2_partial: a NON-EMPTY report with no open-questions marker — what a mid-write kill
-  # leaves behind. `-s` cannot tell this from a good report, which is why run.sh checks
-  # for the marker instead.
+  fdir=$(printf '%s' "$line1" | sed 's/^Findings directory to aggregate (literal absolute path): //')
+  [ "$mode" = "pins_tamper" ] && tamper_worklist "$fdir"
+  pin_line=$(printf '{"project":"%s","title":"Mock lesson","body":"Mock evidence and rule.","kind":"correction"}' "${MOCK_PIN_PROJECT:-proj-a}")
+  # l2_partial: a NON-EMPTY capture with no AUTODREAM_REPORT_END sentinel, what a mid-output
+  # kill leaves behind. run.sh keeps it as a degraded report and retries; `-s` cannot tell it
+  # from a good report, which is why delivery is gated on the sentinel.
   if [ "$mode" = "l2_partial" ] || [ "$mode" = "pins_partial" ]; then
-    printf '# Autodream — mock\n\n## Top patterns\n\n1. truncated mid-w' > "$rep"
-    echo "mock: partial write"
+    printf '# Autodream — mock\n\n## Top patterns\n\n1. truncated mid-w'
+    [ "$writes_pins" = 1 ] && printf '\nAUTODREAM_PINS_BEGIN\n%s\nAUTODREAM_PINS_END\n' "$pin_line"
+    echo "mock: partial stdout, no sentinel" >&2
     exit 0
   fi
-  # The open-questions marker is part of the real contract (PROMPT.md mandates it) and
-  # run.sh now treats its absence as a truncated write, so the mock must emit it too.
-  printf '# Autodream — mock\n\nmock aggregate report\n\n<!-- autodream:open-questions=0 -->\n' > "$rep"
+  # l2_partial_marker: an otherwise complete report (it carries the open-questions marker
+  # report_complete() checks) but no sentinel. The marker alone must not count as delivery.
+  if [ "$mode" = "l2_partial_marker" ]; then
+    printf '# Autodream — mock\n\nmock aggregate report\n\n<!-- autodream:open-questions=0 -->\n'
+    exit 0
+  fi
+  # pins_in_body: the report itself quotes the pin markers. Only the block after the LAST
+  # sentinel may count, so this must store nothing.
+  if [ "$mode" = "pins_in_body" ]; then
+    printf '# Autodream — mock\n\nquoted:\nAUTODREAM_PINS_BEGIN\n%s\nAUTODREAM_PINS_END\n\n<!-- autodream:open-questions=0 -->\nAUTODREAM_REPORT_END\nreport: %s\n' "$pin_line" "$rep"
+    exit 0
+  fi
+  # The open-questions marker is part of the real contract (PROMPT.md mandates it) and run.sh
+  # treats its absence as a truncated report, so the good path emits it too, on stdout, ending
+  # with the sentinel the runner strips, then the optional pin block.
+  printf '# Autodream — mock\n\nmock aggregate report\n\n<!-- autodream:open-questions=0 -->\n'
+  echo "AUTODREAM_REPORT_END"
+  if [ "$writes_pins" = 1 ]; then
+    if [ "$mode" = "pins_unterminated" ]; then
+      printf 'AUTODREAM_PINS_BEGIN\n%s\n' "$pin_line"
+    else
+      printf 'AUTODREAM_PINS_BEGIN\n%s\nAUTODREAM_PINS_END\n' "$pin_line"
+    fi
+  fi
   echo "report: $rep"
-  echo "mock: 1 session reviewed, 0 findings, 0 edits"
+  echo "sessions reviewed: 1"
+  echo "findings: 0"
 fi

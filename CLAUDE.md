@@ -329,6 +329,24 @@ Both files are written by `write_adapter_inputs` just before L2, from the adapte
 
 `prompts/SESSION_TRIAGE.md` is the single L1 prompt. A harness whose transcripts differ from the claude shape it describes adds `adapters/<name>/triage.md`; the worker appends it for that adapter's sessions only (it says it wins where it disagrees), so a claude worker receives exactly SESSION_TRIAGE.md plus the stats block. `adapters/omp/triage.md` carries omp's record shapes, the harness-tool rule, the retired `compliance_markers`, `is_advisor` and `skills_authored`, and the restricted schema for advisor sidecars (no `sandbox_friction`, `tool_loop` or `missed_skill`). PROMPT.md excludes advisor turns from the session-turn total and files any advisor tool-behavior finding under Triage failures.
 
+### L2 is read-only: the report and the pins arrive on stdout (omp-autodream 2026-09-13, plan 2026-09-15)
+
+L2 holds Glob and Read. It cannot write the report, `pins.jsonl`, or anything under the findings directory, so the runner is the only writer and an injected L2 cannot rewrite `sessions-source.txt` or forge a pin. The grammar of its stdout:
+
+```
+<report body>
+AUTODREAM_REPORT_END
+AUTODREAM_PINS_BEGIN        (optional)
+{"project":...,"title":...,"body":...,"kind":...}     one JSON object per line
+AUTODREAM_PINS_END
+report: <path>
+<3-line summary>
+```
+
+- Delivery means a capture with the sentinel. The report is everything before the LAST sentinel; a capture without one is kept as a degraded report, moved aside as `.partial-<epoch>`, and retried. The open-questions marker alone is not proof of completion.
+- Pins come only from a closed block after the last sentinel, so a report that quotes the markers cannot inject one, and a block cut off before its END line proposes nothing. `apply-pins.sh` still validates every line against the authorization list fixed before any model ran.
+- The run exits 0 only for a validated delivery (sentinel plus marker); otherwise the aggregator's own non-zero status, else 1, so the launchd job sees a night that produced nothing.
+
 ## Running / rerunning a date
 
 ```

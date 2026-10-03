@@ -8,10 +8,10 @@ The first two lines give you two **literal absolute paths**:
 
 ```
 Findings directory to aggregate (literal absolute path): /absolute/path/to/findings/YYYY-MM-DD
-Write the report to this literal absolute path: /absolute/path/to/dreams/YYYY-MM-DD.md
+Report destination (literal absolute path): /absolute/path/to/dreams/YYYY-MM-DD.md
 ```
 
-These are plain text values, **not shell variables**. Use them as literal paths with the Glob, Read, and Write tools; never write `$FINDINGS_DIR`, `$REPORT_PATH`, or any `$NAME` in a Bash command — no such environment variable is set, so it expands to nothing and the command fails.
+These are plain text values, **not shell variables**. Use them as literal paths with the Glob and Read tools; never write `$FINDINGS_DIR`, `$REPORT_PATH`, or any `$NAME` in a Bash command — no such environment variable is set, so it expands to nothing and the command fails.
 
 All other inputs you need (treat `<findings-dir>` below as the literal path from line 1):
 
@@ -19,7 +19,7 @@ All other inputs you need (treat `<findings-dir>` below as the literal path from
 - **Per-session stderr**: `<findings-dir>/*.json.err` if a triage call failed — note in your report.
 - **Installed skills**: read `<findings-dir>/skills-inventory.txt`, the authoritative active on-disk skill list the runner wrote from every enabled harness (one line per skill: the name, then a TAB and its description when the harness knows one; deduplicated by name). Skills compiled into a harness binary have no file and are NOT in the inventory: reconcile those against the built-in skills your own session skill surface exposes (a built-in you can see is active; never flag it missing). Project-local `.claude/skills` are not enumerable from the runner, so absence from the inventory is not absence. If the file starts with a line `# skills-inventory.txt unavailable`, the runner could not enumerate skills: fall back to globbing the roots you can reach and do NOT file coverage-gap or triage-failure conclusions from it. Use this to validate `missed_skill` findings (skill exists? trigger matches?).
 - **Per-source facts**: `<findings-dir>/adapter-facts.md`, one `## Source: <name>` section per harness that contributed sessions tonight, saying which remedy surfaces exist for that harness. Propose a remedy for a finding using the surfaces of the source its evidence came from.
-- **Legacy memory files**: `~/.claude/projects/*/memory/MEMORY.md` (one per project, may not exist). Read-only context. New memory goes through `pins.jsonl` (see Memory pins), never into these files.
+- **Legacy memory files**: `~/.claude/projects/*/memory/MEMORY.md` (one per project, may not exist). Read-only context. New memory goes through the pin block (see Memory pins), never into these files.
 - **Global rules**: `~/.claude/CLAUDE.md`, `~/.claude/rules/*.md`, and the lazy-loaded
   playbooks in `~/.claude/docs/guardrails/*.md` (dev-workflow, advisor-mode,
   failure-discipline, pr-workflow, claude-code-lore). The guardrails moved out of `rules/`
@@ -35,7 +35,7 @@ All other inputs you need (treat `<findings-dir>` below as the literal path from
 
 ### 1. The daily report
 
-Write to `REPORT_PATH`. Overwrite if present (idempotent re-runs are fine). Required sections:
+Print the complete report on standard output. The runner writes it to `REPORT_PATH` (idempotent re-runs are fine); you have no Write tool. Required sections:
 
 ```markdown
 # Autodream — <yesterday's date>
@@ -163,14 +163,14 @@ For findings with `confidence: high` AND `count >= 2` AND `severity: high`, you 
 
 Still read the field, for the one thing it proved good at: **compliance detection.** When a session was given an explicit instruction and the transcript shows it wasn't followed, that is a `compliance_failure` — report it as such, citing the instruction. This is the routing that surfaced "`verify-spec-against-code` not invoked by verifier subagents despite an explicit brief instruction", and it only works because the field records what was asked. The field is also legitimate colour for Per-project notes. If an instruction is already recorded in the relevant `MEMORY.md` or `~/.claude/CLAUDE.md` and was ignored, that is likewise a `compliance_failure`, not a memory candidate.
 
-- Write every pin to `<findings-dir>/pins.jsonl` in one Write call, one JSON object per line and nothing else in the file. Skip the file when there are no pins.
+- Print every pin in one block after the report sentinel: a line `AUTODREAM_PINS_BEGIN`, one JSON object per line, then a line `AUTODREAM_PINS_END`. Print no block when there are no pins. The runner writes `pins.jsonl` from it; only the block after the last sentinel counts, and a block without its END line is dropped whole.
   `{"project":"-Users-x-repo","title":"One-line lesson","body":"Evidence and rule","kind":"correction"}`
 - `project` is the exact `project` value of a findings JSON in this directory. The runner refuses any other value, and it stores the memory in that project's own Mnemopi bank.
 - `title` is one line of at most 150 characters that states the lesson. `body` holds the rule and its quoted evidence, at most 4000 characters.
 - `kind` is `correction` (the usual one for autodream signal), `preference`, `fact`, or `decision`.
 - Never edit a legacy `MEMORY.md` file.
 - In the report, mark each pattern you wrote a pin for "Pin proposed: <title>". Never say a pin is stored and never claim a memory id. The runner applies pins after you exit, can still refuse one (a project it did not authorize, no usable working directory, a failed store), and records what happened in `pins-result.txt`.
-- Never mark a pin proposed unless its line is in the `pins.jsonl` you just wrote. A past report cited a pin that was never written.
+- Never mark a pin proposed unless its line is in the pin block you print. A past report cited a pin that was never written.
 
 ### 3. Anything you may NOT edit
 
@@ -186,9 +186,10 @@ Still read the field, for the one thing it proved good at: **compliance detectio
    **Advisor sidecars.** A finding with `"is_advisor": true` came from an OMP advisor sidecar: a reviewer model tailing a primary session, paired 1:1 with a separately triaged parent transcript in the same session dir. Count these as sessions, but **exclude their `turn_count` from the reported session-turn total** and say so in the activity snapshot (advisors carried 73% of the 2026-08-19 turn count and 0% of its tool calls; an unqualified total is meaningless). Their tool-behavior findings are suppressed at L1, so any `sandbox_friction`, `tool_loop` or `missed_skill` that still arrives from one is an L1 rule violation: file it under Triage failures rather than ranking it as a pattern. Content findings from advisors rank normally, but attribute them to the parent session's project, and never let an advisor finding and its parent's finding both count toward the same pattern's session count. When no finding carries `is_advisor`, ignore this paragraph.
 3. Read `<findings-dir>/skills-inventory.txt` (authoritative active skills) and `<findings-dir>/adapter-facts.md`; reconcile built-in skills from your session skill surface.
 4. Read `<findings-dir>/changelog-window.md` (Upstream changes) and `<findings-dir>/run-stats.txt` (Autodream self-audit) if present.
-5. For each high-confidence high-severity recurring finding, add a pin to `<findings-dir>/pins.jsonl` (see Memory pins). Write this file BEFORE the report: a report that is cut off before its last line is retried, but a complete report is never revisited, so pins written after it can be lost while the report says they exist.
-6. Write the report to the literal report path from line 2.
-7. Print: `report: <report-path>` (the literal path from line 2) then a 3-line summary (sessions reviewed, findings, pins proposed), then exit.
+5. Decide the pins first (see Memory pins): each high-confidence high-severity recurring finding may get one. The report must name only pins you are about to print.
+6. Print the complete report to stdout, then a line containing exactly `AUTODREAM_REPORT_END`. A report cut off before that line is retried whole, and so are its pins: nothing before the sentinel is stored.
+7. If there are pins, print `AUTODREAM_PINS_BEGIN`, one JSON object per line, then `AUTODREAM_PINS_END`.
+8. Print one line: `report: <report-path>` (the literal path from line 2), then a 3-line summary (sessions reviewed, findings, pins proposed), then exit.
 
 ## Style
 
