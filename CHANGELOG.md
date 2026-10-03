@@ -2,6 +2,11 @@
 
 All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
+## 2026-10-02
+
+### Added
+- **`mods/autodream-band`, an optional Claude Code mod for the morning report.** A band above the prompt appears when the newest report is a day or two old, not yet triaged, and has open questions or a medium/high pattern, with Triage / View / Dismiss buttons; `/dream` opens the report's top patterns and open questions in a pane. Triage (or `/dream triage`) runs `review.sh` as a fresh session in a cmux split beside the current one, falling back to a cmux workspace and then to an in-session walk-through (`/dream here`). The band hides once the report carries a `## Triage decisions` section. The mod reads the same `DREAMS_DIR`, `AUTODREAM_DIR` and `CMUX_BIN` variables as `review.sh`, with the same defaults. Nothing under `bin/`, `prompts/` or `install.sh` changed; the mod only reads what `PROMPT.md` already makes Layer 2 emit (the title, `## Top patterns` with `**Severity**`, `## Open questions` and its count marker). Load it with `claude --plugin-dir mods/autodream-band`; see `mods/autodream-band/README.md`.
+
 ## 2026-09-15
 
 ### Changed
