@@ -36,7 +36,10 @@ printf 'notes-path\n'
 INSTALL="$SANDBOX/install1/autodream"
 mkdir -p "$INSTALL"
 : > "$INSTALL/config"
-AUTODREAM_DIR="$INSTALL" bash "$WRITER" "env-routed note" >/dev/null 2>&1
+mkdir -p "$SANDBOX/fakehome"
+# HOME points at the sandbox so the legacy-path row below can fail: with the real HOME it would
+# be checking a directory nothing in this test could ever write to.
+HOME="$SANDBOX/fakehome" AUTODREAM_DIR="$INSTALL" bash "$WRITER" "env-routed note" >/dev/null 2>&1
 if [ -s "$INSTALL/notes.md" ] && grep -q "env-routed note" "$INSTALL/notes.md"; then
   ok "AUTODREAM_DIR from the environment routes the note there"
 else
@@ -86,16 +89,6 @@ if [ -s "$INSTALL3/notes.md" ] && grep -q "seam note" "$INSTALL3/notes.md"; then
   ok "the note landed in the install dir both halves resolve to"
 else
   nope "the note landed in the install dir both halves resolve to" "missing from $INSTALL3/notes.md"
-fi
-
-# --- no hardcoded legacy path outside the documented fallback ----------------
-# The legacy path may still appear in the marker-less fallback and in the warning
-# that announces it. What must never come back is NOTES itself being assigned it:
-# that is the exact line that made the writer and the reader disagree.
-if grep -q 'NOTES=.*HOME/\.claude/autodream' "$WRITER"; then
-  nope "NOTES is not assigned the legacy path directly" "$(grep -n 'NOTES=' "$WRITER" | head -1)"
-else
-  ok "NOTES is not assigned the legacy path directly"
 fi
 
 printf '\npassed: %d   failed: %d\n' "$PASS" "$FAIL"

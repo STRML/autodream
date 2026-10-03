@@ -3,7 +3,7 @@
 #
 # WHY THIS EXISTS
 #
-# `autodream-note.sh` appends to ~/.claude/autodream/notes.md, which only works from a
+# `autodream-note.sh` appends to $AUTODREAM_DIR/notes.md, which only works from a
 # terminal on this Mac. Notes worth leaving for the nightly run mostly occur away from
 # the terminal — reading on a phone, mid-meeting, in bed. An Obsidian vault folder syncs
 # to the phone and takes a note from anything that can write a file (Obsidian mobile,
