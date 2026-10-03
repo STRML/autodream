@@ -147,3 +147,8 @@ Not a commit but part of the work: omp-autodream #16 (advisor sidecar schema, op
 
 - Plan 3: pure-stdout `PROMPT.md`, sentinel grammar tests.
 - Plan 4: `tests/replay.sh`, cut the live nightly over (`~/.omp/agent/autodream` currently symlinks into omp-autodream), rename to `STRML/autodream`, archive omp-autodream and `autodream-merge` with pointers. Not started, and not to be started without Sam: it touches the live install.
+
+## Progress (updated after each merged PR)
+
+- Merged: PR 1 (omp adapter, https://github.com/STRML/cc-autodream/pull/81), launchd label (#82), changelogs (#83), overlap (#84), review cmux (#85, #88), decisions (#86), engine seam (#87, #89), failure classification and evidence (#90), notes path (#91), bounded workers, warmup, breaker (#92), outage and provider-refusal deferral (https://github.com/STRML/cc-autodream/pull/93).
+- Next: omp per-session dispatch behind `AUTODREAM_ADAPTERS` (stats, normalize, substantive filter), then the advisor schema and unified `SESSION_TRIAGE.md`, `facts.md` into the L2 prompt, skills inventory, and the review LaunchAgent. Then Plan 3 and the Plan 4 prep (replay, dry-run install, runbook).

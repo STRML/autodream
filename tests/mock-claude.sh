@@ -102,6 +102,9 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
   out=$(printf '%s' "$line2" | sed 's/^Write your findings JSON to this literal absolute path: //')
   sess=$(printf '%s' "$line1" | sed 's/^Session transcript to analyze (literal absolute path): //')
   [ -n "${MOCK_CALL_LOG:-}" ] && printf '%s\n' "$out" >> "$MOCK_CALL_LOG"
+  # What the worker was pointed at, so a test can tell the normalized copy from the raw tree.
+  [ -n "${MOCK_CAPTURE_DIR:-}" ] && [ -r "$sess" ] && cp "$sess" "$MOCK_CAPTURE_DIR/l1-read-$(basename "$out" .json).txt"
+  [ -n "${MOCK_CAPTURE_DIR:-}" ] && printf '%s\n' "$@" > "$MOCK_CAPTURE_DIR/l1-args-$(basename "$out" .json).txt"
   write_findings() { printf '{"session_path":"x","project":"proj-a","turn_count":2,"tool_call_count":0,"tools_used":[],"skills_invoked":[],"models_used":[],"notable_initiatives":[],"underlying_goal":null,"outcome":"fully_achieved","satisfaction_signals":{"happy":0,"satisfied":1,"dissatisfied":0,"frustrated":0},"instructions_given":["always run tests after edits"],"findings":[]}' > "$out"; }
   # Emit a real session_path but a deliberately WRONG project (what nondeterministic
   # haiku does), so run.sh's path-based normalization pass has something to correct.
