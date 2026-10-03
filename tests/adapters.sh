@@ -156,5 +156,30 @@ rm -f "$(_adapter_reject_broken_marker)"
 
 # shellcheck disable=SC2086
 rm -rf $TMPROOTS
+echo "# adapter_l1_model: per-adapter override, then the generic one, then the manifest default"
+l1counts=$(mktemp "${TMPDIR:-/tmp}/l1model.XXXXXX")
+(
+  export ADAPTERS_ROOT="$REPO/adapters"
+  . "$REPO/bin/adapters.sh"
+  unset AUTODREAM_L1_MODEL AUTODREAM_L1_MODEL_CLAUDE AUTODREAM_L1_MODEL_OMP
+  assert_eq "$(adapter_l1_model claude)" "claude-haiku-4-5" "the manifest default"
+  assert_eq "$(adapter_l1_model omp)" "deepseek/deepseek-flash" "each adapter has its own default"
+  AUTODREAM_L1_MODEL=generic/model
+  assert_eq "$(adapter_l1_model claude)" "generic/model" "the generic override applies to every adapter"
+  AUTODREAM_L1_MODEL_OMP=neuralwatt/glm-5.3-flash
+  assert_eq "$(adapter_l1_model omp)" "neuralwatt/glm-5.3-flash" "the per-adapter override beats the generic one"
+  assert_eq "$(adapter_l1_model claude)" "generic/model" "and leaves the other adapter on the generic one"
+  assert_eq "$(AUTODREAM_L1_MODEL= AUTODREAM_L1_MODEL_OMP= adapter_l1_model omp)" "deepseek/deepseek-flash" "an empty override is not an override"
+  adapter_l1_model ../evil >/dev/null 2>&1; assert_eq "$?" "1" "an unsafe name resolves nothing"
+  unset AUTODREAM_L1_MODEL AUTODREAM_L1_MODEL_OMP
+  adapter_l1_model nonesuch >/dev/null 2>&1; assert_eq "$?" "1" "an adapter with no manifest and no override resolves nothing"
+  printf '%s %s\n' "$pass" "$fail" > "$l1counts"
+)
+# A missing counts file means the subshell died before reporting, which is a failure, not a
+# pass: the assertions inside it never reached the totals.
+if read -r _p _f < "$l1counts" 2>/dev/null; then pass=$_p; fail=$_f
+else no "adapter_l1_model assertions did not report their counts"; fi
+trash "$l1counts" 2>/dev/null
+
 printf '\npassed: %s   failed: %s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

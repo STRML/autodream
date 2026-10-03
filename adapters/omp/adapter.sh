@@ -17,6 +17,21 @@ set -u
 ADIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BIN=$(cd -P "$ADIR/../../bin" && pwd)
 
+# Which omp runs. An explicit OMP_BIN wins, for pinning a build; then PATH; then the places
+# omp installs to, because a launchd job has a minimal PATH. On 2026-08-25 a 17.3.7-versus-
+# 18.0.4 split between PATH and the hard-coded default cost half of every L1 round to
+# provider 400s, and nothing in the log said which omp ran.
+omp_bin() {
+  local c
+  if [ -n "${OMP_BIN:-}" ]; then printf '%s' "$OMP_BIN"; return 0; fi
+  c=$(command -v omp 2>/dev/null || true)
+  if [ -n "$c" ]; then printf '%s' "$c"; return 0; fi
+  for c in "$HOME/.local/bin/omp" "$HOME/.bun/bin/omp" /opt/homebrew/bin/omp /usr/local/bin/omp; do
+    if [ -x "$c" ]; then printf '%s' "$c"; return 0; fi
+  done
+  printf '%s' omp
+}
+
 cmd="${1:-}"
 [ "$#" -gt 0 ] && shift
 
@@ -75,6 +90,34 @@ case "$cmd" in
     # ours", because that is the answer a real user session gets.
     [ -r "$1" ] || exit 3
     exec "$BIN/prune-self-sessions.sh" --is-self "$1"
+    ;;
+
+  engine-bin) # -> the omp this adapter runs: an absolute path, or the bare name when none was found
+    printf '%s\n' "$(omp_bin)"
+    ;;
+
+  l1-argv) # $1=model -> NUL-delimited argv for one L1 worker; the prompt arrives on stdin
+    [ "$#" -ge 1 ] && [ -n "$1" ] || exit 2
+    # The invocation omp-autodream runs today, so a night on the unified runner is the same
+    # worker. Three of the flags are load-bearing and each cost a night to learn:
+    #   --config <overlay>   turns off the advisor, local provider probes (a sleeping Mac made
+    #                        them take 3.6s each) and first-turn mnemopi recall, which made
+    #                        headless workers exit 0 with empty stdout before any model call.
+    #   --tools=Read,Write   read the transcript, write the findings JSON, nothing else.
+    #   --no-session         leave no transcript, so the next night does not triage this one.
+    printf '%s\0' "$(omp_bin)" \
+      --allow-home \
+      -p \
+      --approval-mode yolo \
+      --no-session \
+      --config "${NO_ADVISOR_CFG:-$ADIR/l1-no-advisor.yml}" \
+      --model "$1" \
+      --tools=Read,Write \
+      --append-system-prompt 'Headless triage worker. Read the session transcript and write exactly one findings JSON object, via the Write tool, to the literal output path given on line 2 of the prompt. Those paths are literal strings, not shell variables — never $-expand them. Print only the literal word done and exit.'
+    ;;
+
+  l1-env) # -> KEY=VALUE lines the engine needs in its environment: none for omp
+    :
     ;;
 
   skills-inventory)

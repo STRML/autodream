@@ -156,6 +156,36 @@ case "$cmd" in
     exec "$BIN/prune-self-sessions.sh" --is-self "$1"
     ;;
 
+  engine-bin) # -> the absolute path of the engine this adapter runs
+    # CLAUDE_BIN, the same variable run.sh has always honored, defaulting to where the
+    # installer puts it. Printed even when absent: the runner decides what absence means.
+    printf '%s\n' "${CLAUDE_BIN:-$HOME/.local/bin/claude}"
+    ;;
+
+  l1-argv) # $1=model -> NUL-delimited argv for one L1 worker; the prompt arrives on stdin
+    [ "$#" -ge 1 ] && [ -n "$1" ] || exit 2
+    # Byte for byte the invocation run.sh hard-coded before the engine moved behind the
+    # adapter: tests/adapter-claude.sh pins it against that literal text, so a change here
+    # that alters what the nightly runs has to say so. NO shell expansion of the paths in
+    # the system prompt, hence the escaped dollar sign in the text.
+    printf '%s\0' "${CLAUDE_BIN:-$HOME/.local/bin/claude}" \
+      --print \
+      --permission-mode bypassPermissions \
+      --model "$1" \
+      --no-session-persistence \
+      --tools Read Write \
+      --disable-slash-commands \
+      --strict-mcp-config \
+      --settings '{"disableAllHooks":true}' \
+      --append-system-prompt 'Headless triage worker. Read the session transcript and write exactly one findings JSON object, via the Write tool, to the literal output path given on line 2 of the prompt. Those paths are literal strings, not shell variables — never $-expand them. Print only the literal word done and exit.'
+    ;;
+
+  l1-env) # -> KEY=VALUE lines the engine needs in its environment
+    # Lean-query env: keep subscription auth, strip per-call bloat (no CLAUDE.md auto-load,
+    # no telemetry or error reporting). See CLAUDE.md, "How claude is invoked".
+    printf '%s\n' CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1
+    ;;
+
   skills-inventory)
     for d in "$HOME"/.claude/skills/*/ "$HOME"/.claude/plugins/*/skills/*/; do
       [ -f "$d/SKILL.md" ] || continue

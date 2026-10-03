@@ -240,6 +240,28 @@ run_contract(){ # $1=adapter name
     ok "[$name] enumerate returns the session path verbatim"
   else no "[$name] enumerate returns the session path verbatim"; fi
 
+  # --- engine-bin, l1-argv, l1-env: how the runner starts this adapter's L1 worker ---
+  # l1-argv is NUL-delimited, like enumerate, because an argument can hold anything but a NUL
+  # (the system prompt holds a quote, a dollar sign and an em dash). The first element is the
+  # engine; the prompt is not in it, it arrives on stdin.
+  local eb argv_n
+  eb=$("$A" engine-bin 2>/dev/null); rc=$?
+  if [ "$rc" -eq 0 ] && [ -n "$eb" ]; then ok "[$name] engine-bin prints a path"; else no "[$name] engine-bin prints a path"; fi
+  "$A" l1-argv "model/x" > "$tmp/argv" 2>/dev/null; rc=$?
+  assert_eq "$rc" "0" "[$name] l1-argv exits 0 for a model"
+  argv_n=$(tr -cd '\0' < "$tmp/argv" | wc -c | tr -d ' ')
+  if [ "${argv_n:-0}" -ge 2 ]; then ok "[$name] l1-argv is NUL-delimited with an engine and arguments"
+  else no "[$name] l1-argv is NUL-delimited with an engine and arguments (got $argv_n NULs)"; fi
+  if tr '\0' '\n' < "$tmp/argv" | grep -qxF "model/x"; then ok "[$name] l1-argv carries the model it was given"
+  else no "[$name] l1-argv carries the model it was given"; fi
+  assert_eq "$(tr '\0' '\n' < "$tmp/argv" | head -1)" "$eb" "[$name] l1-argv starts with the engine-bin"
+  "$A" l1-argv >/dev/null 2>&1; assert_eq "$?" "2" "[$name] l1-argv with no model is a usage error"
+  "$A" l1-argv "" >/dev/null 2>&1; assert_eq "$?" "2" "[$name] l1-argv with an empty model is a usage error"
+  "$A" l1-env > "$tmp/env" 2>/dev/null; rc=$?
+  assert_eq "$rc" "0" "[$name] l1-env exits 0"
+  if grep -qvE '^[A-Za-z_][A-Za-z0-9_]*=' "$tmp/env"; then no "[$name] l1-env lines are all KEY=VALUE"
+  else ok "[$name] l1-env lines are all KEY=VALUE"; fi
+
   # --- unknown subcommand ---
   "$A" not-a-subcommand >/dev/null 2>&1
   assert_eq "$?" "2" "[$name] an unknown subcommand exits 2"

@@ -100,6 +100,15 @@ case "$cmd" in
     [ -r "$1" ] || exit 3
     exit 1
     ;;
+  engine-bin) printf '%s\n' true ;;
+
+  l1-argv) # $1=model
+    [ "$#" -ge 1 ] && [ -n "$1" ] || exit 2
+    printf '%s\0' true "$1"
+    ;;
+
+  l1-env) : ;;
+
   skills-inventory) printf 'fixture-skill\n' ;;
 
   *)

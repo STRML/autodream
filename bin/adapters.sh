@@ -195,3 +195,22 @@ adapter_run() { # $1=name $2=subcommand [args...]
   root=$(adapters_root); shift
   "$root/$name/adapter.sh" "$@"
 }
+
+# The model one adapter's L1 workers run, resolved in a fixed order so a host can pin one
+# harness without touching another:
+#   AUTODREAM_L1_MODEL_<NAME>   that adapter only (the name upper-cased, dashes to underscores)
+#   AUTODREAM_L1_MODEL          every adapter
+#   the manifest's l1_model     the adapter's own default
+# A model id belongs to one engine (neuralwatt/glm-5.3-flash means nothing to claude), which
+# is why the per-adapter form exists: the generic one is an override for hosts with one engine.
+adapter_l1_model() { # $1=name -> model on stdout, exit 1 when none resolves
+  local name="$1" up var v
+  _adapter_name_safe "$name" || return 1
+  up=$(printf '%s' "$name" | tr 'a-z-' 'A-Z_')
+  var="AUTODREAM_L1_MODEL_$up"
+  v="${!var:-}"
+  [ -n "$v" ] || v="${AUTODREAM_L1_MODEL:-}"
+  [ -n "$v" ] || v=$(adapter_manifest_get "$name" '.l1_model' 2>/dev/null) || v=""
+  [ -n "$v" ] || return 1
+  printf '%s' "$v"
+}
