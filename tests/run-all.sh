@@ -1950,6 +1950,25 @@ test_overlap_triple(){
   rm -rf "$root"
 }
 
+test_overlap_drops_advisor_sidecars(){
+  echo "# overlap: an advisor sidecar inherits its parent's turns, so it is not paired (omp-autodream #16)"
+  local d; d=$(mktemp -d "${TMPDIR:-/tmp}/ccad.XXXXXX")
+  # parent@10:00 and other@10:10 genuinely overlap. The advisor carries the parent's timestamps,
+  # so counting it pairs it with both: 3 sessions and 3 events instead of 2 and 1.
+  printf '{"user_turn_timestamps":[1784541600]}\n' > "$d/parent.stats.json"
+  printf '{"user_turn_timestamps":[1784542200]}\n' > "$d/other.stats.json"
+  printf '{"is_advisor":true,"user_turn_timestamps":[1784541600]}\n' > "$d/adv.stats.json"
+  local out; out=$(bash "$REPO/bin/overlap-stats.sh" "$d")
+  assert_eq "$(printf '%s' "$out" | jq -r .sessions_with_overlap)" "2" "the advisor is not counted as an overlapping session"
+  assert_eq "$(printf '%s' "$out" | jq -r .overlap_events)" "1" "and forms no pairs"
+  # A sidecar with no is_advisor field (every Claude sidecar, and every pre-2026-08-21 one) is kept:
+  # the parent and other fixtures above omit it. An explicit false is kept too, which this adds.
+  printf '{"is_advisor":false,"user_turn_timestamps":[1784541900]}\n' > "$d/third.stats.json"
+  out=$(bash "$REPO/bin/overlap-stats.sh" "$d")
+  assert_eq "$(printf '%s' "$out" | jq -r .sessions_with_overlap)" "3" "is_advisor false is kept"
+  rm -rf "$d"
+}
+
 test_overlap_none(){
   echo "# overlap (#14): sessions more than 30 minutes apart -> both stats 0, keys still present"
   local root; root=$(setup_env)
@@ -2081,6 +2100,7 @@ test_runner_dirty_ignores_untracked
 test_overlap_pair
 test_overlap_triple
 test_overlap_none
+test_overlap_drops_advisor_sidecars
 test_overlap_not_measured_missing_bin
 test_overlap_not_measured_empty_output
 test_overlap_not_measured_malformed_output
