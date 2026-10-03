@@ -227,7 +227,7 @@ run_dream(){ # $1=root ; inherits MOCK_MODE/MOCK_CAPTURE_DIR/FANOUT + changelog 
   AUTODREAM_CONSUME_DATE="${AUTODREAM_CONSUME_DATE:-$DATE}" \
   AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS="${AUTODREAM_L1_ROUNDS:-2}" \
   PROJECTS_DIR="$1/projects" AUTODREAM_DIR="$1/autodream" DREAMS_DIR="$1/dreams" \
-  bash "$RUN" "$DATE" > "$1/run.out" 2>&1
+  /bin/bash "$RUN" "$DATE" > "$1/run.out" 2>&1
   # An unattended run logs to its file rather than through a pipe, so that stdout carries
   # only a pointer now. Fold the real log in, so every assertion below still reads what a
   # nightly run actually recorded rather than what a tty run happens to echo.
@@ -241,7 +241,7 @@ run_dream_broken_pipe(){ # $1=root
   AUTODREAM_CONSUME_DATE="$DATE" \
   AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=2 \
   PROJECTS_DIR="$1/projects" AUTODREAM_DIR="$1/autodream" DREAMS_DIR="$1/dreams" \
-  bash "$RUN" "$DATE" 2>&1 | true
+  /bin/bash "$RUN" "$DATE" 2>&1 | true
   cat "$1/autodream/logs/run-$DATE.log" > "$1/run.out" 2>/dev/null || true
 }
 fdir(){ printf '%s' "$1/autodream/findings/$DATE"; }   # findings dir for a root
@@ -1063,7 +1063,7 @@ test_failure_class_found_through_an_old_install(){
   AUTODREAM_CONFIG="$root/autodream/config" AUTODREAM_CONSUME_DATE="$DATE" \
   AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=2 \
   PROJECTS_DIR="$root/projects" AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
-  bash "$root/autodream/run.sh" "$DATE" > "$root/run.out" 2>&1
+  /bin/bash "$root/autodream/run.sh" "$DATE" > "$root/run.out" 2>&1
   assert_nogrep "$root/run.out" 'required failure classifier not found' "run.sh finds the classifier next to the file its link points at"
   assert_file "$root/dreams/$DATE.md" "and the run still produces a report"
   local gate_out; gate_out=$(AUTODREAM_DIR="$root/autodream" bash "$root/autodream/oversized-gate.sh" "$(fdir "$root")" 2>&1)
@@ -1530,6 +1530,27 @@ test_a_flaky_worker_does_not_trip_the_breaker(){
   assert_grep   "$(fdir "$root")/run-stats.txt" 'l1_breaker_fired: no' "the breaker stays out of a recovering run"
   assert_nogrep "$root/run.out" 'L1 circuit breaker'                   "and never announces itself"
   assert_file   "$root/dreams/$DATE.md"                                "the run produces its report"
+  rm -rf "$root"
+}
+
+test_warmup_works_for_an_adapter_with_no_environment(){
+  echo "# an adapter whose l1-env prints nothing still gets its warmup (an empty array under set -u on bash 3.2)"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  # The claude adapter with an EMPTY l1-env, which is what omp's is. run.sh runs under /bin/bash 3.2
+  # with set -u, where expanding an empty array is an unbound-variable error: the warmup pipeline
+  # aborted before timeout started, recorded l1_warmup: failed and blamed the provider.
+  local ad="$root/adapters"; cp -R "$REPO/adapters" "$ad"
+  python3 - "$ad/claude/adapter.sh" <<'PY'
+import sys,re
+p=sys.argv[1]
+t=open(p).read()
+t=re.sub(r"  l1-env\) .*?\n    ;;\n","  l1-env) : ;;\n",t,count=1,flags=re.S)
+open(p,"w").write(t)
+PY
+  [ -z "$("$ad/claude/adapter.sh" l1-env)" ] || { no "precondition: the test adapter has an empty l1-env"; rm -rf "$root"; return; }
+  export ADAPTERS_ROOT="$ad"; run_dream "$root"; unset ADAPTERS_ROOT
+  assert_grep "$(fdir "$root")/run-stats.txt" 'l1_warmup: ok' "the warmup ran and succeeded"
+  assert_nogrep "$root/run.out" 'warmup FAILED' "and no failure was logged"
   rm -rf "$root"
 }
 
@@ -2124,7 +2145,7 @@ test_runner_provenance_through_symlink(){
   AUTODREAM_CONFIG="$root/autodream/config" AUTODREAM_CONSUME_DATE="$DATE" \
   AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=2 \
   PROJECTS_DIR="$root/projects" AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
-  bash "$root/autodream/run.sh" "$DATE" > "$root/run.out" 2>&1
+  /bin/bash "$root/autodream/run.sh" "$DATE" > "$root/run.out" 2>&1
   local head; head=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null)
   local stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" "runner_commit: $head" "a symlinked runner reports the checkout it points at"
@@ -2152,7 +2173,7 @@ test_runner_provenance_relative_symlink(){
   AUTODREAM_CONFIG="$root/autodream/config" AUTODREAM_CONSUME_DATE="$DATE" \
   AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=2 \
   PROJECTS_DIR="$root/projects" AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
-  bash "$root/autodream/run.sh" "$DATE" > "$root/run.out" 2>&1
+  /bin/bash "$root/autodream/run.sh" "$DATE" > "$root/run.out" 2>&1
   local head; head=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null)
   assert_grep "$(fdir "$root")/run-stats.txt" "runner_commit: $head" "a relative link target resolves against the link's own dir"
   assert_file "$root/dreams/$DATE.md" "the run still produced a report"
@@ -2178,7 +2199,7 @@ test_runner_provenance_unresolvable_chain(){
   AUTODREAM_CONFIG="$root/autodream/config" AUTODREAM_CONSUME_DATE="$DATE" \
   AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=2 \
   PROJECTS_DIR="$root/projects" AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
-  bash "$root/autodream/run.sh" "$DATE" > "$root/run.out" 2>&1
+  /bin/bash "$root/autodream/run.sh" "$DATE" > "$root/run.out" 2>&1
   local stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'runner_commit: unknown' "an unresolved chain degrades instead of guessing"
   assert_grep "$stats" 'runner_dirty: no'       "dirty is not claimed when the commit is unknown"
@@ -2672,6 +2693,7 @@ test_warmup_runs_before_the_fanout
 test_breaker_needs_two_barren_rounds_not_one
 test_a_deterministic_failure_trips_the_breaker
 test_a_flaky_worker_does_not_trip_the_breaker
+test_warmup_works_for_an_adapter_with_no_environment
 test_changelog
 test_changelog_multi_source
 test_changelog_refuses_foreign_cache_dir
@@ -2769,7 +2791,7 @@ run_dream_autodetect(){ # $1=root — like run_dream but with HOME inside the sa
   AUTODREAM_CONSUME_DATE="$DATE" \
   AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=2 \
   HOME="$1/home" AUTODREAM_DIR="$1/autodream" DREAMS_DIR="$1/dreams" \
-  bash "$RUN" "$DATE" > "$1/run.out" 2>&1
+  /bin/bash "$RUN" "$DATE" > "$1/run.out" 2>&1
   cat "$1/autodream/logs/run-$DATE.log" >> "$1/run.out" 2>/dev/null || true
 }
 setup_env_altroot(){ # like setup_env, but with HOME inside the sandbox (no $1/projects); echoes the root
@@ -2978,7 +3000,7 @@ test_preflight_stops_a_run_missing_a_dependency(){
   # An empty PATH dir hides shasum, whose absence silently empties the artifact
   # hash so every session in the night targets one findings filename.
   local empty; empty=$(mktemp -d "${TMPDIR:-/tmp}/nopath.XXXXXX")
-  PATH="$empty:/usr/bin:/bin" AUTODREAM_CHANGELOG=0 CLAUDE_BIN="$MOCK"     AUTODREAM_CONFIG="$root/autodream/config" AUTODREAM_CONSUME_DATE="$DATE"     AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1     AUTODREAM_PREFLIGHT_FORCE_MISSING=shasum     PROJECTS_DIR="$root/projects" AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams"     bash "$RUN" "$DATE" > "$root/run.out" 2>&1 || true
+  PATH="$empty:/usr/bin:/bin" AUTODREAM_CHANGELOG=0 CLAUDE_BIN="$MOCK"     AUTODREAM_CONFIG="$root/autodream/config" AUTODREAM_CONSUME_DATE="$DATE"     AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1     AUTODREAM_PREFLIGHT_FORCE_MISSING=shasum     PROJECTS_DIR="$root/projects" AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams"     /bin/bash "$RUN" "$DATE" > "$root/run.out" 2>&1 || true
   cat "$root/autodream/logs/run-$DATE.log" >> "$root/run.out" 2>/dev/null || true
   assert_no_file "$(fdir "$root")/sessions.txt" "nothing was enumerated"
   assert_grep "$root/run.out" 'preflight' "the log says preflight stopped it"
@@ -3093,7 +3115,7 @@ test_failing_enumerator_aborts_the_run(){
     AUTODREAM_CONFIG="$root/autodream/config" AUTODREAM_CONSUME_DATE="$DATE" \
     AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1 \
     PROJECTS_DIR="$root/projects" AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
-    bash "$RUN" "$DATE" > "$root/run.out" 2>&1
+    /bin/bash "$RUN" "$DATE" > "$root/run.out" 2>&1
   local rc=$?
   cat "$root/autodream/logs/run-$DATE.log" >> "$root/run.out" 2>/dev/null || true
   # This used to assert the run ABORTS. It no longer does, and the change was
@@ -3135,7 +3157,7 @@ test_one_failed_root_does_not_kill_the_night(){
     AUTODREAM_CONFIG="$root/autodream/config" AUTODREAM_CONSUME_DATE="$DATE" \
     AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1 \
     AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
-    bash "$RUN" "$DATE" > "$root/run.out" 2>&1
+    /bin/bash "$RUN" "$DATE" > "$root/run.out" 2>&1
   local rc=$?
   chmod 755 "$bad/locked"
   cat "$root/autodream/logs/run-$DATE.log" >> "$root/run.out" 2>/dev/null || true
@@ -3200,7 +3222,7 @@ test_partial_enumeration_keeps_what_it_read(){
     AUTODREAM_CONFIG="$root/autodream/config" AUTODREAM_CONSUME_DATE="$DATE" \
     AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1 \
     PROJECTS_DIR="$root/projects" AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
-    bash "$RUN" "$DATE" > "$root/run.out" 2>&1
+    /bin/bash "$RUN" "$DATE" > "$root/run.out" 2>&1
   local rc=$?
   cat "$root/autodream/logs/run-$DATE.log" >> "$root/run.out" 2>/dev/null || true
   local d; d=$(fdir "$root")
@@ -3226,7 +3248,7 @@ test_all_roots_unavailable_fails(){
     AUTODREAM_CONFIG="$root/autodream/config" AUTODREAM_CONSUME_DATE="$DATE" \
     AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1 \
     AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
-    bash "$RUN" "$DATE" > "$root/run.out" 2>&1
+    /bin/bash "$RUN" "$DATE" > "$root/run.out" 2>&1
   local rc=$?
   cat "$root/autodream/logs/run-$DATE.log" >> "$root/run.out" 2>/dev/null || true
   assert_eq "$rc" "1" "the run fails when no configured root is reachable"
@@ -3252,7 +3274,7 @@ test_fresh_host_with_no_store_is_not_a_failure(){
     AUTODREAM_CONFIG="$T/autodream/config" AUTODREAM_CONSUME_DATE="$DATE" \
     AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1 \
     AUTODREAM_DIR="$T/autodream" DREAMS_DIR="$T/dreams" \
-    bash "$RUN" "$DATE" > "$T/run.out" 2>&1
+    /bin/bash "$RUN" "$DATE" > "$T/run.out" 2>&1
   local rc=$?
   cat "$T/autodream/logs/run-$DATE.log" >> "$T/run.out" 2>/dev/null || true
   assert_eq "$rc" "0" "a fresh host exits 0"
@@ -3278,7 +3300,7 @@ test_fatal_does_not_clobber_a_complete_date(){
   env "${env_common[@]}" CLAUDE_BIN="$MOCK" AUTODREAM_CONFIG="$root/autodream/config" \
     AUTODREAM_CONSUME_DATE="$DATE" PROJECTS_DIR="$root/projects" \
     AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
-    bash "$RUN" "$DATE" > "$root/run1.out" 2>&1
+    /bin/bash "$RUN" "$DATE" > "$root/run1.out" 2>&1
   assert_nonempty "$root/dreams/$DATE.md" "the first run produced a report"
   local before; before=$(wc -l < "$root/autodream/findings/$DATE/run-stats.txt" | tr -d ' ')
   printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s/notify-args.txt"\n' "$root" \
@@ -3289,7 +3311,7 @@ test_fatal_does_not_clobber_a_complete_date(){
     AUTODREAM_CONSUME_DATE="$DATE" AUTODREAM_FORCE=1 \
     SESSION_ROOTS="$root/gone-a:$root/gone-b" \
     AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
-    bash "$RUN" "$DATE" > "$root/run2.out" 2>&1
+    /bin/bash "$RUN" "$DATE" > "$root/run2.out" 2>&1
   local after; after=$(wc -l < "$root/autodream/findings/$DATE/run-stats.txt" | tr -d ' ')
   assert_eq "$after" "$before" "the completed date's run-stats.txt is untouched"
   assert_grep "$root/autodream/findings/$DATE/run-stats.txt" '^sessions_triaged: [1-9]' \
@@ -3334,7 +3356,7 @@ test_no_usable_adapter_leaves_a_trace(){
     AUTODREAM_CONFIG="$root/autodream/config" AUTODREAM_CONSUME_DATE="$DATE" \
     AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1 \
     PROJECTS_DIR="$root/projects" AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
-    bash "$RUN" "$DATE" > "$root/run.out" 2>&1
+    /bin/bash "$RUN" "$DATE" > "$root/run.out" 2>&1
   local rc=$?
   assert_eq "$rc" "1" "the run still refuses to scan"
   assert_grep "$root/autodream/findings/$DATE/run-stats.txt" '^fatal: ' \
@@ -3394,7 +3416,7 @@ test_enabled_adapters_resolves_once(){
     AUTODREAM_CONFIG="$root/autodream/config" AUTODREAM_CONSUME_DATE="$DATE" \
     AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1 \
     PROJECTS_DIR="$root/projects" AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
-    bash "$RUN" "$DATE" > "$root/run.out" 2>&1
+    /bin/bash "$RUN" "$DATE" > "$root/run.out" 2>&1
   cat "$root/autodream/logs/run-$DATE.log" >> "$root/run.out" 2>/dev/null || true
   local n
   n=$(grep -c "is enabled but per-session dispatch" "$root/run.out" 2>/dev/null || true)
@@ -3463,7 +3485,7 @@ run_dream_collision(){ # $1=root
     AUTODREAM_CONFIG="$1/autodream/config" AUTODREAM_CONSUME_DATE="$DATE" \
     AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1 \
     PROJECTS_DIR="$1/projects" AUTODREAM_DIR="$1/autodream" DREAMS_DIR="$1/dreams" \
-    bash "$RUN" "$DATE" > "$1/run.out" 2>&1
+    /bin/bash "$RUN" "$DATE" > "$1/run.out" 2>&1
   local rc=$?
   cat "$1/autodream/logs/run-$DATE.log" >> "$1/run.out" 2>/dev/null || true
   return $rc
@@ -4157,7 +4179,7 @@ test_question_streaks_state_lives_with_the_install(){
     AUTODREAM_CONFIG="$root/autodream/config" AUTODREAM_CONSUME_DATE="$DATE" \
     AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_NOTIFY_DRYRUN=1 \
     PROJECTS_DIR="$root/projects" DREAMS_DIR="$root/dreams" \
-    bash "$root/autodream/run.sh" "$DATE" > "$root/run.out" 2>&1
+    /bin/bash "$root/autodream/run.sh" "$DATE" > "$root/run.out" 2>&1
   assert_file "$root/dreams/$DATE.md" "precondition: the empty night wrote its report"
   assert_eq "$(streak_rows "$root/autodream/question-streaks.tsv")" "0" "the empty night clears the install's streak store"
 

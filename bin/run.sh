@@ -1652,7 +1652,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
         cat "$FINDINGS_DIR/$hash.stats.json"
         printf "\n\`\`\`\n"
       fi
-    } | "${l1wrap[@]}" env "${envs[@]}" "${argv[@]}" > "$outlog" 2> "$errlog"
+    } | ${l1wrap[@]+"${l1wrap[@]}"} env ${envs[@]+"${envs[@]}"} "${argv[@]}" > "$outlog" 2> "$errlog"
     # Index 1 is the engine side of the pipe; index 0 is the brace group.
     l1rc="${PIPESTATUS[1]}"
     l1elapsed=$(($(date +%s) - l1start))
@@ -2165,7 +2165,10 @@ EOF
         continue
       fi
       _werr="$FINDINGS_DIR/l1-warmup.$_wsrc.err"
-      _wout=$(printf 'ping\n' | env "${_wenv[@]}" "$TIMEOUT_BIN" -k 10 "$AUTODREAM_L1_WARMUP_TIMEOUT" "${_wargv[@]}" 2>"$_werr")
+      # ${arr[@]+"${arr[@]}"}, not "${arr[@]}": run.sh runs under /bin/bash 3.2 with set -u, where
+      # expanding an EMPTY array is an unbound-variable error. omp's l1-env prints nothing, so the
+      # pipeline aborted before timeout started and the warmup recorded failed, blaming a healthy provider.
+      _wout=$(printf 'ping\n' | env ${_wenv[@]+"${_wenv[@]}"} "$TIMEOUT_BIN" -k 10 "$AUTODREAM_L1_WARMUP_TIMEOUT" "${_wargv[@]}" 2>"$_werr")
       _wrc=$?
       # The warmup asks for the single word ok. Anything else on stdout with exit 0 is a
       # diagnostic, not a reply, and must not read as a healthy provider. Case and surrounding
