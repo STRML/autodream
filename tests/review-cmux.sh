@@ -330,7 +330,10 @@ test_headless_missing_cmux_fails(){
 test_interactive_missing_cmux_falls_back_inline(){
   local root; root=$(setup_env)
   mk_report "$root" 2020-01-02 "$REPORT_OPEN"
-  # A pseudo-TTY keeps `[ -t 0 ]` true even with a redirected command.
+  # A pseudo-TTY keeps `[ -t 0 ]` true even with a redirected command. tests/with-pty.py, not BSD
+  # `script`: script calls tcgetattr on its own stdin and fails with "Operation not supported on
+  # socket" whenever the suite is started from something that hands it a socket, which is what
+  # made this test fail only when run through run-all.sh.
   local rc=0
   env AUTODREAM_DIR="$root/autodream" \
       AUTODREAM_CONFIG="$root/nonexistent-config" \
@@ -339,7 +342,7 @@ test_interactive_missing_cmux_falls_back_inline(){
       DREAMS_DIR="$root/dreams" \
       PATH="$root:/usr/bin:/bin" \
       CLAUDE_BIN="$root/cmux-mock.sh" \
-      script -q /dev/null bash "$REVIEW" 2020-01-02 > "$root/out" 2>&1 || rc=$?
+      python3 "$HERE/with-pty.py" bash "$REVIEW" 2020-01-02 > "$root/out" 2>&1 || rc=$?
   assert_eq "$rc" 0 "interactive run with missing cmux exits 0 (inline fallback)"
   assert_grep "$root/out" 'falling back to inline' "interactive run falls back to inline"
 }
