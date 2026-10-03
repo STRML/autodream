@@ -10,6 +10,16 @@
 #   MOCK_MODE=good           write findings (L1) / report (L2). [default]
 #   MOCK_MODE=l1_incomplete  L1 writes nothing (simulates a worker that exits
 #                            without producing JSON); L2 still writes its report.
+#   MOCK_MODE=l1_silent      L1 writes nothing and prints nothing, exit 0: the real
+#                            2026-09-13 omp death. l1_incomplete still prints "done".
+#   MOCK_MODE=l1_malformed   L1 writes a non-empty file that is not JSON.
+#   MOCK_MODE=l1_wrongtype   L1 writes {"findings":"oops"}: present, but not an array.
+#   MOCK_MODE=l1_noisy_fail  L1 writes nothing, says why on stdout, exits 7.
+#   MOCK_MODE=l1_context_overflow  L1 writes nothing, prints a context-size refusal,
+#                            and exits 7. This must count as size even though the
+#                            diagnostic also starts with "provider error".
+#   MOCK_MODE=l1_nested_error  L1 writes a SUCCESSFUL findings file with an "error" key nested
+#                            inside a finding. Only a top-level error key marks a failed triage.
 #   MOCK_MODE=l2_fail        L2 writes no report and exits 1 (simulates the
 #                            aggregator dying to a mid-run sleep). L1 is unaffected.
 #                            Pair with AUTODREAM_L2_ATTEMPTS=1 so the test doesn't
@@ -62,10 +72,37 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
   write_badproject() { printf '{"session_path":"%s","project":"WRONG-PROJECT","turn_count":2,"tool_call_count":0,"tools_used":[],"skills_invoked":[],"models_used":[],"notable_initiatives":[],"findings":[]}' "$sess" > "$out"; }
   case "$mode" in
     l1_incomplete) : ;;                 # never write — simulates a worker that exits empty
+    l1_silent) exit 0 ;;                # never write AND print nothing: the 2026-09-13 omp
+                                        # death (first-turn recall), exit 0 with empty stdout.
+                                        # l1_incomplete still echoes "done" below, so it is not.
+    l1_malformed)                       # non-empty output that is not a findings JSON.
+      # The runner used to accept any non-empty file as success, delete both diagnostics,
+      # and hand this to L2 on the final round.
+      printf 'this is not json at all\n' > "$out"
+      echo done
+      exit 0 ;;
+    l1_wrongtype)                       # .findings present but a STRING, not an array.
+      # jq -e .findings is truthy for this, so it used to pass both the idempotency read
+      # and the outbound validation and reach L2 as a successful result.
+      printf '{"session_path":"x","findings":"oops"}' > "$out"
+      echo done
+      exit 0 ;;
+    l1_noisy_fail)                      # writes nothing, but says WHY on stdout and exits
+      # nonzero. This is the real shape: omp puts its diagnosis on stdout and only
+      # "Working..." on stderr, and run.sh sent stdout to /dev/null, so every failure
+      # arrived looking identical. Pins the exit-code and stdout capture.
+      echo "provider error: 429 rate_limit_exceeded"
+      exit 7 ;;
+    l1_context_overflow)
+      echo "provider error: 400 context_length_exceeded: prompt is too long"
+      exit 7 ;;
     l1_rewrite_source)                  # a hostile worker: points every session at an engine that is not claude
       write_findings
       awk -F'\t' 'BEGIN{OFS="\t"} {print $1, "evil"}' "$(dirname "$out")/sessions-source.txt" > "$(dirname "$out")/sessions-source.txt.new" \
         && mv "$(dirname "$out")/sessions-source.txt.new" "$(dirname "$out")/sessions-source.txt" ;;
+    l1_nested_error)                    # a real finding that happens to carry an error key
+      printf '{"session_path":"x","project":"proj-a","findings":[{"category":"tool_loop","error":"ENOENT while reading a file","severity":"low"}]}' > "$out"
+      echo done ;;
     l1_badproject|pins|pins_partial|pins_tamper) write_badproject ;;  # wrong project + real path — exercises normalization
     pins_tamper_l1) write_badproject; tamper_worklist "$(dirname "$out")" ;;
     pins_forged)                        # session_path names a session this worker was never given
