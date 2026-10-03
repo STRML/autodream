@@ -65,6 +65,21 @@ assert_grep "$SANDBOX/install.out" "cmux not found" "the install says why"
 grep -qE "^bootout .*-review$" "$CALLS" && ok "any previously provisioned review job is booted out" || no "any previously provisioned review job is booted out"
 assert_eq "$(grep -c '^bootstrap' "$CALLS")" "1" "only the nightly agent is bootstrapped"
 
+echo "# a stale review plist is removed, not just unloaded, when cmux disappears"
+new_sandbox
+run_install >/dev/null; P=$(review_plist)
+[ -n "$P" ] && ok "precondition: the first install wrote the review plist" || no "precondition: the first install wrote the review plist"
+rm -f "$SANDBOX/bin/cmux"
+run_install >/dev/null
+[ -z "$(review_plist)" ] && ok "the second install, without cmux, removed it" || no "the second install, without cmux, removed it"
+
+echo "# a config CLAUDE_BIN that points at nothing falls back to the claude on PATH"
+new_sandbox
+mkdir -p "$SANDBOX/target/autodream"; printf 'CLAUDE_BIN="/stale/no-such-claude"\n' > "$SANDBOX/target/autodream/config"
+run_install >/dev/null; P=$(review_plist)
+[ -n "$P" ] && ok "the review agent is still provisioned" || no "the review agent is still provisioned"
+assert_grep "$P" "<key>CLAUDE_BIN</key><string>$SANDBOX/bin/claude</string>" "and pins the usable claude"
+
 echo "# a path with & is XML-escaped so the plist still lints"
 new_sandbox
 mkdir -p "$SANDBOX/a&b"; mv "$SANDBOX/bin/cmux" "$SANDBOX/a&b/cmux"

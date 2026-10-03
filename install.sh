@@ -306,10 +306,14 @@ PLIST
   # PATH-discovered binary. Require a regular executable FILE (-f AND -x): a
   # directory passes -x but `exec <dir>` fails immediately, confirming a dead
   # workspace (auditor 7.2/7.3).
-  local eff_claude="${cfg_claude:-$CLAUDE_BIN_ABS}"
-  if [ -z "$eff_claude" ] || [ ! -f "$eff_claude" ] || [ ! -x "$eff_claude" ]; then
-    echo "  ! claude binary not usable ($eff_claude); review LaunchAgent will abort every trigger"
-    eff_claude=""
+  # The first USABLE candidate, config first: a config value that points at nothing must not
+  # disable the agent while a working claude is on PATH.
+  local eff_claude="" cand
+  for cand in "$cfg_claude" "$CLAUDE_BIN_ABS"; do
+    if [ -n "$cand" ] && [ -f "$cand" ] && [ -x "$cand" ]; then eff_claude="$cand"; break; fi
+  done
+  if [ -z "$eff_claude" ]; then
+    echo "  ! claude binary not usable (config [${cfg_claude}], PATH [${CLAUDE_BIN_ABS}]); review LaunchAgent will abort every trigger"
   fi
   CLAUDE_BIN_XML=$(printf '%s' "$eff_claude" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
   local review_label="${label}-review"
@@ -323,6 +327,9 @@ PLIST
     # a machine that had cmux/claude at install and lost one would otherwise
     # keep the stale scheduled service firing a failing trigger forever.
     launchctl bootout "$domain/$review_label" 2>/dev/null || true
+    # Unloading is not enough: launchd loads every plist in LaunchAgents at login, so a plist left
+    # on disk brings the failing job back at the next login.
+    rm -f "$la_dir/$review_label.plist"
     return 0
   fi
   local review_plist="$la_dir/$review_label.plist"
