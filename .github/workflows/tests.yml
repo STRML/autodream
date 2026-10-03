@@ -65,6 +65,8 @@ jobs:
         run: bash tests/notes-path.sh
       - name: install-review-agent
         run: bash tests/install-review-agent.sh
+      - name: install-dry-run
+        run: bash tests/install-dry-run.sh
 
       - name: x-bookmarks
         run: bash tests/x-bookmarks.sh
