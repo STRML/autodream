@@ -1077,6 +1077,8 @@ changelog_sources() {
     "Codex" "https://github.com/openai/codex.git" "CHANGELOG.md" "$AUTODREAM_DIR/cache/codex"
   printf '%s|%s|%s|%s\n' \
     "OMP" "https://github.com/STRML/oh-my-pi.git" "packages/coding-agent/CHANGELOG.md" "$AUTODREAM_DIR/cache/oh-my-pi"
+  # STRML/oh-my-pi is the fork this host runs, which is rebased onto upstream on every sync, so
+  # it carries the build in use. To watch upstream itself set AUTODREAM_CHANGELOG_SOURCES.
 }
 
 # True only when $1's parent directory resolves, symlinks and all, inside $AUTODREAM_DIR/cache.
@@ -1102,7 +1104,14 @@ changelog_one() { # $1=name $2=remote $3=path $4=repo $5=out
   local head_sha n added
 
   if [ -d "$repo/.git" ]; then
-    if ! ( cd "$repo" && git pull --ff-only --quiet ) 2>>"$RUN_LOG"; then
+    # A cache this install owns is disposable, so it follows the remote even when the remote
+    # was rewritten. `pull --ff-only` failed forever once a fork was rebased and force-pushed
+    # (the OMP fork is, on every upstream sync): the section then read "pull failed" every
+    # night. A repo outside the cache keeps the conservative pull, because resetting it would
+    # discard someone's work.
+    local sync='git pull --ff-only --quiet'
+    if cache_owns "$repo"; then sync='git fetch --quiet origin && git reset --hard --quiet FETCH_HEAD'; fi
+    if ! ( cd "$repo" && eval "$sync" ) 2>>"$RUN_LOG"; then
       log "changelog[$name]: pull failed"
       printf '## %s\n\nGit pull failed; %s changes not checked this run.\n\n' "$name" "$name" >> "$out"
       return 0
@@ -1137,7 +1146,9 @@ changelog_one() { # $1=name $2=remote $3=path $4=repo $5=out
       return 0
     fi
     if [ "${#cloneargs[@]}" -gt 0 ]; then
-      ( cd "$repo" && git sparse-checkout set "$path" ) >/dev/null 2>>"$RUN_LOG" || true
+      # A file, not a directory: cone mode refuses a file path outright (the old call failed and
+      # `|| true` hid it), so ask for non-cone mode and anchor the pattern with a leading slash.
+      ( cd "$repo" && git sparse-checkout set --no-cone "/$path" ) >/dev/null 2>>"$RUN_LOG" || true
     fi
   fi
 
@@ -1150,12 +1161,15 @@ changelog_one() { # $1=name $2=remote $3=path $4=repo $5=out
   # Dedupe non-blank lines, keep every blank. A changelog edited across many commits in one
   # window re-inserts the same lines repeatedly: OMP's log moved 119 commits for 2026-09-08
   # through 09-10 and emitted `## [18.1.16]` three times with its bullets under each. Blank
-  # lines are exempt or the markdown collapses into one paragraph.
+  # lines are exempt or the markdown collapses into one paragraph. The key is the line AND the
+  # release header it sits under: `### Fixed` and `- Fixed a crash` repeat across releases, and
+  # a window-wide key dropped them from the second release, leaving its bullets under no
+  # heading or the first release's (review of https://github.com/STRML/cc-autodream/pull/83).
   added=$( cd "$repo" && git log -p --reverse \
              --since="$TARGET_DATE 00:00:00" --until="$NEXT_DATE 00:00:00" \
              -- "$path" 2>/dev/null \
            | grep '^+' | grep -v '^+++' | sed 's/^+//' \
-           | awk '!NF || !seen[$0]++' )
+           | awk '!NF { print; next } /^## \[/ { hdr = $0 } !seen[hdr SUBSEP $0]++' )
   # Cap per source. One chatty monorepo must not crowd the other harnesses out of L2's
   # context; the cap is per section, so a quiet source is never truncated for a loud one.
   local cap="${AUTODREAM_CHANGELOG_MAX_LINES:-400}" total

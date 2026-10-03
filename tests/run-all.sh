@@ -957,6 +957,63 @@ test_changelog_single_remote_suppresses_defaults(){
   rm -rf "$root"
 }
 
+test_changelog_dedupe_is_scoped_to_the_release(){
+  echo "# changelog dedupe: repeated headings and bullets across releases survive, a re-inserted release does not"
+  command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local up="$root/upstream"; mkdir -p "$up"
+  ( cd "$up" && git init -q && git config user.email t@t.invalid && git config user.name t
+    printf '# Changelog\n\n## [2.0.0]\n\n### Fixed\n\n- Fixed a crash\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T10:00:00" GIT_COMMITTER_DATE="2020-01-02T10:00:00" git commit -q -m 'chore: 2.0.0'
+    # Edited again in the same window: 2.0.0 is re-inserted by the second diff.
+    printf '# Changelog\n\n## [2.0.0]\n\n### Fixed\n\n- Fixed a crash\n- Fixed a hang\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T11:00:00" GIT_COMMITTER_DATE="2020-01-02T11:00:00" git commit -q -m 'chore: 2.0.0 again'
+    # A second release with the SAME heading and the SAME bullet text.
+    printf '# Changelog\n\n## [2.1.0]\n\n### Fixed\n\n- Fixed a crash\n\n## [2.0.0]\n\n### Fixed\n\n- Fixed a crash\n- Fixed a hang\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T12:00:00" GIT_COMMITTER_DATE="2020-01-02T12:00:00" git commit -q -m 'chore: 2.1.0' )
+  export AUTODREAM_CHANGELOG=1 CHANGELOG_REMOTE="$up" CLAUDE_CODE_REPO="$root/cache/cc"
+  run_dream "$root"
+  unset AUTODREAM_CHANGELOG CHANGELOG_REMOTE CLAUDE_CODE_REPO
+  local cw="$(fdir "$root")/changelog-window.md"
+  assert_eq "$(grep -c '^## \[2.0.0\]' "$cw")" "1" "a release re-inserted by later commits is listed once"
+  assert_eq "$(grep -c '^- Fixed a crash$' "$cw")" "2" "the same bullet under two different releases is kept under both"
+  assert_eq "$(grep -c '^### Fixed$' "$cw")" "2" "the same sub-heading under two different releases is kept under both"
+  assert_eq "$(grep -c '^- Fixed a hang$' "$cw")" "1" "a bullet repeated within one release is listed once"
+  rm -rf "$root"
+}
+
+test_changelog_survives_a_force_pushed_remote(){
+  echo "# a cache follows a remote whose history was rewritten (the OMP fork is rebased on every sync)"
+  command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
+  # The cache must live inside the install's cache dir: only a cache this install owns follows a
+  # rewritten remote, and a repo outside it keeps the conservative pull.
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local up="$root/upstream"; mkdir -p "$up"
+  ( cd "$up" && git init -q && git config user.email t@t.invalid && git config user.name t
+    printf '# Changelog\n\n## [1.0.0]\n\n- First history\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T10:00:00" GIT_COMMITTER_DATE="2020-01-02T10:00:00" git commit -q -m 'chore: first' )
+  export AUTODREAM_CHANGELOG=1 CHANGELOG_REMOTE="$up" CLAUDE_CODE_REPO="$root/autodream/cache/cc"
+  run_dream "$root"
+  # Rewrite the history: a different root commit on the same branch, so the cache cannot
+  # fast-forward to it.
+  local br; br=$(git -C "$up" symbolic-ref --short HEAD)
+  ( cd "$up" && git checkout -q --orphan rewritten && git rm -q -rf . >/dev/null 2>&1
+    printf '# Changelog\n\n## [1.0.1]\n\n- Rewritten history\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T10:30:00" GIT_COMMITTER_DATE="2020-01-02T10:30:00" git commit -q -m 'chore: rewritten'
+    git branch -q -M "$br" )
+  AUTODREAM_FORCE=1 run_dream "$root"
+  unset AUTODREAM_CHANGELOG CHANGELOG_REMOTE CLAUDE_CODE_REPO
+  local cw="$(fdir "$root")/changelog-window.md"
+  assert_grep   "$cw" 'Rewritten history' "the second run reads the rewritten history"
+  assert_nogrep "$cw" 'pull failed'       "and does not report a failed pull"
+  rm -rf "$root"
+}
+
 test_prune_helper(){
   echo "# prune-self-sessions helper: list / filter / delete"
   local PR="$REPO/bin/prune-self-sessions.sh"
@@ -1827,6 +1884,8 @@ test_changelog
 test_changelog_multi_source
 test_changelog_refuses_foreign_cache_dir
 test_changelog_single_remote_suppresses_defaults
+test_changelog_dedupe_is_scoped_to_the_release
+test_changelog_survives_a_force_pushed_remote
 test_prune_helper
 test_self_session_excluded
 test_skip_empty_sessions
