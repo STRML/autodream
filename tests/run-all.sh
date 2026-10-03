@@ -969,6 +969,180 @@ test_changelog(){
   rm -rf "$root"
 }
 
+test_changelog_multi_source(){
+  echo "# multi-source changelog: per-harness sections, isolated failures, no log leakage"
+  command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
+  local root; root=$(setup_env); mk_session "$root" sess1
+
+  # Two local fixture 'remotes'. The second keeps its changelog at a NESTED path, which is
+  # the OMP shape — a monorepo with no root CHANGELOG — and the reason path is per-source.
+  local a="$root/up-a"; mkdir -p "$a"
+  ( cd "$a" && git init -q && git config user.email t@t.invalid && git config user.name t
+    printf '# Changelog\n\n## 9.9.9\n\n- Alpha in-window\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T12:00:00" GIT_COMMITTER_DATE="2020-01-02T12:00:00" \
+      git commit -q -m 'alpha release' )
+
+  local b="$root/up-b"; mkdir -p "$b/packages/coding-agent"
+  ( cd "$b" && git init -q && git config user.email t@t.invalid && git config user.name t
+    printf '# Changelog\n\n## 8.8.8\n\n- Beta in-window\n' > packages/coding-agent/CHANGELOG.md
+    git add packages/coding-agent/CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T12:00:00" GIT_COMMITTER_DATE="2020-01-02T12:00:00" \
+      git commit -q -m 'beta release' )
+
+  # Third source points at a path that is not a repo: its clone must fail into its own
+  # section without costing the other two theirs.
+  export AUTODREAM_CHANGELOG=1
+  export AUTODREAM_CHANGELOG_SOURCES="Alpha|$a|CHANGELOG.md|$root/cache/a;Beta|$b|packages/coding-agent/CHANGELOG.md|$root/cache/b;Ghost|$root/nope.git|CHANGELOG.md|$root/cache/ghost"
+  run_dream "$root"
+  unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES
+
+  local cw="$(fdir "$root")/changelog-window.md"
+  assert_file   "$cw" "changelog-window.md written"
+  assert_grep   "$cw" '^## Alpha'            "the first harness gets its own section"
+  assert_grep   "$cw" '^## Beta'             "the second harness gets its own section"
+  assert_grep   "$cw" '^## Ghost'            "an unreachable harness still gets a section"
+  assert_grep   "$cw" 'Alpha in-window'      "the first harness's entry is captured"
+  assert_grep   "$cw" 'Beta in-window'       "a nested changelog path is captured"
+  assert_grep   "$cw" 'Git clone failed'     "the unreachable harness reports its failure"
+  # The bug this pins: log() writes to stdout, so building the file inside a redirected
+  # block files the runner's own progress lines as upstream release notes.
+  assert_nogrep "$cw" 'changelog\['          "no runner log lines leak into the report input"
+  assert_nogrep "$cw" 'cloning'              "no clone progress leaks into the report input"
+  rm -rf "$root"
+}
+
+test_changelog_refuses_foreign_cache_dir(){
+  echo "# a configured cache path that is a real non-git directory is never deleted (debate review of e95e2f2)"
+  command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local a="$root/up-a"; mkdir -p "$a"
+  ( cd "$a" && git init -q && git config user.email t@t.invalid && git config user.name t
+    printf '# Changelog\n\n## 9.9.9\n\n- Alpha in-window\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T12:00:00" GIT_COMMITTER_DATE="2020-01-02T12:00:00" \
+      git commit -q -m 'alpha release' )
+  local precious="$root/precious"; mkdir -p "$precious"; printf 'keep me\n' > "$precious/notes.txt"
+
+  # A second foreign dir reached through `..` from inside the cache prefix: it must not
+  # count as a cache path just because the string starts with one.
+  local sneaky="$root/sneaky"; mkdir -p "$sneaky"; printf 'keep me too\n' > "$sneaky/notes.txt"
+  local ad; ad=$(cd "$root/autodream" 2>/dev/null && pwd) || ad="$root/autodream"
+  # The cache dir must exist, or `cache/..` never resolves and rm -rf is a silent no-op
+  # whether or not the guard is there, which is how the first version of this check passed
+  # with the guard removed.
+  mkdir -p "$ad/cache"
+  # A third foreign dir reached through a symlink inside the cache: the path string has no
+  # `..` and starts with the cache prefix, but rm -rf follows the intermediate link
+  # (Codex review of 0129fc0).
+  local linked="$root/linked"; mkdir -p "$linked/old-repo"; printf 'keep me three\n' > "$linked/old-repo/notes.txt"
+  ln -s "$linked" "$ad/cache/link"
+
+  export AUTODREAM_CHANGELOG=1 AUTODREAM_CHANGELOG_MAX_LINES=abc
+  export AUTODREAM_CHANGELOG_SOURCES="Alpha|$a|CHANGELOG.md|$root/cache/a;Typo|$a|CHANGELOG.md|$precious;Dots|$a|CHANGELOG.md|$ad/cache/../../sneaky;Link|$a|CHANGELOG.md|$ad/cache/link/old-repo"
+  run_dream "$root"
+  unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES AUTODREAM_CHANGELOG_MAX_LINES
+
+  local cw="$(fdir "$root")/changelog-window.md"
+  assert_file "$precious/notes.txt"          "the non-git directory and its contents survive"
+  assert_file "$sneaky/notes.txt"            "a path that climbs out of the cache with .. is not treated as the cache"
+  assert_file "$linked/old-repo/notes.txt"   "a path through a symlink inside the cache is not treated as the cache"
+  assert_grep "$cw" 'is a non-empty directory that is not a git clone' "its section says why it was skipped"
+  assert_grep "$cw" 'Alpha in-window'        "the other source is unaffected"
+  assert_grep "$root/run.out" 'AUTODREAM_CHANGELOG_MAX_LINES=.abc. is not a positive integer; using 400' "a non-numeric cap falls back to the default instead of disabling it"
+
+  # Second run reuses the fixture remote $a, so $root is removed only after it.
+  local root2; root2=$(setup_env); mk_session "$root2" sess1
+  export AUTODREAM_CHANGELOG=1 AUTODREAM_CHANGELOG_MAX_LINES=00
+  export AUTODREAM_CHANGELOG_SOURCES="Alpha|$a|CHANGELOG.md|$root2/cache/a"
+  run_dream "$root2"
+  unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES AUTODREAM_CHANGELOG_MAX_LINES
+  assert_grep "$root2/run.out" 'AUTODREAM_CHANGELOG_MAX_LINES=.00. is not a positive integer; using 400' "a zero written as 00 is refused like 0"
+  assert_grep "$(fdir "$root2")/changelog-window.md" 'Alpha in-window' "and the section still carries its content"
+  rm -rf "$root2" "$root"
+}
+
+test_changelog_single_remote_suppresses_defaults(){
+  echo "# CHANGELOG_REMOTE selects one source and suppresses the default three"
+  command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local up="$root/upstream"; mkdir -p "$up"
+  ( cd "$up" && git init -q && git config user.email t@t.invalid && git config user.name t
+    printf '# Changelog\n\n## 7.7.7\n\n- Solo in-window\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T12:00:00" GIT_COMMITTER_DATE="2020-01-02T12:00:00" \
+      git commit -q -m 'solo release' )
+
+  export AUTODREAM_CHANGELOG=1 CHANGELOG_REMOTE="$up" CLAUDE_CODE_REPO="$root/cache/cc"
+  run_dream "$root"
+  unset AUTODREAM_CHANGELOG CHANGELOG_REMOTE CLAUDE_CODE_REPO
+
+  local cw="$(fdir "$root")/changelog-window.md"
+  assert_grep   "$cw" 'Solo in-window' "the named remote is read"
+  # Load-bearing: without the suppression the suite would clone three real remotes, and
+  # the promise that it never touches the network would break silently.
+  assert_nogrep "$cw" '^## Codex'      "the Codex default is suppressed"
+  assert_nogrep "$cw" '^## OMP'        "the OMP default is suppressed"
+  rm -rf "$root"
+}
+
+test_changelog_dedupe_is_scoped_to_the_release(){
+  echo "# changelog dedupe: repeated headings and bullets across releases survive, a re-inserted release does not"
+  command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local up="$root/upstream"; mkdir -p "$up"
+  ( cd "$up" && git init -q && git config user.email t@t.invalid && git config user.name t
+    printf '# Changelog\n\n## [2.0.0]\n\n### Fixed\n\n- Fixed a crash\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T10:00:00" GIT_COMMITTER_DATE="2020-01-02T10:00:00" git commit -q -m 'chore: 2.0.0'
+    # Edited again in the same window: 2.0.0 is re-inserted by the second diff.
+    printf '# Changelog\n\n## [2.0.0]\n\n### Fixed\n\n- Fixed a crash\n- Fixed a hang\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T11:00:00" GIT_COMMITTER_DATE="2020-01-02T11:00:00" git commit -q -m 'chore: 2.0.0 again'
+    # A second release with the SAME heading and the SAME bullet text.
+    printf '# Changelog\n\n## [2.1.0]\n\n### Fixed\n\n- Fixed a crash\n\n## [2.0.0]\n\n### Fixed\n\n- Fixed a crash\n- Fixed a hang\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T12:00:00" GIT_COMMITTER_DATE="2020-01-02T12:00:00" git commit -q -m 'chore: 2.1.0' )
+  export AUTODREAM_CHANGELOG=1 CHANGELOG_REMOTE="$up" CLAUDE_CODE_REPO="$root/cache/cc"
+  run_dream "$root"
+  unset AUTODREAM_CHANGELOG CHANGELOG_REMOTE CLAUDE_CODE_REPO
+  local cw="$(fdir "$root")/changelog-window.md"
+  assert_eq "$(grep -c '^## \[2.0.0\]' "$cw")" "1" "a release re-inserted by later commits is listed once"
+  assert_eq "$(grep -c '^- Fixed a crash$' "$cw")" "2" "the same bullet under two different releases is kept under both"
+  assert_eq "$(grep -c '^### Fixed$' "$cw")" "2" "the same sub-heading under two different releases is kept under both"
+  assert_eq "$(grep -c '^- Fixed a hang$' "$cw")" "1" "a bullet repeated within one release is listed once"
+  rm -rf "$root"
+}
+
+test_changelog_survives_a_force_pushed_remote(){
+  echo "# a cache follows a remote whose history was rewritten (the OMP fork is rebased on every sync)"
+  command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
+  # The cache must live inside the install's cache dir: only a cache this install owns follows a
+  # rewritten remote, and a repo outside it keeps the conservative pull.
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local up="$root/upstream"; mkdir -p "$up"
+  ( cd "$up" && git init -q && git config user.email t@t.invalid && git config user.name t
+    printf '# Changelog\n\n## [1.0.0]\n\n- First history\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T10:00:00" GIT_COMMITTER_DATE="2020-01-02T10:00:00" git commit -q -m 'chore: first' )
+  export AUTODREAM_CHANGELOG=1 CHANGELOG_REMOTE="$up" CLAUDE_CODE_REPO="$root/autodream/cache/cc"
+  run_dream "$root"
+  # Rewrite the history: a different root commit on the same branch, so the cache cannot
+  # fast-forward to it.
+  local br; br=$(git -C "$up" symbolic-ref --short HEAD)
+  ( cd "$up" && git checkout -q --orphan rewritten && git rm -q -rf . >/dev/null 2>&1
+    printf '# Changelog\n\n## [1.0.1]\n\n- Rewritten history\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T10:30:00" GIT_COMMITTER_DATE="2020-01-02T10:30:00" git commit -q -m 'chore: rewritten'
+    git branch -q -M "$br" )
+  AUTODREAM_FORCE=1 run_dream "$root"
+  unset AUTODREAM_CHANGELOG CHANGELOG_REMOTE CLAUDE_CODE_REPO
+  local cw="$(fdir "$root")/changelog-window.md"
+  assert_grep   "$cw" 'Rewritten history' "the second run reads the rewritten history"
+  assert_nogrep "$cw" 'pull failed'       "and does not report a failed pull"
+  rm -rf "$root"
+}
+
 test_autodream_now_from_a_checkout_uses_the_default_install(){
   echo "# autodream-now.sh run from the repo must not adopt bin/ as its install dir"
   local T; T=$(mktemp -d "${TMPDIR:-/tmp}/ccad.XXXXXX")
@@ -1874,6 +2048,11 @@ test_l2_uses_the_default_model
 test_l2_model_pin_is_honoured
 test_framing
 test_changelog
+test_changelog_multi_source
+test_changelog_refuses_foreign_cache_dir
+test_changelog_single_remote_suppresses_defaults
+test_changelog_dedupe_is_scoped_to_the_release
+test_changelog_survives_a_force_pushed_remote
 test_prune_helper
 test_autodream_now_from_a_checkout_uses_the_default_install
 test_self_session_excluded
