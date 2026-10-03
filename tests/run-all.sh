@@ -1310,6 +1310,17 @@ test_oversized_gate_script_unmeasurable_only(){
   rm -rf "$root"
 }
 
+test_a_nested_error_key_is_not_a_failed_triage(){
+  echo "# only a top-level error key marks a failed triage, not any text that contains one"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  export MOCK_MODE=l1_nested_error AUTODREAM_SLIM_BYTES=10; run_dream "$root"; unset MOCK_MODE AUTODREAM_SLIM_BYTES
+  local stats="$(fdir "$root")/run-stats.txt"
+  assert_grep "$stats" 'l1_findings_with_error: 0'  "a successful file with a nested error key is not counted as errored"
+  assert_grep "$stats" 'oversized_errored: 0'       "nor as an oversized failure"
+  assert_grep "$stats" 'oversized_total: 1'         "precondition: the session really was oversized"
+  rm -rf "$root"
+}
+
 test_changelog(){
   echo "# upstream changelog window (offline, local fixture remote)"
   command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
@@ -2437,6 +2448,7 @@ test_oversized_gate_script_mixed_size_and_provider
 test_oversized_gate_script_silent
 test_oversized_gate_script_stdout_section_boundary
 test_oversized_gate_script_unmeasurable_only
+test_a_nested_error_key_is_not_a_failed_triage
 test_changelog
 test_changelog_multi_source
 test_changelog_refuses_foreign_cache_dir

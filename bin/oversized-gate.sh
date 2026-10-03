@@ -160,7 +160,9 @@ for d in "${DIRS[@]}"; do
     if [ "$size" -gt "$THRESHOLD" ]; then
       oversized=$((oversized + 1))
       findings="$d/$hash.json"
-      if [ -f "$findings" ] && grep -q '"error":' "$findings" 2>/dev/null; then
+      # The top-level key, not a text match: a successful file whose evidence quotes an error
+      # would otherwise count as a failure, with no .err to classify it.
+      if [ -f "$findings" ] && jq -e 'type == "object" and has("error")' "$findings" >/dev/null 2>&1; then
         errored=$((errored + 1))
         failure_class=$(classify_failure "$findings.err")
         case "$failure_class" in

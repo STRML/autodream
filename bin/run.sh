@@ -1387,6 +1387,15 @@ l1_missing_count() { # count sessions in $SESSIONS_LIST that still have no findi
   printf '%s' "$m"
 }
 
+# True when a findings file carries the top-level error key: what the runner writes for a
+# failed triage and what the L1 prompt tells a worker to write when it cannot fit a
+# transcript. A text match on "error": would also fire on a successful file whose evidence
+# quotes one, and with no .err to classify it that file would drop out of both sides of the
+# size-attributable share.
+findings_has_error() { # $1=findings file
+  jq -e 'type == "object" and has("error")' "$1" >/dev/null 2>&1
+}
+
 findings_json_count() {
   find "$FINDINGS_DIR" -type f -name '*.json' ! -name '*.stats.json' 2>/dev/null \
     | wc -l | tr -d ' '
@@ -2060,8 +2069,7 @@ EOF
   # writes a findings JSON carrying a top-level "error" key (empty findings). These are
   # NOT .json.err files, so l1_err_files=0 masked them — count them explicitly so the
   # self-audit can alarm on a high extraction-failure rate (slimming should drive →0).
-  L1_ERRORED=$(find "$FINDINGS_DIR" -type f -name '*.json' ! -name '*.stats.json' \
-    -exec grep -l '"error":' {} + 2>/dev/null | wc -l | tr -d " ")
+  L1_ERRORED=0
   # Count every stub, then classify its surviving .err before the self-audit decides whether
   # the failure says anything about transcript size. A provider refusal or a worker that died
   # silently is not evidence about size (see failure-class.sh).
@@ -2071,7 +2079,8 @@ EOF
   for findingsfile in "$FINDINGS_DIR"/*.json; do
     [ -f "$findingsfile" ] || continue
     case "$findingsfile" in *.stats.json) continue ;; esac
-    grep -q '"error":' "$findingsfile" 2>/dev/null || continue
+    findings_has_error "$findingsfile" || continue
+    L1_ERRORED=$((L1_ERRORED + 1))
     failure_class=$(classify_failure "$findingsfile.err")
     case "$failure_class" in
       silent) L1_ERRORED_SILENT=$((L1_ERRORED_SILENT + 1)) ;;
@@ -2164,7 +2173,7 @@ EOF
     if [ "$sz" -gt "${AUTODREAM_SLIM_BYTES:-262144}" ]; then
       OVERSIZED_TOTAL=$((OVERSIZED_TOTAL + 1))
       findingsfile="$FINDINGS_DIR/$hash.json"
-      if [ -f "$findingsfile" ] && grep -q '"error":' "$findingsfile" 2>/dev/null; then
+      if [ -f "$findingsfile" ] && findings_has_error "$findingsfile"; then
         OVERSIZED_ERRORED=$((OVERSIZED_ERRORED + 1))
         failure_class=$(classify_failure "$findingsfile.err")
         case "$failure_class" in
