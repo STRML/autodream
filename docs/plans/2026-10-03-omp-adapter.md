@@ -1,7 +1,7 @@
 # Plan 2: the OMP adapter, and the omp-autodream work cc-autodream lacks
 
 Date: 2026-10-03
-Status: in progress
+Status: in progress (5 of 9 PRs merged; the other 4 wait on four decisions below)
 Design: `docs/design/unify-harness-adapters-2026-08-23.md` (approved), Migration steps 2, 3 and the facts half of 4.
 Decision (Sam, 2026-10-03): cc-autodream survives and becomes `STRML/autodream`. omp-autodream is archived after the cutover.
 
@@ -72,20 +72,43 @@ Design credit: `STRML/cc-autodream#47` (closed) worked out the tree semantics an
 
 Mutation checks run against three deliberate defects (leaf taken from the first entry, root check removed, advisor stem unanchored); each is caught.
 
-## PR sequence
+## PR sequence and status (2026-10-03)
 
-| PR | Content | Depends on |
+| PR | Content | State |
 | --- | --- | --- |
-| 1 | `adapters/omp`, linearizer with fixtures, omp stats, skills inventory, OMP-aware `is-self`, contract run for omp, CI wiring | none |
-| 2 | `bin/failure-class.sh`, provider-refusal deferral (omp-autodream #37), `l1_provider_refusal` mock, oversized-gate classification | none |
-| 3 | network-outage deferral, bounded L1 workers, auth warmup, circuit breaker, `l1-no-advisor.yml` overlay | 2 |
-| 4 | per-session dispatch: source sidecar, normalize/stats/slim/is-self through the adapter, per-adapter L1 engine, flip `omp` on, advisor sidecar schema (omp-autodream #16), overlap exclusion, nested-transcript project from the first path segment (already in cc as `pin-projects.tsv`; verify) | 1, 3 |
-| 5 | one `SESSION_TRIAGE.md`, `facts.md` concatenated into the L2 prompt, skills inventory in `PROMPT.md` | 4 |
-| 6 | launchd label ownership and install hardening (`scheduler-label.sh`), template fix; adapter install hooks follow with PR 4 | none (done: https://github.com/STRML/cc-autodream/pull/82) |
-| 7 | three-harness changelog window | none |
-| 8 | review.sh cmux claim and confirmed-token dedup | none |
+| 1 | `adapters/omp`, linearizer with fixtures, omp stats, skills inventory, OMP-aware `is-self`, contract run for omp, CI wiring | merged, https://github.com/STRML/cc-autodream/pull/81 |
+| 6 | launchd label ownership, guarded install, hashed on-demand label, adoptable template | merged, https://github.com/STRML/cc-autodream/pull/82 |
+| 7 | three-harness changelog window; also a force-pushed remote is followed, dedupe is scoped to the release, the sparse step works | merged, https://github.com/STRML/cc-autodream/pull/83 |
+| 4a | overlap pass drops advisor sidecars (omp-autodream #16, `bin/overlap-stats.sh`) | merged, https://github.com/STRML/cc-autodream/pull/84 |
+| 8a | `review.sh` cmux popup dedup by report digest, `tests/review-cmux.sh` | merged, https://github.com/STRML/cc-autodream/pull/85 |
+| 2 | L1 worker hardening: stdout and exit-code capture into the `.err`, bounded workers (`AUTODREAM_L1_TIMEOUT`), auth warmup, circuit breaker, the worker overlay, network-outage deferral, no stub on a permanent provider refusal (omp-autodream #37), `failure-class.sh`, oversized-gate classification | not started, see "Why PR 2 is not a port" |
+| 4 | per-session dispatch: source sidecar, normalize/stats/slim/is-self through the adapter, per-adapter L1 engine, enable `omp`, advisor triage schema (`SESSION_TRIAGE.md`, `PROMPT.md` text of omp-autodream #16) | not started, needs the decisions below |
+| 5 | one `SESSION_TRIAGE.md`, `facts.md` concatenated into the L2 prompt, skills inventory in `PROMPT.md` | not started, after 4 |
+| 6b | the review LaunchAgent (cmux popup job) that omp's `install.sh` provisions | not started |
 
-PRs 2, 6, 7 and 8 do not depend on the adapter and can land in any order. PRs 1 to 5 are the path to triaging OMP sessions from cc-autodream. Plans 3 (pure-stdout `PROMPT.md`) and 4 (replay harness, cutover, rename, archive) follow.
+Merged work follows the plan's own rule: each PR passed `omp-review.sh` on its final commit and CI. The review found real defects in three of the five before merge: a blocking P1 in the adapter (two files held one advisor rule), a blocking P1 in `autodream-now.sh` (a run from the checkout adopted `bin/` as the install dir), and in the changelog port a window-wide dedupe that dropped repeated headings, which led to finding that a force-pushed fork made the OMP pull fail every night.
+
+## Why PR 2 is not a port
+
+The 35 generic fixes cannot be lifted commit by commit. A trial `git cherry-pick` of the first one conflicts in six files, and a trial `git merge omp/main` leaves 61 conflict hunks in 12 files that look mechanical but are not. They are the same decision seen in different places:
+
+- **The L2 delivery protocol differs.** omp-autodream's L2 has no `Write` tool: it prints the report on stdout, `run.sh` slices at an `AUTODREAM_REPORT_END` sentinel, and `report_complete` requires it. cc-autodream's L2 still runs `Glob Read Write Edit`, writes the report file itself, and writes `pins.jsonl` for the Mnemopi pin step (#68). The design doc wants stdout and a sentinel, with pins in a block after it, but cc has not built that, so every L2-touching hunk of the merge picks a side of an unmade decision.
+- **Engine invocations are woven through the omp additions.** The warmup, the worker, the version stamp and the fatal "omp not found" check all name `OMP_BIN` and omp flags. In cc they have to become "the L1 engine of this session's adapter". The adapter manifest already lists the flags; nothing builds the command from it yet.
+- **The failure classifier reads a `.err` layout the cc worker does not write.** `failure-class.sh` expects the worker's exit code, its stdout and a log tail, which is the first thing the hardened `dispatch_l1` adds.
+
+So PR 2 and PR 4 are one piece of work, the rewrite of `dispatch_l1` around an adapter-built engine command, and it needs these decided first:
+
+1. **L2 delivery.** Adopt stdout plus sentinel plus a pin block now (Plan 3), or keep cc's file-based L2 and port omp's hardening around it.
+2. **Where the engine command comes from.** A new `l1-argv` adapter subcommand printing a NUL-delimited argv is the least invasive; the manifest's `engine_flags_l1` is data and cannot express `--model` or the overlay path alone.
+3. **L2 engine.** cc runs the `claude` CLI default model; omp runs `omp --model claude-opus-5`. The design makes it a global knob; pick the default.
+4. **Model per adapter.** `AUTODREAM_L1_MODEL` is an omp-only knob today and this host sets it in omp's `config` to a neuralwatt model. Either rename it per adapter or scope it to omp.
+
+## Cutover notes for Plan 4 (found on this host, 2026-10-03)
+
+- Both installs have scheduled jobs and review jobs: `com.samuelreed.autodream`, `com.samuelreed.autodream-review`, `com.samuelreed.omp-autodream`, `com.samuelreed.omp-autodream-review`. Cutover has to unload the omp pair or every report opens two triage popups.
+- `~/.claude/autodream` carries a `backfill.sh` and a `com.samuelreed.autodream.backfill` job that are not in this repo. Decide whether they belong in `bin/` before the install is repointed.
+- `~/.omp/agent/autodream` symlinks into `~/git/oss/omp-autodream`; `~/.claude/autodream` symlinks into this checkout. The live nightly runs whatever is checked out, so a merged PR changes the cc nightly once the main checkout is fast-forwarded.
+- omp-autodream PR 16 (advisor sidecar schema) is merged there; its `overlap-stats.sh` change is ported (https://github.com/STRML/cc-autodream/pull/84), its prompt text is not.
 
 ## omp-only commits (60, from `e231314..omp/main`)
 
