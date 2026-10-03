@@ -168,9 +168,15 @@ install_schedule() {
 
   # launchd agents start with a minimal PATH; seed it with the dirs of the tools
   # the pipeline shells out to (claude, git, bash) plus the usual suspects.
-  local path_dirs="" tool b d
+  local path_dirs="" tool b d CLAUDE_BIN_ABS=""
   for tool in claude git bash; do
     if b="$(command -v "$tool" 2>/dev/null)"; then
+      if [ "$tool" = "claude" ] && [ -n "$b" ]; then
+        # review.sh preflights the EXACT binary path (it aborts if CLAUDE_BIN is not -x), and its
+        # default $HOME/.local/bin/claude is wrong when claude lives elsewhere. Remember the real
+        # one so the review LaunchAgent can pin it in its env.
+        CLAUDE_BIN_ABS="$b"
+      fi
       d="$(cd "$(dirname "$b")" && pwd)"
       case ":$path_dirs:" in *":$d:"*) ;; *) path_dirs="${path_dirs:+$path_dirs:}$d" ;; esac
     fi
@@ -238,6 +244,160 @@ PLIST
     return 1
   }
   echo "  scheduled: $label  (daily 03:15/06:15/09:15/12:15)  -> $target_plist"
+
+  # ---- Review triage LaunchAgent ----
+  # Runs review.sh on several morning triggers (catch-up for the same reason as
+  # run.sh: a slow run that lands its report after 08:00 still gets its triage
+  # popup at the next trigger). review.sh's same-day launch marker (bound to the
+  # report content digest) dedups the triggers, so at most one workspace opens
+  # per report. Env must carry AUTODREAM_TRIAGE_SURFACE=cmux — the whole point
+  # is the popup opening in its own cmux workspace rather than inline in a
+  # headless shell.
+  #
+  # The report to triage is yesterday's (the date run.sh targeted: $DREAMS_DIR/
+  # $(date -v-1d).md). review.sh with no date picks the newest report in the dir
+  # — which at 08:00 is NOT necessarily yesterday's, it's whatever is newest, so
+  # a still-running overnight report sets up the job to triage an OLDER one.
+  # Pass yesterday's date explicitly (evaluated at fire time, not install time:
+  # the \$(...) is escaped so the plist bakes the expression, not a frozen
+  # date). review.sh fails fast with "no autodream report found" if yesterday's
+  # hasn't landed yet — a scheduled job must not silently triage the wrong day.
+  # The review job MUST have cmux or the whole point (the popup) is moot, and a
+  # headless inline fallback would silently run claude with no terminal. Skip
+  # provisioning unless cmux resolves at runtime the same way review.sh does:
+  # a config-file CMUX_BIN first, then PATH, then review.sh's default /Applicat-
+  # ions path (macOS GUI installs typically put cmux there and NOT on PATH, so
+  # a PATH-only check would wrongly skip).
+  #
+  # NOTE: the resolved cmux absolute path IS passed through as CMUX_BIN so the
+  # scheduled job resolves the same binary install.sh accepted — the launchd
+  # env's PATH is fixed and a non-default cmux (e.g. ~/bin/cmux) would
+  # otherwise pass the install check but be unfindable at runtime.
+  local cfg_cmux="" cfg_claude=""
+  if [ -f "$TARGET/config" ]; then
+    # Read CMUX_BIN and CLAUDE_BIN with the SAME semantics review.sh uses at
+    # runtime (it sources this config as Bash): a subshell apply handles $HOME/~
+    # expansion and quotes correctly. A sed/raw-read would grab literal quote
+    # characters from `CMUX_BIN="$HOME/bin/cmux"` and fail the -x test, wrongly
+    # skipping (and unloading) the review agent for a perfectly valid config.
+    cfg_cmux=$( autodream_cfg_scope=${TARGET}/config; bash -c 'unset CMUX_BIN; . "$1" >/dev/null 2>&1; printf "%s" "${CMUX_BIN:-}"' _ "$autodream_cfg_scope" )
+    cfg_cmux=${cfg_cmux//\"/}
+    cfg_claude=$( autodream_cfg_scope=${TARGET}/config; bash -c 'unset CLAUDE_BIN; . "$1" >/dev/null 2>&1; printf "%s" "${CLAUDE_BIN:-}"' _ "$autodream_cfg_scope" )
+    cfg_claude=${cfg_claude//\"/}
+  fi
+  CMUX_DEFAULT="${AUTODREAM_CMUX_DEFAULT:-/Applications/cmux.app/Contents/Resources/bin/cmux}"
+  CMUX_FOUND=""
+  { [ -n "$cfg_cmux" ] && [ -x "$cfg_cmux" ]; } && CMUX_FOUND="$cfg_cmux"
+  { [ -z "$CMUX_FOUND" ] && command -v cmux >/dev/null 2>&1; } && CMUX_FOUND=$(command -v cmux)
+  { [ -z "$CMUX_FOUND" ] && [ -x "$CMUX_DEFAULT" ]; } && CMUX_FOUND="$CMUX_DEFAULT"
+  # launchd runs the job with no working directory, so a relative CMUX_BIN that
+  # passed `-x` here (it resolved against the installer's cwd) would fail at
+  # runtime — every trigger hits the headless-fail branch. Refuse relative.
+  if [ -n "$CMUX_FOUND" ] && [ "${CMUX_FOUND#/}" = "$CMUX_FOUND" ]; then
+    echo "  ! cmux at $CMUX_FOUND is relative; review LaunchAgent needs an absolute path" >&2
+    CMUX_FOUND=""
+  fi
+  # XML-escape the value before embedding in the plist: a path containing & or
+  # < breaks the <string> element and plutil/launchctl reject the job.
+  CMUX_FOUND_XML=$(printf '%s' "${CMUX_FOUND:-}" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
+  # Effective CLAUDE_BIN for the scheduled job: a config-set value wins (the
+  # user explicitly chose a wrapper/custom claude — env must not override it at
+  # runtime, review.sh restores env over config), else fall back to the
+  # PATH-discovered binary. Require a regular executable FILE (-f AND -x): a
+  # directory passes -x but `exec <dir>` fails immediately, confirming a dead
+  # workspace (auditor 7.2/7.3).
+  local eff_claude="${cfg_claude:-$CLAUDE_BIN_ABS}"
+  if [ -z "$eff_claude" ] || [ ! -f "$eff_claude" ] || [ ! -x "$eff_claude" ]; then
+    echo "  ! claude binary not usable ($eff_claude); review LaunchAgent will abort every trigger"
+    eff_claude=""
+  fi
+  CLAUDE_BIN_XML=$(printf '%s' "$eff_claude" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
+  local review_label="${label}-review"
+  if [ -z "$CMUX_FOUND" ] || [ -z "$eff_claude" ]; then
+    if [ -z "$CMUX_FOUND" ]; then
+      echo "  ! cmux not found (config CMUX_BIN, PATH, or $CMUX_DEFAULT); skipping review LaunchAgent"
+    else
+      echo "  ! claude binary not usable; skipping review LaunchAgent"
+    fi
+    # Unload any previously-provisioned review job even though we're skipping —
+    # a machine that had cmux/claude at install and lost one would otherwise
+    # keep the stale scheduled service firing a failing trigger forever.
+    launchctl bootout "$domain/$review_label" 2>/dev/null || true
+    return 0
+  fi
+  local review_plist="$la_dir/$review_label.plist"
+  cat > "$review_plist" <<PLIST || { echo "  ERROR: could not write $review_plist" >&2; return 1; }
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$review_label</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>exec "\$1" "\$(date -v-1d +%Y-%m-%d)"</string>
+        <string>triage</string>
+        <string>$TARGET/review.sh</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>15</integer></dict>
+        <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>15</integer></dict>
+        <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>15</integer></dict>
+    </array>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key><string>$path_val</string>
+        <key>HOME</key><string>$HOME</string>
+        <key>AUTODREAM_DIR</key><string>$TARGET</string>
+        <key>DREAMS_DIR</key><string>$TARGET_PARENT/dreams</string>
+        <key>AUTODREAM_TRIAGE_SURFACE</key><string>cmux</string>
+        <key>CMUX_BIN</key><string>${CMUX_FOUND_XML}</string>
+        <key>CLAUDE_BIN</key><string>${CLAUDE_BIN_XML}</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>$TARGET/logs/review-launch.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>$TARGET/logs/review-launch.err.log</string>
+</dict>
+</plist>
+PLIST
+
+  # The two shell-command substitutions in ProgramArguments must survive the
+  # heredoc LITERALLY (evaluated at fire time, not install time): the target
+  # path as \$1 and yesterday's date as \$(date ...). If the escaping regressed
+  # and one of them got pre-expanded, the plist carries the frozen value — fail
+  # the install loudly rather than provisioning a job that fires the wrong path
+  # or a wrong date.
+  grep -qF '$(date -v-1d +%Y-%m-%d)' "$review_plist" || {
+    echo "  ! review plist lost the fire-time date expression; aborting" >&2
+    return 1
+  }
+  grep -qF 'exec "$1"' "$review_plist" || {
+    echo "  ! review plist lost the argv path reference; aborting" >&2
+    return 1
+  }
+
+  if command -v plutil >/dev/null 2>&1; then
+    plutil -lint "$review_plist" >/dev/null || {
+      echo "  ! generated review plist failed plutil lint: $review_plist" >&2
+      return 1
+    }
+  fi
+  launchctl bootout   "$domain/$review_label" 2>/dev/null || true
+  launchctl bootstrap "$domain" "$review_plist" || {
+    echo "  ERROR: launchctl bootstrap failed for $review_label ($review_plist)" >&2
+    return 1
+  }
+  echo "  scheduled: $review_label  (daily 08:00/09:15/12:15/15:30/18:15)  -> $review_plist"
 }
 
 echo

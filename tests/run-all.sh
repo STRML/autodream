@@ -4656,7 +4656,7 @@ test_all_excluded_corpus_says_so
 # Their counts fold into the totals below, so a red unit suite fails this script.
 echo
 echo "===== unit suites ====="
-for _suite in lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript apply-pins scheduler-label review-skip review-cmux notes-path; do
+for _suite in lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript apply-pins scheduler-label review-skip review-cmux notes-path install-review-agent; do
   _out=$(bash "$HERE/$_suite.sh" 2>&1)
   _rc=$?
   _p=$(printf '%s\n' "$_out" | sed -n 's/^passed: *\([0-9][0-9]*\).*/\1/p' | tail -1)

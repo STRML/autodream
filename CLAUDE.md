@@ -351,6 +351,10 @@ report: <path>
 
 L2 is an adapter too. `AUTODREAM_L2_ENGINE=<adapter name>` picks it (default: the first enabled adapter, so `claude` on an untouched install); a name that is not an accepted adapter stops the run before L1, not after. The adapter prints the command (`adapter.sh l2-argv [model]`, NUL-delimited, prompt on stdin, tools Glob and Read only) and `l1-env` supplies its environment. The model resolves `AUTODREAM_L2_MODEL_<NAME>`, then `AUTODREAM_L2_MODEL`, then the manifest's `l2_model`; none at all is valid and means the engine's own default (claude). `run-stats.txt` records `l2_engine`, `l2_model` (`default` when none was named) and one `l1_model_<adapter>` per source that had sessions, so a report that reads differently can be traced to the engine that wrote it. An install whose `adapters/` tree predates `l2-argv` keeps the built-in claude invocation, for claude only.
 
+### The review triage LaunchAgent
+
+`install.sh` provisions a second agent, `<nightly label>-review`, next to the nightly one: it runs `review.sh <yesterday>` at 08:00, 09:15, 12:15, 15:30 and 18:15 with `AUTODREAM_TRIAGE_SURFACE=cmux`, and review.sh's launch marker keeps it to one workspace per report. The date is a `$(date -v-1d ...)` evaluated at fire time (the installer refuses to write the plist if that expression was frozen). cmux and claude are resolved the way review.sh resolves them (config, then PATH, then `AUTODREAM_CMUX_DEFAULT` or the app bundle path) and pinned absolutely in the agent's environment; with either missing the agent is skipped and a previously provisioned one is booted out, so a machine that lost cmux does not keep firing a failing trigger. A refused nightly schedule provisions no review agent. `tests/install-review-agent.sh` drives the real installer against a sandbox HOME with a shimmed `launchctl`.
+
 ## Running / rerunning a date
 
 ```
