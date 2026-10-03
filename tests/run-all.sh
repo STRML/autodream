@@ -3722,6 +3722,22 @@ test_omp_session_is_linearized_for_the_worker(){
   rm -rf "$root"
 }
 
+test_omp_stats_describe_the_live_branch_only(){
+  echo "# omp stats are computed on the live branch, so abandoned turns cannot lift a session past the noise gate"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local o; o=$(mk_omp_session "$root" dddd); local h; h=$(hash_of "$o")
+  # Two real user turns on the live branch in mk_omp_session; add an abandoned user turn.
+  local tmp; tmp=$(mktemp "$root/o.XXXXXX")
+  { sed '/"id":"ax"/q' "$o"
+    printf '%s\n' '{"type":"message","id":"ux","parentId":"ax","timestamp":"2020-01-02T10:00:02.500Z","message":{"role":"user","content":[{"type":"text","text":"abandoned user turn"}]}}'
+    sed '1,/"id":"ax"/d' "$o"; } > "$tmp" && mv "$tmp" "$o"; touch -t "$STAMP" "$o"
+  run_dream_omp "$root"
+  local fd; fd=$(fdir "$root")
+  assert_eq "$(jq -r .user_message_count "$fd/$h.stats.json")" "2" "the abandoned user turn is not counted"
+  assert_no_file "$fd/$h.statsin.jsonl" "the temporary linearized copy is removed"
+  rm -rf "$root"
+}
+
 test_omp_session_that_cannot_be_linearized_is_an_error_record(){
   echo "# an omp tree the linearizer refuses is a deterministic error record, never a worker run"
   local root; root=$(setup_env); mk_session "$root" sess1
@@ -3731,6 +3747,7 @@ test_omp_session_that_cannot_be_linearized_is_an_error_record(){
   export FANOUT=1 MOCK_CALL_LOG="$root/calls.log"; run_dream_omp "$root"; unset FANOUT MOCK_CALL_LOG
   local fd; fd=$(fdir "$root")
   assert_grep   "$fd/$h.json" 'could not be normalized by the omp adapter' "the session carries a structured error"
+  assert_grep   "$fd/$h.json" 'linearize:' "and the linearizer's reason is in the record"
   assert_nogrep "$root/calls.log" "$h" "no worker was started for it"
   assert_file   "$root/dreams/$DATE.md" "the run still reports"
   rm -rf "$root"
@@ -4382,6 +4399,7 @@ test_enabled_adapters_resolves_once
 test_omp_adapter_is_opt_in
 test_omp_session_is_linearized_for_the_worker
 test_omp_session_that_cannot_be_linearized_is_an_error_record
+test_omp_stats_describe_the_live_branch_only
 test_no_usable_adapter_leaves_a_trace
 test_fatal_does_not_clobber_a_complete_date
 test_partial_enumeration_keeps_what_it_read

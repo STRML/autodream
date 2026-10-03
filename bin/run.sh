@@ -1508,7 +1508,20 @@ compute_session_stats() {
     src=$(awk -F'\t' -v h="$hash" '$1 == h { print $2; exit }' "$FINDINGS_DIR/sessions-source.txt" 2>/dev/null)
     if [ -z "${AUTODREAM_STATS_BIN:-}" ] && [ -n "$src" ] && [ "$src" != "claude" ] \
        && [ -x "$(adapters_root 2>/dev/null)/$src/adapter.sh" ]; then
-      adapter_run "$src" stats "$session" "$stats" >/dev/null 2>&1; stats_rc=$?
+      # Stats describe the live conversation the worker will read, not the append-only tree it
+      # came from: abandoned branches would otherwise add user turns and stretch the duration,
+      # and the noise gate reads these numbers. So a normalizing adapter is linearized first.
+      local statsin="$session" normtmp=""
+      if [ "$(adapter_manifest_get "$src" '.normalize' 2>/dev/null)" = "true" ]; then
+        normtmp="$FINDINGS_DIR/$hash.statsin.jsonl"
+        if adapter_run "$src" normalize "$session" "$normtmp" >/dev/null 2>&1 && [ -s "$normtmp" ]; then
+          statsin="$normtmp"
+        else
+          rm -f "$normtmp"; normtmp=""
+        fi
+      fi
+      adapter_run "$src" stats "$statsin" "$stats" >/dev/null 2>&1; stats_rc=$?
+      [ -z "$normtmp" ] || rm -f "$normtmp"
     elif [ -x "$STATS" ]; then
       "$STATS" "$session" "$stats" >/dev/null 2>&1; stats_rc=$?
     fi
@@ -1642,9 +1655,13 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
     case " $AUTODREAM_NORMALIZE_SOURCES " in
       *" $wsrc "*)
         normfile="$FINDINGS_DIR/$hash.norm.jsonl"
-        if ! "$ADAPTERS_DIR/$wsrc/adapter.sh" normalize "$session" "$normfile" 2>/dev/null || [ ! -s "$normfile" ]; then
+        normerr=$("$ADAPTERS_DIR/$wsrc/adapter.sh" normalize "$session" "$normfile" 2>&1 >/dev/null | head -c 300)
+        if [ ! -s "$normfile" ]; then
           rm -f "$normfile"
-          printf "{\"session_path\":\"%s\",\"error\":\"session could not be normalized by the %s adapter\",\"findings\":[]}\n" "$session" "$wsrc" > "$output"
+          # The adapter reason (duplicate id, dangling parent, cycle, missing jq) goes into the
+          # record, so a refusal can be told from an environment fault by reading it.
+          jq -cn --arg p "$session" --arg a "$wsrc" --arg why "$normerr" \
+            "{session_path: \$p, error: (\"session could not be normalized by the \" + \$a + \" adapter: \" + \$why), findings: []}" > "$output"
           rm -f "$errlog"
           echo "skip (not normalizable): $session ($hash)" >&2
           exit 0
