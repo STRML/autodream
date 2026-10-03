@@ -303,6 +303,21 @@ else
   RUNNER_DIRTY=no
 fi
 
+# The failure classifier is looked up after the runner walk above, because an install
+# made before failure-class.sh existed has a link for every other script but not this
+# one, and updating the checkout must not break that install's nightly (Codex review of
+# omp-autodream b19ec84). The directory the run.sh link points at always has it.
+FAILURE_CLASS=""
+for candidate in "$SCRIPT_DIR" "$RUNNER_REPO_DIR" "$AUTODREAM_DIR"; do
+  [ -n "$candidate" ] && [ -r "$candidate/failure-class.sh" ] && { FAILURE_CLASS="$candidate/failure-class.sh"; break; }
+done
+if [ -z "$FAILURE_CLASS" ]; then
+  printf 'fatal: required failure classifier not found next to %s, %s or %s\n' "$SCRIPT_DIR" "${RUNNER_REPO_DIR:-?}" "$AUTODREAM_DIR" >&2
+  exit 1
+fi
+# shellcheck source=./failure-class.sh
+. "$FAILURE_CLASS"
+
 mkdir -p "$FINDINGS_DIR" "$DREAMS_DIR" "$LOG_DIR" "$WORK_DIR"
 
 export PATH="$HOME/.cargo/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
@@ -1366,9 +1381,19 @@ l1_missing_count() { # count sessions in $SESSIONS_LIST that still have no findi
     # An unvalidated hash here counts the session missing forever and the retry
     # loop re-dispatches it every round.
     h=$(session_hash "$s") || { m=$((m + 1)); continue; }
-    jq -e .findings "$FINDINGS_DIR/$h.json" >/dev/null 2>&1 || m=$((m + 1))
+    # Same check the dispatcher applies on the way out; see the worker for why `arrays`.
+    jq -e ".findings | arrays" "$FINDINGS_DIR/$h.json" >/dev/null 2>&1 || m=$((m + 1))
   done < "$SESSIONS_LIST"
   printf '%s' "$m"
+}
+
+# True when a findings file carries the top-level error key: what the runner writes for a
+# failed triage and what the L1 prompt tells a worker to write when it cannot fit a
+# transcript. A text match on "error": would also fire on a successful file whose evidence
+# quotes one, and with no .err to classify it that file would drop out of both sides of the
+# size-attributable share.
+findings_has_error() { # $1=findings file
+  jq -e 'type == "object" and has("error")' "$1" >/dev/null 2>&1
 }
 
 findings_json_count() {
@@ -1457,14 +1482,24 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       [0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef]) : ;;
       *) exit 0 ;;
     esac
+    t0=$(date +%s)
     output="$FINDINGS_DIR/$hash.json"
     errlog="$output.err"
+    # The worker printed its whole diagnosis to stdout and this used to be /dev/null, so every
+    # failure looked the same: an .err holding the single line "Working..." and a hand-written
+    # sentence from the runner. Kept only when the worker fails; deleted with the errlog on success.
+    outlog="$output.out"
 
     # Idempotent, but validate: a non-empty file that is malformed or lacks a
     # top-level findings key is NOT a completed triage (a worker that emitted
     # garbage JSON). Treat it as missing so this pass re-dispatches it, rather
     # than letting it count as done and feed broken records to L2.
-    jq -e .findings "$output" >/dev/null 2>&1 && exit 0
+    # `jq -e .findings` is truthy for a STRING or an OBJECT, so {"findings":"oops"} counted as a
+    # finished session and reached L2 as a result. `arrays` emits nothing for a non-array, so jq
+    # -e exits non-zero. Written this way rather than as `(.findings | type) == "array"`: this
+    # body is a single-quoted bash -c where a quote silently breaks the quoting, and the same
+    # check in l1_missing_count must read as the same check.
+    jq -e ".findings | arrays" "$output" >/dev/null 2>&1 && exit 0
 
     # Validate the session is readable BEFORE spawning a worker. A path that find
     # enumerated but that is gone/unreadable by dispatch time otherwise sends the
@@ -1551,6 +1586,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
     # Launch from the isolated worker cwd so any AI-title stub lands in $WORK_BUCKET,
     # not the real session bucket. All paths below are absolute, so cd is safe here.
     cd "$WORK_DIR" 2>/dev/null || true
+    l1start=$(date +%s)
     {
       printf "Session transcript to analyze (literal absolute path): %s\n" "$readpath"
       printf "Write your findings JSON to this literal absolute path: %s\n\n" "$output"
@@ -1560,7 +1596,22 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
         cat "$FINDINGS_DIR/$hash.stats.json"
         printf "\n\`\`\`\n"
       fi
-    } | env "${envs[@]}" "${argv[@]}" > /dev/null 2> "$errlog"
+    } | env "${envs[@]}" "${argv[@]}" > "$outlog" 2> "$errlog"
+    # Index 1 is the engine side of the pipe; index 0 is the brace group.
+    l1rc="${PIPESTATUS[1]}"
+    l1elapsed=$(($(date +%s) - l1start))
+
+    # Non-empty is not the same as valid. A worker that writes malformed JSON, or JSON with no
+    # .findings array, used to take the success branch below: both diagnostics were deleted and
+    # the file was left for L2. The dispatcher validates .findings on its way IN, so the next
+    # round would re-run the session, but by then the exit code, the stdout capture and the
+    # reason were gone, and on the final round the malformed file simply reached the aggregator.
+    # Validate the same way on the way out, so a bad write is a failure with its evidence intact.
+    if [ -s "$output" ] && ! jq -e ".findings | arrays" "$output" >/dev/null 2>&1; then
+      printf "worker wrote output with no usable .findings key; treating as a failure\n" >> "$errlog"
+      head -c 2000 "$output" >> "$errlog" 2>/dev/null
+      rm -f "$output"
+    fi
 
     if [ -s "$output" ]; then
       # Reported path should be the real session, not the temp slim copy. Then drop
@@ -1569,13 +1620,26 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
         sed -i "" "s#$slimfile#$session#g" "$output" 2>/dev/null || true
         rm -f "$slimfile"
       fi
-      rm -f "$errlog"
-      echo "ok: $session ($hash)"
+      rm -f "$errlog" "$outlog"
+      echo "ok: $session ($hash) [$(($(date +%s) - t0))s]"
     else
       [ -n "$slimfile" ] && rm -f "$slimfile"
       # Worker exited without writing findings JSON. Record a diagnostic so the
       # failure is visible.
-      printf "worker produced no findings JSON for %s (incomplete run: claude exited without writing output)\n" "$session" >> "$errlog"
+      printf "worker produced no findings JSON for %s (incomplete run: the engine exited without writing output)\n" "$session" >> "$errlog"
+      # The three facts that were missing every time this fired. Without the exit code a provider
+      # refusal and a killed process read identically, and without the stdout capture the whole
+      # diagnosis went to /dev/null while the .err kept the one line the worker happened to put
+      # on stderr (omp-autodream, 2026-09-04: a dead network hid behind three fine transcripts and
+      # the report blamed their size).
+      printf "worker exit code: %s after %ss\n" "$l1rc" "$l1elapsed" >> "$errlog"
+      if [ -s "$outlog" ]; then
+        printf -- "--- worker stdout, last 40 lines ---\n" >> "$errlog"
+        tail -n 40 "$outlog" >> "$errlog"
+      else
+        printf "worker stdout was empty\n" >> "$errlog"
+      fi
+      rm -f "$outlog"
       # On the FINAL retry round, fall back to a metadata-only findings stub so
       # the session is visible to L1_ERRORED and the L2 aggregator instead of
       # disappearing into a silent .err file (the old behavior, which the
@@ -1588,9 +1652,9 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
         lines=$(wc -l < "$session" 2>/dev/null | tr -d " ")
         printf "{\"session_path\":\"%s\",\"error\":\"worker exited without findings JSON after %s rounds\",\"meta\":{\"bytes\":%s,\"lines\":%s,\"slimmed\":%s},\"findings\":[]}\n" \
           "$session" "${AUTODREAM_L1_ROUNDS:-5}" "${sz:-0}" "${lines:-0}" "$([ -n "$slimfile" ] && echo true || echo false)" > "$output"
-        echo "FAIL (metadata stub written): $session ($hash) — see $errlog" >&2
+        echo "FAIL (metadata stub written): $session ($hash) [$(($(date +%s) - t0))s] — see $errlog" >&2
       else
-        echo "FAIL: $session ($hash) — see $errlog" >&2
+        echo "FAIL: $session ($hash) [$(($(date +%s) - t0))s] — see $errlog" >&2
       fi
     fi
   ' _ {}
@@ -1845,11 +1909,17 @@ run() {
       printf 'l1_missing_after_retries: 0\n'
       printf 'l1_err_files: 0\n'
       printf 'l1_findings_with_error: 0\n'
+      printf 'l1_errored_silent: 0\n'
+      printf 'l1_errored_provider: 0\n'
+      printf 'l1_errored_unclassified: 0\n'
       printf 'l1_sessions_already_done_at_start: 0\n'
       printf 'l1_sessions_freshly_processed: 0\n'
       printf 'l1_elapsed_seconds: 0\n'
       printf 'oversized_total: 0\n'
       printf 'oversized_errored: 0\n'
+      printf 'oversized_errored_silent: 0\n'
+      printf 'oversized_errored_provider: 0\n'
+      printf 'oversized_errored_unclassified: 0\n'
       printf 'oversized_unmeasurable: %s\n' "${OVERSIZED_UNMEASURABLE:-0}"
       printf 'stats_sidecars_unparseable: 0\n'
       # A night with nothing to triage genuinely measured no overlap. That is not
@@ -1999,15 +2069,32 @@ EOF
   # writes a findings JSON carrying a top-level "error" key (empty findings). These are
   # NOT .json.err files, so l1_err_files=0 masked them — count them explicitly so the
   # self-audit can alarm on a high extraction-failure rate (slimming should drive →0).
-  L1_ERRORED=$(find "$FINDINGS_DIR" -type f -name '*.json' ! -name '*.stats.json' \
-    -exec grep -l '"error":' {} + 2>/dev/null | wc -l | tr -d " ")
+  L1_ERRORED=0
+  # Count every stub, then classify its surviving .err before the self-audit decides whether
+  # the failure says anything about transcript size. A provider refusal or a worker that died
+  # silently is not evidence about size (see failure-class.sh).
+  L1_ERRORED_SILENT=0
+  L1_ERRORED_PROVIDER=0
+  L1_ERRORED_UNCLASSIFIED=0
+  for findingsfile in "$FINDINGS_DIR"/*.json; do
+    [ -f "$findingsfile" ] || continue
+    case "$findingsfile" in *.stats.json) continue ;; esac
+    findings_has_error "$findingsfile" || continue
+    L1_ERRORED=$((L1_ERRORED + 1))
+    failure_class=$(classify_failure "$findingsfile.err")
+    case "$failure_class" in
+      silent) L1_ERRORED_SILENT=$((L1_ERRORED_SILENT + 1)) ;;
+      provider) L1_ERRORED_PROVIDER=$((L1_ERRORED_PROVIDER + 1)) ;;
+      unclassified) L1_ERRORED_UNCLASSIFIED=$((L1_ERRORED_UNCLASSIFIED + 1)) ;;
+    esac
+  done
   # Noise-gated sessions: dispatch_l1 wrote a stub instead of calling the model
   # (see the "Noise gate" comment in dispatch_l1). Counted from the findings
   # dir rather than a shared counter, since each gate decision happens inside
   # an independent xargs subshell with no shared state to increment.
   GATED=$(find "$FINDINGS_DIR" -type f -name '*.json' ! -name '*.stats.json' \
     -exec grep -l '"skipped": *"below_noise_gate"' {} + 2>/dev/null | wc -l | tr -d " ")
-  log "L1 done in ${L1_ELAPSED}s: $L1_OK done ($L1_ERRORED with errors, $GATED gated), $MISSING missing (.err files: $L1_FAIL)"
+  log "L1 done in ${L1_ELAPSED}s: $L1_OK done ($L1_ERRORED with errors: $L1_ERRORED_SILENT silent, $L1_ERRORED_PROVIDER provider, $L1_ERRORED_UNCLASSIFIED unclassified; $GATED gated), $MISSING missing (.err files: $L1_FAIL)"
 
   # ---- Oversized-transcript measurement gate (#12) ----
   # Issue #12 proposes chunk-summarizing oversized transcripts instead of slimming them;
@@ -2042,6 +2129,9 @@ EOF
   # only thing missing there was the signal, which this counter now supplies.
   OVERSIZED_TOTAL=0
   OVERSIZED_ERRORED=0
+  OVERSIZED_ERRORED_SILENT=0
+  OVERSIZED_ERRORED_PROVIDER=0
+  OVERSIZED_ERRORED_UNCLASSIFIED=0
   STATS_SIDECARS_UNPARSEABLE=0
   OVERSIZED_UNMEASURABLE=0
   while IFS= read -r session; do
@@ -2083,12 +2173,18 @@ EOF
     if [ "$sz" -gt "${AUTODREAM_SLIM_BYTES:-262144}" ]; then
       OVERSIZED_TOTAL=$((OVERSIZED_TOTAL + 1))
       findingsfile="$FINDINGS_DIR/$hash.json"
-      if [ -f "$findingsfile" ] && grep -q '"error":' "$findingsfile" 2>/dev/null; then
+      if [ -f "$findingsfile" ] && findings_has_error "$findingsfile"; then
         OVERSIZED_ERRORED=$((OVERSIZED_ERRORED + 1))
+        failure_class=$(classify_failure "$findingsfile.err")
+        case "$failure_class" in
+          silent) OVERSIZED_ERRORED_SILENT=$((OVERSIZED_ERRORED_SILENT + 1)) ;;
+          provider) OVERSIZED_ERRORED_PROVIDER=$((OVERSIZED_ERRORED_PROVIDER + 1)) ;;
+          unclassified) OVERSIZED_ERRORED_UNCLASSIFIED=$((OVERSIZED_ERRORED_UNCLASSIFIED + 1)) ;;
+        esac
       fi
     fi
   done < "$SESSIONS_LIST"
-  log "oversized: $OVERSIZED_TOTAL session(s) over ${AUTODREAM_SLIM_BYTES:-262144} bytes ($OVERSIZED_ERRORED errored)"
+  log "oversized: $OVERSIZED_TOTAL session(s) over ${AUTODREAM_SLIM_BYTES:-262144} bytes ($OVERSIZED_ERRORED errored: $OVERSIZED_ERRORED_SILENT silent, $OVERSIZED_ERRORED_PROVIDER provider, $OVERSIZED_ERRORED_UNCLASSIFIED unclassified)"
   if [ "$STATS_SIDECARS_UNPARSEABLE" -gt 0 ]; then
     log "stats sidecars unparseable: $STATS_SIDECARS_UNPARSEABLE of $COUNT (sizes fell back to a live read; gated/oversized counts are degraded)"
   fi
@@ -2211,10 +2307,20 @@ PY
     printf 'l1_rounds_max: %s\n' "$L1_ROUNDS"
     printf 'l1_findings_written: %s\n' "$L1_OK"
     printf 'l1_findings_with_error: %s\n' "$L1_ERRORED"
+    # Why those stubs exist, by class. A silent worker death (exit 0, empty stdout), a provider
+    # refusal and an unclassifiable failure are not evidence that a transcript was too large, so
+    # the size-attributable failure rate removes all three: (errors - silent - provider -
+    # unclassified) / (triaged - gated).
+    printf 'l1_errored_silent: %s\n' "$L1_ERRORED_SILENT"
+    printf 'l1_errored_provider: %s\n' "$L1_ERRORED_PROVIDER"
+    printf 'l1_errored_unclassified: %s\n' "$L1_ERRORED_UNCLASSIFIED"
     # Oversized-transcript measurement gate (#12) — see the computation above L1_ERRORED
     # for the gate meaning (M/N >= 5% over a trailing week opens issue #12).
     printf 'oversized_total: %s\n' "$OVERSIZED_TOTAL"
     printf 'oversized_errored: %s\n' "$OVERSIZED_ERRORED"
+    printf 'oversized_errored_silent: %s\n' "$OVERSIZED_ERRORED_SILENT"
+    printf 'oversized_errored_provider: %s\n' "$OVERSIZED_ERRORED_PROVIDER"
+    printf 'oversized_errored_unclassified: %s\n' "$OVERSIZED_ERRORED_UNCLASSIFIED"
     printf 'oversized_unmeasurable: %s\n' "${OVERSIZED_UNMEASURABLE:-0}"
     # Sidecar health (#27): how many of sessions_triaged had a stats sidecar that was
     # missing, empty, or carried no numeric transcript_bytes. Every consumer of the
