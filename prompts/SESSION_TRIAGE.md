@@ -111,3 +111,5 @@ Cap findings at 10 per session — pick the highest-severity ones.
 - Do NOT write anywhere except the output path you were given.
 - Do NOT update MEMORY.md, CLAUDE.md, or skills — Layer 2 owns aggregation; you only emit signal.
 - Be fast. Aim for <30s per session.
+
+**`skills_invoked` and `skills_authored` come from the precomputed stats block, never from your own reading.** Both are counted mechanically by the runner and appear in the "Precomputed session stats" section below the schema; copy them across verbatim, together with `skills_invoked_count` and `skills_invoked_counts`. Do not infer a skill invocation from a tool call that writes or edits a skill file: that creates or changes a skill, it never runs one. The runner overwrites these four fields from the sidecar after you finish, and removes them when the sidecar could not measure them.
