@@ -129,7 +129,16 @@ What still has no root cause is who SIGTERMs `tee`. It was not `claude --print` 
 
 ## Upstream changelog window
 
-`changelog_window()` clones/pulls `anthropics/claude-code` into `cache/claude-code` and runs `git log -p` on `CHANGELOG.md` over `[TARGET_DATE, NEXT_DATE)` (real commit dates; the raw CHANGELOG has no dates, the git history does). The inserted lines go to `changelog-window.md`, which L2 reads for the "Upstream Claude Code changes" report section. Any git failure writes a note and never aborts the run. There is no remote `git blame`; that is why we keep a persistent local clone.
+`changelog_window()` runs `git log -p` on a changelog over `[TARGET_DATE, NEXT_DATE)` (real commit dates; the raw CHANGELOG has no dates, the git history does). The inserted lines go to `changelog-window.md`, which L2 reads for the "Upstream harness changes" report section. Any git failure writes a note and never aborts the run. There is no remote `git blame`; that is why we keep a persistent local clone.
+
+Since 2026-09-11 it watches **three** harnesses rather than one, because the user works across all three: Claude Code, Codex, and OMP. `changelog_sources()` holds the list as `name|remote|path|cache-dir` records. Four things in that design are load-bearing:
+
+- **The path is per-source.** OMP is a monorepo with no root CHANGELOG — the CLI's log is at `packages/coding-agent/CHANGELOG.md`. A hardcoded `CHANGELOG.md` silently yields an empty section for it.
+- **Failures are per-source.** Each harness gets its own cache, its own clone/pull, and its own `## <Harness>` section in the one output file. A dead remote writes an explicit failure line into its own section; it never blanks the others, and it never produces an empty file that reads like a quiet night upstream.
+- **`CHANGELOG_REMOTE` selects a single source and suppresses the defaults.** Back-compat for the old one-repo knob, and the reason the test suite stays offline: the changelog test points that variable at a local fixture, and a default list that still ran would have the suite cloning three real remotes. `AUTODREAM_CHANGELOG_SOURCES` overrides the whole set.
+- **Sections are appended to a named file, never emitted on stdout.** `log()` writes to stdout, so an earlier draft that built the file inside a `{ … } > "$out"` block filed every "cloning …" progress line as an upstream release note. Caught in a live run against all three remotes; `test_changelog_multi_source` pins it.
+
+Output is deduped and capped. A changelog edited across many commits in one window re-inserts the same lines repeatedly — OMP moved 119 commits over 2026-09-08..10 and emitted `## [18.1.16]` three times, each with its bullets. Non-blank lines are deduped order-preserving (blanks exempt, or the markdown collapses into one paragraph) and each section is capped at `AUTODREAM_CHANGELOG_MAX_LINES` (400) with an explicit truncation note, so one chatty monorepo cannot crowd the other harnesses out of L2's context.
 
 ## Operator notes: one file for the prompt, many surfaces for the human
 
