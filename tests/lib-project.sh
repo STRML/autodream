@@ -47,6 +47,22 @@ assert_eq "$(encode_project "/Users/x/a+b,c;d")" "-Users-x-a-b-c-d" \
 assert_eq "$(encode_project "/Users/x/AbC-9")" "-Users-x-AbC-9" \
   "letters, digits and dashes survive — the map is not a blanket squash"
 
+# Non-ASCII, measured not assumed (2026-10-04): `claude -p` run in a directory
+# named `café-日本-😀` under a mktemp dir created the bucket
+# `-private-var-folders-...-T-tmp-XXXXXX-caf-------`. After `caf` there are
+# seven dashes: é, the literal dash, 日, 本, the literal dash, and TWO for the
+# emoji. Claude maps per UTF-16 code unit (a JS regex over the string), so a BMP
+# character is one dash however many UTF-8 bytes it takes, and an astral
+# character (a surrogate pair) is two. A byte-wise `tr` gets 14 here, not 7.
+assert_eq "$(encode_project "/Users/x/café")" "-Users-x-caf-" \
+  "a 2-byte UTF-8 character (U+00E9) becomes one dash"
+assert_eq "$(encode_project "/Users/x/日本")" "-Users-x---" \
+  "3-byte UTF-8 characters (CJK) become one dash each"
+assert_eq "$(encode_project "/Users/x/a😀b")" "-Users-x-a--b" \
+  "a 4-byte UTF-8 character (astral) becomes two dashes, a UTF-16 surrogate pair"
+assert_eq "$(encode_project "/tmp/café-日本-😀")" "-tmp-caf-------" \
+  "the mixed path Claude was measured on encodes to the bucket it created"
+
 echo "# lib-project: the encoding matches real Claude buckets on this host"
 # The regression that motivated this file: seanperkins/autodream-merge maps only
 # `/`, so it produces -Users-<u>-.claude for a directory Claude stores as

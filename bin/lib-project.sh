@@ -31,9 +31,11 @@
 # Same collation trap as the enumerated character classes below, arriving from
 # the opposite direction.
 #
-# Not verified: a non-ASCII path. `tr` is byte-oriented, so a multi-byte
-# character becomes one dash per byte, and no bucket on this host tests whether
-# that is what Claude does.
+# Non-ASCII, verified 2026-10-04 by running `claude -p` in a directory named
+# `café-日本-😀`: Claude emits one dash per UTF-16 code unit. A BMP character
+# (2- or 3-byte UTF-8) is one dash, an astral character (4-byte UTF-8, a
+# surrogate pair) is two. `tr` is byte-oriented and would give one dash per
+# byte, so the multi-byte sequences are collapsed to that many dashes first.
 #
 # This lives in one place because every adapter must produce the SAME key for
 # the same real directory. That is what makes one project out of two harnesses'
@@ -46,7 +48,16 @@
 
 # Encode an already-absolute, already-resolved path into a bucket name.
 encode_project() { # $1=absolute path -> encoded bucket name on stdout
-  printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9-' '-'
+  # Lead bytes: F0-F7 starts a 4-byte sequence (two UTF-16 units), E0-EF a
+  # 3-byte one and C0-DF a 2-byte one (one unit each). Longest first, so a
+  # 4-byte sequence is not consumed as a 3-byte one plus a stray byte.
+  # Raw bytes via $'..': BSD sed has no octal escapes inside a bracket.
+  local cont=$'\200-\277' l4=$'\360-\367' l3=$'\340-\357' l2=$'\300-\337'
+  printf '%s' "$1" | LC_ALL=C sed \
+    -e "s/[$l4][$cont][$cont][$cont]/--/g" \
+    -e "s/[$l3][$cont][$cont]/-/g" \
+    -e "s/[$l2][$cont]/-/g" \
+    | LC_ALL=C tr -c 'A-Za-z0-9-' '-'
 }
 
 # Resolve a path to its physical location, then encode it. Fails loudly rather
