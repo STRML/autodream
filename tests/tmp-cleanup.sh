@@ -28,9 +28,12 @@ interrupt_suite() { # $1=suite -> sets $leftover, $alive
   TMPDIR="$root" bash "$HERE/$s.sh" >/dev/null 2>&1 &
   pid=$!
   set +m
-  # Wait for the suite to make its first temp dir, polling on a real interval.
+  # Wait for the suite to make a temp dir of its own, polling on a real interval.
   while [ "$waited" -lt 2000 ]; do
-    [ -n "$(ls -A "$root" 2>/dev/null)" ] && break
+    # Two levels deep: the suite's own temp root exists once suite_tmp has made
+    # it, and an entry INSIDE it means suite_tmp has returned, so the signal never
+    # lands in the gap between mktemp and the assignment of SUITE_TMP.
+    [ -n "$(ls -A "$root"/*/ 2>/dev/null)" ] && break
     sleep 0.005
     waited=$((waited + 1))
   done

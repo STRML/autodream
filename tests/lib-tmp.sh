@@ -30,3 +30,7 @@ suite_tmp() { # $1=short suite name
   SUITE_TMP=$(mktemp -d "${root%/}/$1-suite.XXXXXX") || return 1
   export TMPDIR="$SUITE_TMP"
 }
+# Residual window: a signal that lands after mktemp creates the directory and
+# before the assignment above leaks it. It is microseconds wide and bash cannot
+# close it without blocking signals; tests/tmp-cleanup.sh waits for the suite to
+# make an entry inside the root so it never fires there.
