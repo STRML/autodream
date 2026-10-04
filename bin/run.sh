@@ -1396,6 +1396,70 @@ report_finishes_date() {
   [[ "$TARGET_DATE" < "${AUTODREAM_MARKER_EPOCH:-2026-08-19}" ]]
 }
 
+# ---- One run per date at a time (#55) ----
+# launchd serialises a label against itself and nothing more, and autodream-now.sh runs
+# under a different label than the scheduled nightly, so an on-demand run and a trigger for
+# the same date are two processes sharing one findings dir, one sidecar set and one report
+# path. The second one's move-aside would even carry off the first one's report mid-build.
+# `mkdir` is the lock: atomic on every filesystem here, and needs no flock. The directory
+# holds the owner's pid and process start time. A run killed mid-flight (this pipeline's
+# documented failure mode) leaves the directory behind, so a holder that is gone, or whose
+# pid now belongs to a different process, is reclaimed. The lock sits outside the findings
+# dir, so clearing a date's findings for a clean rebuild cannot release it under a live run.
+RUN_LOCK="$AUTODREAM_DIR/locks/run-$TARGET_DATE.lock"
+
+proc_start() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '; }
+
+# 0 = the lock's holder is alive, 1 = gone (stale), 2 = the holder has not written its pid yet.
+run_lock_holder_state() {
+  local pid start
+  pid=$(cat "$RUN_LOCK/pid" 2>/dev/null) || pid=""
+  [ -n "$pid" ] || return 2
+  kill -0 "$pid" 2>/dev/null || return 1
+  start=$(cat "$RUN_LOCK/start" 2>/dev/null) || start=""
+  # No recorded start (ps unavailable): the live pid is all there is to go on.
+  [ -z "$start" ] || [ "$(proc_start "$pid")" = "$start" ]
+}
+
+# Move the stale lock aside (rename is atomic, so one reclaimer wins) rather than rmdir it:
+# a second reclaimer that judged the same stale holder must not delete the winner's NEW lock.
+reclaim_run_lock() { # $1=the pid judged stale ("" when none was ever written)
+  local dead="$RUN_LOCK.stale.$$"
+  mv "$RUN_LOCK" "$dead" 2>/dev/null || return 0
+  if [ "$(cat "$dead/pid" 2>/dev/null)" = "$1" ]; then
+    rm -rf "$dead"
+    return 0
+  fi
+  # We moved a lock that a faster reclaimer had already replaced. Put it back.
+  mv "$dead" "$RUN_LOCK" 2>/dev/null || { log "WARNING: could not restore another run's lock from $dead"; return 0; }
+}
+
+# 0 = taken, 1 = another live run holds it. A lock directory that cannot be made at all
+# (read-only state dir) does not stop the night: an unlocked run is the old behaviour.
+acquire_run_lock() {
+  mkdir -p "$(dirname "$RUN_LOCK")" 2>/dev/null || { log "WARNING: could not create $(dirname "$RUN_LOCK"); running without the per-date lock"; return 0; }
+  local tries=0 st pid
+  until mkdir "$RUN_LOCK" 2>/dev/null; do
+    pid=$(cat "$RUN_LOCK/pid" 2>/dev/null) || pid=""
+    run_lock_holder_state; st=$?
+    [ "$st" -ne 0 ] || { RUN_LOCK_HOLDER="$pid"; return 1; }
+    tries=$((tries + 1))
+    if [ "$st" -eq 2 ] && [ "$tries" -le 3 ]; then sleep 1; continue; fi
+    reclaim_run_lock "$pid"
+    [ "$tries" -lt 8 ] || { RUN_LOCK_HOLDER="${pid:-unknown}"; return 1; }
+  done
+  printf '%s\n' "$$" > "$RUN_LOCK/pid"
+  proc_start "$$" > "$RUN_LOCK/start"
+  return 0
+}
+
+# Only the owner removes it. This is also installed as the EXIT trap, which a run that never
+# took the lock reaches too, and which must not touch the holder's.
+release_run_lock() {
+  [ "$(cat "$RUN_LOCK/pid" 2>/dev/null)" = "$$" ] || return 0
+  rm -rf "$RUN_LOCK"
+}
+
 # $1=adapter name $2=session path -> the project the session belongs to: the directory
 # directly under whichever of the adapter's roots holds it. Claude nests transcripts at
 # several depths under one bucket (<bucket>/<session>.jsonl, <bucket>/<session>/subagents/
@@ -2233,6 +2297,10 @@ run() {
   log "===== autodream start: $(date) ====="
   log "runner: $RUNNER_COMMIT$([ "$RUNNER_DIRTY" = "yes" ] && echo " (dirty)")"
   log "target date: $TARGET_DATE"
+  if ! acquire_run_lock; then
+    log "another run for $TARGET_DATE holds the lock (pid ${RUN_LOCK_HOLDER:-unknown}, $RUN_LOCK); nothing to do"
+    return 0
+  fi
   log "findings:    $FINDINGS_DIR"
   log "report:      $REPORT_PATH"
   log "fanout:      $FANOUT"
@@ -3651,6 +3719,7 @@ PY
 # SIGPIPE covers the interactive path too, where tee is still worth having and a closed
 # terminal should cost the run its output rather than its life.
 trap '' PIPE
+trap release_run_lock EXIT
 if [ -t 1 ]; then
   run 2>&1 | tee -a "$RUN_LOG"
   exit "${PIPESTATUS[0]}"

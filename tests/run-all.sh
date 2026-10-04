@@ -2179,6 +2179,50 @@ test_idempotency_guard_needs_a_complete_report(){
   rm -rf "$root"
 }
 
+lock_dir(){ printf '%s' "$1/autodream/locks/run-$DATE.lock"; }   # the per-date run lock for a root
+mk_lock(){ # $1=root $2=pid -> a lock directory held by that pid (with its real start time when ps can say)
+  local d; d=$(lock_dir "$1"); mkdir -p "$d"
+  printf '%s\n' "$2" > "$d/pid"
+  ps -o lstart= -p "$2" 2>/dev/null | tr -s ' ' > "$d/start" || true
+}
+
+test_run_lock_is_per_date_and_live_holders_win(){
+  echo "# a second run for a date does not start while a live run holds the date's lock (#55)"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  sleep 120 & local holder=$!
+  mk_lock "$root" "$holder"
+  run_dream "$root"
+  local rc=$?
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+  assert_grep "$root/run.out" 'holds the lock' "the run said another run holds the lock"
+  assert_no_file "$(fdir "$root")/sessions.txt" "it did not touch the findings dir"
+  assert_no_file "$root/dreams/$DATE.md" "and wrote no report"
+  assert_eq "$(cat "$(lock_dir "$root")/pid")" "$holder" "the holder's lock was left alone"
+  rm -rf "$root"
+}
+
+test_run_lock_is_reclaimed_from_a_dead_holder(){
+  echo "# a lock left by a killed run is reclaimed, and the run releases its own lock"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  true & local dead=$!; wait "$dead" 2>/dev/null
+  mk_lock "$root" "$dead"
+  run_dream "$root"
+  assert_nogrep "$root/run.out" 'holds the lock' "a dead holder does not block the run"
+  assert_file "$root/dreams/$DATE.md" "the run produced its report"
+  assert_no_file "$(lock_dir "$root")" "and released the lock when it finished"
+  # An unrelated live process that reuses the pid is not the holder: the start time differs.
+  if [ -n "$(ps -o lstart= -p $$ 2>/dev/null)" ]; then
+    sleep 120 & local other=$!
+    mk_lock "$root" "$other"; printf 'Mon Jan  1 00:00:00 1990\n' > "$(lock_dir "$root")/start"
+    rm -f "$root/dreams/$DATE.md"
+    run_dream "$root"
+    kill "$other" 2>/dev/null; wait "$other" 2>/dev/null
+    assert_nogrep "$root/run.out" 'holds the lock' "a live pid with a different start time is a stale lock"
+    assert_file "$root/dreams/$DATE.md" "and the run went ahead"
+  fi
+  rm -rf "$root"
+}
+
 test_normalize_project(){
   echo "# project field is normalized deterministically from the session path"
   command -v python3 >/dev/null 2>&1 || { echo "  skip - python3 not available"; return 0; }
@@ -3033,6 +3077,8 @@ test_skip_empty_disabled
 test_l1_retry
 test_idempotency_guard
 test_idempotency_guard_needs_a_complete_report
+test_run_lock_is_per_date_and_live_holders_win
+test_run_lock_is_reclaimed_from_a_dead_holder
 test_self_audit_stats
 test_self_audit_stats_failure_denominator
 test_self_audit_stats_precached_disambiguation
