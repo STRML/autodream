@@ -3442,34 +3442,52 @@ test_install_deploys_the_adapter_runtime(){
   rm -rf "$T"
 }
 
-# ---- Characters the artifact list or the L1 fan-out cannot carry -----------
-# Verified on this host against the real consumer rather than assumed: with
-# `xargs -I {}` a tab becomes a space, a backslash is deleted, and a quote kills
-# the whole dispatch with "unterminated quote". An earlier draft accepted tabs
-# because sessions.txt and the hash tolerate them — those two consumers were
-# checked and the fan-out was not.
-test_unrepresentable_characters_are_refused(){
-  echo "# enumeration: characters the fan-out would corrupt are refused, not accepted"
+# ---- Characters the line-based artifacts cannot carry, and the ones the fan-out now does ----
+# The L1 fan-out used to read sessions.txt through `xargs -I {}`: a tab became a space, a
+# backslash was deleted, and a quote killed the whole dispatch with "unterminated quote" (#54).
+# It is NUL-delimited now, so backslash and quotes are triaged like any path. A tab stays
+# refused (the TSV artifacts carry columns), and so does a newline.
+test_unusual_session_paths_are_triaged_or_refused(){
+  echo "# fan-out: quote, backslash and apostrophe paths are triaged; a tab path is refused; the run completes"
   local root; root=$(setup_env)
   mk_session "$root" good
-  local n=0 p
-  local -a bads
-  bads=( "$(printf 'ta\tb')" 'back\slash' 'quo"te' )
-  local bad
-  for bad in "${bads[@]}"; do
+  local carried=0 refused=0 p bad
+  local -a okbads=( 'back\slash' 'quo"te' "it's" 'ha#sh&amp' )
+  local -a hashes=()
+  for bad in "${okbads[@]}"; do
     p="$root/projects/proj-a/$bad.jsonl"
-    printf '%s\n' '{"type":"user","cwd":"/tmp/proj-a","message":{"content":"x"}}' > "$p" 2>/dev/null || continue
+    cp "$root/projects/proj-a/good.jsonl" "$p" 2>/dev/null || continue
     touch -t "$STAMP" "$p" 2>/dev/null || continue
-    n=$((n + 1))
+    carried=$((carried + 1)); hashes+=( "$(hash_of "$p")" )
   done
-  if [ "$n" -eq 0 ]; then ok "the filesystem refuses these names; nothing to test"; rm -rf "$root"; return 0; fi
+  p="$root/projects/proj-a/$(printf 'ta\tb').jsonl"
+  if cp "$root/projects/proj-a/good.jsonl" "$p" 2>/dev/null && touch -t "$STAMP" "$p" 2>/dev/null; then refused=1; fi
+  if [ "$carried" -eq 0 ]; then ok "the filesystem refuses these names; nothing to test"; rm -rf "$root"; return 0; fi
   run_dream "$root"
   local f; f=$(fdir "$root")
-  assert_eq "$(grep -c . "$f/sessions.txt.raw")" "1" "only the representable session survives enumeration"
-  assert_grep "$f/run-stats.txt" "sessions_rejected_path: $n" "every refusal is counted"
-  # The whole point: the run still completes. A quoted path used to abort the
-  # entire xargs fan-out rather than skipping one session.
-  assert_nonempty "$root/dreams/$DATE.md" "the run still produced a report"
+  assert_eq "$(grep -c . "$f/sessions.txt.raw")" "$((carried + 1))" "every carriable session is enumerated, the tab one is not"
+  assert_grep "$f/run-stats.txt" "sessions_rejected_path: $refused" "only the tab path is refused and counted"
+  local h
+  for h in "${hashes[@]}"; do
+    assert_nonempty "$f/$h.json" "a path with a quote, backslash or apostrophe got its findings JSON ($h)"
+    jq -e '.findings | arrays' "$f/$h.json" >/dev/null 2>&1 && ok "and it is valid JSON with a findings array" || no "and it is valid JSON with a findings array ($h)"
+  done
+  assert_grep "$f/run-stats.txt" "l1_missing_after_retries: 0" "no session was left untriaged"
+  assert_nonempty "$root/dreams/$DATE.md" "the run produced a report"
+  rm -rf "$root"
+}
+
+test_failure_stub_for_a_quoted_path_is_valid_json(){
+  echo "# fan-out: the metadata stub for a worker that wrote nothing carries a quote/backslash path as valid JSON (#54)"
+  local root; root=$(setup_env)
+  local p="$root/projects/proj-a/qu\"o\\te.jsonl"
+  mk_session "$root" good
+  cp "$root/projects/proj-a/good.jsonl" "$p" 2>/dev/null || { ok "the filesystem refuses the name; nothing to test"; rm -rf "$root"; return 0; }
+  touch -t "$STAMP" "$p"
+  export MOCK_MODE=l1_incomplete; run_dream "$root"; unset MOCK_MODE
+  local fj; fj="$(fdir "$root")/$(hash_of "$p").json"
+  assert_eq "$(jq -r '.session_path' "$fj" 2>/dev/null)" "$p" "the stub parses and names the exact path"
+  assert_grep "$fj" 'worker exited without findings JSON' "and it is the failure stub"
   rm -rf "$root"
 }
 
@@ -4842,7 +4860,8 @@ test_source_sidecar_is_written
 test_artifact_hash_contract_is_unchanged
 test_preflight_stops_a_run_missing_a_dependency
 test_install_deploys_the_adapter_runtime
-test_unrepresentable_characters_are_refused
+test_unusual_session_paths_are_triaged_or_refused
+test_failure_stub_for_a_quoted_path_is_valid_json
 test_failing_enumerator_aborts_the_run
 test_one_failed_root_does_not_kill_the_night
 test_enabled_adapters_resolves_once

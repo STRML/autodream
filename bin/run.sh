@@ -543,7 +543,7 @@ write_unindexed_flag() {
 
 # Find sessions modified during the target day across every session root.
 NL=$'\n'            # for the newline-in-path check below
-TAB=$'\t'           # ditto; the L1 xargs -I fan-out turns a tab into a space
+TAB=$'\t'           # ditto; the tab-separated artifacts cannot carry one
 REJECTED_PATHS=0    # session paths a line-based sessions.txt cannot represent
 OUT_OF_WINDOW=0     # files modified since the day began that hold no record inside it
 SESSIONS_WINDOWED=0 # triaged sessions that spill outside the day, so their stats are cut to it
@@ -783,25 +783,20 @@ scan_one_adapter() { # $1=adapter name
       fi
     fi
     while IFS= read -r -d '' sp; do
-      # Reject every character the downstream artifacts cannot carry. Verified on
-      # this host against the real consumers rather than assumed:
+      # Reject the two characters the line-based artifacts cannot carry. Verified on this
+      # host against the real consumers rather than assumed:
       #   newline    sessions.txt is line-delimited; find writes it as two lines
       #              and the runner then triages a session that does not exist
-      #   tab        `xargs -I {}` at the L1 fan-out turns it into a space, so the
-      #              worker hashes and opens a path that is not the one enumerated
-      #   backslash  the same fan-out deletes it outright
-      #   quote      the same fan-out dies with "unterminated quote" and takes the
-      #              WHOLE night's dispatch with it, not just this session
-      # The last three are a pre-existing limitation of the xargs -I transport, not
-      # of this change; an earlier draft accepted tabs because the hash and
-      # sessions.txt tolerate them, having checked those two consumers and not the
-      # fan-out. Accepting a path the dispatcher then corrupts is worse than
-      # refusing it out loud, so these are counted refusals until that transport is
-      # NUL-safe.
+      #   tab        pin-projects.tsv and the source map are tab-separated, so a tab in a
+      #              project directory or session path shifts their columns
+      # Backslash and quotes used to be refused here too, because the L1 fan-out read
+      # sessions.txt through `xargs -I {}`, which deleted a backslash and died on a quote
+      # (#54). dispatch_l1 now hands each worker its path NUL-delimited, and the worker
+      # writes JSON through jq, so those are carried like any other character.
       case "$sp" in
-        *"$NL"*|*"$TAB"*|*\\*|*\"*|*\'*)
+        *"$NL"*|*"$TAB"*)
           REJECTED_PATHS=$((REJECTED_PATHS + 1))
-          log "  skip: session path holds a character the artifact list or the L1 fan-out cannot carry: $(printf '%q' "$sp")"
+          log "  skip: session path holds a newline or tab, which the line-based artifact lists cannot carry: $(printf '%q' "$sp")"
           continue
           ;;
       esac
@@ -1877,7 +1872,13 @@ compute_overlap_stats() {
 }
 
 dispatch_l1() { # one parallel pass; idempotent worker → only the still-missing sessions run
-  < "$SESSIONS_LIST" xargs -P "$FANOUT" -I {} bash -c '
+  # NUL-delimited, one argument per worker, so the path reaches the worker byte for byte.
+  # `xargs -I {}` turned a tab into a space, deleted a backslash and died on a quote with
+  # "unterminated quote", taking the whole night's dispatch with it (#54). A newline cannot
+  # reach here: enumeration refuses it, because sessions.txt is line-based. -n 1 without -I
+  # also lifts the 255-byte limit -I puts on the substituted argument.
+  [ -s "$SESSIONS_LIST" ] || return 0
+  tr '\n' '\0' < "$SESSIONS_LIST" | xargs -0 -n 1 -P "$FANOUT" bash -c '
     session="$1"
     # Same contract as session_hash in the parent, inlined: this is a separate
     # bash -c and the function is not in scope. No apostrophes anywhere in this
@@ -1914,7 +1915,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
     # this is deterministic, so leaving it in $output (idempotent-skipped on re-run)
     # is correct — retrying would not help.
     if [ ! -r "$session" ]; then
-      printf "{\"session_path\":\"%s\",\"error\":\"session file not readable at dispatch\",\"findings\":[]}\n" "$session" > "$output"
+      jq -cn --arg p "$session" "{session_path: \$p, error: \"session file not readable at dispatch\", findings: []}" > "$output"
       rm -f "$errlog"
       echo "skip (unreadable): $session ($hash)" >&2
       exit 0
@@ -1933,7 +1934,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
     if [ -s "$statsfile" ]; then
       gate=$(jq -r --argjson min_turns "${AUTODREAM_MIN_USER_TURNS:-2}" --argjson min_minutes "${AUTODREAM_MIN_MINUTES:-1}" "if (.isSidechain == true) or ((.tool_call_count // 0) >= 5) then 0 elif (.user_message_count // 0) < \$min_turns then 1 elif ((.duration_minutes // 0) > 0) and ((.duration_minutes // 0) < \$min_minutes) then 1 else 0 end" "$statsfile" 2>/dev/null)
       if [ "$gate" = "1" ]; then
-        printf "{\"session_path\":\"%s\",\"skipped\":\"below_noise_gate\",\"findings\":[]}\n" "$session" > "$output"
+        jq -cn --arg p "$session" "{session_path: \$p, skipped: \"below_noise_gate\", findings: []}" > "$output"
         rm -f "$errlog"
         echo "gated (below noise threshold): $session ($hash)" >&2
         exit 0
@@ -2016,7 +2017,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       # Deterministic, so a structured error record that is left in place and skipped on re-run
       # (retrying would not change the answer) and counted by l1_findings_with_error.
       rm -f "$slimfile" "$normfile" "$dayfile"
-      printf "{\"session_path\":\"%s\",\"error\":\"no L1 engine for this session (source [%s], model [%s])\",\"findings\":[]}\n" "$session" "$src" "$model" > "$output"
+      jq -cn --arg p "$session" --arg s "$src" --arg m "$model" "{session_path: \$p, error: (\"no L1 engine for this session (source [\" + \$s + \"], model [\" + \$m + \"])\"), findings: []}" > "$output"
       rm -f "$errlog"
       echo "skip (no engine): $session ($hash)" >&2
       exit 0
@@ -2105,15 +2106,13 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
     if [ -s "$output" ]; then
       # Reported path should be the real session, not the temp slim copy. Then drop
       # the slim file (regenerable; keeps the findings dir clean).
-      if [ -n "$slimfile" ]; then
-        sed -i "" "s#$slimfile#$session#g" "$output" 2>/dev/null || true
-      fi
-      if [ -n "$normfile" ]; then
-        sed -i "" "s#$normfile#$session#g" "$output" 2>/dev/null || true
-      fi
-      if [ -n "$dayfile" ]; then
-        sed -i "" "s#$dayfile#$session#g" "$output" 2>/dev/null || true
-      fi
+      # A literal replace inside the JSON strings: sed would read a # or & in the session
+      # path as part of its own syntax, and a quote or backslash would break the JSON.
+      for tmpcopy in "$slimfile" "$normfile" "$dayfile"; do
+        [ -n "$tmpcopy" ] || continue
+        jq -c --arg a "$tmpcopy" --arg b "$session" "walk(if type == \"string\" then split(\$a) | join(\$b) else . end)" "$output" > "$output.rw" 2>/dev/null \
+          && mv "$output.rw" "$output" || rm -f "$output.rw"
+      done
       rm -f "$slimfile" "$normfile" "$dayfile"
       rm -f "$errlog" "$outlog"
       echo "ok: $session ($hash) [$(($(date +%s) - t0))s]"
@@ -2201,14 +2200,14 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       elif [ "${AUTODREAM_CURRENT_ROUND:-1}" -ge "${AUTODREAM_L1_ROUNDS:-5}" ]; then
         sz=$(wc -c < "$session" 2>/dev/null | tr -d " ")
         lines=$(wc -l < "$session" 2>/dev/null | tr -d " ")
-        printf "{\"session_path\":\"%s\",\"error\":\"worker exited without findings JSON after %s rounds\",\"meta\":{\"bytes\":%s,\"lines\":%s,\"slimmed\":%s},\"findings\":[]}\n" \
-          "$session" "${AUTODREAM_L1_ROUNDS:-5}" "${sz:-0}" "${lines:-0}" "$([ -n "$slimfile" ] && echo true || echo false)" > "$output"
+        jq -cn --arg p "$session" --arg r "${AUTODREAM_L1_ROUNDS:-5}" --argjson b "${sz:-0}" --argjson l "${lines:-0}" --argjson sl "$([ -n "$slimfile" ] && echo true || echo false)" \
+          "{session_path: \$p, error: (\"worker exited without findings JSON after \" + \$r + \" rounds\"), meta: {bytes: \$b, lines: \$l, slimmed: \$sl}, findings: []}" > "$output"
         echo "FAIL (metadata stub written): $session ($hash) [$(($(date +%s) - t0))s] — see $errlog" >&2
       else
         echo "FAIL: $session ($hash) [$(($(date +%s) - t0))s] — see $errlog" >&2
       fi
     fi
-  ' _ {}
+  ' _
 }
 
 # What L2 needs to know about each harness that contributed sessions tonight, and which skills are
