@@ -1672,7 +1672,7 @@ findings_has_error() { # $1=findings file
 }
 
 findings_json_count() {
-  find "$FINDINGS_DIR" -type f -name '*.json' ! -name '*.stats.json' 2>/dev/null \
+  find "$FINDINGS_DIR" -maxdepth 1 -type f -name '*.json' ! -name '*.stats.json' 2>/dev/null \
     | wc -l | tr -d ' '
 }
 
@@ -1708,14 +1708,21 @@ worklist_hashes() {
 # rerun does not pay for the triage twice. Runs once per run, before the pre-L1 cache snapshot.
 reconcile_findings_with_worklist() {
   FINDINGS_OUTSIDE_WORKLIST=0; OUTSIDE_FINDINGS_NAMES=""
-  local _hashes _f _h _q="$FINDINGS_DIR/outside-worklist"
+  local _hashes _f _h _dest _q="$FINDINGS_DIR/outside-worklist"
   _hashes=$(worklist_hashes)
   for _f in "$_q"/*.json; do
     [ -f "$_f" ] || continue
     _h=$(basename "$_f" .json)
     printf '%s\n' "$_hashes" | grep -qxF "$_h" || continue
-    [ ! -e "$FINDINGS_DIR/$_h.json" ] || continue
-    mv "$_f" "$FINDINGS_DIR/$_h.json" 2>/dev/null && log "restored $_h.json from outside-worklist/: its session is in this run's worklist again"
+    if [ -e "$FINDINGS_DIR/$_h.json" ]; then
+      log "WARNING: $_h.json is in outside-worklist/ and in the findings dir; leaving the set-aside copy where it is"
+      continue
+    fi
+    if mv "$_f" "$FINDINGS_DIR/$_h.json" 2>/dev/null; then
+      log "restored $_h.json from outside-worklist/: its session is in this run's worklist again"
+    else
+      log "WARNING: could not restore $_f; this session will be triaged again"
+    fi
   done
   for _f in "$FINDINGS_DIR"/*.json; do
     [ -f "$_f" ] || continue
@@ -1723,7 +1730,13 @@ reconcile_findings_with_worklist() {
     case "$_h" in *[!0-9a-f]*|"") continue ;; esac
     [ "${#_h}" -eq 12 ] || continue
     printf '%s\n' "$_hashes" | grep -qxF "$_h" && continue
-    mkdir -p "$_q" 2>/dev/null && mv -f "$_f" "$_q/$_h.json" 2>/dev/null || continue
+    # Never overwrite an earlier set-aside copy: a second one gets a timestamped name.
+    _dest="$_q/$_h.json"
+    [ ! -e "$_dest" ] || _dest="$_q/$_h.json.$(date +%s)"
+    if ! { mkdir -p "$_q" && mv "$_f" "$_dest"; } 2>/dev/null; then
+      log "WARNING: could not set aside $_f; L2 will read it though its session is not in this run's worklist"
+      continue
+    fi
     FINDINGS_OUTSIDE_WORKLIST=$((FINDINGS_OUTSIDE_WORKLIST + 1))
     OUTSIDE_FINDINGS_NAMES="${OUTSIDE_FINDINGS_NAMES:+$OUTSIDE_FINDINGS_NAMES }$_h"
   done
@@ -2869,7 +2882,7 @@ EOF
   # (see the "Noise gate" comment in dispatch_l1). Counted from the findings
   # dir rather than a shared counter, since each gate decision happens inside
   # an independent xargs subshell with no shared state to increment.
-  GATED=$(find "$FINDINGS_DIR" -type f -name '*.json' ! -name '*.stats.json' \
+  GATED=$(find "$FINDINGS_DIR" -maxdepth 1 -type f -name '*.json' ! -name '*.stats.json' \
     -exec grep -l '"skipped": *"below_noise_gate"' {} + 2>/dev/null | wc -l | tr -d " ")
   log "L1 done in ${L1_ELAPSED}s: $L1_OK done ($L1_ERRORED with errors: $L1_ERRORED_SILENT silent, $L1_ERRORED_PROVIDER provider, $L1_ERRORED_UNCLASSIFIED unclassified; $GATED gated), $MISSING missing (.err files: $L1_FAIL)"
 

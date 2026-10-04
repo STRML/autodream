@@ -5140,6 +5140,7 @@ test_findings_outside_the_worklist_are_set_aside_not_deleted(){
   assert_grep "$fd/run-stats.txt" 'l1_findings_outside_worklist: 1$' "only the leftover findings JSON is counted, not the two this run wrote"
   assert_grep "$fd/run-stats.txt" 'l1_err_files_orphaned: 1$' "and only the stale .err"
   assert_grep "$root/run.out" '0123456789ab' "the log names the leftover"
+  assert_grep "$fd/run-stats.txt" 'l1_findings_written: 2$' "the set-aside JSON is not counted as a finished triage"
   assert_no_file "$fd/0123456789ab.json" "it is no longer where L2 globs for findings"
   assert_file "$fd/outside-worklist/0123456789ab.json" "and it is set aside, not deleted"
   # A later rebuild whose worklist owns the session again gets its findings back before L1,
