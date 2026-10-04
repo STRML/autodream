@@ -3287,6 +3287,12 @@ test_install_deploys_the_adapter_runtime(){
   assert_file "$target/lib-project.sh" "lib-project.sh is installed"
   assert_file "$target/adapters.sh"    "adapters.sh is installed"
   assert_file "$target/preflight.sh"   "preflight.sh is installed"
+  assert_file "$target/session-window.sh" "session-window.sh is installed"
+  # Through the symlink, from outside the checkout: the runner finds it in the install dir.
+  case "$(bash "$target/session-window.sh" bounds 2020-01-02 2020-01-03 2>/dev/null)" in
+    [0-9]*" "[0-9]*) ok "the installed window helper answers" ;;
+    *) no "the installed window helper answers" ;;
+  esac
   [ -e "$target/adapters/claude/adapter.sh" ] \
     && ok "the adapters tree is reachable from the install target" \
     || no "the adapters tree is reachable from the install target"
