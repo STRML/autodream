@@ -4023,6 +4023,28 @@ test_omp_stats_describe_the_live_branch_only(){
   rm -rf "$root"
 }
 
+test_omp_nested_child_is_a_sidechain_of_its_bucket(){
+  echo "# an omp advisor child: grouped under its bucket, exempt from the noise gate, no human turns (#114)"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local o; o=$(mk_omp_session "$root" nnnn)
+  local cdir="${o%.jsonl}" adv h ph
+  mkdir -p "$cdir"; adv="$cdir/__advisor.jsonl"
+  { printf '%s\n' '{"type":"title","title":"t","v":1}'
+    printf '%s\n' '{"type":"session","id":"01a00000-0000-7000-8000-000000000002","cwd":"/tmp/proj-o","timestamp":"2020-01-02T10:00:00.000Z"}'
+    printf '%s\n' '{"type":"message","id":"u1","parentId":null,"timestamp":"2020-01-02T10:00:01.000Z","message":{"role":"user","attribution":"agent","content":[{"type":"text","text":"Session update from the parent"}]}}'
+    printf '%s\n' '{"type":"message","id":"a1","parentId":"u1","timestamp":"2020-01-02T10:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"noted"}]}}'
+  } > "$adv"
+  touch -t "$STAMP" "$adv"
+  h=$(hash_of "$adv"); ph=$(hash_of "$o")
+  run_dream_omp "$root"
+  local fd; fd=$(fdir "$root")
+  assert_eq "$(jq -r '"\(.user_message_count) \(.isSidechain) \(.nested)"' "$fd/$h.stats.json")" "0 true true" "the advisor reads no human turns and is a nested sidechain"
+  assert_nogrep "$fd/$h.json" 'below_noise_gate' "so the noise gate does not skip it"
+  assert_eq "$(jq -r .project "$fd/$h.json")" "proj-o" "its project is the bucket, not the parent's timestamped stem"
+  assert_eq "$(jq -r .project "$fd/$ph.json")" "proj-o" "the same bucket as its parent"
+  rm -rf "$root"
+}
+
 test_omp_session_that_cannot_be_linearized_is_an_error_record(){
   echo "# an omp tree the linearizer refuses is a deterministic error record, never a worker run"
   local root; root=$(setup_env); mk_session "$root" sess1
@@ -5083,6 +5105,7 @@ test_l1_precheck_probes_the_l1_provider
 test_worker_failure_probe_names_the_l1_provider
 test_one_dead_provider_does_not_hold_back_the_others
 test_omp_session_is_linearized_for_the_worker
+test_omp_nested_child_is_a_sidechain_of_its_bucket
 test_omp_session_that_cannot_be_linearized_is_an_error_record
 test_omp_stats_describe_the_live_branch_only
 test_no_usable_adapter_leaves_a_trace

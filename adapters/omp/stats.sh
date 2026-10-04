@@ -38,21 +38,42 @@ case "$(basename "$transcript")" in
   *) is_advisor_name=false ;;
 esac
 
+# Provenance for a raw file: a child lives in a directory named after its parent's file, so
+# "my directory plus .jsonl is a file" identifies it exactly (the rule linearize.sh applies, from
+# the path and not the entries: an advisor child has no user turns and no session_init). A
+# linearized copy lives in the runner's work directory, where this is false, and the meta record
+# the linearizer wrote answers instead.
+nested_name=false
+if [ -f "$(dirname "$transcript").jsonl" ]; then nested_name=true; fi
+# A child whose parent file is gone is still a child: its directory is named like a session file
+# (<ISO stamp>_<id>) and a project bucket never is. The same rule as linearize.sh.
+case "$(basename "$(dirname "$transcript")")" in
+  [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*Z_*) nested_name=true ;;
+esac
+
 mkdir -p "$(dirname "$output")" || exit 1
 
 jq -R -s \
   --argjson transcript_bytes "${bytes:-0}" \
   --argjson transcript_mtime "${mtime:-0}" \
   --argjson is_advisor_name "$is_advisor_name" \
+  --argjson nested_name "$nested_name" \
   '
   [
     split("\n")[]
     | fromjson?
     | select(type == "object")
   ] as $lines
+  # A user-role message the harness wrote is not a human turn. omp marks it "attribution":"agent":
+  # a parent steering a child, hook output, the whole prompt stream of an advisor. In a 400-file
+  # sample of this host (2026-10-04) every one of 14,427 advisor user messages and 457 of 485
+  # task-child ones carried it, and 30 of 428 in main sessions; real human turns carry "user".
+  # Only an explicit "agent" is excluded, so a file from before the field existed counts as it
+  # always did (omp-autodream #114, item 3).
   | [
       $lines[]
       | select(.type == "message" and (.message.role? // "") == "user")
+      | select((.message.attribution? // "") != "agent")
       | .message.content
       | select(
           type == "string"
@@ -67,6 +88,7 @@ jq -R -s \
       [
         $lines[]
         | select(.type == "message" and (.message.role? // "") == "user")
+        | select((.message.attribution? // "") != "agent")
         | select(
             (.message.content) as $c
             | ($c | type) == "string"
@@ -187,6 +209,11 @@ jq -R -s \
       | .name
       | select(type == "string" and length > 0)
     ]) as $skills_authored
+  # `//` would turn a recorded false into the filename fallback, so test for the meta record
+  # itself. A linearized copy has a temp filename and directory that say nothing.
+  | ([ $lines[] | select(.type == "autodream_meta") ] | first) as $meta
+  | (if $meta != null then ($meta.is_advisor == true) else $is_advisor_name end) as $is_advisor
+  | (if $meta != null then ($meta.nested == true) else $nested_name end) as $nested
   | {
       user_message_count: ($user_messages | length),
       turn_count: ($turns | length),
@@ -216,11 +243,13 @@ jq -R -s \
       # transcript archive ever emitted one. It measured only silence.
       transcript_bytes: $transcript_bytes,
       transcript_mtime: $transcript_mtime,
-      isSidechain: (any($lines[]?; ((.customType? // "") == "agent") or ((.customType? // "") == "subagent"))),
-      # `//` would turn a recorded false into the filename fallback, so test for the
-      # meta record itself. A linearized copy has a temp filename that says nothing.
-      is_advisor: (([ $lines[] | select(.type == "autodream_meta") ] | first) as $m | if $m != null then ($m.is_advisor == true) else $is_advisor_name end),
-      nested: ((([ $lines[] | select(.type == "autodream_meta") | .nested ] | first) // false) == true),
+      # A child is a sidechain, as a claude subagent is: provenance, not a record. PORT_CONTRACT
+      # expected a custom `agent`/`subagent` record and omp writes neither (its only custom types
+      # are tool_execution_start and session_exit), so the old test could only read false and the
+      # noise gate never exempted a child (omp-autodream #114, item 2).
+      isSidechain: ($is_advisor or $nested),
+      is_advisor: $is_advisor,
+      nested: $nested,
       user_turn_timestamps: $user_turn_timestamps
     }
   ' "$transcript" > "$output"
