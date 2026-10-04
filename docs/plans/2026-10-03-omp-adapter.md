@@ -167,7 +167,7 @@ Every omp session was read by its adapter (none refused by the linearizer), ever
 
 Two differences are explained, and the replay says so on its WARN lines:
 
-- **Overlap events read lower for omp.** The archived sidecars carry no `is_advisor` flag, so the archived runner counted each advisor sidecar against its parent. The unified runner flags advisors from the path and the overlap pass drops them (omp-autodream #16, https://github.com/STRML/cc-autodream/pull/84): 7 advisor sidecars on 2026-08-20, 151 files and 76 sessions left on 2026-09-30.
+- **Overlap events read lower for omp.** The archived sidecars carry no `is_advisor` flag, so the archived runner counted each advisor sidecar against its parent. The unified runner flags advisors from the path and the overlap pass drops them (omp-autodream #16, https://github.com/STRML/cc-autodream/pull/84): 7 advisor sidecars on 2026-08-20, and 72 of the 151 session files on 2026-09-30 (the replay's WARN line names the count it measured).
 - **2026-09-13 and the claude counts moved.** The 09-13 archive directory was rebuilt in place and holds sidecars from earlier runs, and one claude session of 2026-09-30 is outside the `~/.claude/projects` root the replay used (the archive also scanned the other `~/.claude*` roots).
 
 ## Cutover runbook (not run; every step touches the live install and needs Sam)
