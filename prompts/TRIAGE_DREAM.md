@@ -38,16 +38,24 @@ The report is written by a model reading findings, so its claims about the machi
 wrong. For each actionable item, find the claims in `grounding.json` that its premise rests on
 and use them:
 
-- `present`: the premise holds for that claim. Say what was found.
-- `absent`: the premise is refuted for that claim. Correct the item (a skill the report calls
-  missing that is installed, an allowlist key that is not in settings) and list it under
-  Corrections.
+`present` and `absent` only say whether the thing exists. They do not say whether the report
+is right. Compare the result with what the report asserts about it:
+
+- The report says it is missing and the claim is `absent`, or the report relies on it and the
+  claim is `present`: the premise holds. Say what was found.
+- The report says it is missing and the claim is `present` (a skill the report calls missing
+  that is installed), or the report relies on it and the claim is `absent` (an allowlist key
+  that is not in settings, a commit that does not resolve): the premise is refuted. Correct the
+  item and list it under Corrections.
 - `unknown`, or no matching claim at all: the item is `unverified`. Say why. Never invent a
   check result, and never state that you ran a command.
 
-An `absent` skill claim is a token that sat on a line mentioning skills and matched no installed
-skill name. It may not be a skill at all (a file name, a tool name). Use judgment, and say when
-you set one aside.
+`absent` is a search result, not proof. Built-in skills and project-local skills are not
+searched, an allowlist rule is compared as an exact string (a broader rule may still allow it),
+and a short commit hash may be ambiguous. When the evidence text names such a limit, treat the
+claim as `unverified` rather than refuted. If `truncated` is true, claims beyond the cap were
+not checked. A skill-claim token may not be a skill at all (a file name, a tool name); use
+judgment, and say when you set one aside.
 
 ## Output
 

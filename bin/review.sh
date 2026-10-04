@@ -89,7 +89,7 @@ done
 if [ -n "$POSITIONAL" ]; then
   REPORT="$DREAMS_DIR/$POSITIONAL.md"
 else
-  REPORT=$(ls -t "$DREAMS_DIR"/*.md 2>/dev/null | head -1)
+  REPORT=$(ls -t "$DREAMS_DIR"/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].md 2>/dev/null | head -1)
 fi
 
 if [ -z "${REPORT:-}" ] || [ ! -f "$REPORT" ]; then

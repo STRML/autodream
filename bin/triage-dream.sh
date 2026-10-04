@@ -25,7 +25,8 @@
 #   PROJECTS_DIR           the primary session root            default: $HOME/.claude/projects
 #   AUTODREAM_L2_ENGINE    adapter whose engine runs the pass  default: the first of AUTODREAM_ADAPTERS
 #   AUTODREAM_L2_MODEL / AUTODREAM_L2_MODEL_<NAME>   the model, resolved exactly as for L2
-#   AUTODREAM_TRIAGE_TIMEOUT  seconds before the call is killed   default: 900 (needs timeout or gtimeout)
+#   AUTODREAM_TRIAGE_TIMEOUT  seconds before the call is killed   default: 900
+#                          (needs timeout or gtimeout on PATH; without one the pass is skipped, exit 1)
 #   AUTODREAM_FORCE        1 rebuilds an existing triage file   default: 0
 #   plus the dream-grounding.sh knobs (AUTODREAM_SKILL_DIRS, AUTODREAM_SETTINGS_FILES,
 #   AUTODREAM_TRIAGE_REPOS).
@@ -54,12 +55,19 @@ find_file() { # $1=basename -> first readable copy
 # The config, with the caller's environment winning over it (run.sh's rule).
 CONFIG_FILE="${AUTODREAM_CONFIG:-$AUTODREAM_DIR/config}"
 if [ -f "$CONFIG_FILE" ]; then
-  _env=$(export -p)
-  set -a
-  # shellcheck source=/dev/null
-  . "$CONFIG_FILE" 2>/dev/null
-  set +a
-  eval "$_env" 2>/dev/null || true
+  # Sourcing a user-edited file under nounset kills the shell with its error hidden, so probe
+  # in a subshell first, as run.sh does, and say what is wrong.
+  # shellcheck disable=SC1090
+  if _cfg_err=$( (set -a; set -u; . "$CONFIG_FILE") 2>&1 >/dev/null ); then
+    _env=$(export -p)
+    set -a
+    # shellcheck source=/dev/null
+    . "$CONFIG_FILE" 2>/dev/null
+    set +a
+    eval "$_env" 2>/dev/null || true
+  else
+    log "WARNING: ignoring $CONFIG_FILE: $_cfg_err"
+  fi
 fi
 
 DREAMS_DIR="${DREAMS_DIR:-$HOME/.claude/dreams}"
@@ -79,7 +87,8 @@ FINDINGS_DIR="$AUTODREAM_DIR/findings/$TARGET_DATE"
 STAGE="$FINDINGS_DIR/triage"
 
 [ -s "$REPORT_PATH" ] || { log "ERROR: no report at $REPORT_PATH"; exit 2; }
-if [ -s "$TRIAGE_PATH" ] && [ "${AUTODREAM_FORCE:-0}" != "1" ]; then
+# Current means newer than the report it was made from: a rebuilt report leaves an older triage stale.
+if [ -s "$TRIAGE_PATH" ] && [ ! "$REPORT_PATH" -nt "$TRIAGE_PATH" ] && [ "${AUTODREAM_FORCE:-0}" != "1" ]; then
   log "triage already exists for $TARGET_DATE; AUTODREAM_FORCE=1 rebuilds it"
   exit 0
 fi
@@ -137,8 +146,15 @@ case "$TIMEOUT" in ''|*[!0-9]*|0) TIMEOUT=900 ;; esac
 for t in timeout gtimeout; do
   command -v "$t" >/dev/null 2>&1 && { TMO=("$t" -k 30 "$TIMEOUT"); break; }
 done
+# Unbounded, a wedged engine would hold the run (and its lock) at the end of the night, so
+# without a timeout binary the pass is skipped, as L1's warmup is.
+if [ "${#TMO[@]}" -eq 0 ]; then
+  log "no timeout or gtimeout on PATH; skipping triage rather than run an unbounded model call"
+  exit 1
+fi
 
 STDOUT_FILE="$STAGE/triage.stdout"
+rm -f "$STDOUT_FILE"
 (
   cd "$WORK_DIR" 2>/dev/null || true
   {

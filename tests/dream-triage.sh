@@ -154,6 +154,41 @@ assert_eq "$rc" "2" "an engine that is not an adapter is refused"
 assert_no_file "$root/cap/triage-args.txt" "before any call"
 rm -rf "$root"
 
+echo "# grounding: no installed skills listable is unknown; a cap is recorded, not silent"
+root=$(mk_root); mk_report "$root/r.md" abcdef1
+env AUTODREAM_SKILL_DIRS="$root/empty" AUTODREAM_SETTINGS_FILES="$root/settings.json" bash "$GROUND" "$root/r.md" "$root/g.json"
+assert_eq "$(status_of "$root/g.json" ghost-skill)" "unknown" "with no skill listable, a skill claim is unknown, not absent"
+ground "$root" "$root/r.md" AUTODREAM_GROUNDING_MAX=2
+assert_eq "$(jq -r .truncated "$root/g.json")" "true" "a capped run says it was truncated"
+assert_eq "$(jq '.claims | length' "$root/g.json")" "2" "and kept the cap"
+ground "$root" "$root/r.md"
+assert_eq "$(jq -r .truncated "$root/g.json")" "false" "an uncapped one says it was not"
+rm -rf "$root"
+
+echo "# triage prompt: present/absent are existence results, compared with what the report claims"
+assert_grep "$REPO/prompts/TRIAGE_DREAM.md" 'only say whether the thing exists' "the prompt does not treat a status as a verdict"
+assert_grep "$REPO/prompts/TRIAGE_DREAM.md" 'the report relies on it and the claim is' "and gives both polarities"
+
+echo "# triage: a rebuilt report makes an older triage stale; a bad config is named, not fatal"
+root=$(mk_root); mk_report "$root/dreams/2020-01-02.md" abcdef1
+printf 'old\n' > "$root/dreams/2020-01-02.triage.md"
+touch -t 202001010000 "$root/dreams/2020-01-02.triage.md"
+run_triage "$root"
+assert_grep "$root/dreams/2020-01-02.triage.md" '^# Dream triage' "a triage older than its report is rebuilt"
+printf 'X=$UNSET_VARIABLE_FOR_TEST\n' > "$root/bad-config"
+rm -f "$root/dreams/2020-01-02.triage.md"
+run_triage "$root" AUTODREAM_CONFIG="$root/bad-config"; rc=$?
+assert_eq "$rc" "0" "an unusable config does not stop the pass"
+assert_grep "$root/out.txt" 'WARNING: ignoring' "and the log names it"
+rm -rf "$root"
+
+echo "# review.sh with no date never opens a triage file as the report"
+root=$(mk_root); mk_report "$root/dreams/2020-01-02.md" abcdef1
+printf '# Dream triage - not a report\n' > "$root/dreams/2020-01-02.triage.md"
+out=$(env AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" AUTODREAM_CONFIG="$root/none" CLAUDE_BIN=/usr/bin/false HOME="$root/home" bash "$REPO/bin/review.sh" 2>&1)
+case "$out" in *2020-01-02.triage*) no "review.sh picked the triage file: $out" ;; *) ok "review.sh picked the report" ;; esac
+rm -rf "$root"
+
 echo
 echo "passed: $pass   failed: $fail"
 [ "$fail" -eq 0 ]

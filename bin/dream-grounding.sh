@@ -32,7 +32,8 @@
 #                                 working directories in pin-projects.tsv
 #   AUTODREAM_GROUNDING_MAX       claims kept                                          default: 100
 #
-# Output: {"report": ..., "skills_known": N, "allowlist_entries": N, "repos": [...], "claims":
+# Output: {"report": ..., "skills_known": N, "allowlist_entries": N, "repos": [...], "truncated":
+# bool (more claims than AUTODREAM_GROUNDING_MAX; the rest were not checked), "claims":
 # [{"kind","claim","status","evidence","line"}]} with status present | absent | unknown.
 # `unknown` means the check could not run (no settings file, no repo), never "absent".
 #
@@ -111,10 +112,12 @@ emit() { # kind claim status evidence line
 
 check_skill() { # $1=name $2=line
   local name="$1" bare="${1##*:}"
-  if grep -qxF -e "$name" -e "$bare" "$skills"; then
+  if [ "$skills_known" -eq 0 ]; then
+    emit skill "$name" unknown "no installed skill could be listed (searched: $skill_dirs, and the adapters' inventories)" "$2"
+  elif grep -qxF -e "$name" -e "$bare" "$skills"; then
     emit skill "$name" present "an installed skill named $bare exists" "$2"
   else
-    emit skill "$name" absent "no installed skill is named $bare (searched $skills_known skill names under: $skill_dirs, and the adapters' inventories)" "$2"
+    emit skill "$name" absent "no installed skill is named $bare (searched $skills_known user and plugin skill names under: $skill_dirs, and the adapters' inventories; built-in and project-local skills are not searched)" "$2"
   fi
 }
 
@@ -124,7 +127,7 @@ check_allow() { # $1=key $2=line
   elif printf '%s\n' "$allow" | grep -qxF -- "$1"; then
     emit allowlist "$1" present "permissions.allow holds this exact string" "$2"
   else
-    emit allowlist "$1" absent "permissions.allow ($allow_count entries in $allow_files file(s)) does not hold this exact string" "$2"
+    emit allowlist "$1" absent "permissions.allow ($allow_count entries in $allow_files user-level file(s)) does not hold this exact string; a broader rule or a project setting may still allow it" "$2"
   fi
 }
 
@@ -141,7 +144,7 @@ check_sha() { # $1=sha $2=line
     emit sha "$1" present "in $r: $subj" "$2"
     return
   done <<< "$git_repos"
-  emit sha "$1" absent "not a commit in any of: $(printf '%s' "$git_repos" | tr '\n' ' ')" "$2"
+  emit sha "$1" absent "not resolved as a unique commit in any of: $(printf '%s' "$git_repos" | tr '\n' ' ')" "$2"
 }
 
 classify() { # $1=line $2=mentions-skill $3=span
@@ -162,19 +165,20 @@ classify() { # $1=line $2=mentions-skill $3=span
 
 seen=$'\n'
 n=0
+truncated=false
 while IFS=$'\t' read -r line sk tok; do
   [ -n "$tok" ] || continue
   # A span quoted many times is one claim, at its first line.
   case "$seen" in *$'\n'"$tok"$'\n'*) continue ;; esac
   seen="$seen$tok"$'\n'
-  [ "$n" -lt "$MAX" ] || break
+  [ "$n" -lt "$MAX" ] || { truncated=true; break; }
   before=$(wc -l < "$claims" | tr -d ' ')
   classify "$line" "$sk" "$tok"
   [ "$(wc -l < "$claims" | tr -d ' ')" -gt "$before" ] && n=$((n + 1))
 done <<< "$spans"
 
 repo_json=$(printf '%s' "$git_repos" | jq -R . | jq -sc 'map(select(length > 0))')
-jq -s --arg report "$report" --argjson sk "$skills_known" --argjson al "$allow_count" --argjson repos "$repo_json" \
-  '{report:$report, skills_known:$sk, allowlist_entries:$al, repos:$repos, claims:.}' "$claims" > "$out.tmp" \
+jq -s --arg report "$report" --argjson sk "$skills_known" --argjson al "$allow_count" --argjson repos "$repo_json" --argjson trunc "$truncated" \
+  '{report:$report, skills_known:$sk, allowlist_entries:$al, repos:$repos, truncated:$trunc, claims:.}' "$claims" > "$out.tmp" \
   && mv -f "$out.tmp" "$out" || { echo "dream-grounding: could not write $out" >&2; exit 2; }
 exit 0
