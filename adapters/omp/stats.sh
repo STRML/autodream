@@ -31,7 +31,8 @@ mtime=$(stat -f %m "$transcript" 2>/dev/null) || {
 # name. A raw session falls back to its own name. `__advisor.jsonl` and
 # `__advisor-<name>.jsonl` are omp's reserved stems for a reviewer model that tails a
 # primary session: an observability record, not an agent session, with a read-only
-# toolset, so `tool_call_count: 0` and `Tool "bash" not available` are its normal shape.
+# toolset, so `Tool "bash" not available` is its normal shape. Its calls are toolCall content
+# blocks, not tool_execution_start records, and are counted from those below.
 case "$(basename "$transcript")" in
   __advisor.jsonl|__advisor-*.jsonl) is_advisor_name=true ;;
   *) is_advisor_name=false ;;
@@ -90,7 +91,43 @@ jq -R -s \
   | [
       $lines[]
       | select(.type == "custom" and .customType == "tool_execution_start")
-    ] as $tool_uses
+    ] as $tool_starts
+  # omp writes a tool call two ways. The main session loop emits a custom/tool_execution_start
+  # record per call AND leaves the call as a toolCall block in the assistant message; counting
+  # both double counts (measured on this host 2026-10-03: of 624 main transcripts with tool
+  # activity, 614 hold exactly as many start records as toolCall blocks). An advisor transcript
+  # carries only the blocks: 144 of 410 advisor files had toolCall blocks, none had a start
+  # record, so they read tool_call_count 0 whatever they did (omp-autodream #114, item 1).
+  # The start records stay the source whenever the file has any; the blocks count only when it
+  # has none, so a main session reads exactly what it always did.
+  # An advisor is offered read, grep and glob only; a call to any other tool comes back as a
+  # toolResult whose text is `Tool "<name>" not available`. Those are attempts, not calls made, and
+  # counting them would let an advisor that only ever hit the wall clear the noise gate
+  # exemption for tool_call_count >= 5 (one stored advisor made eight bash attempts and got nothing).
+  # They are matched to their block by call id and left out.
+  | ([
+      $lines[]
+      | select(.type == "message" and (.message.role? // "") == "toolResult")
+      | select(any(.message.content[]?; type == "object" and (((.text? // "") | type) == "string") and ((.text? // "") | test("^Tool \".*\" not available$"))))
+      | .message.toolCallId
+      | select(type == "string")
+      | {key: ., value: true}
+    ] | from_entries) as $rejected
+  | [
+      $lines[]
+      | select(.type == "message")
+      | .message.content
+      | select(type == "array")
+      | .[]
+      | select(type == "object" and .type == "toolCall")
+      | select(((.id? // "") as $i | $rejected[$i]) != true)
+    ] as $tool_blocks
+  | (
+      if ($tool_starts | length) > 0
+      then [$tool_starts[] | {name: (.data.toolName? // null)}]
+      else [$tool_blocks[] | {name: (.name? // .toolName? // null)}]
+      end
+    ) as $tool_uses
   | [
       $lines[]
       | select(.type == "model_change")
@@ -156,7 +193,7 @@ jq -R -s \
       tool_call_count: ($tool_uses | length),
       tools_used: (
         $tool_uses
-        | map(.data.toolName)
+        | map(.name)
         | map(select(type == "string"))
         | unique
         | sort

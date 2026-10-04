@@ -437,6 +437,7 @@ Plan 2 of the consolidation, `docs/plans/2026-10-03-omp-adapter.md`. An OMP sess
 - **Nested sessions are real sessions.** `<stamp>_<id>/__advisor.jsonl` and `<stamp>_<id>/<Name>.jsonl` are children of `<stamp>_<id>.jsonl`. Provenance comes from the path, not from the entries: an advisor has no user turns and no `session_init`. `autodream_meta` carries `nested` and `is_advisor`, and `stats` copies them into the sidecar, because the filename of a normalized temp copy says neither.
 - **Accepted is not enabled.** `run.sh` scans only the adapters named in `AUTODREAM_ADAPTERS` (default `claude`), so a directory under `adapters/` is safe on a claude nightly. `install.sh --adapters claude,omp` writes the choice into the config.
 - `skills-inventory` prints `name<TAB>description`; the claude adapter prints the name alone.
+- **Tool calls have two shapes and a main session writes both.** `stats` counts `custom/tool_execution_start` records, and falls back to the assistant messages' `toolCall` blocks only when the file has none: an advisor transcript has only the blocks (minus the calls its toolset rejected with `Tool "<name>" not available`, matched to their result by call id), a main session has each call as a record and as a block, and a union counts every main-session call twice. `tools_used` follows the same source.
 
 ## The Claude Code mod (`mods/autodream-band`)
 
