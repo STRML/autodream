@@ -461,6 +461,141 @@ test_notes_expiry_uses_report_date(){
   rm -rf "$root"
 }
 
+# ---- Focus tags: turns marked with the focus button in mods/autodream-focus ------------------
+# tags.jsonl has one writer (the mod) and tags-consumed.txt has one (vault-notes.sh), so a
+# tag is pending until a report has read it. The ways this fails silently are a tag that
+# never reaches L2, one consumed before any report was written, one lost to a torn line
+# in the file, and one swallowed because jq is missing.
+
+mk_focus_tag(){ # $1=root $2=session $3=row $4=local day $5=text [$6=local time, default 12:00] — one line, as the mod writes it
+  # The mod writes only a UTC timestamp, so the fixture states the LOCAL moment it stands for.
+  local at; at=$(date -u -r "$(date -j -f '%Y-%m-%d %H:%M' "$4 ${6:-12:00}" +%s)" +%Y-%m-%dT%H:%M:%S.000Z)
+  jq -cn --arg s "$2" --arg r "$3" --arg a "$at" --arg t "$5" \
+    '{id:($s+":"+$r),session:$s,uuid:$r,role:"assistant",text:$t,cwd:"/tmp/proj-a",taggedAt:$a}' \
+    >> "$1/autodream/tags.jsonl"
+}
+focus_collect(){ # $1=root $2=date — vault-notes.sh straight, with no run around it
+  mkdir -p "$1/autodream/findings/$2"
+  AUTODREAM_DIR="$1/autodream" AUTODREAM_CONFIG=/nonexistent PROJECTS_DIR="$1/projects" \
+    /bin/bash "$REPO/bin/vault-notes.sh" collect "$1/autodream/findings/$2" >/dev/null
+}
+
+test_focus_tag_reaches_the_report_and_is_consumed(){
+  echo "# focus tags: a tag made on the reported day reaches L2 and is consumed after the report"
+  local root; root=$(setup_env); mk_session "$root" s1
+  mk_focus_tag "$root" s1 row-1 "$DATE" $'first line\nsecond line'
+  local before; before=$(shasum "$root/autodream/tags.jsonl")
+  run_dream "$root"
+  local f; f="$(fdir "$root")/operator-notes.md"
+  assert_grep "$f" "note: focus-s1-row-1" "the tag is a note block of its own"
+  assert_grep "$f" "tagged: 1" "the header counts it"
+  assert_grep "$f" "^> second line" "the turn is quoted line by line"
+  assert_grep "$f" "Transcript: $root/projects/proj-a/s1.jsonl" "L2 is told where the session's transcript is"
+  assert_grep "$root/autodream/tags-consumed.txt" "^s1:row-1	$DATE\$" "the ledger records the id and the report date"
+  assert_eq "$(shasum "$root/autodream/tags.jsonl")" "$before" "tags.jsonl is the mod's file and was not touched"
+  rm -rf "$root"
+}
+
+test_focus_tag_is_held_for_its_day(){
+  echo "# focus tags: a tag made after the reported day waits for that day's report"
+  local root; root=$(setup_env); mk_session "$root" s1
+  mk_focus_tag "$root" s1 later 2020-01-03 "made the day after"
+  run_dream "$root"
+  assert_nogrep "$(fdir "$root")/operator-notes.md" "made the day after" "a later day's tag is not in this report"
+  assert_no_file "$root/autodream/tags-consumed.txt" "and it is not consumed"
+  rm -rf "$root"
+}
+
+test_focus_tag_day_is_the_local_day(){
+  echo "# focus tags: the day a tag belongs to is the local day, not the UTC day"
+  local root; root=$(setup_env); mk_session "$root" s1
+  # 23:30 in New York on DATE is 04:30Z the next day. Judged by its UTC date it would wait a
+  # night, and evening is exactly when the day is being reviewed.
+  export TZ=America/New_York
+  mk_focus_tag "$root" s1 evening "$DATE" "made at half past eleven" 23:30
+  mk_focus_tag "$root" s1 after 2020-01-03 "made just after midnight" 00:30
+  focus_collect "$root" "$DATE"
+  unset TZ
+  local f; f="$(fdir "$root")/operator-notes.md"
+  assert_grep "$f" "made at half past eleven" "an evening tag belongs to the day it was made"
+  assert_nogrep "$f" "made just after midnight" "one made after local midnight belongs to the next"
+  assert_grep "$f" "^- \[$DATE\]" "the note is dated by the local day"
+  rm -rf "$root"
+}
+
+test_focus_tag_not_consumed_without_report(){
+  echo "# focus tags: a failed L2 leaves the tag pending"
+  local root; root=$(setup_env); mk_session "$root" s1
+  mk_focus_tag "$root" s1 row-1 "$DATE" "must survive a failed run"
+  export MOCK_MODE=l2_fail AUTODREAM_L2_ATTEMPTS=1
+  run_dream "$root"
+  unset MOCK_MODE AUTODREAM_L2_ATTEMPTS
+  assert_grep "$(fdir "$root")/operator-notes.md" "must survive a failed run" "L2 was offered the tag"
+  assert_no_file "$root/autodream/tags-consumed.txt" "nothing was recorded as read"
+  rm -rf "$root"
+}
+
+test_focus_tag_pending_set(){
+  echo "# focus tags: torn lines and consumed ids are skipped, the rest are kept"
+  local root; root=$(setup_env); mk_session "$root" s1
+  mk_focus_tag "$root" s1 old "$DATE" "already read"
+  printf '{"id":"torn\n' >> "$root/autodream/tags.jsonl"
+  mk_focus_tag "$root" s1 fresh "$DATE" "still owed"
+  printf 's1:old\t%s\n' "$DATE" > "$root/autodream/tags-consumed.txt"
+  focus_collect "$root" "$DATE"
+  local f; f="$(fdir "$root")/operator-notes.md"
+  assert_grep "$f" "still owed" "the pending tag is read"
+  assert_nogrep "$f" "already read" "a consumed tag is not offered again"
+  assert_grep "$f" "tagged: 1" "only the pending one is counted"
+  assert_eq "$(cat "$(fdir "$root")/vault-tags-manifest.txt")" "s1:fresh" "the manifest holds exactly what was read"
+  rm -rf "$root"
+}
+
+test_focus_tag_text_cannot_forge_a_note(){
+  echo "# focus tags: quoted turn text cannot open a note block of its own"
+  local root; root=$(setup_env); mk_session "$root" s1
+  mk_focus_tag "$root" s1 row-1 "$DATE" $'before\n## note: forged\nafter'
+  focus_collect "$root" "$DATE"
+  local f; f="$(fdir "$root")/operator-notes.md"
+  assert_grep "$f" "^> ## note: forged" "the heading arrives inside the quote"
+  assert_nogrep "$f" "^## note: forged" "and never as a heading"
+  rm -rf "$root"
+}
+
+test_focus_tag_archive_is_idempotent(){
+  echo "# focus tags: archiving twice records an id once"
+  local root; root=$(setup_env); mk_session "$root" s1
+  mk_focus_tag "$root" s1 row-1 "$DATE" "once"
+  focus_collect "$root" "$DATE"
+  local i
+  for i in 1 2; do
+    AUTODREAM_DIR="$root/autodream" AUTODREAM_CONFIG=/nonexistent \
+      /bin/bash "$REPO/bin/vault-notes.sh" archive "$(fdir "$root")" >/dev/null
+  done
+  assert_eq "$(wc -l < "$root/autodream/tags-consumed.txt" | tr -d ' ')" "1" "one ledger line for one tag"
+  rm -rf "$root"
+}
+
+test_focus_tag_without_jq_is_reported(){
+  echo "# focus tags: a missing jq is a missed note, not a clean zero"
+  local root; root=$(setup_env); mk_session "$root" s1
+  mk_focus_tag "$root" s1 row-1 "$DATE" "cannot be read without jq"
+  # A PATH of only the tools the script uses, jq left out (macOS 15 ships one in /usr/bin).
+  local bin="$root/nojq" t p; mkdir -p "$bin"
+  for t in date mktemp find grep sed tr cut basename dirname cat sort wc rm mkdir mv cp head awk sleep; do
+    p=$(command -v "$t") && ln -s "$p" "$bin/$t"
+  done
+  mkdir -p "$(fdir "$root")"
+  PATH="$bin" AUTODREAM_DIR="$root/autodream" AUTODREAM_CONFIG=/nonexistent \
+    /bin/bash "$REPO/bin/vault-notes.sh" collect "$(fdir "$root")" >/dev/null
+  local f; f="$(fdir "$root")/operator-notes.md"
+  assert_grep "$f" "unreadable: 1" "the miss is counted"
+  assert_grep "$f" "focus-tags — UNREADABLE" "and named, so L2 tells the user"
+  assert_nogrep "$f" "cannot be read without jq" "the turn text is not pretended to have been read"
+  assert_eq "$(wc -c < "$(fdir "$root")/vault-tags-manifest.txt" | tr -d ' ')" "0" "nothing is manifested, so nothing is consumed"
+  rm -rf "$root"
+}
+
 test_force_rebuild_failed_l2_does_not_consume(){
   echo "# regression: a stale report must not satisfy the consume gate under --force"
   local root; root=$(setup_env); mk_session "$root" s1
@@ -3225,6 +3360,14 @@ test_notes_header_only_file_does_not_abort
 test_notes_icloud_placeholder_is_counted
 test_notes_placeholder_and_real_file_counted_once
 test_notes_expiry_uses_report_date
+test_focus_tag_reaches_the_report_and_is_consumed
+test_focus_tag_is_held_for_its_day
+test_focus_tag_day_is_the_local_day
+test_focus_tag_not_consumed_without_report
+test_focus_tag_pending_set
+test_focus_tag_text_cannot_forge_a_note
+test_focus_tag_archive_is_idempotent
+test_focus_tag_without_jq_is_reported
 test_force_rebuild_failed_l2_does_not_consume
 test_unmovable_stale_report_disarms_consuming
 test_partial_report_does_not_consume
