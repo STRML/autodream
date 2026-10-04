@@ -2223,6 +2223,23 @@ test_run_lock_is_reclaimed_from_a_dead_holder(){
   rm -rf "$root"
 }
 
+test_killed_run_temps_are_swept_at_the_start_of_the_next_run(){
+  echo "# a temp left by a killed adapter is removed by the next run, and nothing else is (#57)"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local fd; fd=$(fdir "$root"); mkdir -p "$fd"
+  printf 'partial' > "$fd/0123456789ab.stats.json.tmp.Ab12Cd"
+  printf 'partial' > "$fd/0123456789ab.slim.jsonl.tmp.Zz9Yx8"
+  printf 'partial' > "$fd/0123456789ab.slim.jsonl.pre.jsonl"
+  printf '{"keep":1}\n' > "$fd/0123456789ab.tmp.json"
+  run_dream "$root"
+  assert_no_file "$fd/0123456789ab.stats.json.tmp.Ab12Cd" "the stats temp is gone"
+  assert_no_file "$fd/0123456789ab.slim.jsonl.tmp.Zz9Yx8" "the slim temp is gone"
+  assert_no_file "$fd/0123456789ab.slim.jsonl.pre.jsonl" "slim's own .pre.jsonl is gone"
+  assert_file "$fd/0123456789ab.tmp.json" "a file that only looks similar is left alone"
+  assert_grep "$root/run.out" 'removed 3 temp file' "the log counts what it removed"
+  rm -rf "$root"
+}
+
 test_normalize_project(){
   echo "# project field is normalized deterministically from the session path"
   command -v python3 >/dev/null 2>&1 || { echo "  skip - python3 not available"; return 0; }
@@ -3079,6 +3096,7 @@ test_idempotency_guard
 test_idempotency_guard_needs_a_complete_report
 test_run_lock_is_per_date_and_live_holders_win
 test_run_lock_is_reclaimed_from_a_dead_holder
+test_killed_run_temps_are_swept_at_the_start_of_the_next_run
 test_self_audit_stats
 test_self_audit_stats_failure_denominator
 test_self_audit_stats_precached_disambiguation

@@ -109,7 +109,8 @@ case "$cmd" in
   # failure, so trading a stale temp for a hung process is the wrong direction.
   # Backgrounding the delegate and killing it from the trap would work and is
   # five lines of signal plumbing in a file whose whole claim is that nothing is
-  # invented here. Tracked instead.
+  # invented here. The runner sweeps `*.tmp.??????` and `*.pre.jsonl` out of the findings
+  # dir at the start of each run (sweep_killed_leftovers in bin/run.sh, #57).
   stats|slim)
     # Arity BEFORE dereferencing $2. Under `set -u` a one-arg call died with
     # "$2: unbound variable" and status 1 — indistinguishable from a legitimate

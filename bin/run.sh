@@ -487,6 +487,23 @@ notify_fatal() { # $1=reason
 # under --no-session-persistence (that flag only suppresses the full transcript). By
 # running workers from $WORK_DIR those stubs land in $WORK_BUCKET, which we empty
 # before and after every run so they never accumulate in the user's session history.
+# A run killed mid-flight (this pipeline's normal failure) leaves the temp its adapter was
+# writing, `<out>.tmp.XXXXXX`, and slim-transcript.sh's `<dst>.pre.jsonl`. The adapter cannot
+# clean up after its own death: a signal trap defers the signal until the delegate returns and
+# hangs the run (adapters/claude/adapter.sh says why), so the cleanup lives here, where a
+# killed process cannot skip it (#57). Nothing reads either name (the findings glob is *.json
+# and slim output is read by exact path), so this is about not accumulating them. It runs
+# under the per-date lock, so no live writer of these files exists. A stale temp from a killed
+# run is not a partial result anyone should read.
+sweep_killed_leftovers() {
+  local _f _n=0
+  for _f in "$FINDINGS_DIR"/*.tmp.?????? "$FINDINGS_DIR"/*.pre.jsonl; do
+    [ -f "$_f" ] || continue
+    rm -f "$_f" 2>/dev/null && _n=$((_n + 1))
+  done
+  [ "$_n" -eq 0 ] || log "removed $_n temp file(s) left in $FINDINGS_DIR by a killed run"
+}
+
 clean_work_bucket() { rm -rf "$WORK_BUCKET" 2>/dev/null || true; }
 
 # ---- Session-root selection ----
@@ -2703,6 +2720,7 @@ EOF
   : > "$FINDINGS_DIR/l1-timeouts.txt"
   : > "$FINDINGS_DIR/l1-netdown.txt"
 
+  sweep_killed_leftovers
   reconcile_findings_with_worklist
 
   clean_work_bucket  # start clean: drop any stub left by a prior run's workers
