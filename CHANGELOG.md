@@ -4,7 +4,12 @@ All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
 ## 2026-10-03
 
+### Added
+- **`install.sh --no-review`** installs the nightly without the review triage LaunchAgent, and removes one a previous install wrote. `AUTODREAM_REVIEW_AGENT=0` in the environment or the config does the same on every run, because the flag alone is forgotten by the next `./install.sh`.
+- **The plist PATH reaches every enabled adapter's CLI**, not only claude's. With `--adapters claude,omp` (or the same in the config) the directory of `omp`, or of `OMP_BIN`, is added; before, an omp installed under `~/.bun/bin` was invisible to the scheduled job.
+
 ### Fixed
+- **The nightly and review plists no longer capture a shell's temp PATH entries.** Installing from a cmux terminal wrote `$TMPDIR/cmux-cli-shims/<uuid>` into both plists, and pinned the shim `claude` as the review agent's `CLAUDE_BIN`; both vanish with the session. Entries under `$TMPDIR`, `/tmp` and `/var/folders` are now ignored (and named in the output). `AUTODREAM_EPHEMERAL_DIRS` overrides the list.
 - **L1 no longer files `missed_skill` for a skill whose own method is manual work (#51).** A session that invoked a skill and then ran the commands the skill prescribes (for example a skill that says to drive a CLI through Bash) was reported as abandoning the skill. `prompts/SESSION_TRIAGE.md` now tells the worker to compare the post-invocation actions with the skill's instructions and, for that case only, to emit the finding only when it can quote an instruction the session violated. Prompt-only change: no code, schema or counter moves, so a night's `run-stats.txt` is comparable before and after.
 
 ## 2026-10-02
