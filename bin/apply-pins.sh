@@ -5,7 +5,8 @@
 #
 # Reads two files from <findings-dir>:
 #   pins.jsonl        one pin per line, written by L2:
-#                     {"project","title","body","kind"}
+#                     {"project","title","body","kind"} plus an optional
+#                     "harness": claude|omp|codex, stored as metadata.harness
 #   pin-projects.tsv  project<TAB>cwd for every project this run triaged,
 #                     written by run.sh. It is the authorization list: a pin
 #                     naming any other project is refused.
@@ -56,10 +57,11 @@ VALID='select(type == "object")
            and (.title | length) <= 150 and (.title | test("[\\n\\r]") | not))
   | select((.body | type) == "string" and (.body | test("\\S"))
            and (.body | length) <= 4000)
-  | select(.kind as $k | ["correction", "preference", "fact", "decision"] | index($k))
-  | {project, title, body, kind}'
+  | select(.kind as $k | ["correction", "preference", "fact", "decision"] | any(. == $k))
+  | select((has("harness") | not) or (.harness as $h | ["claude", "omp", "codex"] | any(. == $h)))
+  | {project, title, body, kind} + (if has("harness") then {harness} else {} end)'
 
-total=0 applied=0 duplicate=0 invalid=0 rejected_project=0 no_cwd=0 failed=0 unledgered=0 cli_missing=0 unreadable=0
+total=0 applied=0 duplicate=0 invalid=0 rejected_project=0 no_cwd=0 failed=0 unledgered=0 cli_missing=0 unreadable=0 unsupported_harness=0
 
 write_result() {
   {
@@ -73,6 +75,7 @@ write_result() {
     printf 'pins_unledgered: %s\n' "$unledgered"
     printf 'pins_cli_missing: %s\n' "$cli_missing"
     printf 'pins_unreadable: %s\n' "$unreadable"
+    printf 'pins_unsupported_harness: %s\n' "$unsupported_harness"
   } > "$RESULT.tmp" && mv "$RESULT.tmp" "$RESULT"
   echo "apply-pins: total=$total applied=$applied duplicate=$duplicate invalid=$invalid rejected_project=$rejected_project no_cwd=$no_cwd failed=$failed unledgered=$unledgered cli_missing=$cli_missing unreadable=$unreadable"
 }
@@ -92,6 +95,9 @@ apply_line() {
   local canon project cwd hash ctx bank payload out rc id
   canon=$(jq -cS -s "if length == 1 then .[0] | $VALID else empty end" <<<"$1" 2>/dev/null)
   [ -n "$canon" ] || { echo invalid; return; }
+  # A tagged pin is only safe when the installed shared-memory filters on the tag at
+  # startup. Without that it would load into every harness, so it is held, not stored.
+  if [ "$GATE_OK" != 1 ] && [ "$(jq -r 'has("harness")' <<<"$canon")" = true ]; then echo unsupported_harness; return; fi
   project=$(jq -r .project <<<"$canon")
   cwd=$(project_cwd "$project") || { echo rejected_project; return; }
   if [ -z "$cwd" ] || [ ! -d "$cwd" ]; then echo no_cwd; return; fi
@@ -115,7 +121,7 @@ apply_line() {
     content: ($pin.title + "\n\n" + $pin.body),
     source: "cc-autodream",
     importance: 0.7,
-    metadata: {kind: $pin.kind, project: $pin.project, autodream_date: $date, origin: "cc-autodream"}
+    metadata: ({kind: $pin.kind, project: $pin.project, autodream_date: $date, origin: "cc-autodream"} + (if $pin.harness then {harness: $pin.harness} else {} end))
   }')
   # </dev/null: the caller reads pins.jsonl on a separate fd, but a CLI that
   # reads stdin must never be able to swallow the pins after this one.
@@ -168,6 +174,14 @@ if ! command -v "$SM" >/dev/null 2>&1; then
   exit 0
 fi
 
+# Capability probe. A bare `--host` fails closed in a shared-memory built with the harness
+# gate (agent-mnemopi PR 12) and is ignored by an older one, so the error text tells them
+# apart without storing anything.
+GATE_OK=0
+case $("$SM" startup --host </dev/null 2>/dev/null) in
+  *"--host needs a harness name"*) GATE_OK=1 ;;
+esac
+
 while IFS= read -r line <&3 || [ -n "$line" ]; do
   case $line in *[![:space:]]*) ;; *) continue ;; esac
   total=$((total + 1))
@@ -178,7 +192,8 @@ while IFS= read -r line <&3 || [ -n "$line" ]; do
     rejected_project) rejected_project=$((rejected_project + 1)) ;;
     no_cwd)           no_cwd=$((no_cwd + 1)) ;;
     unledgered)       unledgered=$((unledgered + 1)) ;;
-    *)                failed=$((failed + 1)) ;;
+    unsupported_harness) unsupported_harness=$((unsupported_harness + 1)) ;;
+    *)              failed=$((failed + 1)) ;;
   esac
 done 3<<<"$CONTENT"
 

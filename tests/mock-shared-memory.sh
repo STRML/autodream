@@ -29,6 +29,17 @@ if [ "${1:-}" = "context" ]; then
   exit 0
 fi
 
+# `startup --host` with no value: a shared-memory with the harness gate fails closed with this
+# message; MOCK_SM_GATE=0 stands in for an older build that ignores the flag.
+if [ "${1:-}" = "startup" ]; then
+  if [ "${MOCK_SM_GATE:-1}" = "1" ]; then
+    printf '{"systemMessage":"Mnemopi SessionStart warning: startup failed before recall (Error: --host needs a harness name (claude, omp, codex))."}\n'
+    exit 1
+  fi
+  printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":""}}\n'
+  exit 0
+fi
+
 [ "${1:-}" = "call" ] || { echo "mock-shared-memory: unsupported: $*" >&2; exit 2; }
 tool=$2
 payload=$3
