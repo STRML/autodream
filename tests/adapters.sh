@@ -11,6 +11,8 @@ set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
+# shellcheck source=/dev/null
+. "$HERE/lib-tmp.sh"; suite_tmp adapters
 
 pass=0; fail=0
 ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }

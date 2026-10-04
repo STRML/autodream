@@ -9,6 +9,8 @@ set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
+# shellcheck source=/dev/null
+. "$HERE/lib-tmp.sh"; suite_tmp pf
 PF="$REPO/bin/preflight.sh"
 
 pass=0; fail=0
