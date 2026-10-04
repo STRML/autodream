@@ -1575,6 +1575,29 @@ shim_curl(){ # $1=sandbox root, $2=http_code to report
   printf '%s' "$1/shim"
 }
 
+test_net_up_survives_a_curl_that_stalls_after_the_reply(){
+  echo "# a curl held in close() after the reply arrived still counts as reachable (cutover 2026-10-03: a network filter stalled the socket close for seconds)"
+  local root tb t0 t1 rc
+  root=$(setup_env)
+  tb=$(command -v timeout || command -v gtimeout || true)
+  if [ -z "$tb" ]; then ok "skipped: no timeout binary on this host"; rm -rf "$root"; return 0; fi
+  mkdir -p "$root/stall"
+  # A curl that writes the status line to the -D file the way a real reply does, then hangs.
+  printf '%s\n' '#!/bin/bash' 'while [ $# -gt 0 ]; do [ "$1" = -D ] && printf "HTTP/2 404\r\n\r\n" > "$2"; shift; done' 'sleep 30' > "$root/stall/curl"
+  chmod +x "$root/stall/curl"
+  sed -n '/^net_up() {/,/^}/p' "$REPO/bin/run.sh" > "$root/net_up.sh"
+  t0=$(date +%s)
+  PATH="$root/stall:$PATH" TIMEOUT_BIN="$tb" AUTODREAM_NETUP_LIMIT=2 bash -c ". \"$root/net_up.sh\"; net_up"; rc=$?
+  t1=$(date +%s)
+  assert_eq "$rc" "0" "a reply that arrived before the stall is read as reachable"
+  if [ $((t1 - t0)) -lt 12 ]; then ok "and the probe is bounded ($((t1 - t0))s)"; else no "the probe was not bounded ($((t1 - t0))s)"; fi
+  # A curl that never got any reply is still down.
+  printf '%s\n' '#!/bin/bash' 'sleep 30' > "$root/stall/curl"
+  PATH="$root/stall:$PATH" TIMEOUT_BIN="$tb" AUTODREAM_NETUP_LIMIT=2 bash -c ". \"$root/net_up.sh\"; net_up"; rc=$?
+  assert_eq "$rc" "1" "a stall with no reply at all is still down"
+  rm -rf "$root"
+}
+
 test_network_down_defers_the_date(){
   echo "# a round that cannot be dispatched defers the date instead of reporting on a short corpus"
   local root; root=$(setup_env); mk_session "$root" sess1
@@ -2918,6 +2941,7 @@ test_breaker_needs_two_barren_rounds_not_one
 test_a_deterministic_failure_trips_the_breaker
 test_a_flaky_worker_does_not_trip_the_breaker
 test_warmup_works_for_an_adapter_with_no_environment
+test_net_up_survives_a_curl_that_stalls_after_the_reply
 test_network_down_defers_the_date
 test_oversized_gate_script_deferred
 test_route_lost_after_the_precheck_still_defers

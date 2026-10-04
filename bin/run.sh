@@ -1415,9 +1415,18 @@ write_pin_projects() {
     && mv "$dir/pin-projects.tsv.tmp" "$dir/pin-projects.tsv"
 }
 
-net_up() { # exit 0 if the API host is reachable (any HTTP code beats "000" = no route)
-  local code rc
-  code=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' https://api.anthropic.com/ 2>/dev/null); rc=$?
+net_up() { # exit 0 if the API host is reachable (any HTTP reply beats no reply)
+  local code rc hdr limit up=1
+  local -a bound=()
+  # A network filter can hold curl in close() after the reply has already arrived (found at the
+  # 2026-10-03 cutover: Little Snitch on this host). curl then prints nothing and its own --max-time
+  # cannot interrupt a close(), so the probe read a healthy network as down and the run waited out
+  # the whole cap. The status line is written to a header file the moment it arrives, so a reply
+  # counts even when curl never gets to report it, and a timeout binary bounds the stall.
+  limit="${AUTODREAM_NETUP_LIMIT:-8}"
+  [ -z "${TIMEOUT_BIN:-}" ] || bound=("$TIMEOUT_BIN" -k 2 "$limit")
+  hdr=$(mktemp "${TMPDIR:-/tmp}/netup.XXXXXX" 2>/dev/null) || hdr=""
+  code=$(${bound[@]+"${bound[@]}"} curl -s --max-time 5 -o /dev/null ${hdr:+-D "$hdr"} -w '%{http_code}' https://api.anthropic.com/ 2>/dev/null); rc=$?
   # 127 is "not found" and 126 is "found but not executable". Both mean the shell could
   # not run curl at all — absent, not executable.
   # That is "the check cannot answer", not "the host is down", and reading it as down
@@ -1425,8 +1434,11 @@ net_up() { # exit 0 if the API host is reachable (any HTTP code beats "000" = no
   # run, for a reason nothing reported. Bias to up: a wrong "up" costs one round of
   # workers, a wrong "down" costs the whole date. Checking the exit status rather than
   # `command -v` also covers a curl that is present but unrunnable.
-  { [ "$rc" -eq 127 ] || [ "$rc" -eq 126 ]; } && return 0
-  [ -n "$code" ] && [ "$code" != "000" ]
+  { [ "$rc" -eq 127 ] || [ "$rc" -eq 126 ]; } && up=0
+  if [ "$up" -ne 0 ] && [ -n "$code" ] && [ "$code" != "000" ]; then up=0; fi
+  if [ "$up" -ne 0 ] && [ -n "$hdr" ] && grep -q '^HTTP/' "$hdr" 2>/dev/null; then up=0; fi
+  [ -z "$hdr" ] || rm -f "$hdr"
+  return "$up"
 }
 
 # Seconds this run spent blocked on wait_for_network, summed across rounds. Reported in
