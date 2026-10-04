@@ -1384,6 +1384,18 @@ report_complete() {
   [ -s "$REPORT_PATH" ] && grep -q 'autodream:open-questions=' "$REPORT_PATH" 2>/dev/null
 }
 
+# Whether the report at $REPORT_PATH finishes this date, for the idempotency guard (#111).
+# The guard used to test only `-s`, so a half-written report (a run killed mid-write, or an
+# older runner's partial) read as done: every later trigger no-opped, and question-streaks
+# cleared the board over it. A complete report carries the marker. A report for a date before
+# AUTODREAM_MARKER_EPOCH predates the marker, and is the same exemption unassembled_dates()
+# makes, so the two cannot disagree about whether a date is finished.
+report_finishes_date() {
+  [ -s "$REPORT_PATH" ] || return 1
+  report_complete && return 0
+  [[ "$TARGET_DATE" < "${AUTODREAM_MARKER_EPOCH:-2026-08-19}" ]]
+}
+
 # $1=adapter name $2=session path -> the project the session belongs to: the directory
 # directly under whichever of the adapter's roots holds it. Claude nests transcripts at
 # several depths under one bucket (<bucket>/<session>.jsonl, <bucket>/<session>/subagents/
@@ -2218,13 +2230,18 @@ run() {
   fi
 
   # ---- Idempotency guard: a finished report means we're done ----
-  # A report is only written after a successful L2, so its presence means the date is
-  # complete. This makes launchd catch-up/relaunch (the sleep-resilience strategy:
+  # A report is only written after a successful L2 and carries the open-questions marker
+  # when it is whole, so a report with the marker means the date is complete. This makes launchd catch-up/relaunch (the sleep-resilience strategy:
   # multiple wake-time triggers) cheap no-ops once the night succeeded. A run that
   # failed overnight left NO report, so it correctly proceeds and finishes the work.
-  if [ -s "$REPORT_PATH" ] && [ "${AUTODREAM_FORCE:-0}" != "1" ]; then
+  if report_finishes_date && [ "${AUTODREAM_FORCE:-0}" != "1" ]; then
     log "report already exists for $TARGET_DATE ($REPORT_PATH); nothing to do (AUTODREAM_FORCE=1 to rebuild)"
     return 0
+  fi
+  # Present but not finished: the move-aside before L2 keeps it as .stale-<epoch>, so the
+  # rebuild loses nothing.
+  if [ -s "$REPORT_PATH" ] && [ "${AUTODREAM_FORCE:-0}" != "1" ]; then
+    log "report at $REPORT_PATH lacks the open-questions marker; treating $TARGET_DATE as unfinished and rebuilding it"
   fi
 
   # The `claude` binary is checked by preflight below, NOT here. An earlier commit
