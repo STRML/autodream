@@ -1402,6 +1402,119 @@ report_complete() {
   [ -s "$REPORT_PATH" ] && grep -q 'autodream:open-questions=' "$REPORT_PATH" 2>/dev/null
 }
 
+# ---- L2 attempt diagnostics (issue 42) ----
+# L2 attempt 1 has died with exit 143 (SIGTERM) and a bare "Execution error" on 2026-08-01,
+# 08-31, 09-02, 09-04, 09-19 and 10-02, and nothing in the log says who sent the signal.
+# run.sh applies no timeout of its own to L2, so the TERM comes from outside. When an attempt
+# exits 143, 137 or 124, l2_diag_end writes findings/<date>/l2-attempt-N.diag: timestamps, the
+# exit code, the worker's pid and parent chain, the launchd job's state, load, memory pressure,
+# the kernel's last sleep and wake times, and the other autodream or claude processes.
+#
+# Evidence only. Every probe runs bounded (3s) in its own background job and cannot fail the
+# run: a hung launchctl costs three seconds, a missing tool costs one line. No behavior depends
+# on any of it.
+l2_diag_probe() { # $1=heading, rest=command (function or binary). Always returns 0.
+  local title="$1" out pid i=0
+  shift
+  printf '## %s\n' "$title"
+  out=$(mktemp "${TMPDIR:-/tmp}/l2diag.XXXXXX" 2>/dev/null) || { echo "(no scratch file)"; return 0; }
+  ( "$@" > "$out" 2>&1 ) &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
+  if kill -0 "$pid" 2>/dev/null; then
+    pkill -P "$pid" 2>/dev/null
+    kill -9 "$pid" 2>/dev/null
+    echo "(probe still running after 3s; abandoned)"
+  fi
+  wait "$pid" 2>/dev/null
+  # Line-based, so a huge command line cannot cut the output mid-line and glue the next heading to it.
+  cut -c1-600 "$out" 2>/dev/null | head -n 80
+  rm -f "$out"
+  return 0
+}
+
+l2_diag_chain() { # $1=pid: that process and every parent up to launchd
+  local p="$1" n=0
+  while [ "${p:-0}" -gt 0 ] 2>/dev/null && [ "$n" -lt 10 ]; do
+    ps -o pid=,ppid=,pgid=,etime=,user=,command= -p "$p" 2>/dev/null
+    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+    n=$((n + 1))
+  done
+}
+
+l2_diag_memory() { # kern.memorystatus_vm_pressure_level: 1 normal, 2 warn, 4 critical
+  printf 'vm_pressure_level: %s (1 normal, 2 warn, 4 critical)\n' "$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null)"
+  sysctl vm.swapusage 2>/dev/null
+  vm_stat 2>/dev/null | head -6
+}
+
+l2_diag_launchd() { # $1=label: the job's state, user domain first, then the login session's
+  local uid out; uid=$(id -u)
+  out=$(launchctl print "gui/$uid/$1" 2>&1) || out=$(launchctl print "user/$uid/$1" 2>&1)
+  printf '%s\n' "$out" | head -60
+}
+
+l2_diag_jobs() { # the label is not always known to the runner; the job list names it, with pid and last exit
+  launchctl list 2>&1 | grep -iE 'autodream|^PID' | head -20
+}
+
+l2_diag_sleepwake() { # the kernel's last sleep and wake, so a sleep inside the attempt shows
+  local k v
+  for k in sleeptime waketime boottime; do
+    v=$(sysctl -n "kern.$k" 2>/dev/null | sed -n 's/.*sec = \([0-9]*\).*/\1/p')
+    printf '%s: %s (%s)\n' "$k" "${v:-unknown}" "$([ -n "$v" ] && date -r "$v" 2>/dev/null)"
+  done
+  pmset -g batt 2>/dev/null | head -2
+}
+
+l2_diag_procs() { # every other autodream or claude process, with its parent and age
+  ps -axo pid=,ppid=,etime=,command= 2>/dev/null | grep -E 'autodream|claude' | grep -v 'grep -E' | head -40
+}
+
+l2_diag_snapshot() { # $1=when: the host's state at one moment
+  l2_diag_probe "load average at $1" uptime
+  l2_diag_probe "memory pressure at $1" l2_diag_memory
+}
+
+# Run before an attempt launches. Prints the start half of the record, which the caller holds in
+# memory and hands to l2_diag_end, so a clean attempt leaves nothing on disk.
+l2_diag_start() {
+  printf 'start_epoch: %s\n' "$(date +%s)"
+  printf 'start_time: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+  printf 'runner_pid: %s\n' "$$"
+  l2_diag_probe "parent chain at start (runner first)" l2_diag_chain "$$"
+  l2_diag_snapshot start
+}
+
+# $1=attempt $2=attempts $3=exit code $4=start half $5=file holding the worker pid
+l2_diag_end() {
+  local n="$1" total="$2" rc="$3" start="$4" pidfile="$5" f end label worker start_epoch
+  case "$rc" in 143|137|124) ;; *) return 0 ;; esac
+  f="$FINDINGS_DIR/l2-attempt-$n.diag"
+  end=$(date +%s)
+  start_epoch=$(printf '%s\n' "$start" | sed -n 's/^start_epoch: //p' | head -1)
+  worker=$(cat "$pidfile" 2>/dev/null)
+  label="${AUTODREAM_LAUNCHD_LABEL:-${XPC_SERVICE_NAME:-}}"
+  {
+    printf 'attempt: %s/%s\n' "$n" "$total"
+    printf 'exit_code: %s\n' "$rc"
+    printf 'worker_pid: %s\n' "${worker:-unknown}"
+    printf 'end_epoch: %s\n' "$end"
+    printf 'elapsed_seconds: %s\n' "$(( end - ${start_epoch:-$end} ))"
+    printf 'runner_timeout_fired: no (run.sh applies no timeout to L2, so exit %s came from the engine process or a signal sent to it)\n' "$rc"
+    printf 'runner_survived: yes (this runner reached the end of the attempt, so the signal did not hit it)\n'
+    printf 'launchd_label: %s\n' "${label:-none}"
+    printf '%s\n' "$start"
+    l2_diag_snapshot end
+    l2_diag_probe "sleep and wake times" l2_diag_sleepwake
+    l2_diag_probe "worker at end (gone means it died)" ps -o pid=,ppid=,etime=,command= -p "${worker:-0}"
+    l2_diag_probe "other autodream or claude processes at end" l2_diag_procs
+    l2_diag_probe "launchd jobs naming autodream at end" l2_diag_jobs
+    case "$label" in ""|0) ;; *) l2_diag_probe "launchd job state at end" l2_diag_launchd "$label" ;; esac
+  } > "$f.tmp" 2>/dev/null && mv -f "$f.tmp" "$f" 2>/dev/null && log "L2 attempt $n exited $rc; diagnostics in $f" || rm -f "$f.tmp" 2>/dev/null
+  return 0
+}
+
 # Whether the report at $REPORT_PATH finishes this date, for the idempotency guard (#111).
 # The guard used to test only `-s`, so a half-written report (a run killed mid-write, or an
 # older runner's partial) read as done: every later trigger no-opped, and question-streaks
@@ -3658,16 +3771,23 @@ PY
     # findings directory, so the one hostile-input surface that used to need a quarantine (an L2
     # that rewrote sessions-source.txt or forged a pin) is closed at the tool grant, and the
     # runner is the only writer of $REPORT_PATH and pins.jsonl.
+    #
+    # The engine starts through a one-line sh that records its own pid and then execs, so the
+    # pid in the diagnostics is the engine's (issue 42). exec keeps the pid, stdin and argv.
+    L2_PIDFILE=$(mktemp "${TMPDIR:-/tmp}/l2pid.XXXXXX" 2>/dev/null) || L2_PIDFILE=/dev/null
+    L2_DIAG_START=$(l2_diag_start 2>/dev/null) || L2_DIAG_START=""
     (
       cd "$WORK_DIR" 2>/dev/null || true
       {
         printf "Findings directory to aggregate (literal absolute path): %s\n" "$FINDINGS_DIR"
         printf "Report destination (literal absolute path): %s\n\n" "$REPORT_PATH"
         cat "$AUTODREAM_DIR/PROMPT.md"
-      } | env ${L2_ENVS[@]+"${L2_ENVS[@]}"} ${L2_ARGV[@]+"${L2_ARGV[@]}"}
+      } | env ${L2_ENVS[@]+"${L2_ENVS[@]}"} /bin/sh -c 'printf %s "$$" > "$0" 2>/dev/null; exec "$@"' "$L2_PIDFILE" ${L2_ARGV[@]+"${L2_ARGV[@]}"}
     ) > "$L2_STDOUT"
 
     L2_RC=$?
+    l2_diag_end "$attempt" "$L2_ATTEMPTS" "$L2_RC" "$L2_DIAG_START" "$L2_PIDFILE" 2>/dev/null || true
+    [ "$L2_PIDFILE" = /dev/null ] || rm -f "$L2_PIDFILE"
     # ---- The runner writes the report from L2's stdout ----
     # The AUTODREAM_REPORT_END sentinel is the completion gate: everything before the LAST
     # occurrence is the report body, and a capture without one is a degraded report whether or

@@ -40,6 +40,8 @@
 #                            the child was reaped with the process group.
 #   MOCK_MODE=l2_partial_marker  L2 prints a COMPLETE-LOOKING report (it carries the
 #                            open-questions marker) but no sentinel, then exits 0.
+#   MOCK_MODE=l2_exit143 / l2_exit137  L2 prints "Execution error" and exits 143 / 137 with no
+#                            report: the signal-shaped death of issue 42.
 #   MOCK_MODE=l2_fail        L2 prints no report and exits 1 (simulates the
 #                            aggregator dying to a mid-run sleep). L1 is unaffected.
 #                            Pair with AUTODREAM_L2_ATTEMPTS=1 so the test doesn't
@@ -217,6 +219,10 @@ else
     printf '%s\n' "$@" > "$MOCK_CAPTURE_DIR/l2-args.txt"
   fi
   rep=$(printf '%s' "$line2" | sed 's/^Report destination (literal absolute path): //')
+  case "$mode" in
+    l2_exit143) printf 'Execution error'; exit 143 ;;
+    l2_exit137) printf 'Execution error'; exit 137 ;;
+  esac
   if [ "$mode" = "l2_fail" ]; then
     echo "mock: aggregator failed" >&2
     exit 1
