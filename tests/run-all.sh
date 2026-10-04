@@ -467,10 +467,12 @@ test_notes_expiry_uses_report_date(){
 # never reaches L2, one consumed before any report was written, one lost to a torn line
 # in the file, and one swallowed because jq is missing.
 
+focus_at(){ # $1=local day $2=local time — the UTC taggedAt the mod would write for that LOCAL moment
+  date -u -r "$(date -j -f '%Y-%m-%d %H:%M:%S' "$1 $2:00" +%s)" +%Y-%m-%dT%H:%M:%S.000Z
+}
 mk_focus_tag(){ # $1=root $2=session $3=row $4=local day $5=text [$6=local time, default 12:00] — one line, as the mod writes it
   # The mod writes only a UTC timestamp, so the fixture states the LOCAL moment it stands for.
-  local at; at=$(date -u -r "$(date -j -f '%Y-%m-%d %H:%M' "$4 ${6:-12:00}" +%s)" +%Y-%m-%dT%H:%M:%S.000Z)
-  jq -cn --arg s "$2" --arg r "$3" --arg a "$at" --arg t "$5" \
+  jq -cn --arg s "$2" --arg r "$3" --arg a "$(focus_at "$4" "${6:-12:00}")" --arg t "$5" \
     '{id:($s+":"+$r),session:$s,uuid:$r,role:"assistant",text:$t,cwd:"/tmp/proj-a",taggedAt:$a}' \
     >> "$1/autodream/tags.jsonl"
 }
@@ -491,7 +493,7 @@ test_focus_tag_reaches_the_report_and_is_consumed(){
   assert_grep "$f" "tagged: 1" "the header counts it"
   assert_grep "$f" "^> second line" "the turn is quoted line by line"
   assert_grep "$f" "Transcript: $root/projects/proj-a/s1.jsonl" "L2 is told where the session's transcript is"
-  assert_grep "$root/autodream/tags-consumed.txt" "^s1:row-1	$DATE\$" "the ledger records the id and the report date"
+  assert_grep "$root/autodream/tags-consumed.txt" "^s1:row-1	$DATE	$(focus_at "$DATE" 12:00)\$" "the ledger records the id, the report date and the tag's own time"
   assert_eq "$(shasum "$root/autodream/tags.jsonl")" "$before" "tags.jsonl is the mod's file and was not touched"
   rm -rf "$root"
 }
@@ -541,13 +543,62 @@ test_focus_tag_pending_set(){
   mk_focus_tag "$root" s1 old "$DATE" "already read"
   printf '{"id":"torn\n' >> "$root/autodream/tags.jsonl"
   mk_focus_tag "$root" s1 fresh "$DATE" "still owed"
-  printf 's1:old\t%s\n' "$DATE" > "$root/autodream/tags-consumed.txt"
+  printf 's1:old\t2019-12-31\t%s\n' "$(focus_at "$DATE" 12:00)" > "$root/autodream/tags-consumed.txt"
   focus_collect "$root" "$DATE"
   local f; f="$(fdir "$root")/operator-notes.md"
   assert_grep "$f" "still owed" "the pending tag is read"
   assert_nogrep "$f" "already read" "a consumed tag is not offered again"
   assert_grep "$f" "tagged: 1" "only the pending one is counted"
-  assert_eq "$(cat "$(fdir "$root")/vault-tags-manifest.txt")" "s1:fresh" "the manifest holds exactly what was read"
+  assert_eq "$(cat "$(fdir "$root")/vault-tags-manifest.txt")" "s1:fresh	$(focus_at "$DATE" 12:00)" "the manifest holds exactly what was read"
+  rm -rf "$root"
+}
+
+test_focus_tag_retag_after_consume_is_offered_again(){
+  echo "# focus tags: a consumed tag that is untagged and tagged again is a new tag"
+  local root; root=$(setup_env); mk_session "$root" s1
+  # The ledger has the first tag of this row (made 11:00, read by an earlier report). The user
+  # untagged it and tagged the same turn again at 12:00: same id, new taggedAt.
+  printf 's1:row-1\t2019-12-31\t%s\n' "$(focus_at "$DATE" 11:00)" > "$root/autodream/tags-consumed.txt"
+  mk_focus_tag "$root" s1 row-1 "$DATE" "tagged a second time"
+  focus_collect "$root" "$DATE"
+  assert_grep "$(fdir "$root")/operator-notes.md" "tagged a second time" "the second tag is offered"
+  rm -rf "$root"
+}
+
+test_focus_tag_forced_rebuild_keeps_its_tags(){
+  echo "# focus tags: rebuilding a report date re-offers the tags that report consumed"
+  local root; root=$(setup_env); mk_session "$root" s1
+  mk_focus_tag "$root" s1 row-1 "$DATE" "read by the report being rebuilt"
+  printf 's1:row-1\t%s\t%s\n' "$DATE" "$(focus_at "$DATE" 12:00)" > "$root/autodream/tags-consumed.txt"
+  focus_collect "$root" "$DATE"
+  assert_grep "$(fdir "$root")/operator-notes.md" "read by the report being rebuilt" "the rebuilt report still carries the tag"
+  rm -rf "$root"
+}
+
+test_focus_tag_unreadable_file_is_reported(){
+  echo "# focus tags: a tags.jsonl that exists and will not read is a missed note, not no tags"
+  local root; root=$(setup_env); mk_session "$root" s1
+  mk_focus_tag "$root" s1 row-1 "$DATE" "behind a permission error"
+  chmod 000 "$root/autodream/tags.jsonl"
+  if [ -r "$root/autodream/tags.jsonl" ]; then ok "skipped: running as a user that ignores file modes"; rm -rf "$root"; return 0; fi
+  focus_collect "$root" "$DATE"
+  chmod 644 "$root/autodream/tags.jsonl"
+  local f; f="$(fdir "$root")/operator-notes.md"
+  assert_grep "$f" "unreadable: 1" "the miss is counted"
+  assert_grep "$f" "focus-tags — UNREADABLE" "and named, so L2 tells the user"
+  assert_eq "$(wc -c < "$(fdir "$root")/vault-tags-manifest.txt" | tr -d ' ')" "0" "nothing is manifested, so nothing is consumed"
+  rm -rf "$root"
+}
+
+test_focus_tag_unparseable_time_is_dated_by_the_report(){
+  echo "# focus tags: a tag whose taggedAt does not parse is due, and dated by the report, not 1970"
+  local root; root=$(setup_env); mk_session "$root" s1
+  printf '%s\n' '{"id":"s1:odd","session":"s1","role":"user","text":"no usable time","cwd":"/tmp/proj-a","taggedAt":"garbage"}' >> "$root/autodream/tags.jsonl"
+  focus_collect "$root" "$DATE"
+  local f; f="$(fdir "$root")/operator-notes.md"
+  assert_grep "$f" "no usable time" "the tag is still offered"
+  assert_grep "$f" "^- \\[$DATE\\]" "dated by the report day"
+  assert_nogrep "$f" "1970" "not by the epoch"
   rm -rf "$root"
 }
 
@@ -3365,6 +3416,10 @@ test_focus_tag_is_held_for_its_day
 test_focus_tag_day_is_the_local_day
 test_focus_tag_not_consumed_without_report
 test_focus_tag_pending_set
+test_focus_tag_retag_after_consume_is_offered_again
+test_focus_tag_forced_rebuild_keeps_its_tags
+test_focus_tag_unreadable_file_is_reported
+test_focus_tag_unparseable_time_is_dated_by_the_report
 test_focus_tag_text_cannot_forge_a_note
 test_focus_tag_archive_is_idempotent
 test_focus_tag_without_jq_is_reported

@@ -48,7 +48,7 @@ path, with an instruction to read the turn in context and report on it. L2 alrea
 tool, so the prompt needed no change.
 
 A tag is consumed only after a complete report, under the same gates as an inbox note (`archive`, not `collect`): a
-failed run, or a rebuild of an old date, leaves it pending. Consumed ids go in `tags-consumed.txt`, a ledger this script
+failed run, or a rebuild of an old date, leaves it pending. Consumed tags (id, report date and `taggedAt`) go in `tags-consumed.txt`, a ledger this script
 writes and the mod never does, so a session open at 03:15 cannot race the run. `vault-notes.sh status` shows both counts.
 
 `vault-notes.sh` needs `jq` for this. Without it the tags are reported as `UNREADABLE` in the operator notes and nothing
