@@ -1,24 +1,28 @@
-# cc-autodream
+# autodream
 
-Nightly memory consolidation for Claude Code. While you sleep it reads yesterday's
-session transcripts and leaves you one short report: the mistakes you keep making,
-where you lost time, and what's worth remembering.
+Nightly review of your coding-agent sessions. While you sleep it reads yesterday's
+transcripts from Claude Code and Oh My Pi (OMP) and leaves you one short report: the
+mistakes you keep making, where you lost time, and what's worth remembering.
+
+One repo, one nightly, one report. Each harness is a directory under `adapters/`, so
+adding another means writing one directory and touching no shared code. This repo was
+`cc-autodream` until 2026-10-03, when the OMP port (`omp-autodream`) folded back into it.
 
 ## Why
 
-You have dozens of Claude Code sessions a week. The useful lessons — a wrong
+You have dozens of agent sessions a week. The useful lessons — a wrong
 assumption you made twice, a flag that always trips you up, a fix worth pinning to
-memory — are buried in transcripts you'll never reread. Claude starts each session
-fresh and rediscovers the same friction.
+memory — are buried in transcripts you'll never reread. Each session starts fresh
+and rediscovers the same friction.
 
-cc-autodream does the rereading for you. Every night it looks across **all** of
+autodream does the rereading for you. Every night it looks across **all** of
 yesterday's sessions, ranks what recurs by frequency × severity (so you see the
 patterns, not the one-offs), and writes a dated digest you can skim in a minute. The
 highest-confidence, highest-severity findings get pinned to your shared Mnemopi
 memory store, so the next session already knows.
 
 This is the cross-session view the built-in per-project auto-memory doesn't give you.
-cc-autodream reads full transcripts and tells you what happened, then hands the
+autodream reads full transcripts and tells you what happened, then hands the
 lessons to Mnemopi to hold.
 
 ## What you get
@@ -66,16 +70,23 @@ Three ways you actually interact with it:
 ## Install
 
 ```bash
-git clone https://github.com/STRML/cc-autodream ~/git/cc-autodream
-cd ~/git/cc-autodream
-./install.sh
+git clone https://github.com/STRML/autodream ~/git/autodream
+cd ~/git/autodream
+./install.sh                                              # Claude Code only
+./install.sh --adapters claude,omp --l2-engine omp        # both harnesses, OMP writes the report
+./install.sh --dry-run --adapters claude,omp              # print what it would do, change nothing
 ```
+
+`--adapters` lists the harnesses to read, and `--l2-engine` names the one whose CLI runs the
+aggregation pass. Pin a model per harness in `config` with `AUTODREAM_L1_MODEL_<NAME>` and
+`AUTODREAM_L2_MODEL_<NAME>` (for example `AUTODREAM_L1_MODEL_OMP`). A host with only one harness
+installed needs none of this.
 
 This symlinks `bin/*.sh`, `prompts/*.md` and the `adapters/` tree into `~/.claude/autodream/`, creates
 `~/.claude/dreams/`, and on macOS installs and bootstraps the nightly launchd
 schedule for you (auto-detecting your username, paths, and `claude`/`git` location —
 no plist editing). Because the scripts are symlinks, editing the repo copy takes
-effect immediately. Requires the `claude` CLI on PATH (override with `CLAUDE_BIN`).
+effect immediately. Requires the CLI of each enabled harness on PATH: `claude` (override with `CLAUDE_BIN`) and `omp` (override with `OMP_BIN`).
 
 Install also detects every Claude config dir on the machine — `~/.claude-nous`,
 `~/.claude-ds4`, `~/.claude-sigint`, and any other `~/.claude*/projects` bucket — and
@@ -138,10 +149,20 @@ prompt with **Triage**, **View** and **Dismiss**, and `/dream` opens the report'
 same `DREAMS_DIR`, `AUTODREAM_DIR` and `CMUX_BIN` variables as `review.sh`, so it needs no config of its own.
 
 ```bash
-claude --plugin-dir /path/to/cc-autodream/mods/autodream-band
+claude --plugin-dir /path/to/autodream/mods/autodream-band
 ```
 
 Commands, fallbacks and how to test it are in [`mods/autodream-band/README.md`](mods/autodream-band/README.md).
+
+## Moving from omp-autodream
+
+`omp-autodream` is archived. Its fixes live here (the provider-refusal deferral, bounded workers,
+the changelog window, the review popup dedup) and the OMP session reader is `adapters/omp/`.
+To move an existing OMP install: unload its launchd jobs, run
+`./install.sh --adapters claude,omp --l2-engine omp`, and carry its L1 model over as
+`AUTODREAM_L1_MODEL_OMP`. Do not copy its `SESSION_ROOTS` line: the omp adapter finds
+`~/.omp/agent/sessions` itself, and a stray root would make the Claude adapter parse OMP files.
+The full runbook, with rollback, is in `docs/plans/2026-10-03-omp-adapter.md`.
 
 ## Leaving notes for the next run
 
@@ -231,8 +252,8 @@ is idempotent, so you can rerun any date. Configuration knobs are documented in
 `bin/run.sh`'s header.
 
 Reading sessions is done through a **harness adapter**, so the runner does not know
-which agent produced a transcript. Today there is one; the seam is what lets a second
-arrive without forking the pipeline.
+which agent produced a transcript. Two ship today, `claude` and `omp`; the seam is what lets a
+third arrive without forking the pipeline.
 
 - `adapters/<name>/` — one directory per harness: `manifest.json` (data, read with
   `jq`, never sourced), `adapter.sh` (enumerate, normalize, project, stats, slim,
