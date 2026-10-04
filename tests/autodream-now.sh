@@ -34,7 +34,7 @@ case "$1" in
     [ "$MOCK_STATE" = absent ] && exit 113
     echo "gui/501/label = {"
     echo "	state = $MOCK_STATE"
-    [ "$MOCK_STATE" = running ] && echo "	pid = 4242"
+    [ "$MOCK_STATE" = running ] && printf '\tpid = 4242\n\tpid = 4243\n\tpid = 4244\n\tpid = 4245\n' 
     echo "}"
     ;;
 esac
