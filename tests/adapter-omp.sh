@@ -186,6 +186,9 @@ assert_eq "$(jq -r '"\(.isSidechain) \(.nested) \(.is_advisor)"' "$tmp/sc-sub.js
 assert_eq "$(jq -r .isSidechain "$tmp/sc-subn.json")" "true" "and so is its linearized copy, whose temp name says nothing"
 "$A" stats "$NB/2026-01-02T12-00-00-000Z_01a0.jsonl" "$tmp/sc-par.json" >/dev/null 2>&1
 assert_eq "$(jq -r '"\(.isSidechain) \(.nested)"' "$tmp/sc-par.json")" "false false" "the parent session is not a sidechain"
+OSD="$tmp/orph-stats/-bucket/2026-01-02T12-00-00-000Z_dead"; mkdir -p "$OSD"; cp "$S1" "$OSD/Task1.jsonl"
+"$A" stats "$OSD/Task1.jsonl" "$tmp/sc-orph.json" >/dev/null 2>&1
+assert_eq "$(jq -r '"\(.isSidechain) \(.nested)"' "$tmp/sc-orph.json")" "true true" "a raw child whose parent file is gone is still a sidechain"
 PH="$tmp/phantom.jsonl"
 { echo "$HDR_TITLE"; hdr_session 30 /tmp; umsg u1 null a; printf '{"type":"custom","id":"x1","parentId":"u1","customType":"agent","data":{}}\n'; } > "$PH"
 "$A" stats "$PH" "$tmp/sc-ph.json" >/dev/null 2>&1

@@ -43,7 +43,13 @@ esac
 # the path and not the entries: an advisor child has no user turns and no session_init). A
 # linearized copy lives in the runner's work directory, where this is false, and the meta record
 # the linearizer wrote answers instead.
-if [ -f "$(dirname "$transcript").jsonl" ]; then nested_name=true; else nested_name=false; fi
+nested_name=false
+if [ -f "$(dirname "$transcript").jsonl" ]; then nested_name=true; fi
+# A child whose parent file is gone is still a child: its directory is named like a session file
+# (<ISO stamp>_<id>) and a project bucket never is. The same rule as linearize.sh.
+case "$(basename "$(dirname "$transcript")")" in
+  [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*Z_*) nested_name=true ;;
+esac
 
 mkdir -p "$(dirname "$output")" || exit 1
 
