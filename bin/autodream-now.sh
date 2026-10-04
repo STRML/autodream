@@ -61,17 +61,12 @@ RUN_SH="$BIN_DIR/run.sh"
 # .ondemand label silently left that install's namespace. Unresolved BASH_SOURCE on purpose:
 # the symlink's own directory is the install dir, while BIN_DIR above resolves through to
 # the repo.
-AUTODREAM_DIR="${AUTODREAM_DIR:-}"
-if [ -z "$AUTODREAM_DIR" ]; then
-  AUTODREAM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
-  # Only a directory that carries an install marker is trusted. run.sh exists in the repo's
-  # bin/ as well, so it cannot be the marker: from a checkout that would make bin/ the install
-  # dir. `config` is written by install.sh and PROMPT.md is one of its symlinks; neither is in bin/.
-  if [ -z "$AUTODREAM_DIR" ] || { [ ! -f "$AUTODREAM_DIR/config" ] && [ ! -f "$AUTODREAM_DIR/PROMPT.md" ]; }; then
-    # Running straight from the checkout still lands in the default install.
-    AUTODREAM_DIR="$HOME/.claude/autodream"
-  fi
-fi
+_src="${BASH_SOURCE[0]}"; _lib="$(dirname "$_src")/lib-install-dir.sh"
+# Installed copies are symlinks: a merge updates them before install.sh links a new helper.
+[ -r "$_lib" ] || _lib="$(dirname "$(readlink "$_src" 2>/dev/null || echo "$_src")")/lib-install-dir.sh"
+# shellcheck source=/dev/null
+. "$_lib"
+resolve_install_dir "$_src"
 # The same default run.sh uses, so --watch and the plist point where run.sh writes.
 DREAMS_DIR="${DREAMS_DIR:-$HOME/.claude/dreams}"
 mkdir -p "$AUTODREAM_DIR/logs"

@@ -69,13 +69,12 @@ set -uo pipefail
 # (status, clear, or run.sh's early empty-night path) finds the store there, the same way
 # run.sh finds its install dir. The legacy ~/.claude/autodream stays the last resort
 # (Codex review of 232c94c).
-if [ -z "${AUTODREAM_DIR:-}" ]; then
-  self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
-  if [ -n "$self_dir" ] && { [ -f "$self_dir/config" ] || [ -f "$self_dir/l1-no-advisor.yml" ]; }; then
-    AUTODREAM_DIR="$self_dir"
-  fi
-fi
-AUTODREAM_DIR="${AUTODREAM_DIR:-$HOME/.claude/autodream}"
+_src="${BASH_SOURCE[0]}"; _lib="$(dirname "$_src")/lib-install-dir.sh"
+# Installed copies are symlinks: a merge updates them before install.sh links a new helper.
+[ -r "$_lib" ] || _lib="$(dirname "$(readlink "$_src" 2>/dev/null || echo "$_src")")/lib-install-dir.sh"
+# shellcheck source=/dev/null
+. "$_lib"
+resolve_install_dir "$_src"
 STATE="${AUTODREAM_QUESTION_STATE:-$AUTODREAM_DIR/question-streaks.tsv}"
 ESCALATE_AT="${AUTODREAM_QUESTION_ESCALATE_AT:-3}"
 

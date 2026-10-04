@@ -17,14 +17,12 @@ set -euo pipefail
 # Hard-coding $HOME/.claude/autodream here made the writer and the reader disagree the moment an
 # install lived anywhere else: vault-notes.sh takes AUTODREAM_DIR from the launchd plist, so every
 # note landed in a file the nightly never opened. No error, no missing note reported.
-AUTODREAM_DIR="${AUTODREAM_DIR:-}"
-if [ -z "$AUTODREAM_DIR" ]; then
-  AUTODREAM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
-  if [ -z "$AUTODREAM_DIR" ] || { [ ! -f "$AUTODREAM_DIR/config" ] && [ ! -f "$AUTODREAM_DIR/PROMPT.md" ]; }; then
-    echo "WARNING: no install markers next to $0; falling back to legacy $HOME/.claude/autodream" >&2
-    AUTODREAM_DIR="$HOME/.claude/autodream"
-  fi
-fi
+_src="${BASH_SOURCE[0]}"; _lib="$(dirname "$_src")/lib-install-dir.sh"
+# Installed copies are symlinks: a merge updates them before install.sh links a new helper.
+[ -r "$_lib" ] || _lib="$(dirname "$(readlink "$_src" 2>/dev/null || echo "$_src")")/lib-install-dir.sh"
+# shellcheck source=/dev/null
+. "$_lib"
+resolve_install_dir "$_src" autodream-note.sh
 NOTES="${AUTODREAM_NOTES_FILE:-$AUTODREAM_DIR/notes.md}"
 EXPIRES=""
 if [ "${1:-}" = "--expires" ]; then EXPIRES="${2:-}"; shift 2; fi

@@ -33,14 +33,12 @@ set -u
 # ~/.omp/agent/{autodream,dreams}) made the legacy ~/.claude/{autodream,dreams} defaults
 # fail every manual invocation with "could not locate" the report. Env still wins; the derived dir is
 # only trusted when it carries an install marker file (install.sh writes both).
-AUTODREAM_DIR="${AUTODREAM_DIR:-}"
-if [ -z "$AUTODREAM_DIR" ]; then
-  AUTODREAM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
-  if [ -z "$AUTODREAM_DIR" ] || { [ ! -f "$AUTODREAM_DIR/config" ] && [ ! -f "$AUTODREAM_DIR/l1-no-advisor.yml" ]; }; then
-    echo "review.sh: WARNING no install markers next to $0; falling back to legacy $HOME/.claude/autodream" >&2
-    AUTODREAM_DIR="$HOME/.claude/autodream"
-  fi
-fi
+_src="${BASH_SOURCE[0]}"; _lib="$(dirname "$_src")/lib-install-dir.sh"
+# Installed copies are symlinks: a merge updates them before install.sh links a new helper.
+[ -r "$_lib" ] || _lib="$(dirname "$(readlink "$_src" 2>/dev/null || echo "$_src")")/lib-install-dir.sh"
+# shellcheck source=/dev/null
+. "$_lib"
+resolve_install_dir "$_src" review.sh
 
 # Load the config file first, then let any env-provided values win over it.
 __env_dreams="${DREAMS_DIR:-}"; __env_claude="${CLAUDE_BIN:-}"
