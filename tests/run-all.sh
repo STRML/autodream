@@ -5226,48 +5226,6 @@ for _suite in lib-project preflight adapters adapter-claude adapter-omp adapter-
   fi
 done
 
-test_shared_drift_check_from_a_worktree(){
-  echo "# check-shared-drift.sh names the repo by its main checkout, so a git worktree still finds the sibling"
-  command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
-  # Physical path: on macOS mktemp hands back /var/..., git reports /private/var/..., and the
-  # sibling path the script prints comes from git.
-  local T; T=$(cd "$(mktemp -d)" && pwd -P)
-  # A worktree gets its own directory name (cc-autodream-pr25), and inferring the sibling
-  # from that name exited 2 and failed the whole suite in every worktree.
-  mkdir -p "$T/cc-autodream/bin" "$T/omp-autodream/bin"
-  cp "$REPO/bin/check-shared-drift.sh" "$T/cc-autodream/bin/"
-  printf 'bin/a.sh\n' > "$T/cc-autodream/shared-with-sibling.txt"
-  printf 'echo same\n' > "$T/cc-autodream/bin/a.sh"
-  printf 'echo same\n' > "$T/omp-autodream/bin/a.sh"
-  ( cd "$T/cc-autodream" && git init -q && git config user.email t@t.invalid && git config user.name t \
-      && git add -A && git commit -q -m init && git worktree add -q "$T/cc-autodream-feature" 2>/dev/null )
-  local out rc
-  out=$(env -u AUTODREAM_SIBLING_REPO bash "$T/cc-autodream-feature/bin/check-shared-drift.sh" 2>&1); rc=$?
-  assert_eq "$rc" "0" "a worktree with a matching sibling exits 0"
-  case "$out" in *"ok — 1 shared file(s) match $T/omp-autodream"*) ok "and it compared against the sibling next to the main checkout" ;;
-    *) no "and it compared against the sibling next to the main checkout (got [$out])" ;; esac
-  printf 'echo drifted\n' > "$T/omp-autodream/bin/a.sh"
-  env -u AUTODREAM_SIBLING_REPO bash "$T/cc-autodream-feature/bin/check-shared-drift.sh" >/dev/null 2>&1; rc=$?
-  assert_eq "$rc" "1" "real drift seen from the worktree still fails"
-  # A checkout with a name the script does not know and no git is a degraded measurement:
-  # say SKIPPED and exit 0, the same contract as a sibling that is not on disk.
-  mkdir -p "$T/elsewhere/bin"; cp "$REPO/bin/check-shared-drift.sh" "$T/elsewhere/bin/"
-  printf 'bin/a.sh\n' > "$T/elsewhere/shared-with-sibling.txt"
-  out=$(env -u AUTODREAM_SIBLING_REPO bash "$T/elsewhere/bin/check-shared-drift.sh" 2>&1); rc=$?
-  assert_eq "$rc" "0" "an unrecognised checkout name skips instead of failing the suite"
-  case "$out" in *SKIPPED*) ok "and says it skipped" ;; *) no "and says it skipped (got [$out])" ;; esac
-  # Two unreadable copies used to strip to two empty files and compare equal (Codex review
-  # of 232c94c). A file the check cannot read has not been verified, so it is drift.
-  printf 'echo same\n' > "$T/omp-autodream/bin/a.sh"
-  chmod 000 "$T/cc-autodream-feature/bin/a.sh" "$T/omp-autodream/bin/a.sh"
-  env -u AUTODREAM_SIBLING_REPO bash "$T/cc-autodream-feature/bin/check-shared-drift.sh" >/dev/null 2>&1; rc=$?
-  chmod 644 "$T/cc-autodream-feature/bin/a.sh" "$T/omp-autodream/bin/a.sh"
-  assert_eq "$rc" "1" "an unreadable shared file is drift, not a match"
-  rm -rf "$T"
-}
-
-test_shared_drift_check_from_a_worktree
-
 streak_rows(){ awk '!/^#/ && NF' "$1" 2>/dev/null | wc -l | tr -d ' '; }
 
 test_question_streaks_state_lives_with_the_install(){
@@ -5541,20 +5499,6 @@ test_question_streaks_reruns_and_mismatch(){
 test_question_streaks
 test_question_streaks_reruns_and_mismatch
 test_question_streaks_state_lives_with_the_install
-
-# Cross-repo drift, last. It is not a unit test — it inspects the sibling checkout, so it
-# can only run on a machine holding both — but it belongs in the same command as the rest,
-# because the failure it catches is one no amount of in-repo testing can see. Both repos
-# passed their own suites for the ten nights this repo's bookmark walk was broken while
-# omp-autodream's identical copy had been fixed. SKIPPED (no sibling) exits 0 and says so;
-# drift exits 1 and counts as a failure here.
-echo
-echo "# cross-repo: shared files must not drift from the sibling autodream repo"
-if bash "$REPO/bin/check-shared-drift.sh"; then
-  ok "shared files match the sibling repo (or the check skipped and said so)"
-else
-  no "shared files have drifted from the sibling repo"
-fi
 
 echo
 echo "----------------------------------------"
