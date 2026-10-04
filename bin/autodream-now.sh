@@ -171,12 +171,26 @@ if [ "$DRYRUN" = 1 ]; then
 fi
 
 # ------------------------------------------------------------------ go go go --
+# Every on-demand run for this install shares one label, and `bootout` below kills the
+# process behind it. Launching a second date while the first was still running evicted
+# the first mid-run, with no report and no error (#78). A loaded job with a live pid is
+# in flight: refuse, and name the date that holds the label. A loaded job with no pid has
+# finished and is safe to boot out. This has to run before the plist is rewritten, because
+# the holder's date is read back out of the old plist.
+holder_pid="$(launchctl print "$DOMAIN/$LABEL" 2>/dev/null | sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\).*/\1/p' | head -n 1)" || holder_pid=""
+if [ -n "$holder_pid" ]; then
+  holder_date="$(sed -n 's#.*<string>\([0-9]\{4\}-[0-9][0-9]-[0-9][0-9]\)</string>.*#\1#p' "$PLIST" 2>/dev/null | head -n 1)"
+  echo "autodream-now: a run for ${holder_date:-another date} is still going (pid $holder_pid, label $LABEL)." >&2
+  echo "  Launching now would kill it. Wait for it, or stop it first: launchctl bootout $DOMAIN/$LABEL" >&2
+  exit 75
+fi
+
 printf '%s\n' "$PLIST_BODY" > "$PLIST"
 if command -v plutil >/dev/null 2>&1; then
   plutil -lint "$PLIST" >/dev/null || { echo "autodream-now: generated plist failed plutil lint" >&2; exit 65; }
 fi
 
-# Clear any prior instance, then bootstrap. RunAtLoad is the ONLY trigger — fires the
+# Clear any finished instance, then bootstrap. RunAtLoad is the ONLY trigger — fires the
 # one-shot run exactly once. Do NOT also kickstart, or a fast run (e.g. the
 # idempotency no-op) would execute twice.
 launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
