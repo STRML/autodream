@@ -166,6 +166,70 @@ SK="$tmp/skills.jsonl"
 "$A" stats "$SK" "$tmp/stsk.json" >/dev/null 2>&1
 assert_eq "$(jq -r '"\(.skills_invoked|join(",")) \(.skills_authored|join(","))"' "$tmp/stsk.json")" "review new-skill" "skill invocation and authoring are counted separately"
 
+echo "# stats: tool calls, from start records when the file has them and from toolCall blocks when it does not"
+TC() { printf '{"type":"message","id":"%s","parentId":"%s","message":{"role":"assistant","content":[{"type":"toolCall","id":"c%s","name":"%s","arguments":{}}]}}\n' "$1" "$2" "$1" "$3"; }
+TS() { printf '{"type":"custom","id":"s%s","parentId":"%s","customType":"tool_execution_start","data":{"toolName":"%s"}}\n' "$1" "$2" "$3"; }
+# An advisor transcript: toolCall blocks, no start records (measured: 144 of 410 advisor files).
+ADV="$tmp/adv-calls/__advisor.jsonl"; mkdir -p "$tmp/adv-calls"
+{ echo "$HDR_TITLE"; hdr_session 20 /tmp; umsg u1 null a; TC t1 u1 read; TC t2 t1 grep; TC t3 t2 read; TC t4 t3 glob; } > "$ADV"
+"$A" stats "$ADV" "$tmp/stcalls-adv.json" >/dev/null 2>&1
+assert_eq "$(jq -r .tool_call_count "$tmp/stcalls-adv.json")" "4" "an advisor's toolCall blocks are counted"
+assert_eq "$(jq -r '.tools_used | join(",")' "$tmp/stcalls-adv.json")" "glob,grep,read" "and named, once each"
+"$A" normalize "$ADV" "$tmp/advcalls.out" >/dev/null 2>&1; "$A" stats "$tmp/advcalls.out" "$tmp/stcalls-advn.json" >/dev/null 2>&1
+assert_eq "$(jq -r .tool_call_count "$tmp/stcalls-advn.json")" "4" "the count survives the linearized copy the runner reads"
+# A main session records each call both ways; it must read the start records only, not twice.
+MAIN="$tmp/main-calls.jsonl"
+{ echo "$HDR_TITLE"; hdr_session 21 /tmp; umsg u1 null a; TS 1 u1 bash; TC t1 s1 bash; TS 2 t1 read; TC t2 s2 read; } > "$MAIN"
+"$A" stats "$MAIN" "$tmp/stcalls-main.json" >/dev/null 2>&1
+assert_eq "$(jq -r .tool_call_count "$tmp/stcalls-main.json")" "2" "a main session with both shapes counts each call once"
+assert_eq "$(jq -r '.tools_used | join(",")' "$tmp/stcalls-main.json")" "bash,read" "and names come from the start records"
+# Start records alone (the documented shape) still count, and a session with neither reads zero.
+STARTS="$tmp/starts-only.jsonl"
+{ echo "$HDR_TITLE"; hdr_session 22 /tmp; umsg u1 null a; TS 1 u1 bash; TS 2 s1 read; TS 3 s2 read; } > "$STARTS"
+"$A" stats "$STARTS" "$tmp/stcalls-starts.json" >/dev/null 2>&1
+assert_eq "$(jq -r .tool_call_count "$tmp/stcalls-starts.json")" "3" "start records alone are still counted"
+# The rule is per file, not per call: one start record means the blocks are not counted. A
+# transcript with a start record and an unmatched block (not seen in the wild as a partial
+# write, but 8 of 577 main transcripts hold blocks with no start record) reads the start
+# records only, exactly as it did before the fallback existed.
+MIXED="$tmp/mixed-calls.jsonl"
+{ echo "$HDR_TITLE"; hdr_session 25 /tmp; umsg u1 null a; TS 1 u1 bash; TC t1 s1 bash; TC t2 t1 grep; } > "$MIXED"
+"$A" stats "$MIXED" "$tmp/stcalls-mixed.json" >/dev/null 2>&1
+assert_eq "$(jq -r '"\(.tool_call_count) \(.tools_used|join(","))"' "$tmp/stcalls-mixed.json")" "1 bash" "a start record plus an unmatched block reads the start records only"
+# An advisor that only hit the wall: every call is answered with `Tool "bash" not available`.
+# Those are attempts, not calls made, and must not clear the noise gate's tool_call_count >= 5.
+TR() { printf '{"type":"message","id":"r%s","parentId":"%s","message":{"role":"toolResult","toolCallId":"c%s","toolName":"%s","isError":true,"content":[{"type":"text","text":"Tool \\"%s\\" not available"}]}}\n' "$1" "$2" "$1" "$3" "$3"; }
+REJ="$tmp/rejected-calls/__advisor.jsonl"; mkdir -p "$tmp/rejected-calls"
+{ echo "$HDR_TITLE"; hdr_session 26 /tmp; umsg u1 null a
+  TC t1 u1 bash; TR t1 t1 bash; TC t2 r1 bash; TR t2 t2 bash; TC t3 r2 bash; TR t3 t3 bash
+  TC t4 r3 bash; TR t4 t4 bash; TC t5 r4 bash; TR t5 t5 bash; } > "$REJ"
+"$A" stats "$REJ" "$tmp/stcalls-rej.json" >/dev/null 2>&1
+assert_eq "$(jq -r '"\(.tool_call_count) \(.tools_used|length)"' "$tmp/stcalls-rej.json")" "0 0" "five rejected bash attempts are not five tool calls"
+# Two accepted read calls and three rejected ones: only the accepted calls count.
+HALF="$tmp/half-rejected/__advisor.jsonl"; mkdir -p "$tmp/half-rejected"
+{ echo "$HDR_TITLE"; hdr_session 27 /tmp; umsg u1 null a
+  TC t1 u1 read; TC t2 t1 read; TC t3 t2 bash; TR t3 t3 bash; TC t4 r3 write; TR t4 t4 write; TC t5 r4 bash; TR t5 t5 bash; } > "$HALF"
+"$A" stats "$HALF" "$tmp/stcalls-half.json" >/dev/null 2>&1
+assert_eq "$(jq -r '"\(.tool_call_count) \(.tools_used|join(","))"' "$tmp/stcalls-half.json")" "2 read" "only the calls the toolset accepted count, and only those are named"
+# A real error from an available tool is still a call.
+ERRC="$tmp/err-call/__advisor.jsonl"; mkdir -p "$tmp/err-call"
+{ echo "$HDR_TITLE"; hdr_session 28 /tmp; umsg u1 null a; TC t1 u1 read
+  printf '{"type":"message","id":"rt1","parentId":"t1","message":{"role":"toolResult","toolCallId":"ct1","toolName":"read","isError":true,"content":[{"type":"text","text":"ENOENT: no such file"}]}}\n'; } > "$ERRC"
+"$A" stats "$ERRC" "$tmp/stcalls-err.json" >/dev/null 2>&1
+assert_eq "$(jq -r .tool_call_count "$tmp/stcalls-err.json")" "1" "a failed read is still a call"
+NOCALLS="$tmp/no-calls.jsonl"
+{ echo "$HDR_TITLE"; hdr_session 23 /tmp; umsg u1 null a; } > "$NOCALLS"
+"$A" stats "$NOCALLS" "$tmp/stcalls-none.json" >/dev/null 2>&1
+assert_eq "$(jq -r '"\(.tool_call_count) \(.tools_used|length)"' "$tmp/stcalls-none.json")" "0 0" "a session that called nothing reads zero"
+# A message whose content is a plain string, or a toolCall with no name, must not break the count.
+ODD="$tmp/odd-calls.jsonl"
+{ echo "$HDR_TITLE"; hdr_session 24 /tmp; umsg u1 null a
+  printf '{"type":"message","id":"a1","parentId":"u1","message":{"role":"assistant","content":"plain text"}}\n'
+  printf '{"type":"message","id":"a2","parentId":"a1","message":{"role":"assistant","content":[{"type":"toolCall","id":"c9"}]}}\n'
+} > "$ODD"
+"$A" stats "$ODD" "$tmp/stcalls-odd.json" >/dev/null 2>&1; assert_rc "$?" 0 "string content and a nameless toolCall do not break stats"
+assert_eq "$(jq -r '"\(.tool_call_count) \(.tools_used|length)"' "$tmp/stcalls-odd.json")" "1 0" "the nameless call counts but names nothing"
+
 echo "# is-self: omp's own worker transcripts"
 SELF="$tmp/self.jsonl"
 { echo "$HDR_TITLE"; hdr_session 13 /tmp; umsg u1 null "Session transcript to analyze (literal absolute path): /x"; } > "$SELF"

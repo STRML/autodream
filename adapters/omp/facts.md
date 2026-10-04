@@ -19,7 +19,8 @@ finding whose evidence is an `omp` session, these are the surfaces that exist:
 
 Some omp transcripts are not agent sessions. `__advisor.jsonl` and
 `__advisor-<name>.jsonl` record a reviewer model watching a primary session: its
-toolset is read, grep and glob only, so `tool_call_count: 0` and `Tool "bash" not
-available` are its normal shape and are never `sandbox_friction`. The sidecar's
+toolset is read, grep and glob only, so `Tool "bash" not available` is its normal
+shape and is never `sandbox_friction`. Its `tool_call_count` counts the calls the
+toolset accepted, not rejected attempts. The sidecar's
 `is_advisor` field says which transcripts these are. Task subagent transcripts
 (`<session>/<Name>.jsonl`) are real sessions, flagged `nested`.
