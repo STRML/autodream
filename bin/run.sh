@@ -1408,6 +1408,48 @@ report_finishes_date() {
   [[ "$TARGET_DATE" < "${AUTODREAM_MARKER_EPOCH:-2026-08-19}" ]]
 }
 
+# Pins that a complete report left behind and no run ever finished applying: the run died between
+# the report landing and the pin step (issue 72), or a store call failed or the CLI was missing and
+# no one reran that date (issue 69). Nothing else revisits an old date: the nightly only
+# processes yesterday and the idempotency guard skips a date that has a report.
+#
+# A findings dir in the trailing window qualifies when it holds a non-empty pins.jsonl, the
+# pin-projects.tsv the run that proposed them wrote (the authorization list, never rebuilt here
+# from files a model could have touched), a complete report no older than the pins (older means
+# the report is not the one behind them), and either no pins-result.txt or counters showing
+# failed, cli_missing, unreadable or unsupported_harness pins. The ledger makes the rerun
+# safe: a pin already stored is a duplicate. A pin that cannot be stored is retried each
+# night until its date leaves the window.
+sweep_stranded_pins() {
+  local window="${AUTODREAM_UNASSEMBLED_WINDOW:-7}" root="$AUTODREAM_DIR/findings"
+  local d label report res n
+  [ -d "$root" ] || return 0
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    label=$(basename "$d")
+    [ -s "$d/pins.jsonl" ] || continue
+    # A forced rebuild of the target date replaces its pins; the rebuild owns them.
+    [ "$label" = "$TARGET_DATE" ] && [ "${AUTODREAM_FORCE:-0}" = "1" ] && continue
+    report="$DREAMS_DIR/$label.md"
+    [ -s "$report" ] && grep -q 'autodream:open-questions=' "$report" 2>/dev/null || continue
+    [ ! "$d/pins.jsonl" -nt "$report" ] || continue
+    res="$d/pins-result.txt"
+    if [ -e "$res" ]; then
+      n=$(awk -F': ' '/^pins_(failed|cli_missing|unreadable|unsupported_harness): / { t += $2 } END { print t + 0 }' "$res" 2>/dev/null)
+      [ "${n:-0}" -gt 0 ] || continue
+    fi
+    if [ ! -s "$d/pin-projects.tsv" ]; then
+      log "pin sweep: $label has pins but no pin-projects.tsv, so no project is authorized; they stay in $d/pins.jsonl"
+      continue
+    fi
+    log "pin sweep: applying the pins $label never finished storing"
+    bash "$APPLY_PINS" "$d" "$label" >> "$RUN_LOG" 2>&1 \
+      || log "pin sweep: apply-pins exited non-zero for $label (counters unavailable)"
+    [ ! -r "$res" ] || log "pin sweep: $label: $(tr '\n' ' ' < "$res")"
+  done < <(find "$root" -maxdepth 1 -type d -name '2[0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]' 2>/dev/null \
+    | sort | tail -n "$window")
+}
+
 # ---- One run per date at a time (#55) ----
 # launchd serialises a label against itself and nothing more, and autodream-now.sh runs
 # under a different label than the scheduled nightly, so an on-demand run and a trigger for
@@ -2463,6 +2505,10 @@ run() {
   if [ -n "$LEGACY_MARKER" ]; then
     log "note: unmarked reports predating AUTODREAM_MARKER_EPOCH (treated as complete): $LEGACY_MARKER"
   fi
+
+  # Pins an earlier run left unapplied, whichever date they belong to, before the guard can
+  # return. Needs only files on disk, so it runs whether or not this date has work to do.
+  sweep_stranded_pins
 
   # ---- Idempotency guard: a finished report means we're done ----
   # A report is only written after a successful L2 and carries the open-questions marker
@@ -3587,26 +3633,20 @@ PY
     # reached the end. Both writes are staged to a .tmp and renamed so a half-staged file never
     # lands at $REPORT_PATH. Lines after the sentinel (the pin block, the report path, the
     # summary) are appended to the run log so a stripped capture never loses them.
-    L2_COMPLETE=0
-    if grep -q '^AUTODREAM_REPORT_END$' "$L2_STDOUT" 2>/dev/null; then
-      if awk '/^AUTODREAM_REPORT_END$/ { last=NR } { line[NR]=$0 } END { for (i=1; i<last; i++) print line[i] }' "$L2_STDOUT" > "$REPORT_PATH.tmp" && mv "$REPORT_PATH.tmp" "$REPORT_PATH"; then
-        L2_COMPLETE=1
-      else
-        log "WARNING: could not stage the sentinel-stripped report at $REPORT_PATH"
-      fi
-    elif [ -s "$L2_STDOUT" ]; then
-      log "WARNING: L2 stdout carried no AUTODREAM_REPORT_END sentinel; keeping the whole capture as a degraded report (incomplete, will retry)"
-      cat "$L2_STDOUT" > "$REPORT_PATH.tmp" && mv "$REPORT_PATH.tmp" "$REPORT_PATH" 2>/dev/null || true
-    fi
-    awk '/^AUTODREAM_REPORT_END$/ { f=1; next } f { print }' "$L2_STDOUT" >> "$RUN_LOG" 2>/dev/null || true
-    L2_DELIVERED=$L2_COMPLETE
+    L2_SENTINEL=0
+    grep -q '^AUTODREAM_REPORT_END$' "$L2_STDOUT" 2>/dev/null && L2_SENTINEL=1
     # ---- Pins: the block after the sentinel becomes pins.jsonl, written by the runner ----
     # Only a delivered report carries pins, and only the block that follows the LAST sentinel
     # counts, so a report that quotes the markers in its body cannot inject one. The block needs
     # its END line: a capture cut off inside it proposes nothing, rather than half a pin. Only
     # lines that open a JSON object are kept; apply-pins.sh validates each one against the
     # authorization list that was fixed before any model ran.
-    if [ "$L2_DELIVERED" = "1" ] && [ "$PINS_SAFE" = "1" ]; then
+    #
+    # Written BEFORE the report is staged. A report that stands complete on disk then always has
+    # its pins.jsonl and pin-projects.tsv beside it, so a kill after the report lands cannot
+    # leave a complete report whose pins were never proposed (issue 72); a kill before it leaves
+    # no complete report, and the rerun moves these aside and asks L2 again.
+    if [ "$L2_SENTINEL" = "1" ] && [ "$PINS_SAFE" = "1" ]; then
       if awk '
             /^AUTODREAM_REPORT_END$/ { last = NR }
             { line[NR] = $0 }
@@ -3620,10 +3660,26 @@ PY
             }' "$L2_STDOUT" > "$FINDINGS_DIR/pins.jsonl.tmp" 2>/dev/null \
          && [ -s "$FINDINGS_DIR/pins.jsonl.tmp" ] && mv -f "$FINDINGS_DIR/pins.jsonl.tmp" "$FINDINGS_DIR/pins.jsonl"; then
         log "wrote $(wc -l < "$FINDINGS_DIR/pins.jsonl" | tr -d ' ') proposed pin(s) from the L2 pin block"
+        # The authorization list goes to disk with the pins, so a later run can still apply them
+        # if this one dies before the pin step (see sweep_stranded_pins).
+        write_pin_projects "$FINDINGS_DIR" || log "WARNING: could not write pin-projects.tsv; these pins wait for a later run that can"
       else
         rm -f "$FINDINGS_DIR/pins.jsonl.tmp"
       fi
     fi
+    L2_COMPLETE=0
+    if grep -q '^AUTODREAM_REPORT_END$' "$L2_STDOUT" 2>/dev/null; then
+      if awk '/^AUTODREAM_REPORT_END$/ { last=NR } { line[NR]=$0 } END { for (i=1; i<last; i++) print line[i] }' "$L2_STDOUT" > "$REPORT_PATH.tmp" && mv "$REPORT_PATH.tmp" "$REPORT_PATH"; then
+        L2_COMPLETE=1
+      else
+        log "WARNING: could not stage the sentinel-stripped report at $REPORT_PATH"
+      fi
+    elif [ -s "$L2_STDOUT" ]; then
+      log "WARNING: L2 stdout carried no AUTODREAM_REPORT_END sentinel; keeping the whole capture as a degraded report (incomplete, will retry)"
+      cat "$L2_STDOUT" > "$REPORT_PATH.tmp" && mv "$REPORT_PATH.tmp" "$REPORT_PATH" 2>/dev/null || true
+    fi
+    awk '/^AUTODREAM_REPORT_END$/ { f=1; next } f { print }' "$L2_STDOUT" >> "$RUN_LOG" 2>/dev/null || true
+    L2_DELIVERED=$L2_COMPLETE
     # Break only on a sentinel-validated capture that also carries the open-questions marker;
     # a degraded capture (sentinel absent) never satisfies the loop.
     if [ "$L2_DELIVERED" = "1" ] && report_complete; then

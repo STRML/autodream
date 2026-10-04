@@ -4605,6 +4605,9 @@ test_pins_applied_after_complete_report(){
   assert_grep "$d/pin-projects.tsv" "^$b"$'\t'"$cwd\$" "pin-projects.tsv pairs the bucket with its cwd"
   assert_nonempty "$d/pins-applied.tsv" "the ledger records the stored pin"
   assert_grep "$root/run.out" 'memory pins:' "the run log reports the pin counts"
+  # The pins and their authorization list land before the report does (issue 72), so a complete
+  # report on disk always has them beside it.
+  if [ "$d/pins.jsonl" -nt "$root/dreams/$DATE.md" ]; then no "pins.jsonl was written before the report"; else ok "pins.jsonl was written before the report"; fi
   rm -rf "$root"
 }
 
@@ -4853,6 +4856,57 @@ test_pins_ledger_wiped_by_a_worker_stores_nothing_twice(){
   rm -rf "$root"
 }
 
+# A night's findings dir as an earlier run left it: one pin, its authorization row, a complete report.
+# $1=root $2=date $3=result-file body ("" = no pins-result.txt, so the pin step never finished)
+mk_stranded_pins(){
+  local root=$1 d=$2 result=${3:-} dir="$1/autodream/findings/$2"
+  mkdir -p "$dir" "$root/work-$2"
+  printf '{"project":"proj-%s","title":"Stranded","body":"Body","kind":"correction"}\n' "$d" > "$dir/pins.jsonl"
+  printf 'proj-%s\t%s\n' "$d" "$(cd "$root/work-$d" && pwd -P)" > "$dir/pin-projects.tsv"
+  [ -z "$result" ] || printf '%s\n' "$result" > "$dir/pins-result.txt"
+  # Report written after the pins, the order run.sh now keeps.
+  sleep 1
+  printf '# report\n<!-- autodream:open-questions=0 -->\n' > "$root/dreams/$d.md"
+}
+
+test_pins_sweep_applies_pins_a_killed_run_never_reached(){
+  echo "# pins: a complete report whose pin step never ran gets its pins applied by the next run (#72)"
+  local root; root=$(setup_env)
+  mk_stranded_pins "$root" "$DATE" ""
+  pins_run "$root"
+  assert_grep "$root/run.out" 'nothing to do' "the guard still skips the finished date"
+  assert_eq "$(sm_calls "$root")" "1" "the stranded pin was stored"
+  assert_grep "$root/autodream/findings/$DATE/pins-result.txt" '^pins_applied: 1$' "the result file records it"
+  pins_run "$root"
+  assert_eq "$(sm_calls "$root")" "1" "a later run does not store it again"
+  rm -rf "$root"
+}
+
+test_pins_sweep_retries_failed_pins_on_an_earlier_date(){
+  echo "# pins: a failed pin from an earlier night is retried by a later run (#69)"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  mk_stranded_pins "$root" 2019-12-31 $'pins_total: 1\npins_applied: 0\npins_failed: 1\npins_cli_missing: 0\npins_unreadable: 0'
+  pins_run "$root"
+  assert_eq "$(sm_calls "$root")" "1" "the earlier date's pin was stored"
+  assert_grep "$root/autodream/findings/2019-12-31/pins-result.txt" '^pins_applied: 1$' "its counters now say applied"
+  assert_grep "$root/run.out" 'pin sweep' "the run log names the sweep"
+  rm -rf "$root"
+}
+
+test_pins_sweep_leaves_what_it_must(){
+  echo "# pins: the sweep skips settled dates, dates with no authorization list, and dates without a complete report"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  mk_stranded_pins "$root" 2019-12-29 $'pins_total: 1\npins_applied: 1\npins_failed: 0\npins_cli_missing: 0\npins_unreadable: 0'
+  mk_stranded_pins "$root" 2019-12-30 ""
+  trash "$root/autodream/findings/2019-12-30/pin-projects.tsv"
+  mk_stranded_pins "$root" 2019-12-31 ""
+  printf '# half a report\n' > "$root/dreams/2019-12-31.md"
+  pins_run "$root"
+  assert_eq "$(sm_calls "$root")" "0" "nothing was stored"
+  assert_grep "$root/run.out" '2019-12-30.*no pin-projects.tsv' "the date with no authorization list is named"
+  rm -rf "$root"
+}
+
 test_pins_bucket_named_subagents_is_a_project(){
   echo "# pins: a session directly inside a bucket named 'subagents' belongs to that bucket"
   local root; root=$(setup_env); mkdir -p "$root/work"
@@ -4968,6 +5022,9 @@ test_pins_custom_slug_bucket_keeps_its_cwd
 test_pins_invalid_cwd_still_counts_toward_a_collision
 test_pins_unresolvable_cwd_still_counts_toward_a_collision
 test_pins_applied_before_notify
+test_pins_sweep_applies_pins_a_killed_run_never_reached
+test_pins_sweep_retries_failed_pins_on_an_earlier_date
+test_pins_sweep_leaves_what_it_must
 test_streak_update_runs_before_steps_that_can_hang
 test_pins_ledger_wiped_by_a_worker_stores_nothing_twice
 test_pins_bucket_named_subagents_is_a_project

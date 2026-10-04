@@ -18,8 +18,9 @@
 #   pins-applied.tsv  <sha1 of the canonical pin><TAB><memory_id> per stored
 #                     pin. A pin already listed is skipped, so a rerun never
 #                     stores the same memory twice. A failed call writes no row,
-#                     so a rerun of the same date retries it. Nothing sweeps
-#                     older dates yet (#69).
+#                     so a rerun of the same date retries it; run.sh's
+#                     sweep_stranded_pins reruns this for any date in the trailing
+#                     week whose counters show failed pins.
 #   pins-result.txt   counters, one `key: value` per line.
 #
 # Exit 2 on bad arguments. Exit 3 when pins-result.txt cannot be cleared or written, so the

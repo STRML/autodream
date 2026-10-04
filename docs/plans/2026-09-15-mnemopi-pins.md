@@ -49,7 +49,7 @@ Each row is a test in `tests/apply-pins.sh` (A) or `tests/run-all.sh` (R).
 | A8 project not in this run | skips | memory for a project the run never saw | `pins_rejected_project: 1`, no call |
 | A9 project seen, cwd empty or missing dir | skips | memory scoped to the wrong project | `pins_no_cwd: 2`, no call |
 | A10 `pin-projects.tsv` missing | rejects every pin | writes without authorization | `pins_rejected_project` counts all |
-| A11 CLI exits nonzero | no ledger row | failure recorded as applied | `pins_failed: 1`; a rerun of the same date retries and applies (no nightly sweep of older dates yet, #69) |
+| A11 CLI exits nonzero | no ledger row | failure recorded as applied | `pins_failed: 1`; the next run retries and applies it: `sweep_stranded_pins` reruns any date in the trailing week whose counters show failed pins |
 | A12 CLI exits 0 with non-JSON output | no ledger row | garbage read as success | `pins_failed: 1` |
 | A13 quotes, backslash, `$(...)`, newline in body | passed through as JSON data | shell injection or mangled text | payload content byte-identical, no command ran |
 | A14 no arguments | usage | runs against `$PWD` | exit 2 |
@@ -89,3 +89,5 @@ Each row is a test in `tests/apply-pins.sh` (A) or `tests/run-all.sh` (R).
 | R17 the report describes a pin the runner later refuses or fails | the prompt says "Pin proposed", never stored | the report claims memory that does not exist | prompt test |
 | R8 L1 writes a `session_path` naming an untriaged project's session | the authorization list comes from `sessions.txt`, not findings JSON | a model-written path authorizes memory for a project the run never saw | no call, that project absent from `pin-projects.tsv` |
 | R18 a worker empties `pins-applied.tsv` before a forced rebuild applies its pins | the runner restores the ledger it held before any model ran | the rebuild stores every pin again | no second call, the ledger row is back |
+| R19 the run dies after the report lands and before the pin step (no `pins-result.txt`) | the next run's sweep applies the pins from disk | a complete report whose pins are never stored, and the idempotency guard skips the date | the pin is stored, `pins-result.txt` records it |
+| R20 a date in the trailing week has failed or held pins | the sweep reruns `apply-pins.sh` for it; the ledger blocks duplicates | a store that was down one night strands that night's pins | `pins_applied` in that date's counters |
