@@ -33,10 +33,10 @@ set -u
 # ~/.omp/agent/{autodream,dreams}) made the legacy ~/.claude/{autodream,dreams} defaults
 # fail every manual invocation with "could not locate" the report. Env still wins; the derived dir is
 # only trusted when it carries an install marker file (install.sh writes both).
-# shellcheck source=/dev/null
 _src="${BASH_SOURCE[0]}"; _lib="$(dirname "$_src")/lib-install-dir.sh"
 # Installed copies are symlinks: a merge updates them before install.sh links a new helper.
 [ -r "$_lib" ] || _lib="$(dirname "$(readlink "$_src" 2>/dev/null || echo "$_src")")/lib-install-dir.sh"
+# shellcheck source=/dev/null
 . "$_lib"
 resolve_install_dir "$_src" review.sh
 

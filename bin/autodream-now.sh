@@ -61,10 +61,10 @@ RUN_SH="$BIN_DIR/run.sh"
 # .ondemand label silently left that install's namespace. Unresolved BASH_SOURCE on purpose:
 # the symlink's own directory is the install dir, while BIN_DIR above resolves through to
 # the repo.
-# shellcheck source=/dev/null
 _src="${BASH_SOURCE[0]}"; _lib="$(dirname "$_src")/lib-install-dir.sh"
 # Installed copies are symlinks: a merge updates them before install.sh links a new helper.
 [ -r "$_lib" ] || _lib="$(dirname "$(readlink "$_src" 2>/dev/null || echo "$_src")")/lib-install-dir.sh"
+# shellcheck source=/dev/null
 . "$_lib"
 resolve_install_dir "$_src"
 # The same default run.sh uses, so --watch and the plist point where run.sh writes.

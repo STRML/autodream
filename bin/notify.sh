@@ -39,10 +39,10 @@ else
   REPORT="${1:?Usage: notify.sh <report.md>  |  notify.sh --failure <date> <reason>}"
   DATE=$(basename "$REPORT" .md)
 fi
-# shellcheck source=/dev/null
 _src="${BASH_SOURCE[0]}"; _lib="$(dirname "$_src")/lib-install-dir.sh"
 # Installed copies are symlinks: a merge updates them before install.sh links a new helper.
 [ -r "$_lib" ] || _lib="$(dirname "$(readlink "$_src" 2>/dev/null || echo "$_src")")/lib-install-dir.sh"
+# shellcheck source=/dev/null
 . "$_lib"
 resolve_install_dir "$_src"
 INBOX_DIR="$AUTODREAM_DIR/inbox"
