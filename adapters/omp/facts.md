@@ -14,8 +14,9 @@ finding whose evidence is an `omp` session, these are the surfaces that exist:
   (`~/.omp/agent/RULES.md`, which reaches task subagents; `AGENTS.md` does not), a
   hook, or a doc note. A pin for an omp-only finding is allowed when it sets
   `"harness":"omp"`: omp reads the same Mnemopi store, and the tag keeps the pin out
-  of Claude Code's startup context. Durable behavior still belongs in a rule, because
-  a pin can be crowded out of the startup budget.
+  of Claude Code's startup context. The runner holds a tagged pin (`pins_unsupported_harness`
+  in `pins-result.txt`) until the installed `shared-memory` filters on the tag. Durable
+  behavior still belongs in a rule, because a pin can be crowded out of the startup budget.
 - `compliance_failure` - cite `~/.omp/agent/RULES.md`, `AGENTS.md`, or the project's
   rule surface.
 

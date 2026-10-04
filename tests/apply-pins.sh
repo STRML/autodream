@@ -246,6 +246,21 @@ assert_eq "$(stat_of pins_invalid)" "2" "unknown and null harness rejected"
 assert_eq "$(jq -r 'select(.payload.content | startswith("Tagged")) | .payload.metadata.harness' "$T/calls.jsonl" 2>/dev/null)" "omp" "metadata.harness is omp"
 assert_eq "$(jq -r 'select(.payload.content | startswith("Untagged")) | .payload.metadata | has("harness")' "$T/calls.jsonl" 2>/dev/null)" "false" "untagged pin carries no harness key"
 
+echo "# A26: a shared-memory without the harness gate holds tagged pins and still stores untagged ones"
+setup
+{
+  pin proj-a "Tagged" "Body" | jq -c '. + {harness:"omp"}'
+  pin proj-a "Untagged" "Body"
+} > "$F/pins.jsonl"
+MOCK_SM_GATE=0 run_ap
+assert_eq "$(stat_of pins_unsupported_harness)" "1" "tagged pin held"
+assert_eq "$(stat_of pins_applied)" "1" "untagged pin applied"
+assert_eq "$(calls)" "1" "only one remember call"
+assert_eq "$(ledger_rows)" "1" "held pin is not ledgered"
+run_ap
+assert_eq "$(stat_of pins_applied)" "1" "rerun with the gate present applies the held pin"
+assert_eq "$(stat_of pins_duplicate)" "1" "and recognises the untagged one as stored"
+
 echo "# A14: no arguments"
 setup
 SHARED_MEMORY_BIN="$SM" bash "$AP" > "$T/out" 2>&1
