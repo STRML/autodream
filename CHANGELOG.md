@@ -13,7 +13,7 @@ All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 - `run-stats.txt` keys `sessions_out_of_window`, `session_window` (`on`/`off`), `sessions_windowed` (triaged sessions cut to the day) and `l1_err_files_orphaned`, the `.err` files with no findings JSON whose session is not in the run's worklist, which nothing retries. They are logged by hash. A stale `.err` is reported, not retried: the `.err` is the only record of which session it was, and a worker with the Write tool could have put any path in it.
 - `AUTODREAM_WINDOW=0` restores mtime-only placement. The window is also off, with `session_window: off`, when `bin/session-window.sh` cannot be found, the report day does not convert to epoch bounds, or this host's `find` rejects the far upper date, so a degraded install reads exactly what it read before.
 - `install.sh` links `bin/session-window.sh`. `tests/session-window.sh` is a new unit suite, in CI and in `tests/run-all.sh`; it checks DST days in New York, London and Sydney against literal epoch values.
-- `tests/replay.sh --ingest` stages every session modified since the date began, with no upper mtime bound, so it can see the sessions this change recovers.
+- `tests/replay.sh --ingest` stages every session modified from the date until five years after (the runner's own reach), not only those last modified on the date, so it can see the sessions this change recovers. A replayed date on which every staged file holds no record in the day is a WARN, not a FAIL.
 
 ## 2026-10-03
 
