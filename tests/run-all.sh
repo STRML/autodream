@@ -2987,6 +2987,14 @@ mk_fanout_fixture(){ # $1=root
       '{"type":"assistant","isSidechain":true,"timestamp":"2020-01-02T12:05:05Z","message":{"content":[{"type":"tool_use","name":"Read"}]}}' > "$f"
     touch -t "$STAMP" "$f"
   done
+  # A fanout whose parent file is gone still groups, under the path that file would have had.
+  mkdir -p "$b/orphan1/subagents"
+  for f in "$b/orphan1/subagents/agent-x.jsonl" "$b/orphan1/subagents/agent-y.jsonl"; do
+    printf '%s\n' \
+      '{"type":"user","isSidechain":true,"timestamp":"2020-01-02T18:05:00Z","message":{"content":"worker task"}}' \
+      '{"type":"assistant","isSidechain":true,"timestamp":"2020-01-02T18:05:05Z","message":{"content":[{"type":"tool_use","name":"Read"}]}}' > "$f"
+    touch -t "$STAMP" "$f"
+  done
 }
 
 test_fanout_stats(){
@@ -2996,17 +3004,19 @@ test_fanout_stats(){
   run_dream "$root"
   local stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'sessions_top_level: 2'  "the two ungated top-level sessions"
-  assert_grep "$stats" 'sessions_nested: 3'     "the three workers, at both nesting depths"
-  assert_grep "$stats" 'fanout_parents: 1'      "all three workers belong to one parent"
+  assert_grep "$stats" 'sessions_nested: 5'     "three workers under a parent, at both nesting depths, and two under a missing one"
+  assert_grep "$stats" 'fanout_parents: 2'      "the workers belong to two parents, one of them gone"
   assert_grep "$stats" 'largest_fanout: 3'      "the fanout is three workers wide"
   # The workers' own timestamps (12:05) sit inside the parent's, and the lone session is hours away:
   # no cross-session concurrency, so the fanout must not read as multi-clauding.
   assert_grep "$stats" 'sessions_with_overlap: 0' "a fanout is not multi-clauding"
   local rows; rows=$(cat "$(fdir "$root")/fanouts.tsv" 2>/dev/null)
-  assert_eq "$(printf '%s\n' "$rows" | grep -c .)" "3" "fanouts.tsv names each worker"
+  assert_eq "$(printf '%s\n' "$rows" | grep -c .)" "5" "fanouts.tsv names each worker"
   assert_grep_str "$rows" "$(hash_of "$root/projects/proj-a/parent1/subagents/agent-a.jsonl")" "a worker is named by its findings hash"
   local ph; ph=$(hash_of "$root/projects/proj-a/parent1.jsonl")
-  assert_eq "$(cut -f2 "$(fdir "$root")/fanouts.tsv" | sort -u)" "$ph" "every worker row names the parent file as its parent"
+  assert_eq "$(cut -f2 "$(fdir "$root")/fanouts.tsv" | sort | uniq -c | awk '{print $1}' | sort -n | tr '\n' ' ')" "2 3 " "workers group two and three to a parent"
+  assert_eq "$(grep -c "$ph" "$(fdir "$root")/fanouts.tsv")" "3" "the three workers name the parent file as their parent"
+  assert_eq "$(grep -c "$(hash_of "$root/projects/proj-a/orphan1.jsonl")" "$(fdir "$root")/fanouts.tsv")" "2" "and the two orphans name the path their parent would have had"
   assert_eq "$(cut -f1 "$(fdir "$root")/fanouts.tsv" | grep -c "$ph")" "0" "the parent is not a worker row"
   rm -rf "$root"
 }

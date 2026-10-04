@@ -1922,7 +1922,7 @@ session_parent() {
 # $1=findings dir -> one worker-hash<TAB>parent-hash row per nested transcript in sessions.txt
 # (a sidecar with isSidechain or nested set: a claude subagent or workflow worker, an omp
 # advisor or task child). The parent hash is the parent file's artifact key, or, when that file
-# is gone, a key for the directory the workers share, so a fanout still groups. Held in the
+# is gone, the path that file would have (same string session_parent returns), so a fanout still groups. Held in the
 # runner's memory like session_rows, for the same reason: L1 and L2 can rewrite the worklist.
 fanout_rows() {
   local dir=$1 s hash parent
@@ -1932,8 +1932,8 @@ fanout_rows() {
     hash=$(session_hash "$s") || continue
     jq -e '.isSidechain == true or .nested == true' "$dir/$hash.stats.json" >/dev/null 2>&1 || continue
     parent=$(session_parent "$s") || case $s in
-      */subagents/*) parent=${s%%/subagents/*} ;;
-      *) parent=$(dirname "$s") ;;
+      */subagents/*) parent=${s%%/subagents/*}.jsonl ;;
+      *) parent=$(dirname "$s").jsonl ;;
     esac
     printf '%s\t%s\n' "$hash" "$(session_hash "$parent")"
   done 3< "$dir/sessions.txt"
