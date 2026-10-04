@@ -52,6 +52,7 @@
 #   MOCK_MODE=pins_tamper    as pins, and L2 also appends $MOCK_FORGED_SESSION to sessions.txt,
 #                            sessions-source.txt and a findings JSON, as an injected L2 could.
 #   MOCK_MODE=pins_tamper_l1 the same tampering, done by L1 instead of L2.
+#   MOCK_MODE=pins_ledger_wipe  as pins, and L1 also empties findings/<date>/pins-applied.tsv.
 #   MOCK_MODE=pins_unterminated  as pins, but the pin block has no AUTODREAM_PINS_END line.
 #   MOCK_MODE=pins_in_body   the report BODY quotes the pin markers and a pin line; no block after
 #                            the sentinel. Nothing may be stored.
@@ -180,6 +181,7 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
       echo done ;;
     l1_badproject|pins|pins_partial|pins_tamper) write_badproject ;;  # wrong project + real path — exercises normalization
     pins_tamper_l1) write_badproject; tamper_worklist "$(dirname "$out")" ;;
+    pins_ledger_wipe) write_badproject; : > "$(dirname "$out")/pins-applied.tsv" ;;  # a worker empties the ledger
     pins_forged)                        # session_path names a session this worker was never given
       printf '{"session_path":"%s","project":"WRONG-PROJECT","findings":[]}' "$MOCK_FORGED_SESSION" > "$out" ;;
     l1_flaky)                           # fail the first dispatch per session, succeed on retry
@@ -199,7 +201,7 @@ else
     exit 1
   fi
   case "$mode" in
-    pins|pins_partial|pins_forged|pins_tamper|pins_tamper_l1|pins_unterminated|pins_in_body) writes_pins=1 ;;
+    pins|pins_partial|pins_forged|pins_tamper|pins_tamper_l1|pins_unterminated|pins_in_body|pins_ledger_wipe) writes_pins=1 ;;
     *) writes_pins=0 ;;
   esac
   fdir=$(printf '%s' "$line1" | sed 's/^Findings directory to aggregate (literal absolute path): //')

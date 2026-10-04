@@ -22,8 +22,10 @@
 #                     older dates yet (#69).
 #   pins-result.txt   counters, one `key: value` per line.
 #
-# Exit 2 on bad arguments. Otherwise exit 0 whatever happened to the pins: a
-# pin must never cost a report, and the counters say what went wrong.
+# Exit 2 on bad arguments. Exit 3 when pins-result.txt cannot be cleared or written, so the
+# caller does not read an earlier run's counters as this run's; nothing is stored when it
+# cannot be cleared. Otherwise exit 0 whatever happened to the pins: a pin must never cost a
+# report, and the counters say what went wrong.
 #
 # SHARED_MEMORY_BIN overrides the CLI (default: `shared-memory` on PATH). The
 # test suite points it at a mock so no test writes real memory.
@@ -46,7 +48,10 @@ SM="${SHARED_MEMORY_BIN:-shared-memory}"
 
 # Counters from an earlier run of this date must never stand in for this run's if the
 # write below fails; run.sh logs whatever file it finds.
-rm -f "$RESULT"
+if ! rm -f "$RESULT" 2>/dev/null || [ -e "$RESULT" ]; then
+  echo "apply-pins: could not clear $RESULT; storing nothing so the old counters cannot pass for this run's" >&2
+  exit 3
+fi
 
 # A pin is valid when this filter prints it. Anything else, including a line
 # holding two JSON values, prints nothing.
@@ -61,6 +66,7 @@ VALID='select(type == "object")
   | select((has("harness") | not) or (.harness as $h | ["claude", "omp", "codex"] | any(. == $h)))
   | {project, title, body, kind} + (if has("harness") then {harness} else {} end)'
 
+RESULT_FAILED=0
 total=0 applied=0 duplicate=0 invalid=0 rejected_project=0 no_cwd=0 failed=0 unledgered=0 cli_missing=0 unreadable=0 unsupported_harness=0
 
 write_result() {
@@ -76,7 +82,7 @@ write_result() {
     printf 'pins_cli_missing: %s\n' "$cli_missing"
     printf 'pins_unreadable: %s\n' "$unreadable"
     printf 'pins_unsupported_harness: %s\n' "$unsupported_harness"
-  } > "$RESULT.tmp" && mv "$RESULT.tmp" "$RESULT"
+  } > "$RESULT.tmp" && mv "$RESULT.tmp" "$RESULT" || RESULT_FAILED=1
   echo "apply-pins: total=$total applied=$applied duplicate=$duplicate invalid=$invalid rejected_project=$rejected_project no_cwd=$no_cwd failed=$failed unledgered=$unledgered cli_missing=$cli_missing unreadable=$unreadable"
 }
 
@@ -101,14 +107,6 @@ apply_line() {
   project=$(jq -r .project <<<"$canon")
   cwd=$(project_cwd "$project") || { echo rejected_project; return; }
   if [ -z "$cwd" ] || [ ! -d "$cwd" ]; then echo no_cwd; return; fi
-  hash=$(printf '%s' "$canon" | shasum -a 1 | cut -d' ' -f1)
-  # `cut` succeeds even when shasum dies, which leaves an empty hash. Ledgered, an empty
-  # hash would make every later pin in the file look like a duplicate.
-  [[ $hash =~ ^[0-9a-f]{40}$ ]] || { echo failed; return; }
-  # An unreadable ledger reads the same as "not stored yet" below, which would store the
-  # pin again. When duplicates cannot be ruled out, store nothing.
-  if [ -e "$LEDGER" ] && [ ! -r "$LEDGER" ]; then echo failed; return; fi
-  if [ -f "$LEDGER" ] && cut -f1 "$LEDGER" | grep -qxF "$hash"; then echo duplicate; return; fi
   # mnemopi_remember takes its bank from the payload, then MNEMOPI_MCP_BANK, then
   # "default", and never from --cwd. Without the project's retainBank named here, every
   # pin lands in the global store. No bank means no store.
@@ -116,6 +114,17 @@ apply_line() {
   # only jq's status would.
   ctx=$("$SM" context --cwd "$cwd" </dev/null 2>/dev/null) || { echo failed; return; }
   bank=$(jq -er '.retainBank | strings | select(length > 0)' <<<"$ctx" 2>/dev/null) || { echo failed; return; }
+  # The bank is part of the identity: a forced rebuild can resolve a project to another
+  # directory (/tmp/a_b and /tmp/a-b encode alike), and a pin stored in one bank is not
+  # stored in the other.
+  hash=$(printf '%s\n%s' "$bank" "$canon" | shasum -a 1 | cut -d' ' -f1)
+  # `cut` succeeds even when shasum dies, which leaves an empty hash. Ledgered, an empty
+  # hash would make every later pin in the file look like a duplicate.
+  [[ $hash =~ ^[0-9a-f]{40}$ ]] || { echo failed; return; }
+  # An unreadable ledger reads the same as "not stored yet" below, which would store the
+  # pin again. When duplicates cannot be ruled out, store nothing.
+  if [ -e "$LEDGER" ] && [ ! -r "$LEDGER" ]; then echo failed; return; fi
+  if [ -f "$LEDGER" ] && cut -f1 "$LEDGER" | grep -qxF "$hash"; then echo duplicate; return; fi
   payload=$(jq -cn --argjson pin "$canon" --arg date "$TARGET_DATE" --arg bank "$bank" '{
     bank: $bank,
     content: ($pin.title + "\n\n" + $pin.body),
@@ -154,7 +163,7 @@ apply_line() {
 
 if [ ! -e "$PINS" ]; then
   write_result
-  exit 0
+  exit $((RESULT_FAILED * 3))
 fi
 
 # Read the file once, and check that read. A redirect on the loop below that fails to
@@ -163,7 +172,7 @@ if ! CONTENT=$(cat -- "$PINS" 2>/dev/null); then
   unreadable=1
   write_result
   echo "apply-pins: could not read $PINS; pins stay there" >&2
-  exit 0
+  exit $((RESULT_FAILED * 3))
 fi
 
 if ! command -v "$SM" >/dev/null 2>&1; then
@@ -171,7 +180,7 @@ if ! command -v "$SM" >/dev/null 2>&1; then
   total=$(grep -c '[^[:space:]]' <<<"$CONTENT" || true)
   write_result
   echo "apply-pins: $SM not found; pins stay in $PINS" >&2
-  exit 0
+  exit $((RESULT_FAILED * 3))
 fi
 
 # Capability probe. A bare `--host` fails closed in a shared-memory built with the harness
@@ -198,4 +207,4 @@ while IFS= read -r line <&3 || [ -n "$line" ]; do
 done 3<<<"$CONTENT"
 
 write_result
-exit 0
+exit $((RESULT_FAILED * 3))

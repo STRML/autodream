@@ -4770,6 +4770,25 @@ test_streak_update_runs_before_steps_that_can_hang(){
   rm -rf "$root"
 }
 
+test_pins_ledger_wiped_by_a_worker_stores_nothing_twice(){
+  echo "# pins: a worker that empties pins-applied.tsv cannot make a rebuild store a pin twice (#76)"
+  local root; root=$(setup_env); mkdir -p "$root/work"
+  local cwd; cwd=$(cd "$root/work" && pwd -P)
+  mk_session_with_cwd "$root" s1 "$cwd"
+  local b; b=$(encode_project "$cwd")
+  export MOCK_MODE=pins MOCK_PIN_PROJECT="$b"; pins_run "$root"; unset MOCK_MODE
+  assert_eq "$(sm_calls "$root")" "1" "the first run stores the pin"
+  # Forced rebuild: the previous report moves aside, L2 proposes the same pin again, and the
+  # worker empties the ledger while it runs. The runner's snapshot, taken before any model
+  # ran, puts it back before the pins are applied.
+  # The first run's findings go, or L1 treats the sessions as done and never starts a worker.
+  find "$(fdir "$root")" -maxdepth 1 -name '*.json' -exec trash {} +
+  export MOCK_MODE=pins_ledger_wipe AUTODREAM_FORCE=1; pins_run "$root"; unset MOCK_MODE AUTODREAM_FORCE MOCK_PIN_PROJECT
+  assert_eq "$(sm_calls "$root")" "1" "the rebuild stored nothing a second time"
+  assert_eq "$(wc -l < "$(fdir "$root")/pins-applied.tsv" | tr -d ' ')" "1" "the ledger row is back"
+  rm -rf "$root"
+}
+
 test_pins_bucket_named_subagents_is_a_project(){
   echo "# pins: a session directly inside a bucket named 'subagents' belongs to that bucket"
   local root; root=$(setup_env); mkdir -p "$root/work"
@@ -4886,6 +4905,7 @@ test_pins_invalid_cwd_still_counts_toward_a_collision
 test_pins_unresolvable_cwd_still_counts_toward_a_collision
 test_pins_applied_before_notify
 test_streak_update_runs_before_steps_that_can_hang
+test_pins_ledger_wiped_by_a_worker_stores_nothing_twice
 test_pins_bucket_named_subagents_is_a_project
 test_pins_failed_move_aside_leaves_no_temp_file
 test_pins_l2_cannot_widen_the_worklist
