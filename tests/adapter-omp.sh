@@ -174,6 +174,42 @@ SK="$tmp/skills.jsonl"
 "$A" stats "$SK" "$tmp/stsk.json" >/dev/null 2>&1
 assert_eq "$(jq -r '"\(.skills_invoked|join(",")) \(.skills_authored|join(","))"' "$tmp/stsk.json")" "review new-skill" "skill invocation and authoring are counted separately"
 
+echo "# stats: isSidechain follows provenance, not a custom record omp never writes (#114, item 2)"
+# The old rule keyed off custom/agent and custom/subagent records. omp writes neither, so the flag
+# read false for every file and the noise gate's sidechain exemption never applied to a child.
+NP="$NB/2026-01-02T12-00-00-000Z_01a0"
+"$A" stats "$NP/__advisor.jsonl" "$tmp/sc-adv.json" >/dev/null 2>&1
+assert_eq "$(jq -r .isSidechain "$tmp/sc-adv.json")" "true" "a raw advisor child is a sidechain"
+"$A" stats "$NP/Rebase1.jsonl" "$tmp/sc-sub.json" >/dev/null 2>&1
+assert_eq "$(jq -r '"\(.isSidechain) \(.nested) \(.is_advisor)"' "$tmp/sc-sub.json")" "true true false" "a raw task child is a sidechain and nested, not an advisor"
+"$A" normalize "$NP/Rebase1.jsonl" "$tmp/sc-subn.out" >/dev/null 2>&1; "$A" stats "$tmp/sc-subn.out" "$tmp/sc-subn.json" >/dev/null 2>&1
+assert_eq "$(jq -r .isSidechain "$tmp/sc-subn.json")" "true" "and so is its linearized copy, whose temp name says nothing"
+"$A" stats "$NB/2026-01-02T12-00-00-000Z_01a0.jsonl" "$tmp/sc-par.json" >/dev/null 2>&1
+assert_eq "$(jq -r '"\(.isSidechain) \(.nested)"' "$tmp/sc-par.json")" "false false" "the parent session is not a sidechain"
+PH="$tmp/phantom.jsonl"
+{ echo "$HDR_TITLE"; hdr_session 30 /tmp; umsg u1 null a; printf '{"type":"custom","id":"x1","parentId":"u1","customType":"agent","data":{}}\n'; } > "$PH"
+"$A" stats "$PH" "$tmp/sc-ph.json" >/dev/null 2>&1
+assert_eq "$(jq -r .isSidechain "$tmp/sc-ph.json")" "false" "a custom record named agent does not make a main session a sidechain"
+
+echo "# stats: attribution separates harness-injected turns from human ones (#114, item 3)"
+UM(){ # $1=id $2=parent $3=attribution $4=epoch-ish seconds suffix
+  printf '{"type":"message","id":"%s","parentId":"%s","timestamp":"2026-01-02T12:00:%s.000Z","message":{"role":"user","attribution":"%s","content":[{"type":"text","text":"t"}]}}\n' "$1" "$2" "$4" "$3"
+}
+ATT="$tmp/attrib.jsonl"
+{ echo "$HDR_TITLE"; hdr_session 31 /tmp; UM u1 null user 10; UM u2 u1 agent 20; UM u3 u2 agent 30; UM u4 u3 user 40; } > "$ATT"
+"$A" stats "$ATT" "$tmp/att.json" >/dev/null 2>&1
+assert_eq "$(jq -r .user_message_count "$tmp/att.json")" "2" "agent-attributed user messages are not human turns"
+assert_eq "$(jq -r '.user_turn_timestamps | length' "$tmp/att.json")" "2" "and carry no overlap timestamps"
+assert_eq "$(jq -r .turn_count "$tmp/att.json")" "4" "turn_count still counts every user and assistant message"
+UNATT="$tmp/unattrib.jsonl"
+{ echo "$HDR_TITLE"; hdr_session 32 /tmp; umsg u1 null a; umsg u2 u1 b; } > "$UNATT"
+"$A" stats "$UNATT" "$tmp/unatt.json" >/dev/null 2>&1
+assert_eq "$(jq -r .user_message_count "$tmp/unatt.json")" "2" "a message with no attribution field is human, as in every file before the field existed"
+AADV="$tmp/attr-adv/__advisor.jsonl"; mkdir -p "$tmp/attr-adv"
+{ echo "$HDR_TITLE"; hdr_session 33 /tmp; UM u1 null agent 10; UM u2 u1 agent 20; } > "$AADV"
+"$A" stats "$AADV" "$tmp/attadv.json" >/dev/null 2>&1
+assert_eq "$(jq -r '"\(.user_message_count) \(.isSidechain)"' "$tmp/attadv.json")" "0 true" "an advisor reads zero human turns and is exempt from the gate by provenance"
+
 echo "# stats: tool calls, from start records when the file has them and from toolCall blocks when it does not"
 TC() { printf '{"type":"message","id":"%s","parentId":"%s","message":{"role":"assistant","content":[{"type":"toolCall","id":"c%s","name":"%s","arguments":{}}]}}\n' "$1" "$2" "$1" "$3"; }
 TS() { printf '{"type":"custom","id":"s%s","parentId":"%s","customType":"tool_execution_start","data":{"toolName":"%s"}}\n' "$1" "$2" "$3"; }
