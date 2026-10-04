@@ -1532,21 +1532,28 @@ release_run_lock() {
 }
 
 # $1=adapter name $2=session path -> the project the session belongs to: the directory
-# directly under whichever of the adapter's roots holds it. Claude nests transcripts at
+# directly under the LONGEST of the adapter's roots that holds it, so with nested roots
+# (/c and /c/projects) a session under /c/projects/<bucket> names <bucket>, not "projects".
+# Claude nests transcripts at
 # several depths under one bucket (<bucket>/<session>.jsonl, <bucket>/<session>/subagents/
 # agent-*.jsonl, <bucket>/<session>/subagents/workflows/wf_*/agent-*.jsonl), and a bucket
 # can itself be named "subagents", so no rule based on directory names finds the bucket at
 # every depth. A session under none of the adapter's roots falls back to its parent dir.
 session_project() {
-  local r rest
+  local r rest best=""
   if [ -n "$1" ]; then
     while IFS= read -r r; do
       r=${r%/}
       [ -n "$r" ] || continue
       case $2 in
-        "$r"/*/*) rest=${2#"$r"/}; printf '%s' "${rest%%/*}"; return 0 ;;
+        "$r"/*/*) [ "${#r}" -gt "${#best}" ] && best=$r ;;
       esac
     done < <(adapter_roots "$1")
+  fi
+  if [ -n "$best" ]; then
+    rest=${2#"$best"/}
+    printf '%s' "${rest%%/*}"
+    return 0
   fi
   basename "$(dirname "$2")"
 }
@@ -3176,7 +3183,7 @@ for row in os.environ.get("SESSION_ROWS", "").splitlines():
     if len(parts) >= 2 and parts[1]:
         projects[parts[0]] = parts[1]
 fixed = 0
-for path in glob.glob(os.path.join(findings_dir, "*.json")):
+for path in sorted(glob.glob(os.path.join(findings_dir, "*.json"))):
     proj = projects.get(os.path.basename(path)[:-len(".json")])
     if not proj:
         continue
@@ -3185,6 +3192,8 @@ for path in glob.glob(os.path.join(findings_dir, "*.json")):
             data = json.load(f)
     except (ValueError, OSError):
         continue  # malformed JSON: leave for the triage-failures report section
+    if not isinstance(data, dict):
+        continue  # valid JSON that is not an object (`[]`, `null`): nothing to normalize
     if data.get("project") != proj:
         data["project"] = proj
         tmp = path + ".tmp"
@@ -3194,7 +3203,12 @@ for path in glob.glob(os.path.join(findings_dir, "*.json")):
         fixed += 1
 print(fixed)
 PY
-    log "normalized project field from session path"
+    # shellcheck disable=SC2181
+    if [ $? -eq 0 ]; then
+      log "normalized project field from session path"
+    else
+      log "WARNING: project-field normalization exited nonzero; some findings keep the project the L1 model wrote"
+    fi
   else
     log "python3 not found; skipping project-field normalization (L2 grouping may show dupes)"
   fi

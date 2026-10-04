@@ -4614,6 +4614,47 @@ pins_run(){ # $1=root ; the mock CLI logs each call to $1/sm-calls.jsonl
 }
 sm_calls(){ if [ -f "$1/sm-calls.jsonl" ]; then wc -l < "$1/sm-calls.jsonl" | tr -d ' '; else echo 0; fi; }
 
+test_normalize_project_survives_non_object_findings(){
+  echo "# project normalization: a findings file that is valid JSON but not an object does not stop the rest (#73)"
+  command -v python3 >/dev/null 2>&1 || { echo "  skip - python3 not available"; return 0; }
+  # run.sh's own validation drops a non-object before this pass, so the pass is run on its
+  # own: the python body is cut out of run.sh, and a regression in it shows here.
+  local root; root=$(mktemp -d "${TMPDIR:-/tmp}/ccad.XXXXXX")
+  awk "/SESSION_ROWS=\"\\\$SESSION_ROWS\" python3 - /{f=1; next} /^PY\$/{f=0} f" "$RUN" > "$root/normalize.py"
+  assert_nonempty "$root/normalize.py" "the normalization python was found in run.sh"
+  # Names sort a.json < b.json < c.json < d.json; the pass walks them in that order.
+  printf '[]' > "$root/a.json"; printf 'null' > "$root/b.json"
+  printf '"text"' > "$root/c.json"
+  printf '{"project":"WRONG","findings":[]}' > "$root/d.json"
+  local out rc
+  out=$(SESSION_ROWS=$'a\tproj-a\nb\tproj-a\nc\tproj-a\nd\tproj-a' python3 "$root/normalize.py" "$root" 2>&1); rc=$?
+  assert_eq "$rc" "0" "the pass exits 0 over non-object findings"
+  assert_eq "$(jq -r .project "$root/d.json")" "proj-a" "the object after the non-objects was normalized"
+  assert_eq "$(cat "$root/a.json")" "[]" "an array findings file is left alone"
+  rm -rf "$root"
+}
+
+test_nested_session_roots_name_the_inner_bucket(){
+  echo "# session roots: with nested roots the project is the bucket under the longest root (#73)"
+  local root; root=$(setup_env); mkdir -p "$root/work"
+  local cwd b; cwd=$(cd "$root/work" && pwd -P); b=$(encode_project "$cwd")
+  # setup_env's projects/ is not a root here; the corpus root holds a projects/ root inside it.
+  mkdir -p "$root/corpus/projects/$b"
+  mk_session_with_cwd "$root" s1 "$cwd"
+  mv "$root/projects/$b/s1.jsonl" "$root/corpus/projects/$b/s1.jsonl"
+  export MOCK_MODE=pins MOCK_PIN_PROJECT="$b" SESSION_ROOTS="$root/corpus:$root/corpus/projects"
+  SHARED_MEMORY_BIN="$HERE/mock-shared-memory.sh" MOCK_SM_LOG="$root/sm-calls.jsonl" AUTODREAM_CHANGELOG=0 CLAUDE_BIN="$MOCK" \
+    AUTODREAM_CONFIG="$root/autodream/config" AUTODREAM_CONSUME_DATE="$DATE" AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 \
+    AUTODREAM_L1_ROUNDS=2 AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" /bin/bash "$RUN" "$DATE" > "$root/run.out" 2>&1
+  unset MOCK_MODE MOCK_PIN_PROJECT SESSION_ROOTS
+  cat "$root/autodream/logs/run-$DATE.log" >> "$root/run.out" 2>/dev/null || true
+  local d; d=$(fdir "$root")
+  assert_grep "$d/pin-projects.tsv" "^$b"$'\t'"$cwd\$" "the project is the bucket, not the inner root's own name"
+  assert_nogrep "$d/pin-projects.tsv" '^projects'$'\t' "no project named after the inner root"
+  assert_eq "$(sm_calls "$root")" "1" "the pin for the bucket was stored"
+  rm -rf "$root"
+}
+
 test_pins_applied_after_complete_report(){
   echo "# pins: a complete report's pins.jsonl reaches Mnemopi, scoped to the project's cwd"
   local root; root=$(setup_env); mkdir -p "$root/work"
@@ -5048,6 +5089,8 @@ test_no_markdown_memory_writer_remains(){
 
 # ---- run the new tests ----
 test_pins_applied_after_complete_report
+test_normalize_project_survives_non_object_findings
+test_nested_session_roots_name_the_inner_bucket
 test_pins_not_applied_after_truncated_report
 test_pins_stale_file_is_moved_aside
 test_pins_tab_in_cwd_never_splits_the_row
