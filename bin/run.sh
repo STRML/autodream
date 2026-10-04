@@ -3599,6 +3599,21 @@ PY
   if [ -f "$REPORT_PATH" ]; then
     log "report bytes: $(wc -c < "$REPORT_PATH" | tr -d ' ')"
 
+    # ---- Escalate questions this report has now asked N nights running ----
+    # Before the pins and notify.sh, deliberately: it only reads the report and writes one
+    # local file, while those steps call out (notify.sh runs the user's AUTODREAM_OPEN
+    # synchronously, apply-pins.sh calls the Mnemopi store). If either hangs, a kill there
+    # leaves a report on disk that the next trigger skips, and a streak update placed after
+    # them would never run for it, so a stale question would miss its escalation
+    # (https://github.com/STRML/autodream/issues/77). The failure it
+    # answers is not a missing signal but an unchanging one — the X bookmarks question was
+    # asked six times across ten failing nights, each night's banner identical to the last,
+    # and nothing moved until the user noticed by accident. Never fatal; it is bookkeeping.
+    if [ -x "$AUTODREAM_DIR/question-streaks.sh" ]; then
+      env AUTODREAM_DIR="$AUTODREAM_DIR" "$AUTODREAM_DIR/question-streaks.sh" update "$REPORT_PATH" "$FINDINGS_DIR" \
+        || log "question-streaks returned non-zero (continuing)"
+    fi
+
     # ---- Memory pins: L2's pins.jsonl into Mnemopi ----
     # First step after the report, ahead of notify.sh and the consume steps. notify.sh runs
     # AUTODREAM_OPEN synchronously, so a blocking editor command holds the run there; if
@@ -3653,17 +3668,6 @@ PY
     if [ -x "$AUTODREAM_DIR/notify.sh" ]; then
       log "writing open-questions inbox file..."
       "$AUTODREAM_DIR/notify.sh" "$REPORT_PATH" || log "notify step returned non-zero (continuing)"
-    fi
-
-    # ---- Escalate questions this report has now asked N nights running ----
-    # After notify.sh, deliberately: the nightly banner goes out either way, and this adds
-    # a second, differently-worded one only when a question has gone stale. The failure it
-    # answers is not a missing signal but an unchanging one — the X bookmarks question was
-    # asked six times across ten failing nights, each night's banner identical to the last,
-    # and nothing moved until the user noticed by accident. Never fatal; it is bookkeeping.
-    if [ -x "$AUTODREAM_DIR/question-streaks.sh" ]; then
-      env AUTODREAM_DIR="$AUTODREAM_DIR" "$AUTODREAM_DIR/question-streaks.sh" update "$REPORT_PATH" "$FINDINGS_DIR" \
-        || log "question-streaks returned non-zero (continuing)"
     fi
 
     # ---- Consume what L2 just read ----

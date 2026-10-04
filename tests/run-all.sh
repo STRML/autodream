@@ -4729,6 +4729,27 @@ test_pins_applied_before_notify(){
   rm -rf "$root"
 }
 
+test_streak_update_runs_before_steps_that_can_hang(){
+  echo "# a hung notify.sh or apply-pins.sh cannot skip the question streak update (#77)"
+  local root; root=$(setup_env); mkdir -p "$root/work"
+  local cwd; cwd=$(cd "$root/work" && pwd -P)
+  mk_session_with_cwd "$root" s1 "$cwd"
+  # Each step appends its name to one log. The steps that call user commands or the store
+  # (notify.sh, shared-memory) must come after the streak update, so a hang in either leaves
+  # the streak counted.
+  printf '#!/bin/bash\necho streaks >> "%s/order.log"\n' "$root" > "$root/autodream/question-streaks.sh"
+  printf '#!/bin/bash\necho notify >> "%s/order.log"\n' "$root" > "$root/autodream/notify.sh"
+  printf '#!/bin/bash\necho pins >> "%s/order.log"\nexec bash "%s/mock-shared-memory.sh" "$@"\n' "$root" "$HERE" > "$root/sm.sh"
+  chmod +x "$root/autodream/question-streaks.sh" "$root/autodream/notify.sh" "$root/sm.sh"
+  export MOCK_MODE=pins MOCK_PIN_PROJECT="$(encode_project "$cwd")"
+  SHARED_MEMORY_BIN="$root/sm.sh" MOCK_SM_LOG="$root/sm-calls.jsonl" run_dream "$root"
+  unset MOCK_MODE MOCK_PIN_PROJECT
+  assert_eq "$(sed -n 1p "$root/order.log" 2>/dev/null)" "streaks" "the streak update ran first"
+  assert_grep "$root/order.log" '^pins$' "a pin was stored"
+  assert_grep "$root/order.log" '^notify$' "notify.sh ran"
+  rm -rf "$root"
+}
+
 test_pins_bucket_named_subagents_is_a_project(){
   echo "# pins: a session directly inside a bucket named 'subagents' belongs to that bucket"
   local root; root=$(setup_env); mkdir -p "$root/work"
@@ -4844,6 +4865,7 @@ test_pins_custom_slug_bucket_keeps_its_cwd
 test_pins_invalid_cwd_still_counts_toward_a_collision
 test_pins_unresolvable_cwd_still_counts_toward_a_collision
 test_pins_applied_before_notify
+test_streak_update_runs_before_steps_that_can_hang
 test_pins_bucket_named_subagents_is_a_project
 test_pins_failed_move_aside_leaves_no_temp_file
 test_pins_l2_cannot_widen_the_worklist
