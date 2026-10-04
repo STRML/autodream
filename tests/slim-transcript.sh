@@ -217,5 +217,183 @@ echo "# slim: no .pre.jsonl temp is left behind"
 ls "$TMP"/*.pre.jsonl >/dev/null 2>&1 && no "the pre-pass temp is cleaned up" \
   || ok "the pre-pass temp is cleaned up"
 
+# ---- Reshape mode (AUTODREAM_SLIM_RESHAPE=1): the denylist and the rebuilt record ----------
+# Off unless asked for. run.sh asks for it only while chunked triage is on, so every assertion
+# above runs in the default mode and still means what it did, and the ones below are about the
+# mode alone.
+slim_re() { # $1=jsonl text, extra env as KEY=VAL args after -> slimmed output
+  local text="$1"; shift
+  printf '%s\n' "$text" > "$TMP/re-in.jsonl"
+  rm -f "$TMP/re-out.txt"
+  env AUTODREAM_SLIM_RESHAPE=1 AUTODREAM_SLIM_MAXLINE=100000 AUTODREAM_SLIM_HEAD=9000 \
+      AUTODREAM_SLIM_TAIL=9000 AUTODREAM_SLIM_CAP=100000000 "$@" \
+      "$SLIM" "$TMP/re-in.jsonl" "$TMP/re-out.txt" >/dev/null 2>&1 || return 1
+  cat "$TMP/re-out.txt" 2>/dev/null
+}
+# Every fixture is paired with a sentinel conversation record. If the pre-pass emits NOTHING (every
+# record dropped) the script treats that as a jq failure and falls back to the raw line pass, which
+# would hand the dropped record straight back and fail an assertion that the drop worked.
+SENT='{"type":"user","timestamp":"2026-10-01T09:00:00.000Z","message":{"role":"user","content":"sentinel"}}'
+re_with() { slim_re "$(printf '%s\n%s' "$SENT" "$1")"; }
+
+echo "# slim reshape: Claude Code bookkeeping and hook noise is dropped"
+for t in bridge-session last-prompt permission-mode mode atis-latch ai-title queue-operation file-history-snapshot file-history-delta dev-mods; do
+  got=$(re_with "{\"type\":\"$t\",\"timestamp\":\"2026-10-01T10:00:00.000Z\",\"x\":1}")
+  has 'sentinel' "$got" "($t) the sentinel conversation record survives"
+  hasnt "\"type\":\"$t\"" "$got" "a $t record is dropped"
+done
+for st in hook_success total_tokens_reminder deferred_tools_record deferred_tools_delta silent_turn_reminder prompt_snapshot environment date model instructions session_context credential_org advisor_tool sandbox_instructions mcp_instructions_delta agent_listing_delta remote_session_change command_permissions; do
+  got=$(re_with "{\"type\":\"attachment\",\"timestamp\":\"2026-10-01T10:00:00.000Z\",\"attachment\":{\"type\":\"$st\",\"text\":\"NOISE-$st\"}}")
+  hasnt "NOISE-$st" "$got" "an attachment/$st record is dropped"
+done
+for st in stop_hook_summary turn_duration; do
+  got=$(re_with "{\"type\":\"system\",\"subtype\":\"$st\",\"timestamp\":\"2026-10-01T10:00:00.000Z\",\"content\":\"SYSNOISE\"}")
+  hasnt 'SYSNOISE' "$got" "a system/$st record is dropped"
+done
+
+echo "# slim reshape: records that carry conversation signal, or that this script has never seen, are KEPT"
+got=$(re_with '{"type":"attachment","timestamp":"2026-10-01T10:00:00.000Z","attachment":{"type":"queued_command","prompt":"also fix the footer"}}')
+has 'also fix the footer' "$got" "a queued_command attachment (the user typing mid-turn) is kept"
+got=$(re_with '{"type":"attachment","timestamp":"2026-10-01T10:00:00.000Z","attachment":{"type":"skill_listing","content":"- python-env-management: sets up venvs"}}')
+has 'python-env-management' "$got" "a skill_listing attachment is kept (the triage prompt names it)"
+got=$(re_with '{"type":"system","subtype":"compact_boundary","timestamp":"2026-10-01T10:00:00.000Z","content":"Conversation compacted"}')
+has 'Conversation compacted' "$got" "a system/compact_boundary record is kept"
+got=$(re_with '{"type":"system","subtype":"away_summary","timestamp":"2026-10-01T10:00:00.000Z","content":"AWAYRECAP"}')
+has 'AWAYRECAP' "$got" "a system/away_summary record is kept"
+got=$(re_with '{"type":"system","timestamp":"2026-10-01T10:00:00.000Z","content":"NOSUBTYPE"}')
+has 'NOSUBTYPE' "$got" "a system record with no subtype is kept"
+got=$(re_with '{"type":"pr-link","prNumber":42,"prUrl":"https://example.test/pr/42"}')
+has 'pr/42' "$got" "a pr-link record is kept"
+got=$(re_with '{"type":"summary","summary":"COMPACTED EARLIER WORK","leafUuid":"l1"}')
+has 'COMPACTED EARLIER WORK' "$got" "a compaction summary record is kept"
+got=$(re_with '{"type":"attachment","timestamp":"2026-10-01T10:00:00.000Z","attachment":{"type":"edited_text_file","filename":"a.txt","snippet":"EDITED"}}')
+has 'EDITED' "$got" "an attachment subtype that is not on the denylist (edited_text_file) is kept"
+got=$(re_with '{"type":"attachment","timestamp":"2026-10-01T10:00:00.000Z","attachment":{"type":"a_subtype_from_next_year","x":"FUTURE"}}')
+has 'FUTURE' "$got" "an attachment subtype nobody has seen is kept, not guessed to be noise"
+got=$(re_with '{"type":"some-future-type","payload":{"a":1}}')
+has 'some-future-type' "$got" "an unknown record type is kept"
+got=$(re_with '{"type":"attachment","timestamp":"2026-10-01T10:00:00.000Z"}')
+has '"type":"attachment"' "$got" "an attachment with no subtype at all is kept"
+
+echo "# slim reshape: a kept Claude Code line puts type and timestamp first and only the fields triage reads"
+UREC='{"parentUuid":"p1","isSidechain":false,"userType":"external","cwd":"/x/y","sessionId":"s1","version":"2.1.0","gitBranch":"main","type":"user","message":{"role":"user","content":"hello world"},"uuid":"u1","timestamp":"2026-10-01T14:21:52.155Z","toolUseResult":{"big":"payload"}}'
+got=$(slim_re "$UREC")
+jq_is "$got" 'keys_unsorted[0]' 'type' "type is the first key"
+jq_is "$got" 'keys_unsorted[1]' 'timestamp' "timestamp is the second key, ahead of the payload"
+jq_is "$got" '.message | keys_unsorted | join(",")' 'role,content' "message is reduced to role and content"
+jq_is "$got" '.message.content' 'hello world' "and the user text survives"
+jq_is "$got" '.isSidechain' 'false' "isSidechain is kept"
+for k in parentUuid uuid cwd sessionId version gitBranch userType toolUseResult; do
+  hasnt "\"$k\"" "$got" "envelope field $k is dropped"
+done
+first=$(printf '%s\n' "$got" | grep -m1 '^{' | cut -c1-80)
+has '"timestamp":"2026-10-01T14:21:52.155Z"' "$first" "the timestamp sits inside the first 80 chars, so the line cut cannot take it"
+AREC='{"parentUuid":"p2","type":"assistant","message":{"model":"claude-opus-5-5","id":"msg_1","type":"message","role":"assistant","content":[{"type":"thinking","thinking":"hmm","signature":"AAAASIGNATUREBLOB"},{"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"ls"}}],"usage":{"input_tokens":9}},"uuid":"a1","timestamp":"2026-10-01T14:21:53.000Z"}'
+got=$(slim_re "$AREC")
+hasnt 'SIGNATUREBLOB' "$got" "a thinking signature blob is dropped"
+jq_is "$got" '.message.content[0].thinking' 'hmm' "while the thinking text stays"
+jq_is "$got" '.message.content[1].input.command' 'ls' "and a tool_use command survives"
+jq_is "$got" '.message | keys_unsorted | join(",")' 'role,content' "an assistant message loses model, id, type and usage"
+got=$(slim_re '{"type":"user","message":{"role":"user","content":"no clock"}}')
+jq_is "$got" 'has("timestamp")' 'false' "a record with no timestamp does not gain a null one"
+got=$(slim_re '{"type":"user","timestamp":"2026-10-01T14:21:52.155Z","message":{"content":"no role"}}')
+jq_is "$got" '.message | has("role")' 'false' "a message with no role does not gain a null role"
+got=$(slim_re '{"type":"assistant","timestamp":"2026-10-01T14:21:52.155Z","message":{"role":"assistant","content":["a bare string block",{"type":"thinking","thinking":"t","signature":"S"}]}}')
+jq_is "$got" '.message.content[0]' 'a bare string block' "a content array holding a bare string does not abort the reshape"
+
+echo "# slim reshape: OMP and unknown-schema records come out exactly as they do with the reshape off"
+# Not "raw": the pre-pass has always re-serialised every record with jq -c and stripped OMP toolResult
+# payloads, so an OMP line is already not byte-identical to the file. What this protects is that the
+# DENYLIST never touches a record it does not name. An allowlist bug here deletes every OMP record.
+{ printf '%s\n' '{"type":"title","v":1,"title":"T"}'
+  printf '%s\n' '{"type":"session","version":3,"id":"01a0","timestamp":"2026-08-25T00:43:50.000Z","cwd":"/x"}'
+  printf '%s\n' '{"type":"message","id":"a1","parentId":"p0","timestamp":"2026-08-25T00:43:56.469Z","message":{"role":"toolResult","toolName":"Read","content":"short","details":{"d":1},"usage":{"input":1}}}'
+  printf '%s\n' '{"type":"message","id":"a2","parentId":"a1","timestamp":"2026-08-25T00:43:57.000Z","message":{"role":"assistant","content":[{"type":"text","text":"hi"},{"type":"toolCall","name":"Bash","arguments":{"command":"ls"}}],"providerPayload":{"raw":1}}}'
+  printf '%s\n' '{"type":"custom","customType":"tool_execution_start","data":{"toolName":"bash"}}'
+  printf '%s\n' '{"type":"custom_message","customType":"x","content":"hi"}'
+  printf '%s\n' '{"type":"model_change","id":"m1","model":"x/y"}'
+  printf '%s\n' '{"type":"thinking_level_change","thinkingLevel":"high"}'
+  printf '%s\n' '{"type":"compaction","id":"c1","summary":"S"}'
+  printf '%s\n' '{"type":"autodream_meta","source":"omp","cwd":"/x","is_advisor":false}'
+  printf '%s\n' '{"type":"some-schema-nobody-knows","payload":{"a":[1,2,3]}}'
+  printf '%s\n' '{"no_type_key":true}'; } > "$TMP/omp-all.jsonl"
+rm -f "$TMP/omp-off.out" "$TMP/omp-on.out"
+AUTODREAM_SLIM_MAXLINE=100000 AUTODREAM_SLIM_HEAD=9000 AUTODREAM_SLIM_TAIL=9000 AUTODREAM_SLIM_CAP=100000000 \
+  "$SLIM" "$TMP/omp-all.jsonl" "$TMP/omp-off.out" >/dev/null 2>&1
+AUTODREAM_SLIM_RESHAPE=1 AUTODREAM_SLIM_MAXLINE=100000 AUTODREAM_SLIM_HEAD=9000 AUTODREAM_SLIM_TAIL=9000 AUTODREAM_SLIM_CAP=100000000 \
+  "$SLIM" "$TMP/omp-all.jsonl" "$TMP/omp-on.out" >/dev/null 2>&1
+assert_eq "$(wc -l < "$TMP/omp-on.out" | tr -d ' ')" "$(( $(wc -l < "$TMP/omp-all.jsonl" | tr -d ' ') + 2 ))" "an OMP-shaped file keeps every record (plus the footer) with the reshape on"
+if cmp -s "$TMP/omp-off.out" "$TMP/omp-on.out"; then ok "the output with the reshape on is byte for byte the output with it off"; else no "the output with the reshape on is byte for byte the output with it off"; fi
+has 'details stripped' "$(cat "$TMP/omp-on.out")" "and the OMP toolResult details are still stripped by the pre-pass, as before"
+hasnt 'providerPayload' "$(cat "$TMP/omp-on.out")" "and so is the provider round-trip"
+
+echo "# slim reshape: head and tail are counted over the surviving conversation lines"
+: > "$TMP/budget.jsonl"
+for i in 1 2 3 4 5 6; do
+  printf '{"type":"user","timestamp":"2026-10-01T10:00:0%d.000Z","message":{"role":"user","content":"turn%d"}}\n' "$i" "$i" >> "$TMP/budget.jsonl"
+  printf '{"type":"mode","mode":"auto"}\n{"type":"attachment","attachment":{"type":"hook_success"}}\n' >> "$TMP/budget.jsonl"
+done
+rm -f "$TMP/budget.out"
+AUTODREAM_SLIM_RESHAPE=1 AUTODREAM_SLIM_HEAD=2 AUTODREAM_SLIM_TAIL=2 "$SLIM" "$TMP/budget.jsonl" "$TMP/budget.out" >/dev/null 2>&1
+out=$(cat "$TMP/budget.out" 2>/dev/null)
+has '[2 of 6 lines elided' "$out" "elision is measured against the 6 conversation lines, not the 18 raw ones"
+for t in turn1 turn2 turn5 turn6; do has "$t" "$out" "$t is inside the kept head or tail"; done
+for t in turn3 turn4; do hasnt "$t" "$out" "$t is in the elided middle"; done
+rm -f "$TMP/budget-off.out"
+AUTODREAM_SLIM_HEAD=2 AUTODREAM_SLIM_TAIL=2 "$SLIM" "$TMP/budget.jsonl" "$TMP/budget-off.out" >/dev/null 2>&1
+has '[14 of 18 lines elided' "$(cat "$TMP/budget-off.out" 2>/dev/null)" "control: with the reshape off the same file is elided over all 18 raw lines"
+
+echo "# slim reshape: a file holding ONLY noise still writes something, never nothing"
+printf '%s\n' '{"type":"mode","mode":"auto"}' '{"type":"permission-mode","permissionMode":"x"}' > "$TMP/onlynoise.jsonl"
+rm -f "$TMP/onlynoise.out"
+AUTODREAM_SLIM_RESHAPE=1 "$SLIM" "$TMP/onlynoise.jsonl" "$TMP/onlynoise.out" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "0" "it exits 0"
+[ -s "$TMP/onlynoise.out" ] && ok "and the output is not empty (a worker handed an empty file would write a clean report)" || no "and the output is not empty"
+
+# ---- Full mode (AUTODREAM_SLIM_FULL=1): every surviving line, no cap, no footer -------------
+echo "# slim full: keeps every conversation line, with head, tail and cap set tiny"
+: > "$TMP/full.jsonl"
+for i in $(seq 1 50); do
+  printf '{"type":"user","timestamp":"2026-10-01T10:00:00.000Z","message":{"role":"user","content":"turn%d"}}\n' "$i" >> "$TMP/full.jsonl"
+done
+rm -f "$TMP/full.out" "$TMP/notfull.out"
+AUTODREAM_SLIM_FULL=1 AUTODREAM_SLIM_HEAD=2 AUTODREAM_SLIM_TAIL=2 AUTODREAM_SLIM_CAP=100 \
+  "$SLIM" "$TMP/full.jsonl" "$TMP/full.out" >/dev/null 2>&1
+assert_eq "$(grep -c '"type":"user"' "$TMP/full.out" 2>/dev/null)" "50" "FULL keeps all 50 lines even with head, tail and cap set tiny"
+hasnt 'elided' "$(cat "$TMP/full.out" 2>/dev/null)" "and does not announce an elision"
+AUTODREAM_SLIM_HEAD=2 AUTODREAM_SLIM_TAIL=2 "$SLIM" "$TMP/full.jsonl" "$TMP/notfull.out" >/dev/null 2>&1
+has 'elided' "$(cat "$TMP/notfull.out" 2>/dev/null)" "control: without FULL the same input IS elided"
+echo "# slim full: ends on a transcript line, not on the footer"
+printf '%s\n' "$SENT" > "$TMP/foot.jsonl"
+rm -f "$TMP/foot-full.out" "$TMP/foot-def.out"
+AUTODREAM_SLIM_FULL=1 "$SLIM" "$TMP/foot.jsonl" "$TMP/foot-full.out" >/dev/null 2>&1
+hasnt 'autodream slimmed this transcript' "$(cat "$TMP/foot-full.out" 2>/dev/null)" "full mode appends no footer"
+assert_eq "$(tail -1 "$TMP/foot-full.out" 2>/dev/null | jq -r .type 2>/dev/null)" "user" "and its last line is a transcript record"
+"$SLIM" "$TMP/foot.jsonl" "$TMP/foot-def.out" >/dev/null 2>&1
+has 'autodream slimmed this transcript' "$(cat "$TMP/foot-def.out" 2>/dev/null)" "control: the default mode still appends the footer"
+echo "# slim full: lines are still cut to the line width"
+printf '{"type":"user","timestamp":"2026-10-01T10:00:00.000Z","message":{"role":"user","content":"%s"}}\n' "$(printf 'z%.0s' $(seq 1 500))" > "$TMP/wide.jsonl"
+rm -f "$TMP/wide.out"
+AUTODREAM_SLIM_FULL=1 AUTODREAM_SLIM_MAXLINE=120 "$SLIM" "$TMP/wide.jsonl" "$TMP/wide.out" >/dev/null 2>&1
+assert_eq "$(head -1 "$TMP/wide.out" | tr -d '\n' | wc -c | tr -d ' ')" "120" "a wide line is cut to AUTODREAM_SLIM_MAXLINE (the line, not the file, is what is bounded)"
+
+echo "# slim: the modes are off by default, and an explicit 0 is the default"
+printf '%s\n%s\n%s\n' "$SENT" '{"type":"mode","mode":"auto"}' '{"type":"attachment","attachment":{"type":"hook_success","stdout":"HOOK"}}' > "$TMP/mm.jsonl"
+rm -f "$TMP/mm-a.out" "$TMP/mm-b.out" "$TMP/mm-c.out"
+"$SLIM" "$TMP/mm.jsonl" "$TMP/mm-a.out" >/dev/null 2>&1
+AUTODREAM_SLIM_RESHAPE=0 AUTODREAM_SLIM_FULL=0 "$SLIM" "$TMP/mm.jsonl" "$TMP/mm-b.out" >/dev/null 2>&1
+if cmp -s "$TMP/mm-a.out" "$TMP/mm-b.out"; then ok "RESHAPE=0 FULL=0 writes exactly what no variable writes"; else no "RESHAPE=0 FULL=0 writes exactly what no variable writes"; fi
+has '"type":"mode"' "$(cat "$TMP/mm-a.out")" "and the default mode keeps the bookkeeping record, as it always did"
+has 'HOOK' "$(cat "$TMP/mm-a.out")" "and the hook attachment"
+
+echo "# slim: nothing it writes is readable by another local account"
+printf '%s\n' "$SENT" > "$TMP/mode.jsonl"
+rm -f "$TMP/mode.out"
+( umask 022; AUTODREAM_SLIM_RESHAPE=1 AUTODREAM_SLIM_FULL=1 "$SLIM" "$TMP/mode.jsonl" "$TMP/mode.out" >/dev/null 2>&1 )
+assert_eq "$(stat -f %Lp "$TMP/mode.out" 2>/dev/null)" "600" "the slimmed output is mode 600 even when the caller umask is 022"
+rm -f "$TMP/mode2.out"
+( umask 022; "$SLIM" "$TMP/mode.jsonl" "$TMP/mode2.out" >/dev/null 2>&1 )
+assert_eq "$(stat -f %Lp "$TMP/mode2.out" 2>/dev/null)" "600" "and so is the default mode's"
+
 printf '\npassed: %s   failed: %s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

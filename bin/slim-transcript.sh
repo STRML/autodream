@@ -16,7 +16,22 @@
 # Tunables (env): AUTODREAM_SLIM_MAXLINE (400 chars), _HEAD (400 lines),
 #                 _TAIL (200 lines), _CAP (262144 bytes),
 #                 _TOOLRESULT (600 chars), _THINKING (800 chars).
+# Modes (env, both off unless set to 1, so a plain call writes exactly what it always did):
+#   AUTODREAM_SLIM_RESHAPE=1  drop Claude Code bookkeeping records by a TYPE DENYLIST and rebuild
+#                             each kept Claude record with type and timestamp first and the
+#                             message reduced to role and content. OMP records and any schema
+#                             this script does not know pass through untouched by this step.
+#   AUTODREAM_SLIM_FULL=1     keep every surviving line: no head/tail elision, no byte cap, no
+#                             footer. For the chunker, which sizes the pieces itself at line
+#                             boundaries; a footer would land in the last chunk as a line that is
+#                             not JSON, which the worker would read as transcript.
+# run.sh sets both only while chunked triage is on (AUTODREAM_L1_CHUNK_BYTES above 0), so turning
+# that off restores the head/tail view byte for byte.
 set -u
+
+# Everything written here is derived from a session transcript, so none of it may be readable by
+# another local account whatever umask the caller has.
+umask 077
 
 src="${1:?usage: slim-transcript.sh <src> <dst>}"
 dst="${2:?usage: slim-transcript.sh <src> <dst>}"
@@ -26,6 +41,8 @@ tailn="${AUTODREAM_SLIM_TAIL:-200}"
 cap="${AUTODREAM_SLIM_CAP:-262144}"
 trmax="${AUTODREAM_SLIM_TOOLRESULT:-600}"
 tkmax="${AUTODREAM_SLIM_THINKING:-800}"
+reshape="${AUTODREAM_SLIM_RESHAPE:-0}"
+full="${AUTODREAM_SLIM_FULL:-0}"
 
 [ -r "$src" ] || { echo "slim-transcript: cannot read $src" >&2; exit 1; }
 
@@ -48,11 +65,67 @@ bytes=$(wc -c < "$src" | tr -d ' ')
 # no payload and no goal, and returns no findings. Both schemas are stripped here.
 # The line-based pass still runs as a safety net for stragglers. Falls back
 # transparently if jq isn't installed or the stream isn't parseable JSONL.
+# CLAUDE CODE BOOKKEEPING AND REPLAY NOISE (AUTODREAM_SLIM_RESHAPE=1). Measured 2026-10-02 on a
+# 3,479-line session: 36% of the lines were conversation, 24% hook and reminder attachments and
+# 21% mode, permission-mode, last-prompt and bridge-session records. The head/tail pass below is
+# positional, so on the raw stream it spent its whole budget on those and the worker saw about 2%
+# of the conversation. Measured again on this host's store (24 hours of Claude transcripts):
+# hook_success and total_tokens_reminder alone are 12,000 and 8,000 of about 33,000 attachments.
+#
+# A DENYLIST, never an allowlist of user and assistant. OMP transcripts come through this script
+# too, and an allowlist would delete every one of their records, leaving a worker with an empty
+# transcript and a findings list that reads exactly like a quiet night. It is a denylist of
+# attachment subtypes as well, so a subtype this script has never seen is KEPT: keeping one costs
+# bytes, dropping one silently costs signal. Kept on purpose: attachment/queued_command (the user
+# typing mid-turn, the only place that text lives), attachment/skill_listing (SESSION_TRIAGE.md
+# names it for the StructuredOutput rule and the missed_skill category), every system record but
+# stop_hook_summary and turn_duration (compact_boundary is the compaction marker), pr-link and
+# summary records.
+#
+# RESHAPE. Claude Code writes message before timestamp, so the 400-char line cut dropped the
+# timestamp from a third of the lines, and the envelope (parentUuid, uuid, cwd, sessionId,
+# version, gitBranch, userType, toolUseResult, message id/model/usage) used about 185 chars
+# before the content began. The record is rebuilt with type then timestamp FIRST and only the
+# fields triage reads. A key is added only when the source has it, because inventing a null is
+# the bug the guards in the main program exist to stop. The thinking signature is a base64 blob
+# that filled whole lines on its own.
+reshape_defs=""
+reshape_pipe=""
+if [ "$reshape" = "1" ]; then
+  reshape_defs='
+    def noise_attachment: (.attachment.type | IN("hook_success", "total_tokens_reminder",
+        "deferred_tools_record", "deferred_tools_delta", "silent_turn_reminder",
+        "prompt_snapshot", "environment", "date", "model", "instructions", "session_context",
+        "credential_org", "advisor_tool", "sandbox_instructions", "mcp_instructions_delta",
+        "agent_listing_delta", "remote_session_change", "command_permissions"));
+    def noise:
+      (.type | IN("bridge-session", "last-prompt", "permission-mode", "mode", "atis-latch",
+                  "ai-title", "queue-operation", "file-history-snapshot",
+                  "file-history-delta", "dev-mods"))
+      or (.type == "attachment" and noise_attachment)
+      or (.type == "system" and (.subtype | IN("stop_hook_summary", "turn_duration")));
+    def claude_type: .type | IN("user", "assistant", "attachment", "system");
+    def reshape:
+      if claude_type then
+        ({type: .type}
+         + (if has("timestamp") then {timestamp: .timestamp} else {} end)
+         + with_entries(select(.key | IN("isSidechain", "isMeta", "isCompactSummary",
+                                         "subtype", "level", "content", "message", "attachment"))))
+        | (if (.message | type) == "object"
+             then .message |= with_entries(select(.key | IN("role", "content")))
+             else . end)
+        | (if (.message.content | type) == "array"
+             then .message.content |= map(if type == "object" and .type == "thinking" then del(.signature) else . end)
+             else . end)
+      else . end;
+  '
+  reshape_pipe='select(noise | not) | reshape |'
+fi
 pre_src="$src"
 pre_tmp=""
 if command -v jq >/dev/null 2>&1; then
   pre_tmp="$dst.pre.jsonl"
-  if jq -c --argjson tr "$trmax" --argjson tk "$tkmax" '
+  if jq -c --argjson tr "$trmax" --argjson tk "$tkmax" "$reshape_defs"'
     # tostring is applied ONLY when the value is over the cap, and never to null.
     # The first version ran it unconditionally, which did three wrong things: a
     # toolResult with .content null came out carrying the literal string "null",
@@ -76,6 +149,7 @@ if command -v jq >/dev/null 2>&1; then
         (tostring as $s
          | if ($s | length) > $n then $s[0:$n] + "…[autodream: truncated]" else . end)
       end;
+    '"$reshape_pipe"'
     if (.message | type) == "object" then
       .message |= (
         # Raw provider round-trip, never useful for triage.
@@ -151,17 +225,22 @@ if command -v jq >/dev/null 2>&1; then
   fi
 fi
 
+# AUTODREAM_SLIM_FULL=1 keeps every surviving line and applies no byte cap, because the chunker
+# does its own sizing at line boundaries. Lines are still cut to the line width.
 {
-  if [ "$lines" -le $((headn + tailn)) ]; then
+  if [ "$full" = "1" ] || [ "$lines" -le $((headn + tailn)) ]; then
     cut -c1-"$maxline" "$pre_src"
   else
     head -n "$headn" "$pre_src" | cut -c1-"$maxline"
     printf '...[%d of %d lines elided by autodream for size]...\n' $((lines - headn - tailn)) "$lines"
     tail -n "$tailn" "$pre_src" | cut -c1-"$maxline"
   fi
-} | head -c "$cap" > "$dst"
+} | { if [ "$full" = "1" ]; then cat; else head -c "$cap"; fi; } > "$dst"
 
 [ -n "$pre_tmp" ] && rm -f "$pre_tmp"
 
-printf '\n...[autodream slimmed this transcript: original %s bytes / %s lines; lines truncated to %s chars]...\n' \
+# The footer is plain text. In full mode the output is cut into chunks, so it would land in the
+# last chunk as a line that is not JSON, which the worker would read as transcript. The chunk note
+# and the triage prompt already say that long lines are cut, so full mode appends none.
+[ "$full" = "1" ] || printf '\n...[autodream slimmed this transcript: original %s bytes / %s lines; lines truncated to %s chars]...\n' \
   "$bytes" "$lines" "$maxline" >> "$dst"
