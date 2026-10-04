@@ -290,6 +290,55 @@ test_no_jq_still_writes_the_file(){
   rm -rf "$root"
 }
 
+# chmod 555 stops writes for everyone but root. Returns 1 (and the test skips) when the
+# directory still takes a write, so the test cannot fail for the wrong reason.
+deny_writes(){
+  chmod 555 "$1"
+  ( : > "$1/.probe" ) 2>/dev/null || return 0
+  rm -f "$1/.probe"; chmod 755 "$1"; return 1
+}
+
+test_state_write_failure_is_not_no_unread(){
+  echo "# regression: a seen.jsonl that cannot be written is reported, not read as an empty inbox (#108)"
+  local root; root=$(setup)
+  # No prior state and a state dir that cannot take the staged file: the fetch succeeds,
+  # merge_state fails, and the report used to be told there were no unread bookmarks.
+  deny_writes "$root/state" || { ok "skipped: this user can write to a read-only directory"; rm -rf "$root"; return; }
+  run_bm "$root" collect "$root/findings"
+  local rc=$?
+  chmod 755 "$root/state"
+  assert_eq "$rc" "0" "exits 0 so the nightly run continues"
+  assert_nogrep "$root/findings/x-bookmarks.md" "no unread bookmarks" "the report does not claim an empty inbox"
+  assert_grep "$root/findings/x-bookmarks.md" "^# x-bookmarks: fetch failed" "it uses the failure header L2 already handles"
+  assert_grep "$root/findings/x-bookmarks.md" "seen.jsonl" "and names the state file it could not write"
+  rm -rf "$root"
+}
+
+test_state_write_failure_after_failed_fetch(){
+  echo "# regression: the fetch-failed branch also checks the state write (#108)"
+  local root; root=$(setup)
+  deny_writes "$root/state" || { ok "skipped: this user can write to a read-only directory"; rm -rf "$root"; return; }
+  MOCK_CODE=500 run_bm "$root" collect "$root/findings"
+  chmod 755 "$root/state"
+  assert_grep "$root/findings/x-bookmarks.md" "seen.jsonl" "the state-write failure is named even when the fetch failed too"
+  rm -rf "$root"
+}
+
+test_state_write_failure_keeps_earlier_unread(){
+  echo "# regression: with unread bookmarks already on disk, a failed state write still shows them and names the failure (#108)"
+  local fetch_code
+  for fetch_code in 200 500; do
+    local root; root=$(setup)
+    printf '{"id":"50","author":"earlier","url":"https://x.com/earlier/status/50","text":"earlier post","links":[],"read_on":null}\n' > "$root/state/seen.jsonl"
+    deny_writes "$root/state" || { ok "skipped: this user can write to a read-only directory"; rm -rf "$root"; return; }
+    MOCK_CODE=$fetch_code run_bm "$root" collect "$root/findings"
+    chmod 755 "$root/state"
+    assert_grep "$root/findings/x-bookmarks.md" "earlier post" "fetch $fetch_code: the unread bookmark already on disk is still shown"
+    assert_grep "$root/findings/x-bookmarks.md" "could not update .*seen.jsonl" "fetch $fetch_code: the banner names the state-write failure"
+    rm -rf "$root"
+  done
+}
+
 echo "x-bookmarks.sh tests"
 test_not_configured
 test_auth_failure
@@ -306,6 +355,9 @@ test_text_is_capped
 test_duplicate_ids_within_one_fetch
 test_auth_failure_reason_is_not_empty
 test_no_jq_still_writes_the_file
+test_state_write_failure_is_not_no_unread
+test_state_write_failure_after_failed_fetch
+test_state_write_failure_keeps_earlier_unread
 
 echo
 echo "----------------------------------------"

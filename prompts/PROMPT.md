@@ -123,7 +123,7 @@ Read `<findings-dir>/x-bookmarks.md`. It holds posts the user bookmarked on X th
 
 - **File absent, or it says the feature is not configured** — skip this section entirely. Do not mention it.
 - **First line starts with `# x-bookmarks: fetch failed`** — write one line: `Bookmark fetch failed (<reason from the file>).` If the reason names expired credentials, add the remediation the file gives. Then move on; this is not an open question.
-- **Unread bookmarks present** — produce the ideas below.
+- **Unread bookmarks present** — produce the ideas below. If a `> Note:` line under the heading says the state could not be updated, add one line saying so (`Bookmark state could not be saved: <reason from the note>.`): the same bookmarks will return until the state directory is writable.
 
 The point of this section is the *intersection*, not a reading list. For each idea, one bookmark (or a small cluster of them) must meet something concrete from THIS run's findings: a project the user worked on, a pattern that recurred, a tool that caused friction, an open question already on the table. An idea that only restates what a post says is worthless — the user already read the post; that is why they bookmarked it.
 
