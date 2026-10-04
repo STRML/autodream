@@ -47,7 +47,7 @@ jobs:
           for t in tests/lib-project.sh tests/preflight.sh tests/adapters.sh \
                    tests/adapter-claude.sh tests/adapter-omp.sh tests/adapter-contract.sh \
                    tests/slim-transcript.sh tests/apply-pins.sh tests/scheduler-label.sh \
-                   tests/session-window.sh tests/autodream-now.sh tests/dream-triage.sh; do
+                   tests/session-window.sh tests/autodream-now.sh tests/dream-triage.sh tests/chunk-transcript.sh; do
             echo "== $t"
             bash "$t" || rc=1
           done

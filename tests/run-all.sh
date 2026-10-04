@@ -5788,7 +5788,7 @@ test_window_omp_session_active_only_on_an_abandoned_branch_is_gated_not_refused
 # Their counts fold into the totals below, so a red unit suite fails this script.
 echo
 echo "===== unit suites ====="
-for _suite in lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript session-window apply-pins scheduler-label autodream-now review-skip review-cmux notes-path install-review-agent install-dry-run install-dir tmp-cleanup dream-triage; do
+for _suite in lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript session-window chunk-transcript apply-pins scheduler-label autodream-now review-skip review-cmux notes-path install-review-agent install-dry-run install-dir tmp-cleanup dream-triage; do
   _out=$(bash "$HERE/$_suite.sh" 2>&1)
   _rc=$?
   _p=$(printf '%s\n' "$_out" | sed -n 's/^passed: *\([0-9][0-9]*\).*/\1/p' | tail -1)
