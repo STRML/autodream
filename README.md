@@ -139,6 +139,20 @@ AUTODREAM_FORCE=1 ~/.claude/autodream/run.sh 2026-05-29  # rebuild a date
 ~/.claude/autodream/review.sh --force 2026-05-29         # open it even if there's nothing to triage
 ```
 
+### Which sessions belong to a day
+
+A session belongs to the day its records say, not the day its file was last written.
+`run.sh` takes every transcript modified since the day began and keeps the ones holding a
+record timestamped inside that local day (midnight to midnight, so a daylight-saving day is
+23 or 25 hours). A session resumed after its day closed is therefore still in that day's
+rebuild, and stats and triage for the day read only that day's records of a transcript that
+spans several (the worker is told it holds a slice). A transcript with no timestamps at all is
+placed by its mtime, as before. Files modified since the day began that hold no record in it
+are counted as `sessions_out_of_window` in `run-stats.txt`. `AUTODREAM_WINDOW=0` puts
+the old mtime-only placement back. `install.sh` links the helper, `bin/session-window.sh`;
+until it has run again after an update the runner finds it in the checkout, and a runner that
+finds it nowhere reads the old way and says `session_window: off`.
+
 `review.sh` exits without opening a session when the report has no open questions
 or already carries a `## Triage decisions` section, printing where the report is
 and the `--force` line to open it anyway. It reads the
