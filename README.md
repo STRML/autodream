@@ -287,7 +287,7 @@ third arrive without forking the pipeline.
 
 - `adapters/<name>/` — one directory per harness: `manifest.json` (data, read with
   `jq`, never sourced), `adapter.sh` (enumerate, normalize, project, stats, slim,
-  is-self, memory-root), and `facts.md` (the remedy vocabulary for that harness, so
+  is-self, skills-inventory), and `facts.md` (the remedy vocabulary for that harness, so
   a fix is phrased in terms the harness actually has) → `adapters/claude/facts.md`
 - `bin/adapters.sh` — adapter discovery, identity validation and containment
 - `bin/lib-project.sh` — the canonical project encoding and artifact hash every

@@ -107,12 +107,6 @@ printf '%s\n' \
   "{\"type\":\"user\",\"cwd\":\"$projreal\",\"message\":{\"content\":\"hello\"}}" \
   '{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}' > "$S"
 
-# Subagent transcript, which sits two levels deeper. CLAUDE.md is explicit that
-# these are legitimate sessions to triage, so memory-root must handle both.
-mkdir -p "$tmp/root/projects/-bucket/s1/subagents"
-SUB="$tmp/root/projects/-bucket/s1/subagents/agent-x.jsonl"
-printf '%s\n' "{\"type\":\"user\",\"cwd\":\"$projreal\",\"message\":{\"content\":\"sub\"}}" > "$SUB"
-
 echo "# claude adapter: project returns the resolved cwd, not the bucket name"
 assert_eq "$("$A" project "$S")" "$projreal" "resolved cwd from the transcript"
 if "$A" project "$tmp/root/projects/-bucket/nope.jsonl" >/dev/null 2>&1; then
@@ -136,18 +130,6 @@ if "$A" normalize "$tmp/missing.jsonl" "$tmp/partial.jsonl" 2>/dev/null; then
   no "missing input exits nonzero"
 else ok "missing input exits nonzero"; fi
 if [ -e "$tmp/partial.jsonl" ]; then no "no partial output on failure"; else ok "no partial output on failure"; fi
-
-echo "# claude adapter: memory-root walks up to the config dir, at either depth"
-assert_eq "$("$A" memory-root "$S")"   "$(cd "$tmp/root" && pwd -P)" "normal session resolves to the root"
-assert_eq "$("$A" memory-root "$SUB")" "$(cd "$tmp/root" && pwd -P)" "subagent transcript resolves to the same root"
-if "$A" memory-root "$tmp/loose.jsonl" >/dev/null 2>&1; then
-  no "a path with no projects/ ancestor exits nonzero"
-else ok "a path with no projects/ ancestor exits nonzero"; fi
-
-echo "# claude adapter: memory-root output is absolute and canonical"
-mr=$("$A" memory-root "$S")
-case "$mr" in /*) ok "memory-root is absolute" ;; *) no "memory-root is absolute (got: $mr)" ;; esac
-assert_eq "$mr" "$(realpath "$mr")" "memory-root is already canonical"
 
 echo "# claude adapter: stats writes a sidecar with numeric transcript_bytes"
 if "$A" stats "$S" "$tmp/s1.stats.json" 2>/dev/null; then ok "stats exits 0"; else no "stats exits 0"; fi

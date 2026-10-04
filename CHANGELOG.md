@@ -20,6 +20,11 @@ All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 - `install.sh` links `bin/session-window.sh`. `tests/session-window.sh` is a new unit suite, in CI and in `tests/run-all.sh`; it checks DST days in New York, London and Sydney against literal epoch values.
 - `tests/replay.sh --ingest` stages every session modified from the date until five years after (the runner's own reach), not only those last modified on the date, so it can see the sessions this change recovers. A replayed date on which every staged file holds no record in the day is a WARN, not a FAIL.
 
+## 2026-10-04
+
+### Removed
+- **The adapter `memory-root` subcommand and the manifest `writes_memory` field (https://github.com/STRML/autodream/issues/74).** Both served the per-adapter `MEMORY.md` writer and `claude-memory gc`, which the Mnemopi cutover deleted, so nothing called or read them. The adapter contract tests now assert that neither exists.
+
 ## 2026-10-03
 
 ### Added

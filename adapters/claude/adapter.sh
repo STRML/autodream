@@ -85,26 +85,6 @@ case "$cmd" in
     realpath "$cwd" 2>/dev/null || exit 1
     ;;
 
-  memory-root) # $1=session -> the Claude config dir that owns it
-    # Two shapes exist and both are legitimate sessions to triage:
-    #   <root>/projects/<bucket>/<file>.jsonl
-    #   <root>/projects/<bucket>/<session>/subagents/agent-*.jsonl
-    # so a fixed number of `..` hops is wrong. Walk up to the `projects`
-    # directory instead; its parent is the config root. Failing here is
-    # correct rather than defensive — an unresolvable memory root must not
-    # reach the findings record, because it would later authorise a write
-    # against an empty target.
-    d=$(cd "$(dirname "$1")" 2>/dev/null && pwd -P) || exit 1
-    while [ "$d" != "/" ]; do
-      if [ "$(basename "$d")" = "projects" ]; then
-        dirname "$d"
-        exit 0
-      fi
-      d=$(dirname "$d")
-    done
-    exit 1
-    ;;
-
   # stats and slim delegate like everything else, but they cannot `exec`. Both
   # delegated scripts write the destination directly — slim-transcript.sh in two
   # steps, a `>` for the body and a `>>` for the footer — so an interruption

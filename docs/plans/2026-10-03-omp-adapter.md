@@ -38,7 +38,7 @@ The unified repo is not "cc plus an adapter". It is cc's architecture plus about
 | `is-self` | shared `bin/prune-self-sessions.sh`, now matching OMP's `{"type":"message","message":{"role":"user"}}` shape |
 | `skills-inventory` | `skills-inventory.sh` from omp-autodream; prints `name<TAB>description` |
 
-`manifest.json` declares `writes_memory: false`, so `memory-root` is empty and legal (the subcommand is retired upstream, issue #74). The adapter is not enabled by the runner until per-session dispatch is adapter-aware: `run.sh` already logs and skips any adapter other than `claude`.
+The adapter is not enabled by the runner until per-session dispatch is adapter-aware: `run.sh` already logs and skips any adapter other than `claude`.
 
 Design credit: `STRML/cc-autodream#47` (closed) worked out the tree semantics and the fail-closed rule. `linearize.sh` is a rewrite with its own fixtures, as the design requires.
 
