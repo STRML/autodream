@@ -2114,6 +2114,27 @@ test_idempotency_guard(){
   rm -rf "$root"
 }
 
+test_idempotency_guard_needs_a_complete_report(){
+  echo "# a marker-less report at the path is not done: the guard rebuilds it (#111)"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  # AUTODREAM_MARKER_EPOCH at the fixture date makes DATE a day whose report must carry the
+  # marker. Without it DATE predates the default epoch and an unmarked report is a legacy one.
+  printf '# Autodream\n\nhalf a report, killed before the marker\n' > "$root/dreams/$DATE.md"
+  AUTODREAM_MARKER_EPOCH="$DATE" run_dream "$root"
+  assert_grep "$root/run.out" 'lacks the open-questions marker' "run logged why the guard did not skip"
+  assert_nogrep "$root/run.out" 'nothing to do' "the guard did not treat the partial as done"
+  local h; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  assert_file "$(fdir "$root")/$h.json" "L1 ran for the date"
+  assert_grep "$root/dreams/$DATE.md" 'autodream:open-questions=' "the rebuilt report carries the marker"
+  assert_nogrep "$root/dreams/$DATE.md" 'half a report' "the partial was replaced"
+  # A complete report is still a no-op under the same epoch.
+  printf 'DONE REPORT\n<!-- autodream:open-questions=0 -->\n' > "$root/dreams/$DATE.md"
+  AUTODREAM_MARKER_EPOCH="$DATE" run_dream "$root"
+  assert_grep "$root/dreams/$DATE.md" 'DONE REPORT' "a complete report is left untouched"
+  assert_grep "$root/run.out" 'nothing to do' "and the guard skipped"
+  rm -rf "$root"
+}
+
 test_normalize_project(){
   echo "# project field is normalized deterministically from the session path"
   command -v python3 >/dev/null 2>&1 || { echo "  skip - python3 not available"; return 0; }
@@ -2965,6 +2986,7 @@ test_skip_empty_sessions
 test_skip_empty_disabled
 test_l1_retry
 test_idempotency_guard
+test_idempotency_guard_needs_a_complete_report
 test_self_audit_stats
 test_self_audit_stats_failure_denominator
 test_self_audit_stats_precached_disambiguation
