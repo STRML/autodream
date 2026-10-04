@@ -32,7 +32,7 @@ new_sandbox() { # -> sets SANDBOX, FAKE_HOME, LA, CALLS; fake cmux and claude un
 }
 run_install() { # runs the installer into $SANDBOX/target
   env HOME="$FAKE_HOME" PATH="$SANDBOX/shim:$SANDBOX/bin:/usr/bin:/bin" \
-      AUTODREAM_CMUX_DEFAULT="$SANDBOX/no-such-cmux" \
+      AUTODREAM_CMUX_DEFAULT="$SANDBOX/no-such-cmux" AUTODREAM_EPHEMERAL_DIRS= \
       bash "$REPO/install.sh" "$SANDBOX/target" > "$SANDBOX/install.out" 2>&1
 }
 review_plist() { ls "$LA"/*-review.plist 2>/dev/null | head -1; }

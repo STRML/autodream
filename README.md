@@ -103,6 +103,22 @@ no-op. To skip scheduling and only symlink the scripts:
 ./install.sh --no-schedule
 ```
 
+Install also provisions a second LaunchAgent, `<label>-review`, that opens a cmux triage workspace
+when a report has open questions (08:00, 09:15, 12:15, 15:30, 18:15). `./install.sh --no-review`
+installs the nightly without it, and removes one an earlier install wrote. The flag applies to that
+run only; put `AUTODREAM_REVIEW_AGENT=0` in `~/.claude/autodream/config` (or the environment) to keep
+a re-install from provisioning it again.
+
+launchd starts the job with no login shell, so the plist carries a fixed PATH. Install builds it
+from the directories of `claude`, `git` and `bash`, plus the CLI of every enabled adapter (`omp`
+when `--adapters` includes it, or `OMP_BIN` from the config), and the L2 engine's (`--l2-engine`). A directory under a temp location is
+left out and the install says so: a tool shim such as the one cmux puts first on PATH in every
+terminal is gone by the time launchd runs the job. `AUTODREAM_EPHEMERAL_DIRS` replaces the list of
+temp prefixes (default `$TMPDIR`, `/tmp` and `/var/folders`); set but empty, it turns the check off.
+The PATH is written at install time. If you enable an adapter later by editing the config, re-run
+`./install.sh`, or set that adapter's `<NAME>_BIN` (`OMP_BIN`) in the config, which `run.sh` reads at
+run time and which does not depend on the plist PATH.
+
 launchd won't *wake* the Mac, so to guarantee the 03:15 trigger runs at all, add a
 scheduled wake:
 
