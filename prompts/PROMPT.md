@@ -168,6 +168,7 @@ Still read the field, for the one thing it proved good at: **compliance detectio
 - `project` is the exact `project` value of a findings JSON in this directory. The runner refuses any other value, and it stores the memory in that project's own Mnemopi bank.
 - `title` is one line of at most 150 characters that states the lesson. `body` holds the rule and its quoted evidence, at most 4000 characters.
 - `kind` is `correction` (the usual one for autodream signal), `preference`, `fact`, or `decision`.
+- `harness` is optional: `claude`, `omp` or `codex`. Set it when the pin's evidence came from one harness only and the rule does not apply to the others (see `adapter-facts.md` for that harness's rules). A pin with a `harness` is loaded only by that harness at startup; a pin without one is loaded by all of them.
 - Never edit a legacy `MEMORY.md` file.
 - In the report, mark each pattern you wrote a pin for "Pin proposed: <title>". Never say a pin is stored and never claim a memory id. The runner applies pins after you exit, can still refuse one (a project it did not authorize, no usable working directory, a failed store), and records what happened in `pins-result.txt`.
 - Never mark a pin proposed unless its line is in the pin block you print. A past report cited a pin that was never written.

@@ -232,6 +232,20 @@ setup; mkdir "$F/pins.jsonl"
 run_ap
 assert_eq "$(stat_of pins_unreadable)" "1" "a directory named pins.jsonl: pins_unreadable is 1"
 
+echo "# A25: optional harness tag becomes metadata.harness; unknown values are invalid"
+setup
+{
+  pin proj-a "Tagged" "Body" | jq -c '. + {harness:"omp"}'
+  pin proj-a "Untagged" "Body"
+  pin proj-a "Bad tag" "Body" | jq -c '. + {harness:"vim"}'
+  pin proj-a "Null tag" "Body" | jq -c '. + {harness:null}'
+} > "$F/pins.jsonl"
+run_ap
+assert_eq "$(stat_of pins_applied)" "2" "tagged and untagged pins applied"
+assert_eq "$(stat_of pins_invalid)" "2" "unknown and null harness rejected"
+assert_eq "$(jq -r 'select(.payload.content | startswith("Tagged")) | .payload.metadata.harness' "$T/calls.jsonl" 2>/dev/null)" "omp" "metadata.harness is omp"
+assert_eq "$(jq -r 'select(.payload.content | startswith("Untagged")) | .payload.metadata | has("harness")' "$T/calls.jsonl" 2>/dev/null)" "false" "untagged pin carries no harness key"
+
 echo "# A14: no arguments"
 setup
 SHARED_MEMORY_BIN="$SM" bash "$AP" > "$T/out" 2>&1

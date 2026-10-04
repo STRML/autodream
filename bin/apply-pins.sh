@@ -5,7 +5,8 @@
 #
 # Reads two files from <findings-dir>:
 #   pins.jsonl        one pin per line, written by L2:
-#                     {"project","title","body","kind"}
+#                     {"project","title","body","kind"} plus an optional
+#                     "harness": claude|omp|codex, stored as metadata.harness
 #   pin-projects.tsv  project<TAB>cwd for every project this run triaged,
 #                     written by run.sh. It is the authorization list: a pin
 #                     naming any other project is refused.
@@ -57,7 +58,8 @@ VALID='select(type == "object")
   | select((.body | type) == "string" and (.body | test("\\S"))
            and (.body | length) <= 4000)
   | select(.kind as $k | ["correction", "preference", "fact", "decision"] | index($k))
-  | {project, title, body, kind}'
+  | select((has("harness") | not) or (.harness as $h | ["claude", "omp", "codex"] | index($h)))
+  | {project, title, body, kind} + (if has("harness") then {harness} else {} end)'
 
 total=0 applied=0 duplicate=0 invalid=0 rejected_project=0 no_cwd=0 failed=0 unledgered=0 cli_missing=0 unreadable=0
 
@@ -115,7 +117,7 @@ apply_line() {
     content: ($pin.title + "\n\n" + $pin.body),
     source: "cc-autodream",
     importance: 0.7,
-    metadata: {kind: $pin.kind, project: $pin.project, autodream_date: $date, origin: "cc-autodream"}
+    metadata: ({kind: $pin.kind, project: $pin.project, autodream_date: $date, origin: "cc-autodream"} + (if $pin.harness then {harness: $pin.harness} else {} end))
   }')
   # </dev/null: the caller reads pins.jsonl on a separate fd, but a CLI that
   # reads stdin must never be able to swallow the pins after this one.

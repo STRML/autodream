@@ -12,8 +12,10 @@ finding whose evidence is an `omp` session, these are the surfaces that exist:
   against the session's own skill surface.
 - `memory_miss` - omp's mnemopi autolearn owns memory. Propose a rule
   (`~/.omp/agent/RULES.md`, which reaches task subagents; `AGENTS.md` does not), a
-  hook, or a doc note. Do not propose a pin for an omp-only finding unless it also
-  has evidence in a source that writes pins.
+  hook, or a doc note. A pin for an omp-only finding is allowed when it sets
+  `"harness":"omp"`: omp reads the same Mnemopi store, and the tag keeps the pin out
+  of Claude Code's startup context. Durable behavior still belongs in a rule, because
+  a pin can be crowded out of the startup budget.
 - `compliance_failure` - cite `~/.omp/agent/RULES.md`, `AGENTS.md`, or the project's
   rule surface.
 
