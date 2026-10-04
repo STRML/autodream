@@ -57,8 +57,8 @@ VALID='select(type == "object")
            and (.title | length) <= 150 and (.title | test("[\\n\\r]") | not))
   | select((.body | type) == "string" and (.body | test("\\S"))
            and (.body | length) <= 4000)
-  | select(.kind as $k | ["correction", "preference", "fact", "decision"] | index($k))
-  | select((has("harness") | not) or (.harness as $h | ["claude", "omp", "codex"] | index($h)))
+  | select(.kind as $k | ["correction", "preference", "fact", "decision"] | any(. == $k))
+  | select((has("harness") | not) or (.harness as $h | ["claude", "omp", "codex"] | any(. == $h)))
   | {project, title, body, kind} + (if has("harness") then {harness} else {} end)'
 
 total=0 applied=0 duplicate=0 invalid=0 rejected_project=0 no_cwd=0 failed=0 unledgered=0 cli_missing=0 unreadable=0 unsupported_harness=0
