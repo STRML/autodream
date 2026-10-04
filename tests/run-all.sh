@@ -3912,6 +3912,32 @@ test_config_written_by_install_enables_adapters_and_l2_engine(){
   rm -rf "$root"
 }
 
+test_replay_harness_works_on_synthetic_data(){
+  echo "# tests/replay.sh: artifacts mode flags a corrupt findings JSON, ingest mode replays a real-shaped root"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  run_dream "$root"
+  local fd out; fd=$(fdir "$root")
+  out=$(bash "$REPO/tests/replay.sh" --artifacts "$fd" 2>&1); local rc=$?
+  assert_eq "$rc" "0" "artifacts mode passes on a healthy findings directory"
+  printf '%s' "$out" > "$root/replay.out"
+  assert_grep "$root/replay.out" 'PASS  all 1 findings JSONs have the findings-array shape' "and says what it checked"
+  printf 'not json' > "$fd/$(hash_of "$root/projects/proj-a/sess1.jsonl").json"
+  out=$(bash "$REPO/tests/replay.sh" --artifacts "$fd" 2>&1); rc=$?
+  printf '%s' "$out" > "$root/replay.out"
+  assert_eq "$rc" "0" "a corrupt findings JSON is reported but is archive data, not a replay failure"
+  assert_grep "$root/replay.out" 'WARN  1 of 1 findings JSONs lack a findings array' "and counted"
+  out=$(bash "$REPO/tests/replay.sh" --artifacts "$root/nonexistent" 2>&1); rc=$?
+  assert_eq "$rc" "1" "a directory that does not exist fails"
+  out=$(bash "$REPO/tests/replay.sh" --ingest claude "$root/projects" "$DATE" 2>&1); rc=$?
+  printf '%s' "$out" > "$root/replay.out"
+  assert_eq "$rc" "0" "ingest mode runs the whole runner over a session root with the mock engines"
+  assert_grep "$root/replay.out" 'enumerated 1 session(s), triaged 1' "and finds the session"
+  out=$(bash "$REPO/tests/replay.sh" --ingest claude "$root/projects" 2001-01-01 2>&1); rc=$?
+  printf '%s' "$out" > "$root/replay.out"
+  assert_grep "$root/replay.out" 'nothing was replayed' "a date with no sessions is reported, not passed silently"
+  rm -rf "$root"
+}
+
 test_skill_fields_dropped_without_a_sidecar(){
   echo "# a session with no stats sidecar keeps no worker-written skill fields (Codex review of 0129fc0)"
   local root; root=$(setup_env); mk_session "$root" sess1
@@ -4642,6 +4668,7 @@ test_l2_report_with_a_marker_but_no_sentinel_is_not_delivered
 test_pin_block_must_follow_the_sentinel_and_be_closed
 test_l2_engine_comes_from_an_adapter
 test_config_written_by_install_enables_adapters_and_l2_engine
+test_replay_harness_works_on_synthetic_data
 test_skill_fields_dropped_without_a_sidecar
 test_skill_fields_dropped_with_a_partial_sidecar
 test_skill_fields_are_enforced_from_the_sidecar
