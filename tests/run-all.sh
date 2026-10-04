@@ -4078,6 +4078,9 @@ test_upgrade_lag_install_still_produces_a_report(){
   cat "$T/autodream/logs/run-$DATE.log" >> "$T/run.out" 2>/dev/null || true
   assert_eq "$rc" "0" "a symlinked runner with no installed libraries exits 0"
   assert_nogrep "$T/run.out" 'session_hash: command not found' "session_hash resolved"
+  # The helper is not in the install dir yet (install.sh has not run again), and the window is
+  # still on: the runner finds session-window.sh in the checkout its symlink points into.
+  assert_grep "$T/autodream/findings/$DATE/run-stats.txt" 'session_window: on$' "the window is on although the install has no helper link yet"
   assert_nonempty "$T/dreams/$DATE.md" "the upgrade-lag install still produced a report"
   rm -rf "$T"
 }
