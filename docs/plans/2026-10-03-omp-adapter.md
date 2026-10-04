@@ -1,7 +1,7 @@
 # Plan 2: the OMP adapter, and the omp-autodream work cc-autodream lacks
 
 Date: 2026-10-03
-Status: in progress (5 of 9 PRs merged; the other 4 wait on four decisions below)
+Status: Plans 2 and 3 merged, Plan 4 preparation merged (replay, dry-run install, runbook). The cutover itself is not started and needs Sam.
 Design: `docs/design/unify-harness-adapters-2026-08-23.md` (approved), Migration steps 2, 3 and the facts half of 4.
 Decision (Sam, 2026-10-03): cc-autodream survives and becomes `STRML/autodream`. omp-autodream is archived after the cutover.
 
@@ -81,10 +81,13 @@ Mutation checks run against three deliberate defects (leaf taken from the first 
 | 7 | three-harness changelog window; also a force-pushed remote is followed, dedupe is scoped to the release, the sparse step works | merged, https://github.com/STRML/cc-autodream/pull/83 |
 | 4a | overlap pass drops advisor sidecars (omp-autodream #16, `bin/overlap-stats.sh`) | merged, https://github.com/STRML/cc-autodream/pull/84 |
 | 8a | `review.sh` cmux popup dedup by report digest, `tests/review-cmux.sh` | merged, https://github.com/STRML/cc-autodream/pull/85 |
-| 2 | L1 worker hardening: stdout and exit-code capture into the `.err`, bounded workers (`AUTODREAM_L1_TIMEOUT`), auth warmup, circuit breaker, the worker overlay, network-outage deferral, no stub on a permanent provider refusal (omp-autodream #37), `failure-class.sh`, oversized-gate classification | not started, see "Why PR 2 is not a port" |
-| 4 | per-session dispatch: source sidecar, normalize/stats/slim/is-self through the adapter, per-adapter L1 engine, enable `omp`, advisor triage schema (`SESSION_TRIAGE.md`, `PROMPT.md` text of omp-autodream #16) | not started, needs the decisions below |
-| 5 | one `SESSION_TRIAGE.md`, `facts.md` concatenated into the L2 prompt, skills inventory in `PROMPT.md` | not started, after 4 |
-| 6b | the review LaunchAgent (cmux popup job) that omp's `install.sh` provisions | not started |
+| 2 | L1 worker hardening: stdout and exit-code capture into the `.err`, `failure-class.sh` and oversized-gate classification, bounded workers (`AUTODREAM_L1_TIMEOUT`), auth warmup, circuit breaker, network-outage deferral, no stub on a permanent provider refusal (omp-autodream #37) | merged: https://github.com/STRML/cc-autodream/pull/90, https://github.com/STRML/cc-autodream/pull/92, https://github.com/STRML/cc-autodream/pull/93 |
+| 4 | per-session dispatch: source sidecar, per-adapter L1 engine (`l1-argv`), stats and normalize through the adapter, `omp` enabled behind `AUTODREAM_ADAPTERS` | merged: https://github.com/STRML/cc-autodream/pull/87, https://github.com/STRML/cc-autodream/pull/89, https://github.com/STRML/cc-autodream/pull/94 |
+| 5 | skill fields measured and enforced, skills inventory and per-source facts for L2, per-harness triage addendum with the advisor sidecar schema | merged: https://github.com/STRML/cc-autodream/pull/95, https://github.com/STRML/cc-autodream/pull/96, https://github.com/STRML/cc-autodream/pull/97 |
+| 6b | the review LaunchAgent (cmux popup job) that omp's `install.sh` provisions | merged: https://github.com/STRML/cc-autodream/pull/100 |
+| 3 | Plan 3: L2 is read-only (Glob, Read), report and pin block on stdout behind `AUTODREAM_REPORT_END`, runner-written `pins.jsonl`, exit status only for a validated delivery; L2 engine and model chosen per adapter (`AUTODREAM_L2_ENGINE`), `l2-argv` | merged: https://github.com/STRML/cc-autodream/pull/98, https://github.com/STRML/cc-autodream/pull/99 |
+| C1 | `install.sh --dry-run`, `--adapters`, `--l2-engine` | merged: https://github.com/STRML/cc-autodream/pull/101 |
+| C2 | `tests/replay.sh` (artifacts and ingest modes), results and the cutover runbook below | https://github.com/STRML/cc-autodream/pull/102 |
 
 Merged work follows the plan's own rule: each PR passed `omp-review.sh` on its final commit and CI. The review found real defects in three of the five before merge: a blocking P1 in the adapter (two files held one advisor rule), a blocking P1 in `autodream-now.sh` (a run from the checkout adopted `bin/` as the install dir), and in the changelog port a window-wide dedupe that dropped repeated headings, which led to finding that a force-pushed fork made the OMP pull fail every night.
 
@@ -96,12 +99,12 @@ The 35 generic fixes cannot be lifted commit by commit. A trial `git cherry-pick
 - **Engine invocations are woven through the omp additions.** The warmup, the worker, the version stamp and the fatal "omp not found" check all name `OMP_BIN` and omp flags. In cc they have to become "the L1 engine of this session's adapter". The adapter manifest already lists the flags; nothing builds the command from it yet.
 - **The failure classifier reads a `.err` layout the cc worker does not write.** `failure-class.sh` expects the worker's exit code, its stdout and a log tail, which is the first thing the hardened `dispatch_l1` adds.
 
-So PR 2 and PR 4 are one piece of work, the rewrite of `dispatch_l1` around an adapter-built engine command, and it needs these decided first:
+So PR 2 and PR 4 were one piece of work, the rewrite of `dispatch_l1` around an adapter-built engine command. The four decisions it needed were made (coordinator, 2026-10-03) and implemented:
 
-1. **L2 delivery.** Adopt stdout plus sentinel plus a pin block now (Plan 3), or keep cc's file-based L2 and port omp's hardening around it.
-2. **Where the engine command comes from.** A new `l1-argv` adapter subcommand printing a NUL-delimited argv is the least invasive; the manifest's `engine_flags_l1` is data and cannot express `--model` or the overlay path alone.
-3. **L2 engine.** cc runs the `claude` CLI default model; omp runs `omp --model claude-opus-5`. The design makes it a global knob; pick the default.
-4. **Model per adapter.** `AUTODREAM_L1_MODEL` is an omp-only knob today and this host sets it in omp's `config` to a neuralwatt model. Either rename it per adapter or scope it to omp.
+1. **L2 delivery.** Stdout plus sentinel plus a pin block (Plan 3), no file-based L2: https://github.com/STRML/cc-autodream/pull/98.
+2. **Where the engine command comes from.** The `l1-argv` adapter subcommand, NUL-delimited, claude byte for byte: https://github.com/STRML/cc-autodream/pull/87 and https://github.com/STRML/cc-autodream/pull/89.
+3. **L2 engine.** `AUTODREAM_L2_ENGINE=<adapter>`, default the first enabled adapter: https://github.com/STRML/cc-autodream/pull/99.
+4. **Model per adapter.** `AUTODREAM_L1_MODEL` stays an override, each manifest carries a default, and `AUTODREAM_L1_MODEL_<NAME>` pins one adapter; run-stats records `l1_model_<adapter>` and `l2_engine`/`l2_model`: https://github.com/STRML/cc-autodream/pull/87, https://github.com/STRML/cc-autodream/pull/99.
 
 ## Cutover notes for Plan 4 (found on this host, 2026-10-03)
 
@@ -112,11 +115,11 @@ So PR 2 and PR 4 are one piece of work, the rewrite of `dispatch_l1` around an a
 
 ## omp-only commits (60, from `e231314..omp/main`)
 
-Status: **in cc** already present; **PR n** ported by that PR; **n/a** not needed, with the reason; **verify** classification pending a read of the cc code in the named PR.
+Status: **in cc** already present; **PR n** ported by that PR (the plan's numbering, see the table above for the merged PR URLs); **ported** and **n/a** carry their reason. No row is left unverified.
 
 | Commit | Subject | Status |
 | --- | --- | --- |
-| `216c791` | permanent provider refusal defers the date (#37) | PR 2 |
+| `216c791` | permanent provider refusal defers the date (#37) | ported: https://github.com/STRML/cc-autodream/pull/93 |
 | `dfd39a1`, `7f89556`, `b67c2f1`, `5f7ddaa` | question-streaks `clear` fixes | in cc (#71, #75) |
 | `1d11e03`, `b72f0e4`, `cb76639`, `600e6dd`, `4eea84d`, `764d77d` | question-streaks watermark, lock, escalation | in cc (#71, `4e5aaf5`) |
 | `3c2215f`, `8166f38`, `d905ad7` | docs for streaks and the drift check | in cc (CLAUDE.md carries both) |
@@ -135,20 +138,68 @@ Status: **in cc** already present; **PR n** ported by that PR; **n/a** not neede
 | `bbb4d4b`, `e70492a`, `2ef3031`, `ec829a4`, `aacbc0a`, `1ee66e4` | launchd label ownership, install hardening, stale paths | PR 6 |
 | `d1d0cfb` | macOS runners end TMPDIR with a slash | PR 6 (test) |
 | `387e7bc`, `87e2588`, `10e1c52`, `90e535b`, `bc9ba5a`, `c8303f6`, `1fef17d`, `3c7587f` | review.sh cmux popup panel rounds 1 to 7 | PR 8 |
-| `c16318a` | close out the /code-review sub-80 cleanups (#8) | verify in PR 8 |
-| `9db799d` | stop L2 memory writes; broaden the skill-coverage walk for OMP (#3) | n/a for memory (cc routes pins to Mnemopi, #68); skill walk in PR 5 |
-| `790d1b6` | README rewrite for the OMP port | n/a (the unified README replaces it, Plan 4) |
+| `c16318a` | close out the /code-review sub-80 cleanups (#8) | ported: its `skills-inventory.sh` change (no `-maxdepth` cap, `ignoredSkills` matches directory names) is in `adapters/omp/skills-inventory.sh`, which differs from omp's script by one usage line (verified with `diff`); its `PORT_CONTRACT.md` tool-grant correction is n/a, because the contract is replaced by the adapter docs |
+| `9db799d` | stop L2 memory writes; broaden the skill-coverage walk for OMP (#3) | ported in part. Memory: n/a, cc routes pins to Mnemopi (#68), and L2 now cannot write at all (https://github.com/STRML/cc-autodream/pull/98). Skill walk: ported as the adapter-built `skills-inventory.txt` (https://github.com/STRML/cc-autodream/pull/96). The exit-non-zero-on-a-delivered-nothing-night fix (`abda904`) is in https://github.com/STRML/cc-autodream/pull/98. The L1 wall-time log and the self-locating install dir (`4f31240`, `8d739b7`) are in https://github.com/STRML/cc-autodream/pull/91 and https://github.com/STRML/cc-autodream/pull/85 |
+| `790d1b6` | README rewrite for the OMP port | n/a: it documents omp-autodream as a product; the unified README is written at the rename, and the facts it carried live in `adapters/omp/facts.md` and CLAUDE.md |
 | `6c41c46` | port cc-autodream to OMP | PR 1 and PR 4 |
-| `0dffef5` | retire `compliance_markers` telemetry | verify: cc `session-stats.sh` still computes it; port with PR 4 |
+| `0dffef5` | retire `compliance_markers` telemetry | ported for omp, not for claude. cc `session-stats.sh` still computes `compliance_markers` for claude, whose rule files still emit the markers; `adapters/omp/stats.sh` never did, and `adapters/omp/triage.md` tells omp workers not to emit it (https://github.com/STRML/cc-autodream/pull/97) |
 
 Not a commit but part of the work: omp-autodream #16 (advisor sidecar schema, open, being merged into omp-autodream first) lands in PR 4, and its `SESSION_TRIAGE.md` and `PROMPT.md` text lands in PR 5.
 
+## Replay results (2026-10-03)
+
+`tests/replay.sh` has two modes (see its header). Both ran against this host's real archives, read-only.
+
+Artifacts mode over every archived findings directory: **179 directories (48 from omp-autodream, 131 from cc-autodream), 0 failed.** The WARNs are the archive's, not the code's: directories that hold no findings (nights that never got past enumeration), a run-stats file that predates a counter (skills, failure classes, gated), and one archived claude file from the tool's first day (2026-05-28) that lacks a `findings` array and that the current runner would not accept.
+
+Ingest mode, the whole runner over a staged copy of the real sessions of one date with the engines replaced by `tests/mock-claude.sh`, compared with the run-stats of the nightly that handled that date:
+
+| Source | Date | Sessions (replay / archive) | Gated | Oversized | Overlap events | Result |
+| --- | --- | --- | --- | --- | --- | --- |
+| omp | 2026-08-20 | 20 / 20 | 4 / 4 | 14 / 14 | 31 / 80, explained | pass, 2 warnings |
+| omp | 2026-09-04 | 4 / 4 | 0 / 0 | 4 / 4 | 2 / 2 | pass, 0 warnings |
+| omp | 2026-09-13 | 3 / 3 | 0 / 0 | 3 / 3 | 3 / 15, explained | pass, 2 warnings |
+| omp | 2026-09-30 | 151 / 151 | 70 / 70 | 25 / 25 | 336 / 1399, explained | pass, 2 warnings |
+| claude | 2026-06-15 | 64 / 66 | n/a | n/a | n/a | pass, 6 warnings (the archive predates the counters) |
+| claude | 2026-09-30 | 116 / 117 | 38 / 39 | 72 / 72 | 1150 / 1156 | pass, 5 warnings |
+
+Every omp session was read by its adapter (none refused by the linearizer), every session got a stats sidecar and a findings JSON, no worker errored, and the runner exited 0 with a delivered report. Gated and oversized counts match exactly for omp, which is the check that the linearizer, the omp stats and the noise gate agree with omp-autodream's on real data.
+
+Two differences are explained, and the replay says so on its WARN lines:
+
+- **Overlap events read lower for omp.** The archived sidecars carry no `is_advisor` flag, so the archived runner counted each advisor sidecar against its parent. The unified runner flags advisors from the path and the overlap pass drops them (omp-autodream #16, https://github.com/STRML/cc-autodream/pull/84): 7 advisor sidecars on 2026-08-20, 151 files and 76 sessions left on 2026-09-30.
+- **2026-09-13 and the claude counts moved.** The 09-13 archive directory was rebuilt in place and holds sidecars from earlier runs, and one claude session of 2026-09-30 is outside the `~/.claude/projects` root the replay used (the archive also scanned the other `~/.claude*` roots).
+
+## Cutover runbook (not run; every step touches the live install and needs Sam)
+
+Rehearse each step first: `./install.sh --dry-run ...` prints what it would do and changes nothing, and `tests/replay.sh` gives the baseline to compare the first real night against. Nothing below renames or archives a repository: that is a separate decision after one clean week on the unified install.
+
+Decide first:
+
+- Which report directory the unified install writes to. omp writes `~/.omp/agent/dreams`, claude writes `~/.claude/dreams`. `DREAMS_DIR` is one value, and the review popup, the vault publish and `question-streaks` all key off it. Recommended: `~/.claude/dreams`, because the claude-side history is longer and the cc nightly already owns it. Copy or link the omp reports in once.
+- The L2 engine. Recommended `omp` with `anthropic/claude-opus-5` (omp-autodream's setting), set once by `--l2-engine omp`; claude stays the default for a host that has no omp.
+
+Checklist:
+
+1. Merge state: the main checkout `~/git/oss/cc-autodream` is on `main` at `origin/main` (the cc nightly runs whatever is checked out).
+2. Baseline: `tests/replay.sh --ingest omp ~/.omp/agent/sessions <yesterday>` and the same for `claude ~/.claude/projects <yesterday>`; both must report 0 failed.
+3. Rehearse: `./install.sh --dry-run --adapters claude,omp --l2-engine omp ~/.claude` and read the plists it prints. Confirm the labels (`<nightly>` and `<nightly>-review`) and that no foreign job holds them.
+4. Quiet the omp pair so a night is not processed twice and no report opens two triage popups: `launchctl bootout gui/$(id -u)/com.samuelreed.omp-autodream` and `.../com.samuelreed.omp-autodream-review`. Keep their plists on disk until the first clean night.
+5. Install the unified runner over the cc install: `./install.sh --adapters claude,omp --l2-engine omp` (this writes `AUTODREAM_ADAPTERS` and `AUTODREAM_L2_ENGINE` into `~/.claude/autodream/config`, regenerates the nightly and review plists, and re-arms them).
+6. Carry the omp host settings into `~/.claude/autodream/config`: `AUTODREAM_L1_MODEL_OMP=neuralwatt/glm-5.3-flash` (the omp config line `AUTODREAM_L1_MODEL=...` today), and `AUTODREAM_L2_MODEL_OMP=anthropic/claude-opus-5` if it should differ from the manifest default. Leave `AUTODREAM_L1_MODEL` unset so claude keeps its own default. Do not copy omp's `SESSION_ROOTS=/Users/.../.omp/agent/sessions` line: `SESSION_ROOTS` belongs to the claude adapter, and pointing it at omp sessions would parse them as claude transcripts. The omp adapter finds its own root from its manifest.
+7. Repoint the omp install directory at the same code so `autodream-now.sh`, `autodream-note.sh` and any habit that uses the omp path keep working: replace the per-file symlinks under `~/.omp/agent/autodream` with one link to `~/.claude/autodream` (move the old directory aside first, never delete it).
+8. First night: run `~/.claude/autodream/autodream-now.sh <yesterday> --watch`. Check `run-stats.txt`: `adapters_enabled: claude,omp`, `l2_engine: omp`, one `l1_model_<adapter>` per source, `l1_findings_with_error: 0`, `skills_unmeasured` small.
+9. `com.samuelreed.autodream.backfill` and `~/.claude/autodream/backfill.sh` belong nowhere in the repo. The script is a one-shot with a hard-coded list of dates (2026-08-28 to 2026-09-03) written for one incident, and its job has `RunAtLoad`. Unload the job (`launchctl bootout gui/$(id -u)/com.samuelreed.autodream.backfill`) and leave the script out of `bin/`. A serial date-range backfill is worth having as a generic tool (`autodream-now.sh` takes one date), but that is its own change.
+10. After one clean week: archive omp-autodream and `autodream-merge` with pointers, rename `STRML/cc-autodream` to `STRML/autodream`, and write the unified README. Not before.
+
+Rollback, any time before step 10: `launchctl bootstrap` the omp plists you kept, restore the moved-aside `~/.omp/agent/autodream`, and re-run `./install.sh --no-schedule` from the previous checkout of this repo.
+
 ## Remaining after this plan
 
-- Plan 3: pure-stdout `PROMPT.md`, sentinel grammar tests.
-- Plan 4: `tests/replay.sh`, cut the live nightly over (`~/.omp/agent/autodream` currently symlinks into omp-autodream), rename to `STRML/autodream`, archive omp-autodream and `autodream-merge` with pointers. Not started, and not to be started without Sam: it touches the live install.
+- Plan 4 proper: run the cutover runbook above, then the rename and the archive. Not started, and not to be started without Sam: it touches the live install.
 
 ## Progress (updated after each merged PR)
 
-- Merged: PR 1 (omp adapter, https://github.com/STRML/cc-autodream/pull/81), launchd label (#82), changelogs (#83), overlap (#84), review cmux (#85, #88), decisions (#86), engine seam (#87, #89), failure classification and evidence (#90), notes path (#91), bounded workers, warmup, breaker (#92), outage and provider-refusal deferral (https://github.com/STRML/cc-autodream/pull/93).
-- Next: omp per-session dispatch behind `AUTODREAM_ADAPTERS` (stats, normalize, substantive filter), then the advisor schema and unified `SESSION_TRIAGE.md`, `facts.md` into the L2 prompt, skills inventory, and the review LaunchAgent. Then Plan 3 and the Plan 4 prep (replay, dry-run install, runbook).
+- Merged: PR 1 (omp adapter, https://github.com/STRML/cc-autodream/pull/81), launchd label (https://github.com/STRML/cc-autodream/pull/82), changelogs (https://github.com/STRML/cc-autodream/pull/83), overlap (https://github.com/STRML/cc-autodream/pull/84), review cmux (https://github.com/STRML/cc-autodream/pull/85, https://github.com/STRML/cc-autodream/pull/88), decisions (https://github.com/STRML/cc-autodream/pull/86), engine seam (https://github.com/STRML/cc-autodream/pull/87, https://github.com/STRML/cc-autodream/pull/89), failure classification (https://github.com/STRML/cc-autodream/pull/90), notes path (https://github.com/STRML/cc-autodream/pull/91), bounded workers (https://github.com/STRML/cc-autodream/pull/92), outage deferral (https://github.com/STRML/cc-autodream/pull/93), omp dispatch (https://github.com/STRML/cc-autodream/pull/94), skill fields (https://github.com/STRML/cc-autodream/pull/95), L2 inputs (https://github.com/STRML/cc-autodream/pull/96), triage addenda (https://github.com/STRML/cc-autodream/pull/97), read-only L2 (https://github.com/STRML/cc-autodream/pull/98), L2 engine (https://github.com/STRML/cc-autodream/pull/99), review agent (https://github.com/STRML/cc-autodream/pull/100), install dry-run (https://github.com/STRML/cc-autodream/pull/101).
+- In review: the replay harness, this results section and the runbook (https://github.com/STRML/cc-autodream/pull/102).
+- Next: the cutover, with Sam.
