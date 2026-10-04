@@ -433,6 +433,13 @@ collect() {
   return $rc
 }
 
+# merge_state failed, so this run's bookmarks never reached the state and emit_unread
+# would read the OLD state: with none, the report was told there is nothing unread (#108).
+# Say the walk is broken instead, under the header L2 already treats as a failure.
+state_write_failed() {
+  printf '# x-bookmarks: fetch failed — could not update %s, so this run'"'"'s bookmarks were not recorded (check that the state directory is writable)\n' "$SEEN" > "$1"
+}
+
 collect_bookmarks() {
   local findings="$1"
   local out="$findings/x-bookmarks.md" manifest="$findings/x-bookmarks-manifest.txt"
@@ -454,22 +461,30 @@ collect_bookmarks() {
     # A failed fetch still lets previously-recorded unread bookmarks through below —
     # they are already on disk and the model can still use them. Only say "failed" when
     # there is also nothing to show.
-    merge_state
-    if ! emit_unread "$out" "$manifest" "$(fail_reason)"; then
-      printf '# x-bookmarks: fetch failed — %s\n' "$(fail_reason)" > "$out"
+    local note reason; reason=$(fail_reason)
+    note="this run could not reach X ($reason). The bookmarks below were captured earlier and are still unread."
+    local state_ok=0; merge_state || state_ok=1
+    [ "$state_ok" -eq 0 ] || note="$note It also could not update $SEEN."
+    if ! emit_unread "$out" "$manifest" "$note"; then
+      if [ "$state_ok" -ne 0 ]; then state_write_failed "$out"
+      else printf '# x-bookmarks: fetch failed — %s\n' "$(fail_reason)" > "$out"; fi
     fi
     echo "x-bookmarks: $(fail_reason)"
     return 0
   fi
 
-  merge_state
-  emit_unread "$out" "$manifest" "" || printf '# x-bookmarks: no unread bookmarks\n' > "$out"
+  # A failed state update still shows what is already on disk, with the failure named.
+  local note=""
+  merge_state || note="this run could not update $SEEN, so the bookmarks it fetched were not recorded (check that the state directory is writable). The bookmarks below were captured earlier and are still unread."
+  if ! emit_unread "$out" "$manifest" "$note"; then
+    if [ -n "$note" ]; then state_write_failed "$out"; else printf '# x-bookmarks: no unread bookmarks\n' > "$out"; fi
+  fi
   echo "x-bookmarks: $(wc -l < "$manifest" | tr -d ' ') unread -> $out"
   return 0
 }
 
 # Write every unread bookmark as a markdown block. Returns 1 when there are none, so the
-# caller can choose a different header. $3, when set, is a warning banner to prepend.
+# caller can choose a different header. $3, when set, is the sentence of a note to prepend.
 emit_unread() {
   local out="$1" manifest="$2" warn="${3:-}"
   [ -s "$SEEN" ] || return 1
@@ -487,7 +502,7 @@ emit_unread() {
   local total; total=$(jq -c 'select(.read_on == null)' "$SEEN" 2>/dev/null | wc -l | tr -d ' ')
   {
     printf '# Unread X bookmarks\n'
-    [ -n "$warn" ] && printf '\n> Note: this run could not reach X (%s). The bookmarks below were captured earlier and are still unread.\n' "$warn"
+    [ -n "$warn" ] && printf '\n> Note: %s\n' "$warn"
     printf '\n%s unread bookmark(s)' "$total"
     [ "$total" -gt "$MAX_UNREAD" ] && printf '; showing the %s most recent' "$MAX_UNREAD"
     printf '.\n\n'
