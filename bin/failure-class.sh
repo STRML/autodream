@@ -13,7 +13,7 @@ worker_text_of() {
       next
     }
     /^--- worker stdout, last 40 lines ---$/ { in_stdout = 1; next }
-    /^--- an omp log touched during this round/ || /^curl could not be run here/ || /^no route to api\.anthropic\.com/ { exit }
+    /^--- an omp log touched during this round/ || /^curl could not be run here/ || /^no route to / { exit }
     in_stdout { print }
   ' "$1"
 }
