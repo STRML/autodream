@@ -2238,8 +2238,8 @@ run() {
     log "report already exists for $TARGET_DATE ($REPORT_PATH); nothing to do (AUTODREAM_FORCE=1 to rebuild)"
     return 0
   fi
-  # Present but not finished: the move-aside before L2 keeps it as .stale-<epoch>, so the
-  # rebuild loses nothing.
+  # Present but not finished: the move-aside before L2 sets it aside as .stale-<epoch>. It is
+  # kept if the rebuild fails and discarded once a complete report replaces it.
   if [ -s "$REPORT_PATH" ] && [ "${AUTODREAM_FORCE:-0}" != "1" ]; then
     log "report at $REPORT_PATH lacks the open-questions marker; treating $TARGET_DATE as unfinished and rebuilding it"
   fi
@@ -3247,7 +3247,7 @@ PY
   if [ -s "$REPORT_PATH" ]; then
     STALE_REPORT="$REPORT_PATH.stale-$(date +%s)"
     if mv "$REPORT_PATH" "$STALE_REPORT"; then
-      log "existing report for $TARGET_DATE moved aside to $STALE_REPORT before rebuilding (AUTODREAM_FORCE=1)"
+      log "existing report for $TARGET_DATE moved aside to $STALE_REPORT before rebuilding"
     else
       log "WARNING: could not move the existing report aside; this run will NOT archive notes or mark bookmarks read, because a stale report can no longer be told apart from a fresh one"
       STALE_REPORT=""
