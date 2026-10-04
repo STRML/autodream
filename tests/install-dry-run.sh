@@ -46,6 +46,10 @@ assert_eq "$(tree_of)" "$BEFORE" "the filesystem is byte-for-byte the same after
 assert_eq "$(wc -c < "$CALLS" | tr -d ' ')" "0" "launchctl was never invoked"
 assert_grep "$SANDBOX/install.out" "DRY RUN" "it says it is a dry run"
 assert_grep "$SANDBOX/install.out" "[dry-run] link $SANDBOX/target/autodream/run.sh -> $REPO/bin/run.sh" "it lists the links it would make"
+for f in bin/triage-dream.sh bin/dream-grounding.sh; do
+  assert_grep "$SANDBOX/install.out" "[dry-run] link $SANDBOX/target/autodream/$(basename "$f") -> $REPO/$f" "it links $(basename "$f")"
+done
+assert_grep "$SANDBOX/install.out" "[dry-run] link $SANDBOX/target/autodream/TRIAGE_DREAM.md -> $REPO/prompts/TRIAGE_DREAM.md" "and the triage prompt"
 assert_grep "$SANDBOX/install.out" "[dry-run] launchctl bootstrap" "and the launchctl calls it would make"
 assert_grep "$SANDBOX/install.out" "would write $LA/" "and where each plist would go"
 assert_grep "$SANDBOX/install.out" 'exec "$1" "$(date -v-1d +%Y-%m-%d)"' "it shows the review plist it generated"
