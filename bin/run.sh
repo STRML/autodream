@@ -3694,7 +3694,7 @@ PY
       if bash "$APPLY_PINS" "$FINDINGS_DIR" "$TARGET_DATE" >> "$RUN_LOG" 2>&1; then
         log "memory pins: $(tr '\n' ' ' 2>/dev/null < "$FINDINGS_DIR/pins-result.txt" || echo "counters unavailable")"
       else
-        log "apply-pins exited non-zero (pins stay in $PINS); memory pin counters unavailable"
+        log "memory pin counters unavailable: apply-pins exited non-zero (check pins-applied.tsv for what it stored; unstored pins stay in $PINS)"
       fi
     fi
 
