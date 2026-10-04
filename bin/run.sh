@@ -62,6 +62,9 @@
 #                        alone, as before. On (default) it is placed by the timestamps
 #                        INSIDE the transcript, and stats and L1 see only that day  default: 1
 #   AUTODREAM_L2_ENGINE  adapter whose engine runs L2                default: the first enabled adapter
+#   AUTODREAM_TRIAGE     set 1 to triage each delivered report into dreams/DATE.triage.md   default: 0
+#                        One extra read-only call on the L2 engine and model, after everything
+#                        else (bin/triage-dream.sh; never fatal). Off, nothing changes.
 #   AUTODREAM_L2_MODEL   pin the L2 aggregator model (every engine)   default: the adapter's own (claude: the CLI default)
 #   AUTODREAM_L2_MODEL_<NAME> / AUTODREAM_L1_MODEL_<NAME>  the same for one adapter only
 #   AUTODREAM_MARKER_EPOCH    first date whose report is REQUIRED to carry the
@@ -292,6 +295,9 @@ fi
 # directly after L2 has produced a report.
 CITECHECK="$SCRIPT_DIR/citation-check.sh"
 [ -x "$CITECHECK" ] || CITECHECK="$AUTODREAM_DIR/citation-check.sh"
+# Optional dream triage (AUTODREAM_TRIAGE=1): fixed grounding checks plus one read-only model call.
+TRIAGE_DREAM="$SCRIPT_DIR/triage-dream.sh"
+[ -x "$TRIAGE_DREAM" ] || TRIAGE_DREAM="$AUTODREAM_DIR/triage-dream.sh"
 # Operator-note collector and X-bookmark fetcher. Both are context-gatherers for L2 and
 # both are opt-in: vault-notes.sh degrades to the plain notes.md when no vault is set,
 # x-bookmarks.sh to a "not configured" stub when no credentials exist. Overrides are
@@ -3934,6 +3940,23 @@ PY
         fi
       else
         log "target date $TARGET_DATE is not $NORMAL_TARGET_DATE (today's normal nightly date); skipping vault-notes archive and x-bookmark mark-read so today's inbox/unread bookmarks aren't consumed by this reprocess (still collected as L2 context)"
+      fi
+    fi
+
+    # ---- Dream triage: an optional worklist from the finished report ----
+    # Opt-in (AUTODREAM_TRIAGE=1), and last on purpose: it is one more model call, so a hang or
+    # a failure there must not hold back the pins, the banner or the consume steps above. Only a
+    # validated delivery is triaged. The engine is L2's (an adapter), the model gets Read and
+    # Glob only, and bin/triage-dream.sh writes dreams/<date>.triage.md itself. Never fatal.
+    if [ "${AUTODREAM_TRIAGE:-0}" = "1" ] && [ "$L2_DELIVERED" = "1" ] && report_complete; then
+      if [ -x "$TRIAGE_DREAM" ]; then
+        log "dream triage: running ($TRIAGE_DREAM)"
+        env AUTODREAM_DIR="$AUTODREAM_DIR" DREAMS_DIR="$DREAMS_DIR" PROJECTS_DIR="$PROJECTS_DIR" \
+          AUTODREAM_L2_ENGINE="$L2_ENGINE" "$TRIAGE_DREAM" "$TARGET_DATE" >> "$RUN_LOG" 2>&1 \
+          || log "dream triage produced no worklist (continuing)"
+        clean_work_bucket
+      else
+        log "dream triage requested but triage-dream.sh was not found; skipping"
       fi
     fi
   else

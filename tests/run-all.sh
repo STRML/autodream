@@ -4366,6 +4366,42 @@ test_pin_block_must_follow_the_sentinel_and_be_closed(){
   rm -rf "$root"
 }
 
+test_dream_triage_is_opt_in_and_leaves_l2_alone(){
+  echo "# dream triage: off by default; on, it runs last on L2's engine and cannot disturb the night"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  export MOCK_CAPTURE_DIR="$root/cap"; run_dream "$root"; unset MOCK_CAPTURE_DIR
+  assert_no_file "$root/dreams/$DATE.triage.md" "default: no triage file"
+  assert_no_file "$root/cap/triage-stdin.txt" "default: no extra model call"
+  assert_nogrep "$root/run.out" 'dream triage' "default: the log does not mention it"
+  rm -rf "$root"
+
+  root=$(setup_env); mk_session "$root" sess1
+  export MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_TRIAGE=1; run_dream "$root"; unset MOCK_CAPTURE_DIR AUTODREAM_TRIAGE
+  assert_grep "$root/dreams/$DATE.triage.md" '^# Dream triage' "AUTODREAM_TRIAGE=1 writes dreams/DATE.triage.md"
+  assert_grep "$root/cap/triage-stdin.txt" '^# Dream triage worker' "through the triage prompt"
+  assert_grep "$root/cap/triage-args.txt" '^Glob$' "on the read-only L2 engine arguments"
+  assert_grep "$root/cap/l2-stdin.txt" 'Report destination' "L2's own captured prompt is still L2's"
+  assert_nogrep "$root/cap/l2-stdin.txt" 'Dream triage worker' "and carries no triage text"
+  assert_grep "$root/cap/l2-args.txt" '^Read$' "L2's captured arguments are still L2's"
+  assert_eq "$(cat "$root/run.exit")" "0" "the run still exits 0"
+  assert_file "$root/dreams/$DATE.md" "and the report is there"
+  assert_grep "$root/autodream/findings/$DATE/triage/grounding.json" '"claims"' "grounding.json was written"
+  rm -rf "$root"
+
+  root=$(setup_env); mk_session "$root" sess1
+  export AUTODREAM_TRIAGE=1 MOCK_TRIAGE_MODE=fail; run_dream "$root"; unset AUTODREAM_TRIAGE MOCK_TRIAGE_MODE
+  assert_eq "$(cat "$root/run.exit")" "0" "a failed triage call does not fail the run"
+  assert_grep "$root/run.out" "dream triage produced no worklist" "and the log says so"
+  assert_file "$root/dreams/$DATE.md" "the report still ships"
+  rm -rf "$root"
+
+  root=$(setup_env); mk_session "$root" sess1
+  export AUTODREAM_TRIAGE=1 MOCK_MODE=l2_fail AUTODREAM_L2_ATTEMPTS=1 MOCK_CAPTURE_DIR="$root/cap"; run_dream "$root"
+  unset AUTODREAM_TRIAGE MOCK_MODE AUTODREAM_L2_ATTEMPTS MOCK_CAPTURE_DIR
+  assert_no_file "$root/cap/triage-stdin.txt" "no report was delivered, so no triage call was made"
+  rm -rf "$root"
+}
+
 test_l2_engine_comes_from_an_adapter(){
   echo "# the L2 engine is an adapter: default the first enabled one, AUTODREAM_L2_ENGINE picks another"
   local root; root=$(setup_env); mk_session "$root" sess1
@@ -5338,6 +5374,7 @@ test_harness_addendum_reaches_only_that_harnesss_workers
 test_l2_is_read_only_and_the_runner_writes_the_report
 test_l2_report_with_a_marker_but_no_sentinel_is_not_delivered
 test_pin_block_must_follow_the_sentinel_and_be_closed
+test_dream_triage_is_opt_in_and_leaves_l2_alone
 test_l2_engine_comes_from_an_adapter
 test_config_written_by_install_enables_adapters_and_l2_engine
 test_replay_harness_works_on_synthetic_data
@@ -5751,7 +5788,7 @@ test_window_omp_session_active_only_on_an_abandoned_branch_is_gated_not_refused
 # Their counts fold into the totals below, so a red unit suite fails this script.
 echo
 echo "===== unit suites ====="
-for _suite in lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript session-window apply-pins scheduler-label autodream-now review-skip review-cmux notes-path install-review-agent install-dry-run install-dir tmp-cleanup; do
+for _suite in lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript session-window apply-pins scheduler-label autodream-now review-skip review-cmux notes-path install-review-agent install-dry-run install-dir tmp-cleanup dream-triage; do
   _out=$(bash "$HERE/$_suite.sh" 2>&1)
   _rc=$?
   _p=$(printf '%s\n' "$_out" | sed -n 's/^passed: *\([0-9][0-9]*\).*/\1/p' | tail -1)

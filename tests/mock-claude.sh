@@ -56,6 +56,9 @@
 #   MOCK_MODE=pins_unterminated  as pins, but the pin block has no AUTODREAM_PINS_END line.
 #   MOCK_MODE=pins_in_body   the report BODY quotes the pin markers and a pin line; no block after
 #                            the sentinel. Nothing may be stored.
+#   MOCK_TRIAGE_MODE=fail|nosentinel|empty  the dream-triage call (bin/triage-dream.sh) fails, is cut off
+#                            before the sentinel, or delivers nothing. It writes triage-*.txt to
+#                            MOCK_CAPTURE_DIR, never l2-*.
 #   MOCK_CAPTURE_DIR=<dir>   dump each layer's stdin + argv to <dir>/l{1,2}-*.txt
 #                            so tests can assert on the exact prompt framing.
 #   MOCK_CALL_LOG=<file>     append the L1 output path for every invocation of
@@ -189,6 +192,24 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
     *) write_findings ;;
   esac
   echo done
+elif printf '%s' "$input" | grep -q '^# Dream triage worker'; then
+  # ---- Dream triage (bin/triage-dream.sh): its own capture files, never l2-*, so a test that
+  # asserts on L2's args or stdin cannot be overwritten by this call ----
+  if [ -n "${MOCK_CAPTURE_DIR:-}" ]; then
+    printf '%s' "$input" > "$MOCK_CAPTURE_DIR/triage-stdin.txt"
+    printf '%s\n' "$@" > "$MOCK_CAPTURE_DIR/triage-args.txt"
+  fi
+  tdir=$(printf '%s' "$line1" | sed 's/^Findings directory to aggregate (literal absolute path): //')
+  case "${MOCK_TRIAGE_MODE:-good}" in
+    fail) echo "mock: triage failed" >&2; exit 1 ;;
+    nosentinel) printf '# Dream triage - mock\n\ncut off mid-w' ; exit 0 ;;
+    empty) echo "AUTODREAM_REPORT_END"; exit 0 ;;
+  esac
+  # Echo what grounding said about each claim, so a test can see the data reached the model.
+  printf '# Dream triage - mock\n\n'
+  [ -r "$tdir/grounding.json" ] && jq -r '.claims[] | "- \(.kind) \(.claim) \(.status)"' "$tdir/grounding.json"
+  echo "AUTODREAM_REPORT_END"
+  echo "report: ignored"
 else
   # ---- Layer 2: aggregator ----
   if [ -n "${MOCK_CAPTURE_DIR:-}" ]; then

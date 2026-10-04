@@ -141,6 +141,8 @@ link "$REPO_DIR/bin/scheduler-label.sh"      "$TARGET/scheduler-label.sh"
 link "$REPO_DIR/bin/oversized-gate.sh"       "$TARGET/oversized-gate.sh"
 link "$REPO_DIR/bin/failure-class.sh"        "$TARGET/failure-class.sh"
 link "$REPO_DIR/bin/citation-check.sh"       "$TARGET/citation-check.sh"
+link "$REPO_DIR/bin/triage-dream.sh"         "$TARGET/triage-dream.sh"
+link "$REPO_DIR/bin/dream-grounding.sh"      "$TARGET/dream-grounding.sh"
 link "$REPO_DIR/bin/cookie-cadence.sh"       "$TARGET/cookie-cadence.sh"
 link "$REPO_DIR/bin/vault-notes.sh"          "$TARGET/vault-notes.sh"
 link "$REPO_DIR/bin/x-bookmarks.sh"          "$TARGET/x-bookmarks.sh"
@@ -158,6 +160,7 @@ link "$REPO_DIR/bin/preflight.sh"             "$TARGET/preflight.sh"
 link "$REPO_DIR/adapters"                     "$TARGET/adapters"
 link "$REPO_DIR/prompts/PROMPT.md"      "$TARGET/PROMPT.md"
 link "$REPO_DIR/prompts/SESSION_TRIAGE.md" "$TARGET/SESSION_TRIAGE.md"
+link "$REPO_DIR/prompts/TRIAGE_DREAM.md"   "$TARGET/TRIAGE_DREAM.md"
 
 if [ "$DRY" = 1 ]; then dry "chmod +x bin/*.sh adapters/*/adapter.sh"; else
 chmod +x "$REPO_DIR/bin/"*.sh
