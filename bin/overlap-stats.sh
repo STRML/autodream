@@ -35,6 +35,15 @@
 # concurrent human activity that simply wasn't worth triaging, whereas an advisor pair
 # is the same human activity counted twice.
 #
+# Nested-worker exclusion (#79): the same holds for a subagent or workflow worker. Its
+# transcript is a separate file inside its parent's directory, with timestamps that sit
+# inside the parent's span and inside every sibling's, so a 30-worker fanout paired every
+# worker with its parent and with each other (2026-09-08 read "78 of 72 sessions"). A
+# sidecar with `isSidechain: true` (a claude worker) or `nested: true` (an omp child) is
+# dropped, so the stat counts concurrency between parent sessions. What it still includes
+# is every gated top-level session, which the Activity snapshot's session total leaves
+# out; PROMPT.md says so beside the figure.
+#
 # Usage: overlap-stats.sh <findings_dir> [window_seconds]   (default window: 1800 = 30 min)
 # Prints a single-line JSON object {"overlap_events":N,"sessions_with_overlap":N} to
 # stdout. Never fails the caller: an empty/missing findings dir yields 0/0.
@@ -57,15 +66,15 @@ fi
 # NDJSON: one {"id":..., "ts":[...]} line per sidecar. Missing/empty user_turn_timestamps
 # (pre-#14 sidecars, or sessions with no timestamped user turns) become [] and simply
 # can't form a pair — jq's has_overlap already short-circuits on an empty array.
-# Advisor sidecars emit no line at all (see the header note). `is_advisor` is absent on
-# pre-2026-08-21 sidecars, and `null != true` keeps them, so old findings dirs pair
+# Advisor and nested-worker sidecars emit no line at all (see the header note). The flags
+# are absent on older sidecars, and `null != true` keeps those, so old findings dirs pair
 # exactly as they did before.
 build_session_list() {
   local f id
   for f in "$findings_dir"/*.stats.json; do
     [ -e "$f" ] || continue
     id=$(basename "$f" .stats.json)
-    jq -c --arg id "$id" 'select(.is_advisor != true) | {id: $id, ts: (.user_turn_timestamps // [])}' "$f" 2>/dev/null
+    jq -c --arg id "$id" 'select(.is_advisor != true and .isSidechain != true and .nested != true) | {id: $id, ts: (.user_turn_timestamps // [])}' "$f" 2>/dev/null
   done
 }
 

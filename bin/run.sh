@@ -1905,6 +1905,65 @@ compute_overlap_stats() {
   log "overlap: $OVERLAP_EVENTS pair(s), $SESSIONS_WITH_OVERLAP session(s) involved"
 }
 
+# $1=transcript path -> its parent session file, or nothing for a top-level transcript. A child
+# lives in a directory named after its parent's file, so walking up until "<dir>.jsonl" is a
+# file finds the parent at any depth: claude nests workers at <bucket>/<id>/subagents/ and
+# <bucket>/<id>/subagents/workflows/wf_*/, omp at <bucket>/<stamp>_<id>/.
+session_parent() {
+  local d depth=0
+  d=$(dirname "$1")
+  while [ "$depth" -lt 6 ] && [ "$d" != / ] && [ "$d" != . ]; do
+    [ -f "$d.jsonl" ] && { printf '%s' "$d.jsonl"; return 0; }
+    d=$(dirname "$d"); depth=$((depth + 1))
+  done
+  return 1
+}
+
+# $1=findings dir -> one worker-hash<TAB>parent-hash row per nested transcript in sessions.txt
+# (a sidecar with isSidechain or nested set: a claude subagent or workflow worker, an omp
+# advisor or task child). The parent hash is the parent file's artifact key, or, when that file
+# is gone, a key for the directory the workers share, so a fanout still groups. Held in the
+# runner's memory like session_rows, for the same reason: L1 and L2 can rewrite the worklist.
+fanout_rows() {
+  local dir=$1 s hash parent
+  [ -r "$dir/sessions.txt" ] || return 0
+  while IFS= read -r s <&3; do
+    [ -n "$s" ] || continue
+    hash=$(session_hash "$s") || continue
+    jq -e '.isSidechain == true or .nested == true' "$dir/$hash.stats.json" >/dev/null 2>&1 || continue
+    parent=$(session_parent "$s") || case $s in
+      */subagents/*) parent=${s%%/subagents/*} ;;
+      *) parent=$(dirname "$s") ;;
+    esac
+    printf '%s\t%s\n' "$hash" "$(session_hash "$parent")"
+  done 3< "$dir/sessions.txt"
+}
+
+# Splits the report's session total into top-level sessions and nested workers (#79), so a
+# parent that spawned thirty workers stops reading as thirty-one sessions. Runs after L1 so a
+# gated stub drops out, the same set the Activity snapshot's N counts. Sets FANOUT_TOP,
+# FANOUT_NESTED, FANOUT_PARENTS and FANOUT_LARGEST, and writes fanouts.tsv (worker hash, parent
+# hash) for L2. Needs FANOUT_ROWS from fanout_rows, which ran before any model did.
+compute_fanout_stats() {
+  local json hash row ungated=0 rows=""
+  FANOUT_TOP=0; FANOUT_NESTED=0; FANOUT_PARENTS=0; FANOUT_LARGEST=0
+  for json in "$FINDINGS_DIR"/*.json; do
+    [ -f "$json" ] || continue
+    case "$json" in *.stats.json) continue ;; esac
+    grep -q '"skipped": *"below_noise_gate"' "$json" 2>/dev/null && continue
+    ungated=$((ungated + 1))
+    hash=$(basename "$json" .json)
+    row=$(printf '%s\n' "$FANOUT_ROWS" | grep -m1 "^$hash"$'\t') || continue
+    rows="${rows}${row}"$'\n'
+  done
+  if [ -n "$rows" ]; then printf '%s' "$rows" > "$FINDINGS_DIR/fanouts.tsv"; else : > "$FINDINGS_DIR/fanouts.tsv"; fi
+  [ -n "$rows" ] || { FANOUT_TOP=$ungated; return 0; }
+  FANOUT_NESTED=$(printf '%s' "$rows" | grep -c .)
+  FANOUT_TOP=$((ungated - FANOUT_NESTED))
+  FANOUT_PARENTS=$(printf '%s' "$rows" | cut -f2 | sort -u | grep -c .)
+  FANOUT_LARGEST=$(printf '%s' "$rows" | cut -f2 | sort | uniq -c | sort -rn | awk 'NR == 1 { print $1 }')
+}
+
 dispatch_l1() { # one parallel pass; idempotent worker → only the still-missing sessions run
   # NUL-delimited, one argument per worker, so the path reaches the worker byte for byte.
   # `xargs -I {}` turned a tab into a space, deleted a backslash and died on a quote with
@@ -2607,6 +2666,7 @@ run() {
       printf 'overlap_measured: no\n'
       printf 'overlap_events: 0\n'
       printf 'sessions_with_overlap: 0\n'
+      printf 'sessions_top_level: 0\nsessions_nested: 0\nfanout_parents: 0\nlargest_fanout: 0\n'
       # EMPTY, not `none`. PROMPT.md defines empty as "none" for this key and tells
       # L2 to name the dates for any non-empty value, so `none` was handed to it as
       # a date list to report.
@@ -2672,6 +2732,7 @@ EOF
   # runs inside dispatch_l1 below — gated sessions' sidecars still exist and still
   # participate in overlap (see the comment in bin/overlap-stats.sh).
   compute_overlap_stats
+  FANOUT_ROWS=$(fanout_rows "$FINDINGS_DIR")
 
   # ---- Pin authorization, fixed before any model runs ----
   # L1 and L2 both run with the Write tool and bypassPermissions, so any file they can
@@ -2935,6 +2996,7 @@ EOF
   # an independent xargs subshell with no shared state to increment.
   GATED=$(find "$FINDINGS_DIR" -maxdepth 1 -type f -name '*.json' ! -name '*.stats.json' \
     -exec grep -l '"skipped": *"below_noise_gate"' {} + 2>/dev/null | wc -l | tr -d " ")
+  compute_fanout_stats
   log "L1 done in ${L1_ELAPSED}s: $L1_OK done ($L1_ERRORED with errors: $L1_ERRORED_SILENT silent, $L1_ERRORED_PROVIDER provider, $L1_ERRORED_UNCLASSIFIED unclassified; $GATED gated), $MISSING missing (.err files: $L1_FAIL)"
 
   # ---- Oversized-transcript measurement gate (#12) ----
@@ -3270,6 +3332,13 @@ PY
     printf 'overlap_measured: %s\n' "$([ "$OVERLAP_MEASURED" = "1" ] && echo yes || echo no)"
     printf 'overlap_events: %s\n' "$OVERLAP_EVENTS"
     printf 'sessions_with_overlap: %s\n' "$SESSIONS_WITH_OVERLAP"
+    # The Activity snapshot's session total split into top-level sessions and nested workers
+    # (#79). Both count ungated sessions, the same set as the report's N; fanouts.tsv names
+    # each worker and its parent.
+    printf 'sessions_top_level: %s\n' "$FANOUT_TOP"
+    printf 'sessions_nested: %s\n' "$FANOUT_NESTED"
+    printf 'fanout_parents: %s\n' "$FANOUT_PARENTS"
+    printf 'largest_fanout: %s\n' "$FANOUT_LARGEST"
     printf 'skills_unmeasured: %s\n' "${SKILLS_DROPPED:-0}"
     printf 'skills_enforcement_failed: %s\n' "${SKILLS_FAILED:-0}"
     # Other dates that were triaged and never assembled (#36). Empty means none in the
