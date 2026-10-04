@@ -1713,11 +1713,16 @@ wait_for_network() { # 0 = network is up, 1 = gave up after the cap; no-op when 
   case "$cap" in ''|*[!0-9]*) log "AUTODREAM_NETCHECK_CAP='$cap' is not a number; using 1800"; cap=1800 ;; esac
   start=$(date +%s)
   while :; do
-    down=1
+    down=1; asked=0
     while IFS= read -r url; do
       # Sized per URL, not per pass: with several providers down, every probe in the pass spends
-      # the same clock the cap is counting.
-      left=$(( cap - ($(date +%s) - start) )); [ "$left" -ge 1 ] || left=1
+      # the same clock the cap is counting. Once it is spent, the pass stops: a floor of 1s on
+      # every later URL ran the pass N-1 probes past the cap. Only the first probe floors, so a
+      # cap of 0 still asks once.
+      left=$(( cap - ($(date +%s) - start) ))
+      [ "$left" -ge 1 ] || [ "$asked" -eq 0 ] || break
+      [ "$left" -ge 1 ] || left=1
+      asked=1
       lim=$probe; [ "$left" -lt "$lim" ] && lim=$left
       if net_up -l "$lim" "$url"; then down=0; break; fi
       log "no answer from $url"

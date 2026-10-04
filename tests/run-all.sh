@@ -1635,12 +1635,16 @@ test_wait_for_network_cap_bounds_the_probe(){
   t1=$(date +%s)
   assert_eq "$rc" "1" "a host that never answers is given up on"
   if [ $((t1 - t0)) -le 6 ]; then ok "inside the cap, not the probe limit ($((t1 - t0))s for a 2s cap)"; else no "the wait ran $((t1 - t0))s against a 2s cap"; fi
+  # Six dead providers against a 2s cap. A probe past the cap is clamped to 1s, so a loop that keeps
+  # probing after the cap is spent runs about 2s + 5 x 1s (7s or more, plus timeout grace), while one
+  # that stops at the cap runs about 2s. A ceiling of 4s sits between them by more than the 1s
+  # granularity of date +%s, so load can move either reading by a second without flipping the verdict.
   t0=$(date +%s)
   PATH="$shim:$PATH" TIMEOUT_BIN="$tb" AUTODREAM_NETCHECK_CAP=2 AUTODREAM_NETUP_LIMIT=20 NET_DOWN_SECONDS=0 \
-    bash -c 'log(){ :; }; . "'"$root"'/wfn.sh"; wait_for_network "$(printf "%s\n" https://api.deepseek.com/ https://api.anthropic.com/ https://api.z.ai/)"'; rc=$?
+    bash -c 'log(){ :; }; . "'"$root"'/wfn.sh"; wait_for_network "$(printf "%s\n" https://a.invalid/ https://b.invalid/ https://c.invalid/ https://d.invalid/ https://e.invalid/ https://f.invalid/)"'; rc=$?
   t1=$(date +%s)
   assert_eq "$rc" "1" "several hosts that never answer are given up on"
-  if [ $((t1 - t0)) -le 5 ]; then ok "and the cap covers every probe in the pass ($((t1 - t0))s for a 2s cap)"; else no "three dead hosts ran $((t1 - t0))s against a 2s cap"; fi
+  if [ $((t1 - t0)) -le 4 ]; then ok "and the cap covers every probe in the pass ($((t1 - t0))s for a 2s cap)"; else no "six dead hosts ran $((t1 - t0))s against a 2s cap"; fi
   rm -rf "$root"
 }
 
