@@ -1687,11 +1687,7 @@ findings_json_count() {
 # and named, not retried: the .err is the only record of which session it was, and a worker with
 # the Write tool could have put any path in it.
 #
-# A findings JSON outside the worklist is a session an earlier run triaged under this date that
-# the current run no longer places in it (typically a rebuild of a date first run on file mtime
-# alone). Nothing removes it, and L2 reads every findings JSON in the directory, so the report
-# would quietly include it. Counted and named; left in place, because deleting findings is not
-# this runner's call. A clean rebuild means removing the date's findings directory first.
+# A findings JSON outside the worklist is handled by reconcile_findings_with_worklist.
 worklist_hashes() {
   [ -f "$SESSIONS_LIST" ] || return 0
   # session_hash prints no trailing newline, so each hash is printed on its own line here:
@@ -1703,9 +1699,40 @@ worklist_hashes() {
     printf '%s\n' "$_h"
   done < "$SESSIONS_LIST"
 }
+# L2 reads every findings JSON in the directory, and a forced rerun reuses the directory, so a
+# JSON left by an earlier run for a session this run's worklist no longer owns would reach the
+# report as that day's work (#56). It is silent: a stale <hash>.json is a well-formed record.
+# The ones outside the worklist are moved to outside-worklist/, which L2's glob does not reach,
+# and counted and named. Moved, not deleted: deleting findings is not this runner's call, and a
+# later rebuild whose worklist owns the session again gets its JSON back before L1 runs, so the
+# rerun does not pay for the triage twice. Runs once per run, before the pre-L1 cache snapshot.
+reconcile_findings_with_worklist() {
+  FINDINGS_OUTSIDE_WORKLIST=0; OUTSIDE_FINDINGS_NAMES=""
+  local _hashes _f _h _q="$FINDINGS_DIR/outside-worklist"
+  _hashes=$(worklist_hashes)
+  for _f in "$_q"/*.json; do
+    [ -f "$_f" ] || continue
+    _h=$(basename "$_f" .json)
+    printf '%s\n' "$_hashes" | grep -qxF "$_h" || continue
+    [ ! -e "$FINDINGS_DIR/$_h.json" ] || continue
+    mv "$_f" "$FINDINGS_DIR/$_h.json" 2>/dev/null && log "restored $_h.json from outside-worklist/: its session is in this run's worklist again"
+  done
+  for _f in "$FINDINGS_DIR"/*.json; do
+    [ -f "$_f" ] || continue
+    _h=$(basename "$_f" .json)
+    case "$_h" in *[!0-9a-f]*|"") continue ;; esac
+    [ "${#_h}" -eq 12 ] || continue
+    printf '%s\n' "$_hashes" | grep -qxF "$_h" && continue
+    mkdir -p "$_q" 2>/dev/null && mv -f "$_f" "$_q/$_h.json" 2>/dev/null || continue
+    FINDINGS_OUTSIDE_WORKLIST=$((FINDINGS_OUTSIDE_WORKLIST + 1))
+    OUTSIDE_FINDINGS_NAMES="${OUTSIDE_FINDINGS_NAMES:+$OUTSIDE_FINDINGS_NAMES }$_h"
+  done
+  if [ "$FINDINGS_OUTSIDE_WORKLIST" -gt 0 ]; then
+    log "WARNING: $FINDINGS_OUTSIDE_WORKLIST findings JSON(s) belong to no session in this run's worklist; moved to $_q so L2 does not read them: $OUTSIDE_FINDINGS_NAMES"
+  fi
+}
 scan_worklist_leftovers() {
   L1_ERR_ORPHANED=0; ORPHAN_ERR_NAMES=""
-  FINDINGS_OUTSIDE_WORKLIST=0; OUTSIDE_FINDINGS_NAMES=""
   local _hashes _f _h
   _hashes=$(worklist_hashes)
   for _f in "$FINDINGS_DIR"/*.json.err; do
@@ -1716,20 +1743,8 @@ scan_worklist_leftovers() {
     L1_ERR_ORPHANED=$((L1_ERR_ORPHANED + 1))
     ORPHAN_ERR_NAMES="${ORPHAN_ERR_NAMES:+$ORPHAN_ERR_NAMES }$_h"
   done
-  for _f in "$FINDINGS_DIR"/*.json; do
-    [ -f "$_f" ] || continue
-    _h=$(basename "$_f" .json)
-    case "$_h" in *[!0-9a-f]*|"") continue ;; esac
-    [ "${#_h}" -eq 12 ] || continue
-    printf '%s\n' "$_hashes" | grep -qxF "$_h" && continue
-    FINDINGS_OUTSIDE_WORKLIST=$((FINDINGS_OUTSIDE_WORKLIST + 1))
-    OUTSIDE_FINDINGS_NAMES="${OUTSIDE_FINDINGS_NAMES:+$OUTSIDE_FINDINGS_NAMES }$_h"
-  done
   if [ "$L1_ERR_ORPHANED" -gt 0 ]; then
     log "WARNING: $L1_ERR_ORPHANED .err file(s) have no findings JSON and belong to no session in this run's worklist, so nothing will retry them: $ORPHAN_ERR_NAMES"
-  fi
-  if [ "$FINDINGS_OUTSIDE_WORKLIST" -gt 0 ]; then
-    log "WARNING: $FINDINGS_OUTSIDE_WORKLIST findings JSON(s) in $FINDINGS_DIR belong to no session in this run's worklist and L2 will still read them: $OUTSIDE_FINDINGS_NAMES (remove the date's findings directory before a clean rebuild)"
   fi
 }
 
@@ -2469,6 +2484,7 @@ run() {
     # An empty worklist owns nothing, so every .err with no findings JSON is orphaned and every
     # findings JSON is outside it. Counted here too: a night that found no session must not
     # report zero over a directory that holds stale failures.
+    reconcile_findings_with_worklist
     scan_worklist_leftovers
     local early_err_files; early_err_files=$(ls -1 "$FINDINGS_DIR"/*.json.err 2>/dev/null | wc -l | tr -d ' ')
     {
@@ -2674,6 +2690,8 @@ EOF
   # that date's record of what timed out.
   : > "$FINDINGS_DIR/l1-timeouts.txt"
   : > "$FINDINGS_DIR/l1-netdown.txt"
+
+  reconcile_findings_with_worklist
 
   clean_work_bucket  # start clean: drop any stub left by a prior run's workers
 

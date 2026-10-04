@@ -5123,8 +5123,8 @@ test_stale_err_is_counted_on_a_night_with_no_session_too(){
   rm -rf "$root"
 }
 
-test_findings_outside_the_worklist_are_reported_and_left_in_place(){
-  echo "# window: a findings JSON for a session this run no longer places in the day is counted and named, and not deleted"
+test_findings_outside_the_worklist_are_set_aside_not_deleted(){
+  echo "# window: a findings JSON for a session this run no longer places in the day is counted, named and set aside where L2 does not read it (#56)"
   local root; root=$(setup_env)
   # TWO sessions in the worklist: session_hash prints no trailing newline, and a list of hashes
   # run together matches nothing, which made every findings JSON read as outside the worklist.
@@ -5140,7 +5140,17 @@ test_findings_outside_the_worklist_are_reported_and_left_in_place(){
   assert_grep "$fd/run-stats.txt" 'l1_findings_outside_worklist: 1$' "only the leftover findings JSON is counted, not the two this run wrote"
   assert_grep "$fd/run-stats.txt" 'l1_err_files_orphaned: 1$' "and only the stale .err"
   assert_grep "$root/run.out" '0123456789ab' "the log names the leftover"
-  assert_file "$fd/0123456789ab.json" "and it is left in place, not deleted"
+  assert_no_file "$fd/0123456789ab.json" "it is no longer where L2 globs for findings"
+  assert_file "$fd/outside-worklist/0123456789ab.json" "and it is set aside, not deleted"
+  # A later rebuild whose worklist owns the session again gets its findings back before L1,
+  # so the rerun does not triage it twice.
+  local h1; h1=$(hash_of "$root/projects/proj-a/inday.jsonl")
+  mv "$fd/$h1.json" "$fd/outside-worklist/$h1.json"
+  printf '{"session_path":"x","findings":[],"marker":"kept-from-first-run"}\n' > "$fd/outside-worklist/$h1.json"
+  rm -f "$root/dreams/$DATE.md"
+  AUTODREAM_FORCE=1 run_dream "$root"
+  assert_grep "$fd/$h1.json" 'kept-from-first-run' "a set-aside JSON whose session is back in the worklist is restored and not re-triaged"
+  assert_no_file "$fd/outside-worklist/$h1.json" "and leaves the quarantine"
   rm -rf "$root"
   root=$(setup_env); mk_session "$root" s1; fd=$(fdir "$root")
   run_dream "$root"
@@ -5240,7 +5250,7 @@ test_rebuild_keeps_a_session_touched_after_its_day_and_retries_its_stale_err
 test_rebuild_of_an_omp_parent_touched_after_its_day_keeps_it_beside_its_advisor
 test_stale_err_with_no_session_in_the_worklist_is_reported_not_silent
 test_stale_err_is_counted_on_a_night_with_no_session_too
-test_findings_outside_the_worklist_are_reported_and_left_in_place
+test_findings_outside_the_worklist_are_set_aside_not_deleted
 test_a_night_of_only_out_of_window_files_says_so
 test_window_omp_cuts_the_live_chain_after_linearizing
 test_window_omp_session_active_only_on_an_abandoned_branch_is_gated_not_refused
