@@ -1587,14 +1587,58 @@ test_net_up_survives_a_curl_that_stalls_after_the_reply(){
   chmod +x "$root/stall/curl"
   sed -n '/^net_up() {/,/^}/p' "$REPO/bin/run.sh" > "$root/net_up.sh"
   t0=$(date +%s)
-  PATH="$root/stall:$PATH" TIMEOUT_BIN="$tb" AUTODREAM_NETUP_LIMIT=2 bash -c ". \"$root/net_up.sh\"; net_up"; rc=$?
+  PATH="$root/stall:$PATH" TIMEOUT_BIN="$tb" AUTODREAM_NETUP_LIMIT=2 bash -c ". \"$root/net_up.sh\"; net_up https://api.anthropic.com/"; rc=$?
   t1=$(date +%s)
   assert_eq "$rc" "0" "a reply that arrived before the stall is read as reachable"
   if [ $((t1 - t0)) -lt 12 ]; then ok "and the probe is bounded ($((t1 - t0))s)"; else no "the probe was not bounded ($((t1 - t0))s)"; fi
   # A curl that never got any reply is still down.
   printf '%s\n' '#!/bin/bash' 'sleep 30' > "$root/stall/curl"
-  PATH="$root/stall:$PATH" TIMEOUT_BIN="$tb" AUTODREAM_NETUP_LIMIT=2 bash -c ". \"$root/net_up.sh\"; net_up"; rc=$?
+  PATH="$root/stall:$PATH" TIMEOUT_BIN="$tb" AUTODREAM_NETUP_LIMIT=2 bash -c ". \"$root/net_up.sh\"; net_up https://api.anthropic.com/"; rc=$?
   assert_eq "$rc" "1" "a stall with no reply at all is still down"
+  rm -rf "$root"
+}
+
+# A curl that records the URL it was asked for and answers like a reachable host, or never
+# answers when $3 is "hang".
+shim_curl_logging(){ # $1=sandbox root $2=log file $3=reply|hang
+  mkdir -p "$1/logshim"
+  printf '%s\n' '#!/bin/bash' 'for a in "$@"; do case "$a" in https://*|http://*) printf "%s\n" "$a" >> "'"$2"'" ;; esac; done' \
+    "$( [ "$3" = hang ] && echo 'sleep 30' || echo 'printf 200' )" > "$1/logshim/curl"
+  chmod +x "$1/logshim/curl"
+  printf '%s' "$1/logshim"
+}
+
+test_net_up_probes_the_host_it_is_given(){
+  echo "# net_up probes the URL a layer's provider owns, not a hard-coded api.anthropic.com (issue 109)"
+  local root shim log rc
+  root=$(setup_env); log="$root/curl.log"; shim=$(shim_curl_logging "$root" "$log" reply)
+  sed -n '/^net_up() {/,/^}/p' "$REPO/bin/run.sh" > "$root/net_up.sh"
+  PATH="$shim:$PATH" bash -c ". \"$root/net_up.sh\"; net_up -l 2 https://api.deepseek.com/"; rc=$?
+  assert_eq "$rc" "0" "a reply from the layer's own host is up"
+  assert_grep   "$log" 'api.deepseek.com' "the probe went to the provider the layer calls"
+  assert_nogrep "$log" 'api.anthropic.com' "and not to anthropic"
+  rm -rf "$root"
+}
+
+test_wait_for_network_cap_bounds_the_probe(){
+  echo "# the cap bounds the probe too: a hung probe cannot run past what is left of it (issue 110)"
+  local root shim tb t0 t1 rc
+  root=$(setup_env); shim=$(shim_curl_logging "$root" "$root/curl.log" hang)
+  tb=$(command -v timeout || command -v gtimeout || true)
+  if [ -z "$tb" ]; then ok "skipped: no timeout binary on this host"; rm -rf "$root"; return 0; fi
+  { sed -n '/^net_up() {/,/^}/p' "$REPO/bin/run.sh"; sed -n '/^wait_for_network() {/,/^}/p' "$REPO/bin/run.sh"; } > "$root/wfn.sh"
+  t0=$(date +%s)
+  PATH="$shim:$PATH" TIMEOUT_BIN="$tb" AUTODREAM_NETCHECK_CAP=2 AUTODREAM_NETUP_LIMIT=20 NET_DOWN_SECONDS=0 \
+    bash -c 'log(){ :; }; . "'"$root"'/wfn.sh"; wait_for_network https://api.deepseek.com/'; rc=$?
+  t1=$(date +%s)
+  assert_eq "$rc" "1" "a host that never answers is given up on"
+  if [ $((t1 - t0)) -le 6 ]; then ok "inside the cap, not the probe limit ($((t1 - t0))s for a 2s cap)"; else no "the wait ran $((t1 - t0))s against a 2s cap"; fi
+  t0=$(date +%s)
+  PATH="$shim:$PATH" TIMEOUT_BIN="$tb" AUTODREAM_NETCHECK_CAP=2 AUTODREAM_NETUP_LIMIT=20 NET_DOWN_SECONDS=0 \
+    bash -c 'log(){ :; }; . "'"$root"'/wfn.sh"; wait_for_network "$(printf "%s\n" https://api.deepseek.com/ https://api.anthropic.com/ https://api.z.ai/)"'; rc=$?
+  t1=$(date +%s)
+  assert_eq "$rc" "1" "several hosts that never answer are given up on"
+  if [ $((t1 - t0)) -le 5 ]; then ok "and the cap covers every probe in the pass ($((t1 - t0))s for a 2s cap)"; else no "three dead hosts ran $((t1 - t0))s against a 2s cap"; fi
   rm -rf "$root"
 }
 
@@ -2963,6 +3007,8 @@ test_a_deterministic_failure_trips_the_breaker
 test_a_flaky_worker_does_not_trip_the_breaker
 test_warmup_works_for_an_adapter_with_no_environment
 test_net_up_survives_a_curl_that_stalls_after_the_reply
+test_net_up_probes_the_host_it_is_given
+test_wait_for_network_cap_bounds_the_probe
 test_network_down_defers_the_date
 test_oversized_gate_script_deferred
 test_route_lost_after_the_precheck_still_defers
@@ -3733,13 +3779,53 @@ mk_omp_session(){ # $1=root $2=name [$3=cwd]  -> path on stdout; abandoned branc
 }
 run_dream_omp(){ # $1=root ; claude + omp enabled, a sandbox HOME, both engines are the mock
   mkdir -p "$1/home"
-  HOME="$1/home" AUTODREAM_ADAPTERS="${AUTODREAM_ADAPTERS:-claude,omp}" AUTODREAM_L1_MODEL_OMP=omp/test-model \
+  HOME="$1/home" AUTODREAM_ADAPTERS="${AUTODREAM_ADAPTERS:-claude,omp}" AUTODREAM_L1_MODEL_OMP="${TEST_OMP_L1_MODEL:-omp/test-model}" \
     AUTODREAM_CHANGELOG=0 CLAUDE_BIN="$MOCK" OMP_BIN="$MOCK" \
     AUTODREAM_CONFIG="$1/autodream/config" AUTODREAM_CONSUME_DATE="$DATE" \
-    AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1 \
+    AUTODREAM_NETCHECK="${AUTODREAM_NETCHECK:-0}" AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1 \
     PROJECTS_DIR="$1/projects" AUTODREAM_DIR="$1/autodream" DREAMS_DIR="$1/dreams" \
     /bin/bash "$RUN" "$DATE" > "$1/run.out" 2>&1
   cat "$1/autodream/logs/run-$DATE.log" >> "$1/run.out" 2>/dev/null || true
+}
+
+test_l1_precheck_probes_the_l1_provider(){
+  echo "# an omp L1 on deepseek is gated on deepseek reachability, not anthropic (issue 109)"
+  local root shim log; root=$(setup_env); mk_session "$root" sess1; mk_omp_session "$root" cccc >/dev/null
+  log="$root/curl.log"; shim=$(shim_curl_logging "$root" "$log" reply)
+  TEST_CURL_SHIMMED=1 PATH="$shim:$PATH" AUTODREAM_ADAPTERS=omp TEST_OMP_L1_MODEL=deepseek/test-flash AUTODREAM_NETCHECK=1 run_dream_omp "$root"
+  assert_grep "$log" 'api.deepseek.com' "the pre-dispatch check probed the L1 provider"
+  assert_eq "$(head -n 1 "$log" 2>/dev/null)" "https://api.deepseek.com/" "and probed it first"
+  rm -rf "$root"
+}
+
+test_worker_failure_probe_names_the_l1_provider(){
+  echo "# a worker that fails on a dead deepseek route says so, and probes deepseek (issue 109)"
+  local root shim log h o; root=$(setup_env); o=$(mk_omp_session "$root" dddd); h=$(hash_of "$o")
+  log="$root/curl.log"; mkdir -p "$root/dead"
+  printf '%s\n' '#!/bin/bash' 'for a in "$@"; do case "$a" in https://*) printf "%s\n" "$a" >> "'"$log"'" ;; esac; done' 'printf 000; exit 6' > "$root/dead/curl"
+  chmod +x "$root/dead/curl"
+  export MOCK_MODE=l1_incomplete
+  TEST_CURL_SHIMMED=1 PATH="$root/dead:$PATH" AUTODREAM_ADAPTERS=omp TEST_OMP_L1_MODEL=deepseek/test-flash run_dream_omp "$root"
+  unset MOCK_MODE
+  assert_grep "$log" 'api.deepseek.com' "the failure probe went to the L1 provider"
+  assert_nogrep "$log" 'api.anthropic.com' "not to anthropic"
+  assert_grep "$(fdir "$root")/$h.json.err" 'no route to api.deepseek.com' ".err names the host that was down"
+  rm -rf "$root"
+}
+
+test_one_dead_provider_does_not_hold_back_the_others(){
+  echo "# a dead deepseek route does not defer a run whose claude sessions never touch it (review of PR 124)"
+  local root log; root=$(setup_env); mk_session "$root" sess1; mk_omp_session "$root" eeee >/dev/null
+  log="$root/curl.log"; mkdir -p "$root/half"
+  printf '%s\n' '#!/bin/bash' 'for a in "$@"; do case "$a" in https://*) u="$a"; printf "%s\n" "$a" >> "'"$log"'" ;; esac; done' \
+    'case "$u" in *deepseek*) printf 000; exit 6 ;; *) printf 200 ;; esac' > "$root/half/curl"
+  chmod +x "$root/half/curl"
+  TEST_CURL_SHIMMED=1 PATH="$root/half:$PATH" AUTODREAM_ADAPTERS=claude,omp TEST_OMP_L1_MODEL=deepseek/test-flash \
+    AUTODREAM_NETCHECK=1 AUTODREAM_NETCHECK_CAP=0 run_dream_omp "$root"
+  assert_grep   "$log" 'api.anthropic.com' "the gate asked claude's host"
+  assert_nogrep "$root/run.out" 'not dispatched' "the round was dispatched anyway, because claude's host answers"
+  assert_grep   "$(fdir "$root")/run-stats.txt" 'network_deferred: no' "and the date was not deferred"
+  rm -rf "$root"
 }
 
 test_omp_adapter_is_opt_in(){
@@ -4729,6 +4815,9 @@ test_skill_fields_dropped_with_a_partial_sidecar
 test_skill_fields_are_enforced_from_the_sidecar
 test_builtin_slash_commands_are_not_skill_invocations
 test_omp_adapter_is_opt_in
+test_l1_precheck_probes_the_l1_provider
+test_worker_failure_probe_names_the_l1_provider
+test_one_dead_provider_does_not_hold_back_the_others
 test_omp_session_is_linearized_for_the_worker
 test_omp_session_that_cannot_be_linearized_is_an_error_record
 test_omp_stats_describe_the_live_branch_only

@@ -231,3 +231,31 @@ adapter_l2_model() { # $1=name -> model on stdout, exit 1 when none resolves
   [ -n "$v" ] || return 1
   printf '%s' "$v"
 }
+
+# The URL net_up probes for one engine layer, derived from the model that layer calls rather than
+# from a constant. L1 on the omp adapter runs deepseek/... and L2 on omp runs anthropic/..., so a
+# probe pinned to api.anthropic.com read a dead deepseek route as healthy and a dead anthropic one
+# as a deepseek outage. The provider is the part of the model id before the slash. The claude
+# adapter has no provider prefix: it always talks to Anthropic, even with no model named (the CLI's
+# own default). Exits 1 with no output when the
+# provider has no known host, which the caller reads as "cannot answer", not "down".
+#   AUTODREAM_NETUP_URL_<PROVIDER>   pin one provider's probe URL (upper-cased, non-alnum to _)
+provider_probe_url() { # $1=adapter name $2=model (may be empty) -> URL on stdout
+  local name="${1:-}" model="${2:-}" provider up var v
+  if [ "$name" = "claude" ]; then provider=anthropic
+  else
+    case "$model" in */*) provider="${model%%/*}" ;; *) return 1 ;; esac
+  fi
+  up=$(printf '%s' "$provider" | tr 'a-z' 'A-Z' | tr -c 'A-Z0-9' '_')
+  var="AUTODREAM_NETUP_URL_$up"
+  v="${!var:-}"
+  if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
+  case "$provider" in
+    anthropic)  printf '%s' "https://api.anthropic.com/" ;;
+    deepseek)   printf '%s' "https://api.deepseek.com/" ;;
+    neuralwatt) printf '%s' "https://api.neuralwatt.com/" ;;
+    zai|z-ai)   printf '%s' "https://api.z.ai/" ;;
+    runinfra)   printf '%s' "https://api.runinfra.ai/" ;;
+    *) return 1 ;;
+  esac
+}

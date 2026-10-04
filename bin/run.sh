@@ -1487,18 +1487,24 @@ write_pin_projects() {
     && mv "$dir/pin-projects.tsv.tmp" "$dir/pin-projects.tsv"
 }
 
-net_up() { # exit 0 if the API host is reachable (any HTTP reply beats no reply)
-  local code rc hdr limit up=1
+net_up() { # net_up [-l secs] URL: exit 0 if that host answers (any HTTP reply beats no reply)
+  local code rc hdr limit maxt up=1
   local -a bound=()
+  limit="${AUTODREAM_NETUP_LIMIT:-8}"
+  if [ "${1:-}" = "-l" ]; then limit="$2"; shift 2; fi
+  # No URL means the caller could not name a host to ask. That is "the check cannot answer", which
+  # reads as up for the reason given at the exit-127 test below.
+  [ -n "${1:-}" ] || return 0
   # A network filter can hold curl in close() after the reply has already arrived (found at the
   # 2026-10-03 cutover: Little Snitch on this host). curl then prints nothing and its own --max-time
   # cannot interrupt a close(), so the probe read a healthy network as down and the run waited out
   # the whole cap. The status line is written to a header file the moment it arrives, so a reply
   # counts even when curl never gets to report it, and a timeout binary bounds the stall.
-  limit="${AUTODREAM_NETUP_LIMIT:-8}"
   [ -z "${TIMEOUT_BIN:-}" ] || bound=("$TIMEOUT_BIN" -k 2 "$limit")
   hdr=$(mktemp "${TMPDIR:-/tmp}/netup.XXXXXX" 2>/dev/null) || hdr=""
-  code=$(${bound[@]+"${bound[@]}"} curl -s --max-time 5 -o /dev/null ${hdr:+-D "$hdr"} -w '%{http_code}' https://api.anthropic.com/ 2>/dev/null); rc=$?
+  # curl's own limit never exceeds the probe's, so a host without a timeout binary is bounded too.
+  maxt=5; [ "$limit" -lt "$maxt" ] 2>/dev/null && maxt="$limit"
+  code=$(${bound[@]+"${bound[@]}"} curl -s --max-time "$maxt" -o /dev/null ${hdr:+-D "$hdr"} -w '%{http_code}' "$1" 2>/dev/null); rc=$?
   # 127 is "not found" and 126 is "found but not executable". Both mean the shell could
   # not run curl at all — absent, not executable.
   # That is "the check cannot answer", not "the host is down", and reading it as down
@@ -1518,30 +1524,64 @@ net_up() { # exit 0 if the API host is reachable (any HTTP reply beats no reply)
 # 2026-09-04 it could not, and blamed 90 minutes of dead network on oversized transcripts.
 NET_DOWN_SECONDS=0
 
+# The URLs the L1 workers need, one per distinct provider (any one answering opens the gate): each enabled adapter's own L1 model,
+# not a fixed host. Empty when no adapter has a resolvable provider, which wait_for_network reads
+# as "nothing to ask".
+l1_probe_urls() {
+  local src model
+  while IFS=$'\t' read -r src model; do
+    [ -n "$src" ] || continue
+    provider_probe_url "$src" "$model" 2>/dev/null
+    echo
+  done <<< "${AUTODREAM_L1_MODELS:-}" | awk 'NF && !seen[$0]++'
+}
+
+l2_probe_url() { provider_probe_url "$L2_ENGINE" "$L2_MODEL" 2>/dev/null; }
+
+# $1 = the URLs to gate on, one per line; the network is up when any one answers. A dead route to one provider
+# must not hold back sessions that run on another: a worker that does need the dead one fails,
+# is classified as an outage by its own probe, and defers the date through the existing path. The cap is wall-clock and counts the probes
+# themselves: it used to count only the sleeps, so each probe (up to AUTODREAM_NETUP_LIMIT) ran past
+# the bound it was handed, and a hung one was only noticed after it returned. A probe now gets at
+# most what is left of the cap, and the first one always runs, so a cap of 0 still asks once.
 wait_for_network() { # 0 = network is up, 1 = gave up after the cap; no-op when AUTODREAM_NETCHECK=0
   [ "${AUTODREAM_NETCHECK:-1}" != "0" ] || return 0
-  local waited=0 step cap="${AUTODREAM_NETCHECK_CAP:-1800}"
-  # A non-numeric cap makes every [ "$waited" -ge "$cap" ] test error out, and an erroring
+  [ -n "${1:-}" ] || return 0
+  local start elapsed step left lim url down cap="${AUTODREAM_NETCHECK_CAP:-1800}" probe="${AUTODREAM_NETUP_LIMIT:-8}"
+  # A non-numeric cap makes every [ "$elapsed" -ge "$cap" ] test error out, and an erroring
   # test reads as false — so the give-up branch became unreachable and the bound that was
   # supposed to limit the wait removed it instead.
   case "$cap" in ''|*[!0-9]*) log "AUTODREAM_NETCHECK_CAP='$cap' is not a number; using 1800"; cap=1800 ;; esac
-  while ! net_up; do
-    if [ "$waited" -ge "$cap" ]; then
-      NET_DOWN_SECONDS=$((NET_DOWN_SECONDS + waited))
-      log "network still down after ~${waited}s of checks (cap ${cap}s)"
+  start=$(date +%s)
+  while :; do
+    down=1
+    while IFS= read -r url; do
+      # Sized per URL, not per pass: with several providers down, every probe in the pass spends
+      # the same clock the cap is counting.
+      left=$(( cap - ($(date +%s) - start) )); [ "$left" -ge 1 ] || left=1
+      lim=$probe; [ "$left" -lt "$lim" ] && lim=$left
+      if net_up -l "$lim" "$url"; then down=0; break; fi
+      log "no answer from $url"
+    done <<< "$1"
+    [ "$down" -eq 1 ] || break
+    elapsed=$(( $(date +%s) - start ))
+    if [ "$elapsed" -ge "$cap" ]; then
+      NET_DOWN_SECONDS=$((NET_DOWN_SECONDS + elapsed))
+      log "network still down after ~${elapsed}s of checks (cap ${cap}s)"
       # Was `return 0` — "proceeding anyway". Proceeding meant dispatching a full round
       # of workers at a host with no route, which fails every one of them in ~9s and
       # burns a retry round to learn nothing. The caller now defers the date instead.
       return 1
     fi
-    log "waiting for network to return... (${waited}s)"
+    log "waiting for network to return... (${elapsed}s)"
     # Never sleep past the cap. A fixed 15s step meant any cap below 15 still waited a
     # full 15 seconds, so the wait overran the bound it was handed and reported a
     # network_down_seconds larger than the configured maximum.
-    step=$(( cap - waited )); [ "$step" -gt 15 ] && step=15
-    sleep "$step"; waited=$(( waited + step ))
+    step=$(( cap - elapsed )); [ "$step" -gt 15 ] && step=15
+    sleep "$step"
   done
-  NET_DOWN_SECONDS=$((NET_DOWN_SECONDS + waited))
+  # Down time is from the first failed probe to the one that answered. A healthy first probe adds nothing.
+  [ -z "${elapsed:-}" ] || NET_DOWN_SECONDS=$((NET_DOWN_SECONDS + $(date +%s) - start))
   return 0
 }
 
@@ -2012,17 +2052,24 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       # worker failure excluded from the oversized gate, permanently and invisibly.
       # unknown is not netdown: it never ledgers and never suppresses the stub.
       netdown=unknown
-      netcode=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" https://api.anthropic.com/ 2>/dev/null)
-      netrc=$?
-      if [ "$netrc" -eq 127 ] || [ "$netrc" -eq 126 ]; then
-        printf "curl could not be run here (exit %s: not found, or not executable); this failure is unclassified, not an outage\n" "$netrc" >> "$errlog"
-      elif [ -z "$netcode" ] || [ "$netcode" = "000" ]; then
-        netdown=true
-      else
-        netdown=false
-      fi
-      if [ "$netdown" = "true" ]; then
-        printf "no route to api.anthropic.com when this worker failed (curl http_code=%s)\n" "${netcode:-000}" >> "$errlog"
+      # The host the engine of this worker talks to, resolved before any model ran
+      # (AUTODREAM_L1_PROBE_URLS), not a fixed one: an omp worker on deepseek failing while
+      # api.anthropic.com answers is not "network up", and the reverse is not an outage.
+      probeurl=$(printf "%s\n" "${AUTODREAM_L1_PROBE_URLS:-}" | awk -F"\t" -v s="$src" "\$1 == s { print \$2; exit }")
+      if [ -n "$probeurl" ]; then
+        probehost=${probeurl#*://}; probehost=${probehost%%/*}
+        netcode=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" "$probeurl" 2>/dev/null)
+        netrc=$?
+        if [ "$netrc" -eq 127 ] || [ "$netrc" -eq 126 ]; then
+          printf "curl could not be run here (exit %s: not found, or not executable); this failure is unclassified, not an outage\n" "$netrc" >> "$errlog"
+        elif [ -z "$netcode" ] || [ "$netcode" = "000" ]; then
+          netdown=true
+        else
+          netdown=false
+        fi
+        if [ "$netdown" = "true" ]; then
+          printf "no route to %s when this worker failed (curl http_code=%s)\n" "$probehost" "${netcode:-000}" >> "$errlog"
+        fi
       fi
       # Ledger every classified failure, with its round, and never rewrite a line. A
       # bare hash was wrong: the ledger is truncated once per RUN, so a round-1 outage
@@ -2529,11 +2576,14 @@ EOF
   ADAPTERS_DIR=$(adapters_root)
   AUTODREAM_SOURCE_MAP=$(cat "$FINDINGS_DIR/sessions-source.txt" 2>/dev/null)
   AUTODREAM_L1_MODELS=""
-  local _src _model
+  AUTODREAM_L1_PROBE_URLS=""
+  local _src _model _purl
   while IFS= read -r _src; do
     [ -n "$_src" ] || continue
     _model=$(adapter_l1_model "$_src" 2>/dev/null) || _model=""
     AUTODREAM_L1_MODELS="${AUTODREAM_L1_MODELS}${_src}"$'\t'"${_model}"$'\n'
+    _purl=$(provider_probe_url "$_src" "$_model" 2>/dev/null) || _purl=""
+    AUTODREAM_L1_PROBE_URLS="${AUTODREAM_L1_PROBE_URLS}${_src}"$'\t'"${_purl}"$'\n'
     [ -n "$_model" ] || log "WARNING: no L1 model resolves for adapter $_src; its sessions will not be triaged"
     log "L1 model for $_src: ${_model:-<none>}"
   done < <(printf '%s\n' "$AUTODREAM_SOURCE_MAP" | awk -F'\t' 'NF >= 2 && !seen[$2]++ { print $2 }')
@@ -2543,7 +2593,7 @@ EOF
     [ "$(adapter_manifest_get "$_src" '.normalize' 2>/dev/null)" = "true" ] \
       && AUTODREAM_NORMALIZE_SOURCES="${AUTODREAM_NORMALIZE_SOURCES:+$AUTODREAM_NORMALIZE_SOURCES }$_src"
   done < <(printf '%s\n' "$AUTODREAM_SOURCE_MAP" | awk -F'\t' 'NF >= 2 && !seen[$2]++ { print $2 }')
-  export ADAPTERS_DIR AUTODREAM_SOURCE_MAP AUTODREAM_L1_MODELS AUTODREAM_NORMALIZE_SOURCES
+  export ADAPTERS_DIR AUTODREAM_SOURCE_MAP AUTODREAM_L1_MODELS AUTODREAM_L1_PROBE_URLS AUTODREAM_NORMALIZE_SOURCES
   # AUTODREAM_L1_ROUNDS is referenced by the dispatcher subshell to decide
   # whether this is the last retry round (gates the metadata-stub fallback).
   export AUTODREAM_L1_ROUNDS
@@ -2637,7 +2687,7 @@ EOF
   for round in $(seq 1 "$L1_ROUNDS"); do
     # Check BEFORE dispatching, including round 1: the overnight failure is a Mac that slept
     # through its trigger, so round 1 is the round most likely to run at a host with no route.
-    if ! wait_for_network; then
+    if ! wait_for_network "$(l1_probe_urls)"; then
       NET_DEFERRED=yes
       log "L1 round $round not dispatched: no route to the API. Deferring $TARGET_DATE for a later run."
       break
@@ -3372,7 +3422,7 @@ PY
     if [ "$attempt" -lt "$L2_ATTEMPTS" ]; then
       # Spending the remaining attempts against a host with no route produces nothing but a
       # later exit, so stop and record the deferral.
-      if ! wait_for_network; then
+      if ! wait_for_network "$(l2_probe_url)"; then
         NET_DEFERRED=yes
         log "L2 retry not attempted: no route to the API — deferring $TARGET_DATE for a later run"
         break
@@ -3386,7 +3436,7 @@ PY
   # Classify the LAST attempt too: the probe in the retry loop only runs between attempts, so a
   # route that dropped before the final attempt was never seen and the run would record
   # network_deferred_l2: no. Only probe when L2 failed; a delivered report needs no explanation.
-  if [ "${AUTODREAM_NETCHECK:-1}" != "0" ] && [ "$L2_DELIVERED" != "1" ] && ! net_up; then
+  if [ "${AUTODREAM_NETCHECK:-1}" != "0" ] && [ "$L2_DELIVERED" != "1" ] && ! net_up "$(l2_probe_url)"; then
     NET_DEFERRED=yes
     log "L2 produced no report and the API is unreachable; recording this as a network deferral"
   fi
