@@ -50,6 +50,10 @@ atomic() { # $1=dest, rest = command taking the temp path as its LAST argument
 case "$cmd" in
 
   enumerate) # $1=root $2=target-date $3=next-date -> NUL-delimited session paths
+    # $2 and $3 are an mtime window and nothing more. The runner passes a $3 far in the
+    # future when it places a session in a day by the timestamps inside the transcript
+    # (bin/session-window.sh), which turns this into a lower bound only and keeps the
+    # adapter contract free of any knowledge of that window.
     # stderr is kept: find exits 1 for an unreadable directory and the runner has to
     # tell a partial corpus from a failed root on that status.
     find "$1" -type f -name '*.jsonl' \

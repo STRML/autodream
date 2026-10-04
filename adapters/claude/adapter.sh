@@ -19,6 +19,10 @@ cmd="${1:-}"
 case "$cmd" in
 
   enumerate) # $1=root $2=target-date $3=next-date -> NUL-delimited session paths
+    # $2 and $3 are an mtime window and nothing more. The runner passes a $3 far in the
+    # future when it places a session in a day by the timestamps inside the transcript
+    # (bin/session-window.sh), which turns this into a lower bound only and keeps the
+    # adapter contract free of any knowledge of that window.
     # stderr is NOT discarded. find exits 1 for any unreadable directory in the
     # walk, and the runner has to decide between a partial corpus and a failed
     # root on that status alone. Swallowing the reason left it reporting bare
