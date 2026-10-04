@@ -4970,13 +4970,20 @@ test_stale_err_is_counted_on_a_night_with_no_session_too(){
 test_findings_outside_the_worklist_are_reported_and_left_in_place(){
   echo "# window: a findings JSON for a session this run no longer places in the day is counted and named, and not deleted"
   local root; root=$(setup_env)
+  # TWO sessions in the worklist: session_hash prints no trailing newline, and a list of hashes
+  # run together matches nothing, which made every findings JSON read as outside the worklist.
   mk_win_session "$root" inday "$STAMP" 2020-01-02T12:00:00Z 2020-01-02T12:10:00Z >/dev/null
+  mk_win_session "$root" inday2 "$STAMP" 2020-01-02T13:00:00Z 2020-01-02T13:10:00Z >/dev/null
   local fd; fd=$(fdir "$root"); mkdir -p "$fd"
-  # What an earlier mtime-only run left for a session that belongs to another day.
+  # What an earlier mtime-only run left for a session that belongs to another day, and a stale
+  # failure for a session that is gone.
   printf '{"session_path":"/elsewhere/old.jsonl","findings":[]}\n' > "$fd/0123456789ab.json"
+  printf 'worker produced no findings JSON for /gone/two.jsonl (incomplete run)\n' > "$fd/deadbeef0003.json.err"
   run_dream "$root"
-  assert_grep "$fd/run-stats.txt" 'l1_findings_outside_worklist: 1$' "the leftover findings JSON is counted"
-  assert_grep "$root/run.out" '0123456789ab' "and the log names it"
+  assert_grep "$fd/run-stats.txt" 'sessions_triaged: 2$' "both sessions are in the worklist"
+  assert_grep "$fd/run-stats.txt" 'l1_findings_outside_worklist: 1$' "only the leftover findings JSON is counted, not the two this run wrote"
+  assert_grep "$fd/run-stats.txt" 'l1_err_files_orphaned: 1$' "and only the stale .err"
+  assert_grep "$root/run.out" '0123456789ab' "the log names the leftover"
   assert_file "$fd/0123456789ab.json" "and it is left in place, not deleted"
   rm -rf "$root"
   root=$(setup_env); mk_session "$root" s1; fd=$(fdir "$root")

@@ -1578,8 +1578,14 @@ findings_json_count() {
 # this runner's call. A clean rebuild means removing the date's findings directory first.
 worklist_hashes() {
   [ -f "$SESSIONS_LIST" ] || return 0
-  local _s
-  while IFS= read -r _s; do [ -n "$_s" ] && session_hash "$_s"; done < "$SESSIONS_LIST"
+  # session_hash prints no trailing newline, so each hash is printed on its own line here:
+  # grep -x below matches whole lines, and two hashes run together never match anything.
+  local _s _h
+  while IFS= read -r _s; do
+    [ -n "$_s" ] || continue
+    _h=$(session_hash "$_s") || continue
+    printf '%s\n' "$_h"
+  done < "$SESSIONS_LIST"
 }
 scan_worklist_leftovers() {
   L1_ERR_ORPHANED=0; ORPHAN_ERR_NAMES=""
