@@ -10,6 +10,8 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
 # shellcheck source=/dev/null
+. "$HERE/lib-tmp.sh"; suite_tmp libproj
+# shellcheck source=/dev/null
 . "$REPO/bin/lib-project.sh"
 
 pass=0; fail=0
