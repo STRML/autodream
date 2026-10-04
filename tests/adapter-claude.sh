@@ -75,6 +75,26 @@ trap cleanup EXIT
 trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
 
+# Can this host read a process state at all? An empty read from `ps` means two
+# different things below: "the process is gone" (ps ran, found nothing) and "ps
+# cannot run" (a sandbox answered `Operation not permitted`). Folding the second
+# into the first made the SIGTERM assertion pass without testing anything. This
+# asks `ps` about the suite's own shell, which is certainly alive, so an empty
+# answer here can only mean ps is unusable.
+ps_usable() {
+  [ -n "$(ps -o state= -p $$ 2>/dev/null | tr -d ' ')" ]
+}
+
+echo "# claude adapter: the ps probe notices a ps that cannot run"
+psstub="$tmp/psstub"; mkdir -p "$psstub"
+printf '#!/bin/sh\necho "ps: Operation not permitted" >&2\nexit 1\n' > "$psstub/ps"
+chmod +x "$psstub/ps"
+if PATH="$psstub:$PATH" ps_usable; then
+  no "ps_usable reported a ps that fails to execute as usable"
+else
+  ok "ps_usable rejects a ps that fails to execute"
+fi
+
 # A real cwd to resolve against, created inside the sandbox so the test owns it.
 proj="$tmp/proj a"          # a space, because NUL transport is supposed to allow it
 mkdir -p "$proj"
@@ -196,14 +216,23 @@ if [ -p "$fifodir/src.jsonl" ]; then
   # already did, depending entirely on when bash got round to reaping. That is a
   # test that fails on a busy CI machine and passes locally. An empty state means
   # gone; Z means exited and not yet reaped. Both are termination.
-  died=0; waited=0
-  while [ "$waited" -lt 60 ]; do
-    st=$(ps -o state= -p "$slim_pid" 2>/dev/null | tr -d ' ')
-    case "$st" in ""|Z*) died=1; break ;; esac
-    sleep 0.05
-    waited=$((waited + 1))
-  done
-  if [ "$died" = "1" ]; then
+  # An unusable ps FAILS the assertion rather than skipping it: this is the check
+  # that stops a signal trap being re-added to the adapter, and a quiet skip would
+  # stop it doing that on exactly the hosts where ps is restricted.
+  died=0; waited=0; psok=0
+  if ps_usable; then
+    psok=1
+    while [ "$waited" -lt 60 ]; do
+      st=$(ps -o state= -p "$slim_pid" 2>/dev/null | tr -d ' ')
+      case "$st" in ""|Z*) died=1; break ;; esac
+      sleep 0.05
+      waited=$((waited + 1))
+    done
+  fi
+  if [ "$psok" = "0" ]; then
+    no "ps is unavailable, so the SIGTERM assertion cannot be evaluated"
+    kill -9 "$slim_pid" 2>/dev/null
+  elif [ "$died" = "1" ]; then
     ok "a signalled slim terminates instead of ignoring SIGTERM"
   else
     no "a signalled slim did not terminate within 3s"
