@@ -68,6 +68,8 @@ jobs:
         run: bash tests/install-review-agent.sh
       - name: install-dry-run
         run: bash tests/install-dry-run.sh
+      - name: install-dir
+        run: bash tests/install-dir.sh
       - name: install-path
         run: bash tests/install-path.sh
 

@@ -148,6 +148,7 @@ link "$REPO_DIR/bin/question-streaks.sh"     "$TARGET/question-streaks.sh"
 link "$REPO_DIR/bin/apply-pins.sh"           "$TARGET/apply-pins.sh"
 link "$REPO_DIR/bin/root-probe.sh"           "$TARGET/root-probe.sh"
 link "$REPO_DIR/bin/lib-project.sh"           "$TARGET/lib-project.sh"
+link "$REPO_DIR/bin/lib-install-dir.sh"       "$TARGET/lib-install-dir.sh"
 link "$REPO_DIR/bin/adapters.sh"              "$TARGET/adapters.sh"
 link "$REPO_DIR/bin/preflight.sh"             "$TARGET/preflight.sh"
 # The adapters TREE, not individual files: run.sh resolves adapters/<name>/adapter.sh
