@@ -22,9 +22,13 @@ type Ui = ReturnType<EngineInterface['ui']['resolve']>
 type Turn = { uuid: string; role: FocusTag['role']; text: string }
 
 const where = async ($: EngineInterface): Promise<string> => {
-  const [HOME, AUTODREAM_DIR] = await Promise.all([$.env.get('HOME'), $.env.get('AUTODREAM_DIR')])
+  const [HOME, AUTODREAM_DIR, AUTODREAM_TAGS_FILE] = await Promise.all([
+    $.env.get('HOME'),
+    $.env.get('AUTODREAM_DIR'),
+    $.env.get('AUTODREAM_TAGS_FILE'),
+  ])
 
-  return tagsFile({ HOME, AUTODREAM_DIR })
+  return tagsFile({ HOME, AUTODREAM_DIR, AUTODREAM_TAGS_FILE })
 }
 
 const reason = (cause: unknown): string => (cause instanceof Error ? cause.message : String(cause))
@@ -97,7 +101,7 @@ const press = async ($: EngineInterface, turn: Turn) => {
  * was marked.
  */
 const withFocus = async ($: EngineInterface, ui: Ui, turn: Turn, requestId: string, beneath: RenderElement) => {
-  if (turn.text.trim() === '') return beneath
+  if (typeof turn.text !== 'string' || turn.text.trim() === '') return beneath
 
   const [session, ids] = await Promise.all([$.session.id(), read($, tagged)])
   const isTagged = ids.includes(tagId(session, turn.uuid))
@@ -131,7 +135,7 @@ export const register: Register = on => {
   // Only what the person typed (here or from the phone): a task notification or a peer's message is not theirs to tag.
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
     const beneath = await next(e)
-    const { kind } = e.props.origin
+    const kind = e.props.origin?.kind
 
     if (kind !== 'composer' && kind !== 'bridge') return beneath
 

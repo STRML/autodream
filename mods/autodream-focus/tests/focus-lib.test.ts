@@ -84,3 +84,8 @@ test('the tags file is next to the rest of autodream, and AUTODREAM_DIR moves it
   expect(tagsFile({ HOME: '/Users/x', AUTODREAM_DIR: '/opt/ad' })).toBe('/opt/ad/tags.jsonl')
   expect(tagsFile({ HOME: '/Users/x', AUTODREAM_DIR: '' })).toBe('/Users/x/.claude/autodream/tags.jsonl')
 })
+
+test('AUTODREAM_TAGS_FILE moves the tags file, as it moves the one bin/vault-notes.sh reads', () => {
+  expect(tagsFile({ HOME: '/Users/x', AUTODREAM_DIR: '/opt/ad', AUTODREAM_TAGS_FILE: '/elsewhere/t.jsonl' })).toBe('/elsewhere/t.jsonl')
+  expect(tagsFile({ HOME: '/Users/x', AUTODREAM_TAGS_FILE: '' })).toBe('/Users/x/.claude/autodream/tags.jsonl')
+})

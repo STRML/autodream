@@ -217,10 +217,11 @@ tag_pending() {
   # is 23 or 25 hours; if it cannot be computed, everything made so far is due.
   cutoff=$(date -j -v+1d -f '%Y-%m-%d %H:%M:%S' "$1 00:00:00" +%s 2>/dev/null) || true
   [ -n "$cutoff" ] || cutoff=$(( $(date +%s) + 1 ))
-  jq -R -c --argjson cutoff "$cutoff" --arg day "$1" --rawfile ledger "$ledger" '
+  jq -n -R -c --argjson cutoff "$cutoff" --arg day "$1" --rawfile ledger "$ledger" '
     def clean: tostring | gsub("[\u001f\t\n]"; " ");
     ($ledger | split("\n") | map(split("\t")) | map(select(length >= 3 and .[1] != $day) | .[0] + "\t" + .[2])
       | map({key: ., value: true}) | from_entries) as $seen
+    | inputs
     | (fromjson? // empty)
     | select(type == "object" and (.id | type) == "string" and (.text | type) == "string")
     | ((.id | clean) + "\t" + ((.taggedAt // "") | clean)) as $key

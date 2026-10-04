@@ -59,6 +59,7 @@ is consumed.
 | Variable | Default |
 | --- | --- |
 | `AUTODREAM_DIR` | `~/.claude/autodream` (where `tags.jsonl` is) |
+| `AUTODREAM_TAGS_FILE` | `$AUTODREAM_DIR/tags.jsonl` (moves the file itself, as it does for `bin/vault-notes.sh`) |
 
 A value set only in `$AUTODREAM_DIR/config` is invisible to the mod, because the mod cannot source a shell file. Export it
 in the environment Claude Code starts from if you moved the install.

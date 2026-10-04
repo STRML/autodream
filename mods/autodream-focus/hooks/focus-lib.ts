@@ -6,11 +6,14 @@ export const TEXT_CAP = 2_000
 const ROLES: readonly string[] = ['user', 'assistant']
 
 /**
- * Where the tags are, resolved the way bin/vault-notes.sh resolves them: an exported AUTODREAM_DIR wins and an empty
- * one counts as unset. A value set only in `$AUTODREAM_DIR/config` is invisible here; export it to move the mod too.
+ * Where the tags are, resolved the way bin/vault-notes.sh resolves them: an exported AUTODREAM_TAGS_FILE wins, else AUTODREAM_DIR (an empty
+ * one counts as unset) plus tags.jsonl. A value set only in `$AUTODREAM_DIR/config` is invisible here; export it to move the mod too.
  */
-export const tagsFile = (env: { HOME?: string | undefined; AUTODREAM_DIR?: string | undefined }): string =>
-  `${env.AUTODREAM_DIR || `${env.HOME ?? ''}/.claude/autodream`}/tags.jsonl`
+export const tagsFile = (env: {
+  HOME?: string | undefined
+  AUTODREAM_DIR?: string | undefined
+  AUTODREAM_TAGS_FILE?: string | undefined
+}): string => env.AUTODREAM_TAGS_FILE || `${env.AUTODREAM_DIR || `${env.HOME ?? ''}/.claude/autodream`}/tags.jsonl`
 
 /** One turn, across sessions: the id Claude Code gives the row, under the session that holds it. */
 export const tagId = (session: string, uuid: string): string => `${session}:${uuid}`
