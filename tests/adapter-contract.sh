@@ -206,19 +206,12 @@ run_contract(){ # $1=adapter name
     ok "[$name] an unreadable session is distinguishable from a real answer"
   fi
 
-  # --- memory-root: empty is legal ONLY for a non-writing adapter ---
-  local writes mr
-  writes=$(jq -r '.writes_memory' "$REPO/adapters/$name/manifest.json")
-  mr=$("$A" memory-root "$S" 2>/dev/null || true)
-  if [ "$writes" = "true" ]; then
-    case "$mr" in
-      /*) ok "[$name] writes_memory:true, so memory-root is absolute" ;;
-      *)  no "[$name] writes_memory:true, so memory-root is absolute (got: [$mr])" ;;
-    esac
-    assert_eq "$mr" "$(realpath "$mr" 2>/dev/null)" "[$name] memory-root is canonical"
-  else
-    assert_eq "$mr" "" "[$name] writes_memory:false, so memory-root is empty"
-  fi
+  # --- memory-root and writes_memory are retired (#74): one shared Mnemopi store has no
+  #     per-adapter root, so nothing may offer or declare them ---
+  if "$A" memory-root "$S" >/dev/null 2>&1; then
+    no "[$name] memory-root is retired and exits nonzero"
+  else ok "[$name] memory-root is retired and exits nonzero"; fi
+  assert_eq "$(jq -r 'has("writes_memory")' "$REPO/adapters/$name/manifest.json")" "false" "[$name] manifest has no writes_memory field"
 
   # --- enumerate: the only subcommand production actually calls, and the one
   #     with the subtlest contract (NUL delimiting, and a status the caller now

@@ -135,7 +135,7 @@ transport — see the note on that split below.
 | `is-self <session>` | exit 0 if this is one of autodream's own worker transcripts | `prune-self-sessions.sh` 19% |
 | `skills-inventory` | prints the active skill list, one per line | `omp-autodream/bin/skills-inventory.sh` |
 
-`apply-pin` and `gc` were dropped from this table on 2026-09-15, and `memory-root` is retired with them: one shared Mnemopi store has no per-adapter root to resolve. `bin/apply-pins.sh` applies pins for every adapter (see Pin protocol).
+`apply-pin` and `gc` were dropped from this table on 2026-09-15, and `memory-root` is retired with them: one shared Mnemopi store has no per-adapter root to resolve. The subcommand and the manifest's `writes_memory` field were removed from every adapter on 2026-10-04 (https://github.com/STRML/autodream/issues/74). `bin/apply-pins.sh` applies pins for every adapter (see Pin protocol).
 
 **Every subcommand has a named skip path and atomic output.** A subcommand that writes a file writes to `<out>.tmp` in the destination directory and renames on success; a nonzero exit leaves no `<out>` and removes any partial `<out>.tmp`. A nonzero exit from `project`, `stats`, or `slim` skips that session with its own counter, exactly as `normalize` does — the earlier draft specified failure handling only for `normalize`, which left three subcommands with undefined behavior on a partial write.
 

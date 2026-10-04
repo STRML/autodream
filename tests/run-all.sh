@@ -3394,7 +3394,7 @@ test_failing_enumerator_aborts_the_run(){
   mk_session "$root" a
   # A private adapters tree holding one adapter that always fails to enumerate.
   local ad="$root/adapters"; mkdir -p "$ad/claude"
-  printf '{"name":"claude","engine_bin":"true","writes_memory":true}\n' > "$ad/claude/manifest.json"
+  printf '{"name":"claude","engine_bin":"true"}\n' > "$ad/claude/manifest.json"
   printf '#!/bin/bash\ncase "${1:-}" in enumerate) exit 3 ;; *) exit 2 ;; esac\n' > "$ad/claude/adapter.sh"
   chmod +x "$ad/claude/adapter.sh"
   ADAPTERS_ROOT="$ad" AUTODREAM_CHANGELOG=0 CLAUDE_BIN="$MOCK" \
@@ -3490,13 +3490,12 @@ test_partial_enumeration_keeps_what_it_read(){
   mk_session "$root" a
   local sess="$root/projects/proj-a/a.jsonl"
   local ad="$root/adapters"; mkdir -p "$ad/claude"
-  printf '{"name":"claude","engine_bin":"true","writes_memory":true}\n' > "$ad/claude/manifest.json"
+  printf '{"name":"claude","engine_bin":"true"}\n' > "$ad/claude/manifest.json"
   # Emits one real NUL-delimited path, then exits nonzero — exactly find's shape.
   { printf '#!/bin/bash\n'
     printf 'case "${1:-}" in\n'
     printf '  enumerate) printf "%%s\\0" "%s"; exit 1 ;;\n' "$sess"
     printf '  project) printf "/tmp/proj-a" ;;\n'
-    printf '  memory-root) cd "$(dirname "$2")/../.." 2>/dev/null && pwd -P ;;\n'
     printf '  normalize|slim) cp "$2" "$3" ;;\n'
     printf '  stats) "%s/bin/session-stats.sh" "$2" "$3" ;;\n' "$REPO"
     printf '  is-self) exit 1 ;;\n'
@@ -3630,7 +3629,7 @@ test_no_usable_adapter_leaves_a_trace(){
   local root; root=$(setup_env)
   mk_session "$root" a
   local ad="$root/adapters"; mkdir -p "$ad/claude"
-  printf '{"name":"claude","engine_bin":"true","writes_memory":true}\n' > "$ad/claude/manifest.json"
+  printf '{"name":"claude","engine_bin":"true"}\n' > "$ad/claude/manifest.json"
   cp "$REPO/adapters/claude/adapter.sh" "$ad/claude/adapter.sh"
   chmod -x "$ad/claude/adapter.sh"          # the whole trigger
   # A notify.sh that records how it was called. fatal_exit gates on -x, so without
@@ -3693,10 +3692,10 @@ test_enabled_adapters_resolves_once(){
   mk_session "$root" a
   local ad="$root/adapters"
   mkdir -p "$ad/claude" "$ad/other"
-  printf '{"name":"claude","engine_bin":"true","writes_memory":true}\n' > "$ad/claude/manifest.json"
+  printf '{"name":"claude","engine_bin":"true"}\n' > "$ad/claude/manifest.json"
   cp "$REPO/adapters/claude/adapter.sh" "$ad/claude/adapter.sh"
   chmod +x "$ad/claude/adapter.sh"
-  printf '{"name":"other","engine_bin":"true","writes_memory":false}\n' > "$ad/other/manifest.json"
+  printf '{"name":"other","engine_bin":"true"}\n' > "$ad/other/manifest.json"
   printf '#!/bin/bash\nexit 2\n' > "$ad/other/adapter.sh"; chmod +x "$ad/other/adapter.sh"
   ADAPTERS_ROOT="$ad" AUTODREAM_CHANGELOG=0 CLAUDE_BIN="$MOCK" \
     AUTODREAM_CONFIG="$root/autodream/config" AUTODREAM_CONSUME_DATE="$DATE" \

@@ -8,8 +8,7 @@
 # quietly grew a Claude-specific assumption.
 #
 # Excluded from the default adapter set by its leading underscore, so a nightly
-# run never sees it. It declares writes_memory:false, which also makes it the
-# fixture for the no-store routing path.
+# run never sees it.
 set -u
 
 cmd="${1:-}"
@@ -61,13 +60,6 @@ case "$cmd" in
     cwd=$(jq -re '.cwd // empty' "$1" 2>/dev/null) || exit 1
     [ -n "$cwd" ] || exit 1
     realpath "$cwd" 2>/dev/null || exit 1
-    ;;
-
-  memory-root)
-    # Empty output is legal here and ONLY here, because this adapter declares
-    # writes_memory:false. For a memory-writing adapter an empty root must skip
-    # the session instead, or it would authorise a write against no target.
-    exit 0
     ;;
 
   stats) # $1=in $2=out

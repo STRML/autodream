@@ -35,7 +35,7 @@ TMPROOTS=""
 sandbox(){ local d; d=$(mktemp -d "${TMPDIR:-/tmp}/adapters.XXXXXX"); TMPROOTS="$TMPROOTS $d"; printf '%s' "$d"; }
 mk_adapter(){ # $1=root $2=dirname $3=manifest name field
   mkdir -p "$1/$2"
-  printf '{"name":"%s","engine_bin":"bash","writes_memory":true}\n' "$3" > "$1/$2/manifest.json"
+  printf '{"name":"%s","engine_bin":"bash"}\n' "$3" > "$1/$2/manifest.json"
   printf '#!/bin/bash\nprintf "ran %%s" "$1"\n' > "$1/$2/adapter.sh"
   chmod +x "$1/$2/adapter.sh"
 }
