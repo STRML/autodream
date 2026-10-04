@@ -58,11 +58,15 @@ Each row is a test in `tests/apply-pins.sh` (A) or `tests/run-all.sh` (R).
 | A22 `shared-memory context` exits nonzero but prints a bank | pin fails before any store | the `jq` stage's status hides the failure and the pin goes to that bank | `pins_failed: 1`, no call |
 | A24 `pins.jsonl` exists but cannot be read (no read permission, or a directory) | applies nothing, leaves the file | the failed open reads as an empty file and the run reports no pins proposed | `pins_unreadable: 1`, no call |
 | A15 store succeeds, ledger append fails | no applied count | counted as applied, silently stored again next run | `pins_unledgered: 1`, memory id in the run log |
-| A16 result file cannot be written, an old one exists | old counters removed first | the run log repeats an earlier run's counts | no stale `pins-result.txt`, exit 0 |
+| A16 result file cannot be written, an old one exists | old counters removed first | the run log repeats an earlier run's counts | no stale `pins-result.txt`, exit 3, so the run log says the counters are unavailable |
 | A17 `shasum` exists but fails at runtime | pin fails before any store | empty hash ledgered, every later pin read as a duplicate | `pins_failed` for each, no call, no ledger row |
 | A18 `shared-memory context` names no bank | pin fails before any store | memory lands in the global `default` bank instead of the project's | `pins_failed: 1`, no call |
 | A19 store reports `stored` with an empty `memory_id` | no ledger row | an id-less row is ledgered as applied and blocks every retry | `pins_failed: 1` |
 | A20 `pins-applied.tsv` exists but is unreadable | pin fails before any store | an unreadable ledger reads as "not stored" and the pin is stored again | `pins_failed: 1`, no call |
+| A25 a pin tags a `harness` (`claude`, `omp`, `codex`) | stored as `metadata.harness`; an unknown, null or array value is invalid | an array passes a subsequence `index` check and is stored as the tag | `pins_invalid` counts the bad tags |
+| A26 `shared-memory` without the harness gate and a tagged pin | holds the tagged pin, stores the untagged ones | the tag is stored where nothing filters on it | `pins_unsupported_harness: 1`; no ledger row, so a later run applies it |
+| A27 a rebuild resolves the project to another bank | stores the pin there, since the ledger hash includes the bank | skipped as a duplicate of a pin stored in a different bank | `pins_applied: 1` |
+| A28 `pins-result.txt` cannot be cleared | stores nothing | the run log reads an earlier run's counters | exit 3 |
 | R1 complete report plus pins | pins applied after the report | pins before report | ledger present, log line |
 | R2 truncated report plus pins | not applied | pins from a dead L2 | no call, no ledger |
 | R3 forced rebuild with an old `pins.jsonl`, new L2 writes none | old file moved aside, nothing applied | old pins applied again | `pins.jsonl.stale-*` exists, no call |
@@ -84,3 +88,4 @@ Each row is a test in `tests/apply-pins.sh` (A) or `tests/run-all.sh` (R).
 | R16 L1 does the same tampering | same | same | same |
 | R17 the report describes a pin the runner later refuses or fails | the prompt says "Pin proposed", never stored | the report claims memory that does not exist | prompt test |
 | R8 L1 writes a `session_path` naming an untriaged project's session | the authorization list comes from `sessions.txt`, not findings JSON | a model-written path authorizes memory for a project the run never saw | no call, that project absent from `pin-projects.tsv` |
+| R18 a worker empties `pins-applied.tsv` before a forced rebuild applies its pins | the runner restores the ledger it held before any model ran | the rebuild stores every pin again | no second call, the ledger row is back |

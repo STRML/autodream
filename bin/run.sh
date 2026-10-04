@@ -1563,6 +1563,23 @@ write_pin_projects() {
     && mv "$dir/pin-projects.tsv.tmp" "$dir/pin-projects.tsv"
 }
 
+# $1=findings dir -> puts pins-applied.tsv back to what it held before any model ran (or removes
+# it when it did not exist). Fails when it cannot.
+restore_pins_ledger() {
+  local f="$1/pins-applied.tsv" cur
+  [ "${PINS_LEDGER_OK:-1}" = "1" ] || return 1
+  if [ "${PINS_LEDGER_PRESENT:-0}" != "1" ]; then
+    [ -e "$f" ] || return 0
+    log "pins-applied.tsv appeared while the models ran; removing it"
+    rm -f "$f"
+    return
+  fi
+  cur=$(cat -- "$f" 2>/dev/null && printf x) || cur=""
+  [ "$cur" != "$PINS_LEDGER_SNAPSHOT_X" ] || return 0
+  log "pins-applied.tsv changed while the models ran; restoring it"
+  printf '%s' "${PINS_LEDGER_SNAPSHOT_X%x}" > "$f.tmp" && mv -f "$f.tmp" "$f"
+}
+
 net_up() { # net_up [-l secs] URL: exit 0 if that host answers (any HTTP reply beats no reply)
   local code rc hdr limit maxt up=1
   local -a bound=()
@@ -2671,6 +2688,23 @@ EOF
     log "WARNING: could not build the pin authorization list; this run will not store memory pins"
   fi
 
+  # The ledger of stored pins gets the same treatment: a worker with the Write tool could
+  # empty it, and the apply step would then store every pin again. Its content is held here
+  # and put back before the pins are applied. A ledger that exists but cannot be read
+  # leaves nothing to restore from, so this run stores no pins.
+  PINS_LEDGER_PRESENT=0
+  PINS_LEDGER_SNAPSHOT_X=""
+  PINS_LEDGER_OK=1
+  if [ -e "$FINDINGS_DIR/pins-applied.tsv" ]; then
+    # The trailing x keeps $(...) from stripping the ledger's final newline.
+    if PINS_LEDGER_SNAPSHOT_X=$(cat -- "$FINDINGS_DIR/pins-applied.tsv" 2>/dev/null && printf x); then
+      PINS_LEDGER_PRESENT=1
+    else
+      log "WARNING: could not read pins-applied.tsv; this run will not store memory pins"
+      PINS_LEDGER_OK=0
+    fi
+  fi
+
   # ---- Layer 1: haiku triage, parallel, retried across sleep/network gaps ----
   # Lean-query env (claude-cells internal/claude/query.go pattern): keep subscription
   # OAuth auth but strip per-call bloat — no CLAUDE.md auto-load, no telemetry/error
@@ -3654,10 +3688,14 @@ PY
       log "skipping memory pins: no complete report from this run stands behind $PINS"
     elif [ -s "$PINS" ] && ! write_pin_projects "$FINDINGS_DIR"; then
       log "skipping memory pins: could not write pin-projects.tsv, so no project is authorized"
+    elif [ -s "$PINS" ] && ! restore_pins_ledger "$FINDINGS_DIR"; then
+      log "skipping memory pins: could not restore pins-applied.tsv, so duplicates cannot be ruled out"
     elif [ -s "$PINS" ]; then
-      bash "$APPLY_PINS" "$FINDINGS_DIR" "$TARGET_DATE" >> "$RUN_LOG" 2>&1 \
-        || log "apply-pins exited non-zero (pins stay in $PINS)"
-      log "memory pins: $(tr '\n' ' ' 2>/dev/null < "$FINDINGS_DIR/pins-result.txt" || echo "counters unavailable")"
+      if bash "$APPLY_PINS" "$FINDINGS_DIR" "$TARGET_DATE" >> "$RUN_LOG" 2>&1; then
+        log "memory pins: $(tr '\n' ' ' 2>/dev/null < "$FINDINGS_DIR/pins-result.txt" || echo "counters unavailable")"
+      else
+        log "apply-pins exited non-zero (pins stay in $PINS); memory pin counters unavailable"
+      fi
     fi
 
     # ---- Report citation integrity (appended to run-stats.txt) ----

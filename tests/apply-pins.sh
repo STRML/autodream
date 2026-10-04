@@ -160,7 +160,7 @@ setup; pin proj-a "Title" "Body" > "$F/pins.jsonl"
 printf 'pins_applied: 99\n' > "$F/pins-result.txt"
 mkdir "$F/pins-result.txt.tmp"
 run_ap
-assert_eq "$RC" "0" "exits 0"
+assert_eq "$RC" "3" "exits 3 so the caller reports counters unavailable"
 if grep -q 'pins_applied: 99' "$F/pins-result.txt" 2>/dev/null; then no "stale counters removed"; else ok "stale counters removed"; fi
 
 echo "# A17: a shasum that fails at runtime never writes an empty hash"
@@ -262,6 +262,28 @@ assert_eq "$(ledger_rows)" "1" "held pin is not ledgered"
 run_ap
 assert_eq "$(stat_of pins_applied)" "1" "rerun with the gate present applies the held pin"
 assert_eq "$(stat_of pins_duplicate)" "1" "and recognises the untagged one as stored"
+
+echo "# A27: the ledger is keyed on the bank too: the same pin resolving to another bank is stored there (#70)"
+setup; pin proj-a "Title" "Body" > "$F/pins.jsonl"
+run_ap
+assert_eq "$(stat_of pins_applied)" "1" "first run stores the pin"
+mkdir -p "$T/work-a2"; printf 'proj-a\t%s\n' "$T/work-a2" > "$F/pin-projects.tsv"
+run_ap
+assert_eq "$(stat_of pins_applied)" "1" "a rebuild that resolves the project to another bank stores the pin there"
+assert_eq "$(jq -r .payload.bank "$T/calls.jsonl" 2>/dev/null | paste -sd, -)" "bank-work-a,bank-work-a2" "one store per bank"
+printf 'proj-a\t%s\n' "$T/work-a2" > "$F/pin-projects.tsv"
+run_ap
+assert_eq "$(stat_of pins_duplicate)" "1" "the same pin in the same bank is still a duplicate"
+
+echo "# A28: a result file that cannot be cleared stores nothing and exits 3 (#70)"
+setup; pin proj-a "Title" "Body" > "$F/pins.jsonl"
+run_ap
+chmod 555 "$F"
+run_ap
+rc28=$RC
+chmod 755 "$F"
+assert_eq "$rc28" "3" "exits 3 so the caller does not read the old counters"
+assert_eq "$(calls)" "1" "no pin was stored on the failed run"
 
 echo "# A14: no arguments"
 setup
