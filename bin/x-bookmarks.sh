@@ -225,7 +225,7 @@ detect_query_id() {
   local PAGE_URL_CAP=8
   local cands="$TMP/cands"; : > "$cands"
   grep -oE 'https://abs\.twimg\.com/responsive-web/client-web/[A-Za-z0-9._~-]+\.js' "$html" 2>/dev/null \
-    | grep -E 'main\.|bundle\.Bookmarks' | head -n "$PAGE_URL_CAP" >> "$cands"
+    | grep -E 'main\.|bundle\.Bookmarks' | awk '!seen[$0]++' | head -n "$PAGE_URL_CAP" >> "$cands"
 
   local chunk_id name hash
   chunk_id=$(grep -oE '[0-9]+:"(shared~bundle\.BookmarkFolders~bundle\.Bookmarks|bundle\.Bookmarks)"' "$html" 2>/dev/null | head -1 | cut -d: -f1)
