@@ -1420,6 +1420,14 @@ report_finishes_date() {
 # failed, cli_missing, unreadable or unsupported_harness pins. The ledger makes the rerun
 # safe: a pin already stored is a duplicate. A pin that cannot be stored is retried each
 # night until its date leaves the window.
+# $1=date label -> 0 when that date's run lock exists and its pid is alive. Unlike
+# acquire_run_lock it never reclaims a stale lock; it only reads.
+lock_held_by_live_run() {
+  local lock="$AUTODREAM_DIR/locks/run-$1.lock" pid
+  pid=$(cat "$lock/pid" 2>/dev/null) || return 1
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
 sweep_stranded_pins() {
   local window="${AUTODREAM_UNASSEMBLED_WINDOW:-7}" root="$AUTODREAM_DIR/findings"
   local d label report res n
@@ -1433,8 +1441,17 @@ sweep_stranded_pins() {
     report="$DREAMS_DIR/$label.md"
     [ -s "$report" ] && grep -q 'autodream:open-questions=' "$report" 2>/dev/null || continue
     [ ! "$d/pins.jsonl" -nt "$report" ] || continue
+    # Another date's own run may be in its pin step right now (autodream-now.sh runs under a
+    # different launchd label). Two apply-pins on one date both read the ledger before either
+    # appends, and store a pin twice, so a date whose lock is held by a live pid is left alone.
+    if [ "$label" != "$TARGET_DATE" ] && lock_held_by_live_run "$label"; then
+      log "pin sweep: $label has a run in flight; leaving its pins to that run"
+      continue
+    fi
     res="$d/pins-result.txt"
-    if [ -e "$res" ]; then
+    # A result file older than the pins describes an earlier run of the date (a forced rebuild
+    # replaced the pins and died before applying them), so it settles nothing.
+    if [ -e "$res" ] && [ ! "$d/pins.jsonl" -nt "$res" ]; then
       n=$(awk -F': ' '/^pins_(failed|cli_missing|unreadable|unsupported_harness): / { t += $2 } END { print t + 0 }' "$res" 2>/dev/null)
       [ "${n:-0}" -gt 0 ] || continue
     fi

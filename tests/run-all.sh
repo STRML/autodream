@@ -4907,6 +4907,22 @@ test_pins_sweep_leaves_what_it_must(){
   rm -rf "$root"
 }
 
+test_pins_sweep_respects_a_live_run_and_a_stale_result(){
+  echo "# pins: the sweep leaves a date a live run owns, and applies pins newer than their result file"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local clean=$'pins_total: 1\npins_applied: 1\npins_failed: 0\npins_cli_missing: 0\npins_unreadable: 0'
+  mk_stranded_pins "$root" 2019-12-30 ""
+  mkdir -p "$root/autodream/locks/run-2019-12-30.lock"; printf '%s\n' "$$" > "$root/autodream/locks/run-2019-12-30.lock/pid"
+  # A forced rebuild replaced these pins after the settled result was written, then died.
+  mk_stranded_pins "$root" 2019-12-31 "$clean"
+  sleep 1; touch "$root/autodream/findings/2019-12-31/pins.jsonl"; sleep 1; touch "$root/dreams/2019-12-31.md"
+  pins_run "$root"
+  assert_eq "$(sm_calls "$root")" "1" "one pin stored: the rebuilt date's, not the locked date's"
+  assert_eq "$(jq -r .payload.metadata.project "$root/sm-calls.jsonl" 2>/dev/null)" "proj-2019-12-31" "it is the date with the stale result"
+  assert_grep "$root/run.out" '2019-12-30 has a run in flight' "the locked date is named"
+  rm -rf "$root"
+}
+
 test_pins_bucket_named_subagents_is_a_project(){
   echo "# pins: a session directly inside a bucket named 'subagents' belongs to that bucket"
   local root; root=$(setup_env); mkdir -p "$root/work"
@@ -5025,6 +5041,7 @@ test_pins_applied_before_notify
 test_pins_sweep_applies_pins_a_killed_run_never_reached
 test_pins_sweep_retries_failed_pins_on_an_earlier_date
 test_pins_sweep_leaves_what_it_must
+test_pins_sweep_respects_a_live_run_and_a_stale_result
 test_streak_update_runs_before_steps_that_can_hang
 test_pins_ledger_wiped_by_a_worker_stores_nothing_twice
 test_pins_bucket_named_subagents_is_a_project
