@@ -475,48 +475,17 @@ It finds `review.sh`, the reports and cmux through the variables `review.sh` rea
 
 Its tests run under Claude Code, not in `tests/run-all.sh` and not in CI (`claude plugin validate mods/autodream-band`, `claude plugin test mods/autodream-band`; `tsc -p` needs the types Claude Code writes into the git-ignored `.claude-plugin/types/` when it loads the mod). `$.env.get` takes a literal variable name, so the variables a mod reads can be listed: a loop over names fails validation.
 
-## The sibling repo, and the fix that lands in only one of them
+## One repo, no sibling to drift from
 
-This repo has a twin: **omp-autodream**, the OMP port. Both are checked out on this host
-and **both installs run nightly** — `~/.claude/autodream` off this repo,
-`~/.omp/agent/autodream` off that one. Most of the code has genuinely diverged; measured
-2026-09-15 with comments stripped, `run.sh` differs by 1009 code lines, `review.sh` by 93,
-`session-stats.sh` by 70. Those are a port, not a copy, and they should differ.
-
-Five helpers are byte-identical by intent, and they are listed in
-`shared-with-sibling.txt`:
-
-```
-bin/cookie-cadence.sh   bin/make-notifier.sh   bin/overlap-stats.sh   bin/x-bookmarks.sh
-bin/question-streaks.sh
-```
-
-A fix to any of those is half a fix until it lands in both. That is not hypothetical. On
-2026-09-11 the X bookmarks queryId walk was fixed in omp-autodream after X moved to
-16-character webpack chunk hashes; the identical file here was never touched. This
-install kept failing every night, its reports said `x_queryid_source: failed` ten nights
-running and raised it as an open question six times, and it took the user noticing that
-the other repo's reports had gone quiet. **Both repos' test suites passed the entire
-time**, because each was internally consistent — which is precisely why no in-repo test
-could ever have caught it.
-
-`bin/check-shared-drift.sh` now compares those files against the sibling checkout and
-`tests/run-all.sh` runs it last. It strips FULL-LINE comments before comparing, so each repo can
-date its own incident notes in a comment block. An inline trailing comment is not
-stripped and does count as drift — `sed` cannot tell a `#` in a comment from one in a
-string or a regex, and for files meant to be identical "port the comment too" is the
-right answer anyway. It finds the sibling by the name of the main checkout, not the
-current directory, so a git worktree such as `cc-autodream-port71` still resolves
-`../omp-autodream` (a name-based guess exited 2 and failed the whole suite in every
-worktree). A shared file it cannot read counts as drift, not a match. With no sibling on
-disk, or a checkout name it does not recognise, it prints SKIPPED and
-exits 0 **loudly**, naming the path it looked for — the same rule as `overlap_measured`
-and `stats_sidecars_unparseable`: a degraded measurement says so rather than reading as a
-pass. It is verified by re-introducing the real regression, not by a fixture.
-
-The habit that generalizes: **a review finding is a class, not a site.** Before fixing
-anything under `bin/`, check whether the sibling ships the same file. One `grep` on
-2026-09-11 would have saved four failing nights here.
+This repo used to have a twin, **omp-autodream**, the OMP port, and five helpers were kept
+byte-identical with it by a drift check (`bin/check-shared-drift.sh`, `shared-with-sibling.txt`).
+The reason was real: on 2026-09-11 the X bookmarks queryId walk was fixed in omp-autodream after
+X moved to 16-character webpack chunk hashes, the identical file here was never touched, and this
+install kept failing every night for ten nights while both repos' suites passed, each internally
+consistent. omp-autodream is archived and its code lives here (see "Moving from omp-autodream" in
+the README), so there is one copy of each helper and nothing to compare against. The check and its
+manifest were removed in issue #106. The habit that outlives them: **a review finding is a class,
+not a site.** Before fixing a pattern in one script, grep for it in the others.
 
 ## Open questions that never get answered
 
@@ -594,7 +563,6 @@ after the suite was green. Four are why the file reads as it does now:
   one level up: every streak silently frozen, no escalation ever again, indistinguishable
   from a quiet week. A mismatch now posts a banner saying the escalation is down.
 
-It is in `shared-with-sibling.txt`, so the drift check keeps both repos' copies identical.
 Replayed against the real 09-10..14 reports it escalates on **09-12** — two nights before
 the user actually caught the bookmarks failure.
 
