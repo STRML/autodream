@@ -339,6 +339,49 @@ test_state_write_failure_keeps_earlier_unread(){
   done
 }
 
+# A curl shim that serves the bookmarks page, logs every URL it is asked for, and returns
+# a Bookmarks chunk only for MOCK_CHUNK_URL. Every other URL is a miss (a 404 body).
+make_walk_shim(){ # $1=bindir
+  mkdir -p "$1"
+  cat > "$1/curl" <<'SH'
+#!/bin/bash
+out=""; prev=""; url=""
+for a in "$@"; do
+  [ "$prev" = "-o" ] && out="$a"
+  case "$a" in https://*) url="$a" ;; esac
+  prev="$a"
+done
+printf '%s\n' "$url" >> "$MOCK_LOG"
+case "$url" in
+  https://x.com/i/bookmarks) cat "$MOCK_HTML" > "$out"; printf '200' ;;
+  "$MOCK_CHUNK_URL") printf 'a:1,queryId:"WALKEDQID",operationName:"Bookmarks",b:2' > "$out"; printf '200' ;;
+  *) printf 'not found' > "$out"; printf '404' ;;
+esac
+exit 0
+SH
+  chmod +x "$1/curl"
+}
+
+test_walk_reaches_every_suffix_variant(){
+  echo "# regression: a page full of main.*.js URLs does not starve the suffix variants (#107)"
+  local root; root=$(setup)
+  rm -f "$root/state/query-id"
+  make_walk_shim "$root/bin"
+  local hash=0123456789abcdef i
+  {
+    for i in $(seq 1 30); do printf '"https://abs.twimg.com/responsive-web/client-web/main.page%s.js"\n' "$i"; done
+    printf '{7:"bundle.Bookmarks"}{7:"%s"}\n' "$hash"
+  } > "$root/page.html"
+  # The last variant the walk enumerates: with the old global cap of 24 requests it sat
+  # behind 30 page URLs and was never requested.
+  MOCK_HTML="$root/page.html" MOCK_LOG="$root/requests.log" \
+  MOCK_CHUNK_URL="https://abs.twimg.com/responsive-web/client-web/bundle.Bookmarks.${hash}9.js" \
+    run_bm "$root" collect "$root/findings"
+  assert_eq "$(cat "$root/state/query-id" 2>/dev/null)" "WALKEDQID" "the queryId behind the last suffix variant is found"
+  assert_eq "$(cat "$root/findings/x-bookmarks-queryid.txt")" "fresh" "and recorded as a fresh scrape"
+  rm -rf "$root"
+}
+
 echo "x-bookmarks.sh tests"
 test_not_configured
 test_auth_failure
@@ -358,6 +401,7 @@ test_no_jq_still_writes_the_file
 test_state_write_failure_is_not_no_unread
 test_state_write_failure_after_failed_fetch
 test_state_write_failure_keeps_earlier_unread
+test_walk_reaches_every_suffix_variant
 
 echo
 echo "----------------------------------------"

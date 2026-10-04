@@ -219,9 +219,13 @@ detect_query_id() {
   # Candidate bundles, cheapest first: any client-web JS URL printed in the HTML, then
   # the Bookmarks chunk reconstructed from the webpack runtime's id->name and id->hash
   # maps (the chunk's own filename is never in the HTML; only the runtime knows it).
+  # The page's own URLs are capped on their own, so a page that lists many of them cannot
+  # push the reconstructed suffix variants out of the walk (#107). The total is bounded by
+  # construction: this cap plus the 17 suffix candidates below.
+  local PAGE_URL_CAP=8
   local cands="$TMP/cands"; : > "$cands"
   grep -oE 'https://abs\.twimg\.com/responsive-web/client-web/[A-Za-z0-9._~-]+\.js' "$html" 2>/dev/null \
-    | grep -E 'main\.|bundle\.Bookmarks' >> "$cands"
+    | grep -E 'main\.|bundle\.Bookmarks' | awk '!seen[$0]++' | head -n "$PAGE_URL_CAP" >> "$cands"
 
   local chunk_id name hash
   chunk_id=$(grep -oE '[0-9]+:"(shared~bundle\.BookmarkFolders~bundle\.Bookmarks|bundle\.Bookmarks)"' "$html" 2>/dev/null | head -1 | cut -d: -f1)
@@ -255,11 +259,9 @@ detect_query_id() {
   # Order-preserving dedupe, NOT `sort -u`. The suffix candidates above are deliberately
   # ordered cheapest-first, and sorting threw that away — the digit variants would sort
   # ahead of `a`, so the one that actually resolves came last and the cap cut it off first.
-  local url qid n=0
+  local url qid
   while IFS= read -r url; do
     [ -n "$url" ] || continue
-    # Bounded, but wide enough to walk the whole suffix enumeration plus main/vendor.
-    n=$(( n + 1 )); [ "$n" -gt 24 ] && break
     curl_x -H 'referer: https://x.com/' -o "$TMP/chunk.js" "$url" >/dev/null 2>&1 || continue
     qid=$(extract_qid "$TMP/chunk.js")
     if [ -n "$qid" ]; then printf '%s' "$qid"; return 0; fi
