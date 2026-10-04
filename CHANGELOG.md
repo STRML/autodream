@@ -2,6 +2,11 @@
 
 All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
+## 2026-10-03
+
+### Fixed
+- **L1 no longer files `missed_skill` for a skill whose own method is manual work (#51).** A session that invoked a skill and then ran the commands the skill prescribes (for example a skill that says to drive a CLI through Bash) was reported as abandoning the skill. `prompts/SESSION_TRIAGE.md` now tells the worker to compare the post-invocation actions with the skill's instructions and, for that case only, to emit the finding only when it can quote an instruction the session violated. Prompt-only change: no code, schema or counter moves, so a night's `run-stats.txt` is comparable before and after.
+
 ## 2026-10-02
 
 ### Added
