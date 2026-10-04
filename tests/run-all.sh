@@ -4953,6 +4953,38 @@ test_stale_err_with_no_session_in_the_worklist_is_reported_not_silent(){
   rm -rf "$root"
 }
 
+test_stale_err_is_counted_on_a_night_with_no_session_too(){
+  echo "# #113: the early exit for a night with nothing to triage still counts the stale failures in the directory"
+  local root; root=$(setup_env)
+  mk_win_session "$root" next "$LATE" 2020-01-03T12:00:00Z 2020-01-03T12:10:00Z >/dev/null
+  local fd; fd=$(fdir "$root"); mkdir -p "$fd"
+  printf 'worker produced no findings JSON for /gone/session.jsonl (incomplete run)\n' > "$fd/deadbeef0002.json.err"
+  run_dream "$root"
+  assert_grep "$fd/run-stats.txt" 'sessions_triaged: 0$' "nothing was triaged"
+  assert_grep "$fd/run-stats.txt" 'l1_err_files: 1$' "the stale .err is counted, not reported as 0"
+  assert_grep "$fd/run-stats.txt" 'l1_err_files_orphaned: 1$' "and counted as one nothing will retry"
+  assert_grep "$root/run.out" 'nothing will retry them: deadbeef0002' "and the log names it"
+  rm -rf "$root"
+}
+
+test_findings_outside_the_worklist_are_reported_and_left_in_place(){
+  echo "# window: a findings JSON for a session this run no longer places in the day is counted and named, and not deleted"
+  local root; root=$(setup_env)
+  mk_win_session "$root" inday "$STAMP" 2020-01-02T12:00:00Z 2020-01-02T12:10:00Z >/dev/null
+  local fd; fd=$(fdir "$root"); mkdir -p "$fd"
+  # What an earlier mtime-only run left for a session that belongs to another day.
+  printf '{"session_path":"/elsewhere/old.jsonl","findings":[]}\n' > "$fd/0123456789ab.json"
+  run_dream "$root"
+  assert_grep "$fd/run-stats.txt" 'l1_findings_outside_worklist: 1$' "the leftover findings JSON is counted"
+  assert_grep "$root/run.out" '0123456789ab' "and the log names it"
+  assert_file "$fd/0123456789ab.json" "and it is left in place, not deleted"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" s1; fd=$(fdir "$root")
+  run_dream "$root"
+  assert_grep "$fd/run-stats.txt" 'l1_findings_outside_worklist: 0$' "a clean night reports none outside its worklist"
+  rm -rf "$root"
+}
+
 test_a_night_of_only_out_of_window_files_says_so(){
   echo "# window: when every modified file is outside the day the stub says that, not 'no session files were modified'"
   local root; root=$(setup_env)
@@ -5044,6 +5076,8 @@ test_window_is_dst_correct_end_to_end
 test_rebuild_keeps_a_session_touched_after_its_day_and_retries_its_stale_err
 test_rebuild_of_an_omp_parent_touched_after_its_day_keeps_it_beside_its_advisor
 test_stale_err_with_no_session_in_the_worklist_is_reported_not_silent
+test_stale_err_is_counted_on_a_night_with_no_session_too
+test_findings_outside_the_worklist_are_reported_and_left_in_place
 test_a_night_of_only_out_of_window_files_says_so
 test_window_omp_cuts_the_live_chain_after_linearizing
 test_window_omp_session_active_only_on_an_abandoned_branch_is_gated_not_refused

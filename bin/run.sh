@@ -1560,6 +1560,57 @@ findings_json_count() {
     | wc -l | tr -d ' '
 }
 
+# Two kinds of leftover that this run's worklist does not own (#113). Both read SESSIONS_LIST,
+# which is empty on a night that found nothing, so the same scan serves the early stub exit.
+#
+# An orphaned .err is a failed triage nobody has finished: no findings JSON beside it, and its
+# session is not in the worklist (the file is gone, or this run no longer places it in the day).
+# While its session is in the worklist the retry loop owns it and l1_missing_count counts it;
+# one with no owner is retried by nothing and seen by no other counter, so l1_err_files cannot
+# tell "two workers crashed tonight" from "two crashed last week and nobody retried". Counted
+# and named, not retried: the .err is the only record of which session it was, and a worker with
+# the Write tool could have put any path in it.
+#
+# A findings JSON outside the worklist is a session an earlier run triaged under this date that
+# the current run no longer places in it (typically a rebuild of a date first run on file mtime
+# alone). Nothing removes it, and L2 reads every findings JSON in the directory, so the report
+# would quietly include it. Counted and named; left in place, because deleting findings is not
+# this runner's call. A clean rebuild means removing the date's findings directory first.
+worklist_hashes() {
+  [ -f "$SESSIONS_LIST" ] || return 0
+  local _s
+  while IFS= read -r _s; do [ -n "$_s" ] && session_hash "$_s"; done < "$SESSIONS_LIST"
+}
+scan_worklist_leftovers() {
+  L1_ERR_ORPHANED=0; ORPHAN_ERR_NAMES=""
+  FINDINGS_OUTSIDE_WORKLIST=0; OUTSIDE_FINDINGS_NAMES=""
+  local _hashes _f _h
+  _hashes=$(worklist_hashes)
+  for _f in "$FINDINGS_DIR"/*.json.err; do
+    [ -f "$_f" ] || continue
+    _h=$(basename "$_f" .json.err)
+    [ ! -f "$FINDINGS_DIR/$_h.json" ] || continue
+    printf '%s\n' "$_hashes" | grep -qxF "$_h" && continue
+    L1_ERR_ORPHANED=$((L1_ERR_ORPHANED + 1))
+    ORPHAN_ERR_NAMES="${ORPHAN_ERR_NAMES:+$ORPHAN_ERR_NAMES }$_h"
+  done
+  for _f in "$FINDINGS_DIR"/*.json; do
+    [ -f "$_f" ] || continue
+    _h=$(basename "$_f" .json)
+    case "$_h" in *[!0-9a-f]*|"") continue ;; esac
+    [ "${#_h}" -eq 12 ] || continue
+    printf '%s\n' "$_hashes" | grep -qxF "$_h" && continue
+    FINDINGS_OUTSIDE_WORKLIST=$((FINDINGS_OUTSIDE_WORKLIST + 1))
+    OUTSIDE_FINDINGS_NAMES="${OUTSIDE_FINDINGS_NAMES:+$OUTSIDE_FINDINGS_NAMES }$_h"
+  done
+  if [ "$L1_ERR_ORPHANED" -gt 0 ]; then
+    log "WARNING: $L1_ERR_ORPHANED .err file(s) have no findings JSON and belong to no session in this run's worklist, so nothing will retry them: $ORPHAN_ERR_NAMES"
+  fi
+  if [ "$FINDINGS_OUTSIDE_WORKLIST" -gt 0 ]; then
+    log "WARNING: $FINDINGS_OUTSIDE_WORKLIST findings JSON(s) in $FINDINGS_DIR belong to no session in this run's worklist and L2 will still read them: $OUTSIDE_FINDINGS_NAMES (remove the date's findings directory before a clean rebuild)"
+  fi
+}
+
 # Cut a transcript down to the report day's records. 0 = the slice was written to $2,
 # 1 = nothing to cut (the window is off, or every timestamped record is already inside the
 # day) and $2 is untouched, 2 = the helper failed and the caller reads the whole transcript.
@@ -2277,6 +2328,11 @@ run() {
     # so adding it to a path total understates the loss. Report the two
     # separately rather than inventing a combined figure that is wrong.
     local refused=$(( REJECTED_PATHS + HASH_COLLISIONS ))
+    # An empty worklist owns nothing, so every .err with no findings JSON is orphaned and every
+    # findings JSON is outside it. Counted here too: a night that found no session must not
+    # report zero over a directory that holds stale failures.
+    scan_worklist_leftovers
+    local early_err_files; early_err_files=$(ls -1 "$FINDINGS_DIR"/*.json.err 2>/dev/null | wc -l | tr -d ' ')
     {
       printf '# Autodream run self-audit — %s\n' "$TARGET_DATE"
       printf 'runner_commit: %s\n' "$RUNNER_COMMIT"
@@ -2328,8 +2384,9 @@ run() {
       printf 'l1_breaker_fired: not_reached\n'
       printf 'l1_findings_written: 0\n'
       printf 'l1_missing_after_retries: 0\n'
-      printf 'l1_err_files: 0\n'
-      printf 'l1_err_files_orphaned: 0\n'
+      printf 'l1_err_files: %s\n' "$early_err_files"
+      printf 'l1_err_files_orphaned: %s\n' "$L1_ERR_ORPHANED"
+      printf 'l1_findings_outside_worklist: %s\n' "$FINDINGS_OUTSIDE_WORKLIST"
       printf 'l1_findings_with_error: 0\n'
       printf 'l1_errored_silent: 0\n'
       printf 'l1_errored_provider: 0\n'
@@ -2624,27 +2681,8 @@ EOF
   L1_ELAPSED=$(( $(date +%s) - L1_START ))
   L1_OK=$(findings_json_count)
   L1_FAIL=$(ls -1 "$FINDINGS_DIR"/*.json.err 2>/dev/null | wc -l | tr -d " ")
-  # A .err with no findings JSON beside it is a failed triage nobody has finished. While its
-  # session is in the worklist the retry loop owns it and l1_missing_count counts it. One whose
-  # session is NOT in the worklist (the file is gone, or this run no longer places it in the
-  # day) has no owner: nothing retries it and no counter above sees it, so l1_err_files cannot
-  # tell "two workers crashed tonight" from "two crashed last week and nobody retried" (#113).
-  # Counted and named here. It is not retried, because the .err is the only record of which
-  # session it was and a worker with the Write tool could have put any path in it.
-  L1_ERR_ORPHANED=0
-  _orphans=""
-  _worklist_hashes=$(while IFS= read -r _s; do [ -n "$_s" ] && session_hash "$_s"; done < "$SESSIONS_LIST")
-  for _e in "$FINDINGS_DIR"/*.json.err; do
-    [ -f "$_e" ] || continue
-    _h=$(basename "$_e" .json.err)
-    [ ! -f "$FINDINGS_DIR/$_h.json" ] || continue
-    printf '%s\n' "$_worklist_hashes" | grep -qxF "$_h" && continue
-    L1_ERR_ORPHANED=$((L1_ERR_ORPHANED + 1))
-    _orphans="${_orphans:+$_orphans }$_h"
-  done
-  if [ "$L1_ERR_ORPHANED" -gt 0 ]; then
-    log "WARNING: $L1_ERR_ORPHANED .err file(s) have no findings JSON and belong to no session in this run's worklist, so nothing will retry them: $_orphans"
-  fi
+  # Leftovers this run's worklist does not own: see scan_worklist_leftovers.
+  scan_worklist_leftovers
   # In-band failures: a worker that ran to completion but couldn't fit the transcript
   # writes a findings JSON carrying a top-level "error" key (empty findings). These are
   # NOT .json.err files, so l1_err_files=0 masked them — count them explicitly so the
@@ -2994,6 +3032,9 @@ PY
     # Of those, the ones with no findings JSON and no session in tonight's worklist: failed
     # triage that nothing will retry. Nonzero is a stale failure, not tonight's.
     printf 'l1_err_files_orphaned: %s\n' "$L1_ERR_ORPHANED"
+    # Findings JSONs in the directory that no session in tonight's worklist owns. L2 reads them
+    # all, so a nonzero value means the report includes sessions this run did not place in the day.
+    printf 'l1_findings_outside_worklist: %s\n' "$FINDINGS_OUTSIDE_WORKLIST"
     # Cached vs. fresh: lets the aggregator distinguish a sub-second "elapsed"
     # caused by everything already being done from a broken timer.
     printf 'l1_sessions_already_done_at_start: %s\n' "$L1_PRECACHED"
