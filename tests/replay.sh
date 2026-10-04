@@ -30,6 +30,12 @@ REPO=$(cd "$HERE/.." && pwd)
 MOCK="$HERE/mock-claude.sh"
 
 PASS=0; FAIL=0; WARN=0
+SANDBOXES=""
+cleanup_sandboxes() {
+  [ -n "${REPLAY_KEEP:-}" ] && return 0
+  local d; for d in $SANDBOXES; do rm -rf "$d"; done
+}
+trap cleanup_sandboxes EXIT
 pass() { PASS=$((PASS + 1)); printf '  PASS  %s\n' "$1"; }
 fail() { FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "$1"; }
 warn() { WARN=$((WARN + 1)); printf '  WARN  %s\n' "$1"; }
@@ -118,14 +124,15 @@ replay_artifacts() { # $1=findings dir
     [ -e "$j" ] || continue
     case "$j" in *.stats.json) continue ;; esac
     jq -e '(.findings | type) == "array"' "$j" >/dev/null 2>&1 || continue
+    # Gated stubs and error records are never rewritten by the enforcement pass, and carry no
+    # skill fields either, so only the sessions the runner would have touched are compared.
+    jq -e 'has("error") or .skipped == "below_noise_gate"' "$j" >/dev/null 2>&1 && continue
     sc="${j%.json}.stats.json"
     jq -e 'type == "object" and (["skills_invoked", "skills_invoked_count", "skills_invoked_counts", "skills_authored"] - keys | length == 0)' "$sc" >/dev/null 2>&1 \
       || unmeasured=$((unmeasured + 1))
   done
   n=$(stat_of "$stats" skills_unmeasured)
   if [ -n "$n" ]; then
-    # Gated stubs carry no skill fields either and are not rewritten, so only compare the
-    # sessions the runner would have touched: written minus gated minus errored.
     cmp_num_warn "skills unmeasured" "$unmeasured" "$n"
   else
     warn "skills unmeasured: $unmeasured of $written (the archive predates skill measurement)"
@@ -165,6 +172,8 @@ replay_ingest() { # $1=adapter $2=session root $3=date $4=archived findings dir 
   [ -x "$MOCK" ] || { fail "tests/mock-claude.sh is missing"; return; }
 
   sb=$(mktemp -d "${TMPDIR:-/tmp}/ccad-replay.XXXXXX") || { fail "cannot create a sandbox"; return; }
+  # Holds a staged copy of real sessions, so it is removed on every exit path, kept only on request.
+  SANDBOXES="${SANDBOXES:-} $sb"
   home="$sb/home"; target="$home/.claude/autodream"
   mkdir -p "$home/.claude/projects"
   local adapters="claude" session_roots="" next stage
