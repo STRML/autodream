@@ -180,7 +180,7 @@ fi
 # Capture first and parse the capture: a pipeline under pipefail could lose a pid it had read.
 # A print that fails means the label is not loaded; nothing to protect.
 print_out="$(launchctl print "$DOMAIN/$LABEL" 2>/dev/null)" || print_out=""
-holder_pid="$(sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\).*/\1/{p;q;}' <<<"$print_out")"
+holder_pid="$(sed -n '/^[[:space:]]*pid = [0-9]/{s/^[[:space:]]*pid = \([0-9][0-9]*\).*/\1/;p;q;}' <<<"$print_out")"
 if [ -n "$holder_pid" ]; then
   holder_date="$(sed -n 's#.*<string>\([0-9]\{4\}-[0-9][0-9]-[0-9][0-9]\)</string>.*#\1#p' "$PLIST" 2>/dev/null | head -n 1)"
   echo "autodream-now: a run for ${holder_date:-another date} is still going (pid $holder_pid, label $LABEL)." >&2
