@@ -2621,7 +2621,7 @@ EOF
     # store would keep yesterday's questions alive across an empty night, and a
     # question that reappeared two reports later would be called consecutive when
     # it was not. The early return below is why this cannot live at the usual call
-    # site next to notify.sh.
+    # site at the top of the report-present block.
     if [ -x "$AUTODREAM_DIR/question-streaks.sh" ]; then
       env AUTODREAM_DIR="$AUTODREAM_DIR" "$AUTODREAM_DIR/question-streaks.sh" update "$REPORT_PATH" "$FINDINGS_DIR" \
         || log "question-streaks returned non-zero (continuing)"
@@ -3615,7 +3615,8 @@ PY
     fi
 
     # ---- Memory pins: L2's pins.jsonl into Mnemopi ----
-    # First step after the report, ahead of notify.sh and the consume steps. notify.sh runs
+    # First step after the report that calls out (the streak update above only writes a local
+    # file), ahead of notify.sh and the consume steps. notify.sh runs
     # AUTODREAM_OPEN synchronously, so a blocking editor command holds the run there; if
     # the run dies in that wait, the next run skips the date and pins placed after it are
     # never stored.

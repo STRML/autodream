@@ -501,7 +501,8 @@ Detection was never the problem. **A signal that repeats at constant volume is a
 learn to skim.**
 
 `bin/question-streaks.sh` counts the repeats and makes the Nth ask look different from the
-first. `run.sh` calls it right after `notify.sh`, so the normal banner still goes out every
+first. `run.sh` calls it first after a complete report, ahead of the pins and `notify.sh`, so a hung
+`AUTODREAM_OPEN` or store cannot skip it (issue #77). The normal banner still goes out every
 night and a second, differently-worded one fires only for questions that have gone stale.
 Escalations also land in `findings/<date>/question-escalations.txt`.
 
