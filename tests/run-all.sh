@@ -4878,6 +4878,72 @@ test_window_is_dst_correct_end_to_end(){
   rm -rf "$root"
 }
 
+test_rebuild_keeps_a_session_touched_after_its_day_and_retries_its_stale_err(){
+  echo "# #113: a rebuild keeps a session touched after its window, and its stale .err is retried, not stranded"
+  local root; root=$(setup_env)
+  local late; late=$(mk_win_session "$root" late "$LATE" 2020-01-02T12:00:00Z 2020-01-02T12:10:00Z)
+  mk_session "$root" ok1
+  local h; h=$(hash_of "$late"); local fd; fd=$(fdir "$root")
+  # What the aborted run left: a worker's .err and no findings JSON for the session.
+  mkdir -p "$fd"
+  printf 'worker produced no findings JSON for %s (incomplete run: the engine exited without writing output)\nworker exit code: 1 after 3s\n' "$late" > "$fd/$h.json.err"
+  # No report exists and nothing is forced: the ordinary catch-up run for a missed date.
+  run_dream "$root"
+  in_list "$fd/sessions.txt" "$late" && ok "(a) the session touched after its day is enumerated again" || no "(a) the session touched after its day is enumerated again"
+  assert_eq "$(jq -r '.findings | type' "$fd/$h.json" 2>/dev/null)" "array" "(b) it was retried: its findings JSON now exists"
+  assert_no_file "$fd/$h.json.err" "(b) and the stale .err is gone"
+  assert_grep "$fd/run-stats.txt" 'l1_missing_after_retries: 0$' "nothing is missing after retries"
+  assert_grep "$fd/run-stats.txt" 'l1_err_files: 0$' "no .err file is left"
+  assert_grep "$fd/run-stats.txt" 'l1_err_files_orphaned: 0$' "and none is stranded"
+  # The rebuild of a day that already has a report, the exact case in the issue: the session
+  # is touched again after the first report was written, then the date is rebuilt.
+  local before; before=$(wc -l < "$fd/sessions.txt" | tr -d ' ')
+  touch -t 202001090900 "$late"
+  AUTODREAM_FORCE=1 run_dream "$root"
+  in_list "$fd/sessions.txt" "$late" && ok "a forced rebuild still enumerates it after a further touch" || no "a forced rebuild still enumerates it after a further touch"
+  assert_eq "$(wc -l < "$fd/sessions.txt" | tr -d ' ')" "$before" "the rebuilt corpus is the same size as the original's"
+  rm -rf "$root"
+}
+
+test_rebuild_of_an_omp_parent_touched_after_its_day_keeps_it_beside_its_advisor(){
+  echo "# #113 as reported: an omp parent touched after its day is enumerated again beside its untouched advisor sidecar"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local o; o=$(mk_omp_session "$root" parent1); local h; h=$(hash_of "$o")
+  touch -t "$LATE" "$o"
+  # The advisor sidecar keeps the parent's name as its directory and is not touched again.
+  local adir="${o%.jsonl}"; mkdir -p "$adir"
+  local adv="$adir/__advisor.jsonl"
+  { printf '{"type":"title","title":"adv","v":1}\n'
+    printf '{"type":"session","id":"01a00000-0000-7000-8000-0000000000aa","cwd":"/tmp/proj-o","timestamp":"2020-01-02T10:00:00.000Z"}\n'
+    printf '{"type":"message","id":"v1","parentId":null,"timestamp":"2020-01-02T10:01:00.000Z","message":{"role":"user","content":[{"type":"text","text":"transcript excerpt"}]}}\n'
+    printf '{"type":"message","id":"v2","parentId":"v1","timestamp":"2020-01-02T10:01:30.000Z","message":{"role":"user","content":[{"type":"text","text":"more of it"}]}}\n'
+    printf '{"type":"message","id":"v3","parentId":"v2","timestamp":"2020-01-02T10:02:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"advisor note"}]}}\n'
+  } > "$adv"; touch -t "$STAMP" "$adv"
+  local fd; fd=$(fdir "$root"); mkdir -p "$fd"
+  printf 'worker produced no findings JSON for %s (incomplete run: the engine exited without writing output)\n' "$o" > "$fd/$h.json.err"
+  run_dream_omp "$root"
+  in_list "$fd/sessions.txt" "$o"   && ok "the parent touched after its day is in the corpus" || no "the parent touched after its day is in the corpus"
+  in_list "$fd/sessions.txt" "$adv" && ok "and so is its advisor sidecar, so the report no longer holds the advisor without its parent" || no "and so is its advisor sidecar"
+  assert_eq "$(jq -r '.findings | type' "$fd/$h.json" 2>/dev/null)" "array" "the parent's stale failure was retried and has a findings record"
+  assert_nogrep "$fd/$h.json" 'could not be normalized' "and the omp session was not refused"
+  assert_no_file "$fd/$h.json.err" "its .err is gone"
+  assert_grep "$fd/run-stats.txt" 'l1_missing_after_retries: 0$' "nothing is missing"
+  rm -rf "$root"
+}
+
+test_stale_err_with_no_session_in_the_worklist_is_reported_not_silent(){
+  echo "# #113: a .err whose session is not in tonight's worklist is counted and named, not left to read as tonight's failure"
+  local root; root=$(setup_env); mk_session "$root" s1
+  local fd; fd=$(fdir "$root"); mkdir -p "$fd"
+  printf 'worker produced no findings JSON for /gone/session.jsonl (incomplete run)\n' > "$fd/deadbeef0001.json.err"
+  run_dream "$root"
+  assert_grep "$fd/run-stats.txt" 'l1_err_files: 1$' "the file is counted, as before"
+  assert_grep "$fd/run-stats.txt" 'l1_err_files_orphaned: 1$' "and counted as one nothing will retry"
+  assert_grep "$root/run.out" 'nothing will retry them: deadbeef0001' "and the log names it"
+  assert_grep "$fd/run-stats.txt" 'l1_missing_after_retries: 0$' "it does not make a finished corpus read as missing"
+  rm -rf "$root"
+}
+
 test_a_night_of_only_out_of_window_files_says_so(){
   echo "# window: when every modified file is outside the day the stub says that, not 'no session files were modified'"
   local root; root=$(setup_env)
@@ -4966,6 +5032,9 @@ test_window_cuts_a_multi_day_session_to_the_report_day
 test_window_off_restores_mtime_enumeration
 test_window_degrades_when_the_helper_is_absent
 test_window_is_dst_correct_end_to_end
+test_rebuild_keeps_a_session_touched_after_its_day_and_retries_its_stale_err
+test_rebuild_of_an_omp_parent_touched_after_its_day_keeps_it_beside_its_advisor
+test_stale_err_with_no_session_in_the_worklist_is_reported_not_silent
 test_a_night_of_only_out_of_window_files_says_so
 test_window_omp_cuts_the_live_chain_after_linearizing
 test_window_omp_session_active_only_on_an_abandoned_branch_is_gated_not_refused

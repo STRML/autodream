@@ -2329,6 +2329,7 @@ run() {
       printf 'l1_findings_written: 0\n'
       printf 'l1_missing_after_retries: 0\n'
       printf 'l1_err_files: 0\n'
+      printf 'l1_err_files_orphaned: 0\n'
       printf 'l1_findings_with_error: 0\n'
       printf 'l1_errored_silent: 0\n'
       printf 'l1_errored_provider: 0\n'
@@ -2623,6 +2624,27 @@ EOF
   L1_ELAPSED=$(( $(date +%s) - L1_START ))
   L1_OK=$(findings_json_count)
   L1_FAIL=$(ls -1 "$FINDINGS_DIR"/*.json.err 2>/dev/null | wc -l | tr -d " ")
+  # A .err with no findings JSON beside it is a failed triage nobody has finished. While its
+  # session is in the worklist the retry loop owns it and l1_missing_count counts it. One whose
+  # session is NOT in the worklist (the file is gone, or this run no longer places it in the
+  # day) has no owner: nothing retries it and no counter above sees it, so l1_err_files cannot
+  # tell "two workers crashed tonight" from "two crashed last week and nobody retried" (#113).
+  # Counted and named here. It is not retried, because the .err is the only record of which
+  # session it was and a worker with the Write tool could have put any path in it.
+  L1_ERR_ORPHANED=0
+  _orphans=""
+  _worklist_hashes=$(while IFS= read -r _s; do [ -n "$_s" ] && session_hash "$_s"; done < "$SESSIONS_LIST")
+  for _e in "$FINDINGS_DIR"/*.json.err; do
+    [ -f "$_e" ] || continue
+    _h=$(basename "$_e" .json.err)
+    [ ! -f "$FINDINGS_DIR/$_h.json" ] || continue
+    printf '%s\n' "$_worklist_hashes" | grep -qxF "$_h" && continue
+    L1_ERR_ORPHANED=$((L1_ERR_ORPHANED + 1))
+    _orphans="${_orphans:+$_orphans }$_h"
+  done
+  if [ "$L1_ERR_ORPHANED" -gt 0 ]; then
+    log "WARNING: $L1_ERR_ORPHANED .err file(s) have no findings JSON and belong to no session in this run's worklist, so nothing will retry them: $_orphans"
+  fi
   # In-band failures: a worker that ran to completion but couldn't fit the transcript
   # writes a findings JSON carrying a top-level "error" key (empty findings). These are
   # NOT .json.err files, so l1_err_files=0 masked them — count them explicitly so the
@@ -2969,6 +2991,9 @@ PY
     printf 'stats_sidecars_unparseable: %s\n' "$STATS_SIDECARS_UNPARSEABLE"
     printf 'l1_missing_after_retries: %s\n' "$MISSING"
     printf 'l1_err_files: %s\n' "$L1_FAIL"
+    # Of those, the ones with no findings JSON and no session in tonight's worklist: failed
+    # triage that nothing will retry. Nonzero is a stale failure, not tonight's.
+    printf 'l1_err_files_orphaned: %s\n' "$L1_ERR_ORPHANED"
     # Cached vs. fresh: lets the aggregator distinguish a sub-second "elapsed"
     # caused by everything already being done from a broken timer.
     printf 'l1_sessions_already_done_at_start: %s\n' "$L1_PRECACHED"
