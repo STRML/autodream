@@ -115,6 +115,14 @@ assert_eq "$(jq -r 'select(.type=="autodream_meta") | "\(.nested) \(.is_advisor)
 "$LIN" "$NB/2026-01-02T12-00-00-000Z_01a0.jsonl" "$tmp/par.out" >/dev/null 2>&1
 assert_eq "$(jq -r 'select(.type=="autodream_meta") | "\(.nested) \(.is_advisor)"' "$tmp/par.out")" "false false" "the parent session is neither"
 assert_eq "$(jq -r 'select(.type=="autodream_meta") | .parent_session_file | if . == null then "null" else (split("/")|last) end' "$tmp/sub.out")" "2026-01-02T12-00-00-000Z_01a0.jsonl" "a child names its parent file"
+# A child whose parent file is gone is still nested: the stamped directory says so.
+OB="$tmp/orphan/-bucket"; mkdir -p "$OB/2026-01-02T12-00-00-000Z_dead"
+cp "$S1" "$OB/2026-01-02T12-00-00-000Z_dead/__advisor.jsonl"; cp "$S1" "$OB/2026-01-02T12-00-00-000Z_dead/Task1.jsonl"; cp "$S1" "$OB/2026-01-02T12-00-00-000Z_top.jsonl"
+for f in 2026-01-02T12-00-00-000Z_dead/__advisor.jsonl 2026-01-02T12-00-00-000Z_dead/Task1.jsonl 2026-01-02T12-00-00-000Z_top.jsonl; do
+  "$LIN" "$OB/$f" "$tmp/orph.out" >/dev/null 2>&1
+  case "$f" in *_top.jsonl) want=false ;; *) want=true ;; esac
+  assert_eq "$(jq -r 'select(.type=="autodream_meta") | .nested' "$tmp/orph.out")" "$want" "nested without a parent file: $f"
+done
 # enumerate returns children too: they are sessions to triage.
 touch -t 202601021200 "$NB"/*.jsonl "$NB"/*/*.jsonl
 enum=$("$A" enumerate "$tmp/store" 2026-01-02 2026-01-03 2>/dev/null | tr '\0' '\n' | sort | wc -l | tr -d ' ')

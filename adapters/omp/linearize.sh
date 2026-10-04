@@ -58,6 +58,12 @@ parent_candidate="$(dirname "$src").jsonl"
 nested=false
 parent=""
 if [ -f "$parent_candidate" ]; then nested=true; parent="$parent_candidate"; fi
+# A child whose parent file is gone (deleted or archived) is still a child. Its directory is
+# named like a session file (<ISO stamp>_<id>) and a project bucket never is, because a bucket
+# is a dash-encoded path, so the shape of the directory name answers without the parent.
+case "$(basename "$(dirname "$src")")" in
+  [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*Z_*) nested=true ;;
+esac
 # omp reserves both stems for a reviewer model that tails a primary session. The same
 # rule lives in stats.sh for a raw file, so a change to one must change the other
 # (tests/adapter-omp.sh pins both against `__advisor-<name>.jsonl`).
