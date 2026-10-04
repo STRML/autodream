@@ -190,16 +190,16 @@ mk_trivial_session(){ # $1=root $2=name — single user turn, no tool calls: bel
 mk_short_duration_session(){ # $1=root $2=name — 2 user turns, 5s apart: gates on duration alone
   local f="$1/projects/proj-a/$2.jsonl"
   printf '%s\n' \
-    '{"type":"user","timestamp":"2026-07-20T10:00:00Z","message":{"content":"quick check"}}' \
-    '{"type":"user","timestamp":"2026-07-20T10:00:05Z","message":{"content":"thanks bye"}}' \
+    '{"type":"user","timestamp":"2020-01-02T12:00:00Z","message":{"content":"quick check"}}' \
+    '{"type":"user","timestamp":"2020-01-02T12:00:05Z","message":{"content":"thanks bye"}}' \
     > "$f"
   touch -t "$STAMP" "$f"
 }
 mk_subagent_session(){ # $1=root $2=name — isSidechain + >=5 tool calls: carve-out, never gated
   local f="$1/projects/proj-a/$2.jsonl"
   printf '%s\n' \
-    '{"type":"user","isSidechain":true,"timestamp":"2026-07-20T10:00:00Z","message":{"content":"subagent task"}}' \
-    '{"type":"assistant","isSidechain":true,"timestamp":"2026-07-20T10:00:05Z","message":{"content":[{"type":"tool_use","name":"Read"},{"type":"tool_use","name":"Write"},{"type":"tool_use","name":"Bash"},{"type":"tool_use","name":"Grep"},{"type":"tool_use","name":"Edit"}]}}' \
+    '{"type":"user","isSidechain":true,"timestamp":"2020-01-02T12:00:00Z","message":{"content":"subagent task"}}' \
+    '{"type":"assistant","isSidechain":true,"timestamp":"2020-01-02T12:00:05Z","message":{"content":[{"type":"tool_use","name":"Read"},{"type":"tool_use","name":"Write"},{"type":"tool_use","name":"Bash"},{"type":"tool_use","name":"Grep"},{"type":"tool_use","name":"Edit"}]}}' \
     > "$f"
   touch -t "$STAMP" "$f"
 }
@@ -2787,8 +2787,8 @@ test_overlap_pair(){
   # A: 10:00, 10:20   B: 10:05, 10:25 — every A/B turn combo is within 30 min
   # (A0-B0=5m, A0-B1=25m, A1-B0=15m, A1-B1=5m), so four turn-pairs qualify but
   # the {A,B} pair must be counted exactly once.
-  mk_timed_session "$root" sessA "2026-07-20T10:00:00Z" "2026-07-20T10:20:00Z"
-  mk_timed_session "$root" sessB "2026-07-20T10:05:00Z" "2026-07-20T10:25:00Z"
+  mk_timed_session "$root" sessA "2020-01-02T12:00:00Z" "2020-01-02T12:20:00Z"
+  mk_timed_session "$root" sessB "2020-01-02T12:05:00Z" "2020-01-02T12:25:00Z"
   run_dream "$root"
   local stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'overlap_measured: yes'     "a real overlap measurement happened"
@@ -2801,9 +2801,9 @@ test_overlap_triple(){
   echo "# overlap (#14): three pairwise-overlapping sessions -> 3 pairs, 3 sessions"
   local root; root=$(setup_env)
   # A@10:00, B@10:10, C@10:20 — every pair (A-B=10m, B-C=10m, A-C=20m) is within 30 min.
-  mk_timed_session "$root" sessA "2026-07-20T10:00:00Z"
-  mk_timed_session "$root" sessB "2026-07-20T10:10:00Z"
-  mk_timed_session "$root" sessC "2026-07-20T10:20:00Z"
+  mk_timed_session "$root" sessA "2020-01-02T12:00:00Z"
+  mk_timed_session "$root" sessB "2020-01-02T12:10:00Z"
+  mk_timed_session "$root" sessC "2020-01-02T12:20:00Z"
   run_dream "$root"
   local stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'overlap_measured: yes'     "a real overlap measurement happened"
@@ -2834,8 +2834,8 @@ test_overlap_drops_advisor_sidecars(){
 test_overlap_none(){
   echo "# overlap (#14): sessions more than 30 minutes apart -> both stats 0, keys still present"
   local root; root=$(setup_env)
-  mk_timed_session "$root" sessA "2026-07-20T10:00:00Z"
-  mk_timed_session "$root" sessB "2026-07-20T11:00:00Z"
+  mk_timed_session "$root" sessA "2020-01-02T12:00:00Z"
+  mk_timed_session "$root" sessB "2020-01-02T13:00:00Z"
   run_dream "$root"
   local stats="$(fdir "$root")/run-stats.txt"
   # This is the genuine-zero case (#26): the pass DID run, it just found nothing to
@@ -2850,8 +2850,8 @@ test_overlap_none(){
 test_overlap_not_measured_missing_bin(){
   echo "# overlap (#26): AUTODREAM_OVERLAP_BIN pointed at a nonexistent path -> not measured, counts still 0"
   local root; root=$(setup_env)
-  mk_timed_session "$root" sessA "2026-07-20T10:00:00Z"
-  mk_timed_session "$root" sessB "2026-07-20T10:05:00Z"
+  mk_timed_session "$root" sessA "2020-01-02T12:00:00Z"
+  mk_timed_session "$root" sessB "2020-01-02T12:05:00Z"
   export AUTODREAM_OVERLAP_BIN="$root/does-not-exist.sh"; run_dream "$root"; unset AUTODREAM_OVERLAP_BIN
   local stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'overlap_measured: no'      "missing overlap-stats.sh binary is not a measurement"
@@ -2863,8 +2863,8 @@ test_overlap_not_measured_missing_bin(){
 test_overlap_not_measured_empty_output(){
   echo "# overlap (#26): overlap-stats.sh stub that prints nothing -> not measured"
   local root; root=$(setup_env)
-  mk_timed_session "$root" sessA "2026-07-20T10:00:00Z"
-  mk_timed_session "$root" sessB "2026-07-20T10:05:00Z"
+  mk_timed_session "$root" sessA "2020-01-02T12:00:00Z"
+  mk_timed_session "$root" sessB "2020-01-02T12:05:00Z"
   local stub="$root/overlap-empty.sh"
   printf '#!/bin/bash\nexit 0\n' > "$stub"
   chmod +x "$stub"
@@ -2879,8 +2879,8 @@ test_overlap_not_measured_empty_output(){
 test_overlap_not_measured_malformed_output(){
   echo "# overlap (#26): overlap-stats.sh stub that prints non-JSON -> not measured"
   local root; root=$(setup_env)
-  mk_timed_session "$root" sessA "2026-07-20T10:00:00Z"
-  mk_timed_session "$root" sessB "2026-07-20T10:05:00Z"
+  mk_timed_session "$root" sessA "2020-01-02T12:00:00Z"
+  mk_timed_session "$root" sessB "2020-01-02T12:05:00Z"
   local stub="$root/overlap-malformed.sh"
   printf '#!/bin/bash\necho "not json at all"\n' > "$stub"
   chmod +x "$stub"
@@ -3287,6 +3287,12 @@ test_install_deploys_the_adapter_runtime(){
   assert_file "$target/lib-project.sh" "lib-project.sh is installed"
   assert_file "$target/adapters.sh"    "adapters.sh is installed"
   assert_file "$target/preflight.sh"   "preflight.sh is installed"
+  assert_file "$target/session-window.sh" "session-window.sh is installed"
+  # Through the symlink, from outside the checkout: the runner finds it in the install dir.
+  case "$(bash "$target/session-window.sh" bounds 2020-01-02 2020-01-03 2>/dev/null)" in
+    [0-9]*" "[0-9]*) ok "the installed window helper answers" ;;
+    *) no "the installed window helper answers" ;;
+  esac
   [ -e "$target/adapters/claude/adapter.sh" ] \
     && ok "the adapters tree is reachable from the install target" \
     || no "the adapters tree is reachable from the install target"
@@ -4072,6 +4078,9 @@ test_upgrade_lag_install_still_produces_a_report(){
   cat "$T/autodream/logs/run-$DATE.log" >> "$T/run.out" 2>/dev/null || true
   assert_eq "$rc" "0" "a symlinked runner with no installed libraries exits 0"
   assert_nogrep "$T/run.out" 'session_hash: command not found' "session_hash resolved"
+  # The helper is not in the install dir yet (install.sh has not run again), and the window is
+  # still on: the runner finds session-window.sh in the checkout its symlink points into.
+  assert_grep "$T/autodream/findings/$DATE/run-stats.txt" 'session_window: on$' "the window is on although the install has no helper link yet"
   assert_nonempty "$T/dreams/$DATE.md" "the upgrade-lag install still produced a report"
   rm -rf "$T"
 }
@@ -4717,6 +4726,369 @@ test_unwritable_collision_index_fails_closed
 test_broken_shasum_never_collapses_sessions
 test_all_excluded_corpus_says_so
 
+# ---- Report-day window: a session is placed by what is IN it, not by its file mtime -----
+# Issue #113. Enumeration used to be `-newermt DAY ! -newermt NEXT`, so a session written to
+# again after its day closed (a resumed one) vanished from every later rebuild of that day.
+# The adapter's find is now a lower bound only (run.sh passes it a far upper date) and
+# bin/session-window.sh keeps the files with a record inside the day. The expected sets below
+# are worked out from the fixtures, not read back from the code.
+LATE=202001051200    # touch -t form: three days after DATE, so a find with an upper bound drops it
+
+mk_win_session(){ # $1=root $2=name $3=touch-t stamp $4.. = ISO timestamps, one user turn each -> path
+  local root="$1" name="$2" stamp="$3"; shift 3
+  local f="$root/projects/proj-a/$name.jsonl" ts first=1
+  : > "$f"
+  for ts in "$@"; do
+    if [ "$first" = 1 ]; then
+      printf '{"type":"user","cwd":"/tmp/proj-a","timestamp":"%s","message":{"content":"%s %s"}}\n' "$ts" "$name" "$ts" >> "$f"; first=0
+    else
+      printf '{"type":"user","timestamp":"%s","message":{"content":"%s %s"}}\n' "$ts" "$name" "$ts" >> "$f"
+    fi
+  done
+  touch -t "$stamp" "$f"
+  printf '%s' "$f"
+}
+in_list(){ grep -qxF "$2" "$1" 2>/dev/null; } # $1=sessions.txt $2=path
+
+test_window_places_a_session_by_its_records_not_its_mtime(){
+  echo "# window: a session belongs to the day its records say, whatever its mtime (#113)"
+  local root; root=$(setup_env)
+  local late_in fresh_old late_next torn noclock_in noclock_late
+  late_in=$(mk_win_session "$root" late-in "$LATE" 2020-01-02T12:00:00Z 2020-01-02T12:10:00Z)        # touched after the day, records inside it
+  fresh_old=$(mk_win_session "$root" fresh-old "$STAMP" 2019-12-31T12:00:00Z 2019-12-31T12:10:00Z)    # touched inside the day, records from before it
+  late_next=$(mk_win_session "$root" late-next "$LATE" 2020-01-03T12:00:00Z 2020-01-03T12:10:00Z)    # belongs to the next day
+  torn=$(mk_win_session "$root" torn "$LATE" 2020-01-02T12:00:00Z 2020-01-02T12:10:00Z)
+  { printf 'not json at all\n{"type":"user","timestamp":\n'; } >> "$torn"; touch -t "$LATE" "$torn"
+  mk_session "$root" noclock-in; noclock_in="$root/projects/proj-a/noclock-in.jsonl"                   # no clock, mtime inside the day
+  mk_session "$root" noclock-late; noclock_late="$root/projects/proj-a/noclock-late.jsonl"; touch -t "$LATE" "$noclock_late"
+  export FANOUT=1 MOCK_CALL_LOG="$root/calls.log"; run_dream "$root"; unset FANOUT MOCK_CALL_LOG
+  local fd; fd=$(fdir "$root")
+  in_list "$fd/sessions.txt" "$late_in"     && ok "a session touched after the day, with a record inside it, is enumerated" || no "a session touched after the day, with a record inside it, is enumerated"
+  in_list "$fd/sessions.txt" "$torn"        && ok "so is one whose transcript carries torn lines (they neither crash nor decide)" || no "so is one whose transcript carries torn lines"
+  in_list "$fd/sessions.txt" "$noclock_in"  && ok "a file with no clock is placed by its mtime: inside the day -> enumerated" || no "a file with no clock is placed by its mtime: inside the day -> enumerated"
+  in_list "$fd/sessions.txt" "$fresh_old"   && no "a file touched inside the day whose records are older is not enumerated" || ok "a file touched inside the day whose records are older is not enumerated"
+  in_list "$fd/sessions.txt" "$late_next"   && no "a session whose records are all on the next day is not enumerated" || ok "a session whose records are all on the next day is not enumerated"
+  in_list "$fd/sessions.txt" "$noclock_late" && no "a file with no clock, modified after the day, is not enumerated" || ok "a file with no clock, modified after the day, is not enumerated"
+  assert_eq "$(wc -l < "$fd/sessions.txt" | tr -d ' ')" "3" "exactly the three sessions with a place in the day"
+  assert_grep "$fd/run-stats.txt" 'sessions_out_of_window: 3$' "the three left out are counted, so they cannot read as a quiet night"
+  assert_grep "$fd/run-stats.txt" 'session_window: on$' "the window is recorded as in force"
+  assert_grep "$fd/run-stats.txt" 'sessions_triaged: 3$' "and three sessions were triaged"
+  local p h
+  for p in "$late_in" "$torn" "$noclock_in"; do
+    h=$(hash_of "$p")
+    assert_eq "$(jq -r '.findings | type' "$fd/$h.json" 2>/dev/null)" "array" "$(basename "$p") has a findings record"
+  done
+  for p in "$fresh_old" "$late_next" "$noclock_late"; do
+    h=$(hash_of "$p")
+    assert_no_file "$fd/$h.json" "$(basename "$p") has none"
+    assert_nogrep "$root/calls.log" "$h" "and no worker was started for $(basename "$p")"
+  done
+  assert_grep "$root/run.out" 'out of window' "the log counts the files left out"
+  assert_eq "$(cat "$root/run.exit")" "0" "the run exits 0"
+  assert_nonempty "$root/dreams/$DATE.md" "and wrote its report"
+  rm -rf "$root"
+}
+
+test_window_cuts_a_multi_day_session_to_the_report_day(){
+  echo "# window: stats and the L1 read of a multi-day session cover the report day only"
+  local root; root=$(setup_env)
+  local f="$root/projects/proj-a/multi.jsonl"
+  {
+    printf '%s\n' '{"type":"user","cwd":"/tmp/proj-a","timestamp":"2020-01-01T12:00:00Z","message":{"content":"DAY-BEFORE-ONE"}}'
+    printf '%s\n' '{"type":"assistant","timestamp":"2020-01-01T12:01:00Z","message":{"content":[{"type":"tool_use","name":"Read"}]}}'
+    printf '%s\n' '{"type":"user","timestamp":"2020-01-02T12:00:00Z","message":{"content":"TODAY-ONE"}}'
+    printf '%s\n' '{"type":"assistant","timestamp":"2020-01-02T12:05:00Z","message":{"content":[{"type":"tool_use","name":"Bash"}]}}'
+    printf '%s\n' '{"type":"user","timestamp":"2020-01-02T12:30:00Z","message":{"content":"TODAY-TWO"}}'
+    printf '%s\n' '{"type":"user","timestamp":"2020-01-03T12:00:00Z","message":{"content":"DAY-AFTER-ONE"}}'
+    printf '%s\n' '{"type":"assistant","timestamp":"2020-01-03T12:01:00Z","message":{"content":[{"type":"tool_use","name":"Edit"}]}}'
+  } > "$f"; touch -t "$LATE" "$f"
+  local whole; whole=$(mk_win_session "$root" wholeday "$STAMP" 2020-01-02T12:00:00Z 2020-01-02T12:20:00Z)
+  local hm hw; hm=$(hash_of "$f"); hw=$(hash_of "$whole")
+  export FANOUT=1 MOCK_MODE=l1_badproject MOCK_CAPTURE_DIR="$root/cap"; run_dream "$root"; unset FANOUT MOCK_MODE MOCK_CAPTURE_DIR
+  local fd; fd=$(fdir "$root")
+  assert_eq "$(jq -r .user_message_count "$fd/$hm.stats.json")" "2" "stats count the two user turns of the day, not the four of the file"
+  assert_eq "$(jq -r .duration_minutes "$fd/$hm.stats.json")" "30" "the duration is the day's 30 minutes, not two days"
+  assert_eq "$(jq -r .tool_call_count "$fd/$hm.stats.json")" "1" "and the one tool call of the day"
+  assert_eq "$(jq -r .transcript_mtime "$fd/$hm.stats.json")" "$(stat -f %m "$f")" "the sidecar carries the session's own mtime, not the moment it was cut"
+  assert_grep   "$root/cap/l1-read-$hm.txt" 'TODAY-ONE' "the worker read the day's first turn"
+  assert_grep   "$root/cap/l1-read-$hm.txt" 'TODAY-TWO' "and its last"
+  assert_nogrep "$root/cap/l1-read-$hm.txt" 'DAY-BEFORE-ONE' "and nothing from the day before"
+  assert_nogrep "$root/cap/l1-read-$hm.txt" 'DAY-AFTER-ONE' "and nothing from the day after"
+  assert_grep   "$root/cap/l1-stdin-$hm.txt" '## Report day' "the worker is told it holds a slice"
+  assert_grep   "$root/cap/l1-stdin-$hm.txt" 'recorded on 2020-01-02' "and which day"
+  assert_eq "$(jq -r .session_path "$fd/$hm.json")" "$f" "the findings name the real session, not the temporary slice"
+  if cmp -s "$whole" "$root/cap/l1-read-$hw.txt"; then ok "a session wholly inside the day is read byte for byte, as before"; else no "a session wholly inside the day is read byte for byte, as before"; fi
+  assert_nogrep "$root/cap/l1-stdin-$hw.txt" '## Report day' "and its prompt carries no slice note"
+  assert_grep "$fd/run-stats.txt" 'sessions_windowed: 1$' "one of the two triaged sessions spilled outside the day"
+  assert_eq "$(ls "$fd" | grep -c '\.day\.jsonl$\|\.statsday\.jsonl$')" "0" "no temporary slice is left in the findings dir"
+  rm -rf "$root"
+}
+
+test_window_off_restores_mtime_enumeration(){
+  echo "# window: AUTODREAM_WINDOW=0 places a session by its file mtime alone, as before"
+  local root; root=$(setup_env)
+  local late_in fresh_old multi
+  late_in=$(mk_win_session "$root" late-in "$LATE" 2020-01-02T12:00:00Z 2020-01-02T12:10:00Z)
+  fresh_old=$(mk_win_session "$root" fresh-old "$STAMP" 2019-12-31T12:00:00Z 2019-12-31T12:10:00Z)
+  multi=$(mk_win_session "$root" multi "$STAMP" 2019-12-31T12:00:00Z 2020-01-02T12:10:00Z 2020-01-04T12:00:00Z)
+  export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_WINDOW=0; run_dream "$root"; unset FANOUT MOCK_CAPTURE_DIR AUTODREAM_WINDOW
+  local fd; fd=$(fdir "$root")
+  in_list "$fd/sessions.txt" "$fresh_old" && ok "a file touched inside the day is enumerated whatever its records say" || no "a file touched inside the day is enumerated whatever its records say"
+  in_list "$fd/sessions.txt" "$late_in"   && no "a file touched after the day is not enumerated (the old bounded find)" || ok "a file touched after the day is not enumerated (the old bounded find)"
+  assert_grep "$fd/run-stats.txt" 'session_window: off$' "run-stats says the window was off"
+  assert_grep "$fd/run-stats.txt" 'sessions_out_of_window: 0$' "so nothing is counted out of window"
+  assert_grep "$fd/run-stats.txt" 'sessions_windowed: 0$' "and no session is cut"
+  local hm; hm=$(hash_of "$multi")
+  if cmp -s "$multi" "$root/cap/l1-read-$hm.txt"; then ok "a multi-day session is read whole"; else no "a multi-day session is read whole"; fi
+  assert_nogrep "$root/cap/l1-stdin-$hm.txt" '## Report day' "with no slice note"
+  assert_grep "$root/run.out" 'scanning for sessions modified between' "and the log keeps the old scan line"
+  rm -rf "$root"
+}
+
+test_window_degrades_when_the_helper_is_absent(){
+  echo "# window: an install without session-window.sh keeps the bounded enumeration and still reports"
+  local root; root=$(setup_env)
+  local inst="$root/inst"; mkdir -p "$inst/bin"
+  cp -R "$REPO/adapters" "$inst/adapters"
+  local b; for b in "$REPO"/bin/*.sh; do [ "$(basename "$b")" = session-window.sh ] || cp "$b" "$inst/bin/"; done
+  local late_in; late_in=$(mk_win_session "$root" late-in "$LATE" 2020-01-02T12:00:00Z 2020-01-02T12:10:00Z)
+  mk_session "$root" s1
+  mkdir -p "$root/shim-default"; printf '#!/bin/bash\nprintf %s "200"\n' "'%s'" > "$root/shim-default/curl"; chmod +x "$root/shim-default/curl"
+  PATH="$root/shim-default:$PATH" AUTODREAM_CHANGELOG=0 CLAUDE_BIN="$MOCK" AUTODREAM_CONFIG="$root/autodream/config" \
+    AUTODREAM_CONSUME_DATE="$DATE" AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1 \
+    PROJECTS_DIR="$root/projects" AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
+    /bin/bash "$inst/bin/run.sh" "$DATE" > "$root/run.out" 2>&1
+  local rc=$?
+  cat "$root/autodream/logs/run-$DATE.log" >> "$root/run.out" 2>/dev/null || true
+  local fd; fd=$(fdir "$root")
+  assert_eq "$rc" "0" "the run exits 0"
+  assert_grep "$fd/run-stats.txt" 'session_window: off$' "the window is recorded as off"
+  in_list "$fd/sessions.txt" "$late_in" && no "the bounded find ran: a file touched after the day is not enumerated" || ok "the bounded find ran: a file touched after the day is not enumerated"
+  in_list "$fd/sessions.txt" "$root/projects/proj-a/s1.jsonl" && ok "and a file touched inside the day is" || no "and a file touched inside the day is"
+  assert_nonempty "$root/dreams/$DATE.md" "the night still produced its report"
+  rm -rf "$root"
+}
+
+test_window_is_dst_correct_end_to_end(){
+  echo "# window: the report day is local midnight to local midnight on a 23-hour DST day (America/New_York 2020-03-08)"
+  local DATE=2020-03-08 root; root=$(setup_env)
+  # EST until 02:00, EDT after: local midnight is 05:00Z, the next one 04:00Z. A record at
+  # 04:30Z on 03-09 is 00:30 EDT on 03-09, so it is NOT in the report day, and a 24-hour
+  # window (end 05:00Z) would take it.
+  local in edge
+  in=$(mk_win_session "$root" in "$LATE" 2020-03-08T15:00:00Z 2020-03-08T15:10:00Z)
+  edge=$(mk_win_session "$root" edge "$LATE" 2020-03-09T04:30:00Z 2020-03-09T04:40:00Z)
+  TZ=America/New_York touch -t 202003091200 "$in" "$edge"
+  TZ=America/New_York run_dream "$root"
+  local fd; fd=$(fdir "$root")
+  in_list "$fd/sessions.txt" "$in"   && ok "a record at 11:00 EDT on the day is inside it" || no "a record at 11:00 EDT on the day is inside it"
+  in_list "$fd/sessions.txt" "$edge" && no "a record at 00:30 EDT the next morning is outside it (a 24h window would take it)" || ok "a record at 00:30 EDT the next morning is outside it (a 24h window would take it)"
+  assert_grep "$fd/run-stats.txt" 'sessions_out_of_window: 1$' "and is counted out of window"
+  rm -rf "$root"
+}
+
+test_rebuild_keeps_a_session_touched_after_its_day_and_retries_its_stale_err(){
+  echo "# #113: a rebuild keeps a session touched after its window, and its stale .err is retried, not stranded"
+  local root; root=$(setup_env)
+  local late; late=$(mk_win_session "$root" late "$LATE" 2020-01-02T12:00:00Z 2020-01-02T12:10:00Z)
+  mk_session "$root" ok1
+  local h; h=$(hash_of "$late"); local fd; fd=$(fdir "$root")
+  # What the aborted run left: a worker's .err and no findings JSON for the session.
+  mkdir -p "$fd"
+  printf 'worker produced no findings JSON for %s (incomplete run: the engine exited without writing output)\nworker exit code: 1 after 3s\n' "$late" > "$fd/$h.json.err"
+  # No report exists and nothing is forced: the ordinary catch-up run for a missed date.
+  run_dream "$root"
+  in_list "$fd/sessions.txt" "$late" && ok "(a) the session touched after its day is enumerated again" || no "(a) the session touched after its day is enumerated again"
+  assert_eq "$(jq -r '.findings | type' "$fd/$h.json" 2>/dev/null)" "array" "(b) it was retried: its findings JSON now exists"
+  assert_no_file "$fd/$h.json.err" "(b) and the stale .err is gone"
+  assert_grep "$fd/run-stats.txt" 'l1_missing_after_retries: 0$' "nothing is missing after retries"
+  assert_grep "$fd/run-stats.txt" 'l1_err_files: 0$' "no .err file is left"
+  assert_grep "$fd/run-stats.txt" 'l1_err_files_orphaned: 0$' "and none is stranded"
+  # The rebuild of a day that already has a report, the exact case in the issue: the session
+  # is touched again after the first report was written, then the date is rebuilt.
+  local before; before=$(wc -l < "$fd/sessions.txt" | tr -d ' ')
+  touch -t 202001090900 "$late"
+  AUTODREAM_FORCE=1 run_dream "$root"
+  in_list "$fd/sessions.txt" "$late" && ok "a forced rebuild still enumerates it after a further touch" || no "a forced rebuild still enumerates it after a further touch"
+  assert_eq "$(wc -l < "$fd/sessions.txt" | tr -d ' ')" "$before" "the rebuilt corpus is the same size as the original's"
+  rm -rf "$root"
+}
+
+test_rebuild_of_an_omp_parent_touched_after_its_day_keeps_it_beside_its_advisor(){
+  echo "# #113 as reported: an omp parent touched after its day is enumerated again beside its untouched advisor sidecar"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local o; o=$(mk_omp_session "$root" parent1); local h; h=$(hash_of "$o")
+  touch -t "$LATE" "$o"
+  # The advisor sidecar keeps the parent's name as its directory and is not touched again.
+  local adir="${o%.jsonl}"; mkdir -p "$adir"
+  local adv="$adir/__advisor.jsonl"
+  { printf '{"type":"title","title":"adv","v":1}\n'
+    printf '{"type":"session","id":"01a00000-0000-7000-8000-0000000000aa","cwd":"/tmp/proj-o","timestamp":"2020-01-02T10:00:00.000Z"}\n'
+    printf '{"type":"message","id":"v1","parentId":null,"timestamp":"2020-01-02T10:01:00.000Z","message":{"role":"user","content":[{"type":"text","text":"transcript excerpt"}]}}\n'
+    printf '{"type":"message","id":"v2","parentId":"v1","timestamp":"2020-01-02T10:01:30.000Z","message":{"role":"user","content":[{"type":"text","text":"more of it"}]}}\n'
+    printf '{"type":"message","id":"v3","parentId":"v2","timestamp":"2020-01-02T10:02:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"advisor note"}]}}\n'
+  } > "$adv"; touch -t "$STAMP" "$adv"
+  local fd; fd=$(fdir "$root"); mkdir -p "$fd"
+  printf 'worker produced no findings JSON for %s (incomplete run: the engine exited without writing output)\n' "$o" > "$fd/$h.json.err"
+  run_dream_omp "$root"
+  in_list "$fd/sessions.txt" "$o"   && ok "the parent touched after its day is in the corpus" || no "the parent touched after its day is in the corpus"
+  in_list "$fd/sessions.txt" "$adv" && ok "and so is its advisor sidecar, so the report no longer holds the advisor without its parent" || no "and so is its advisor sidecar"
+  assert_eq "$(jq -r '.findings | type' "$fd/$h.json" 2>/dev/null)" "array" "the parent's stale failure was retried and has a findings record"
+  assert_nogrep "$fd/$h.json" 'could not be normalized' "and the omp session was not refused"
+  assert_no_file "$fd/$h.json.err" "its .err is gone"
+  assert_grep "$fd/run-stats.txt" 'l1_missing_after_retries: 0$' "nothing is missing"
+  rm -rf "$root"
+}
+
+test_stale_err_with_no_session_in_the_worklist_is_reported_not_silent(){
+  echo "# #113: a .err whose session is not in tonight's worklist is counted and named, not left to read as tonight's failure"
+  local root; root=$(setup_env); mk_session "$root" s1
+  local fd; fd=$(fdir "$root"); mkdir -p "$fd"
+  printf 'worker produced no findings JSON for /gone/session.jsonl (incomplete run)\n' > "$fd/deadbeef0001.json.err"
+  run_dream "$root"
+  assert_grep "$fd/run-stats.txt" 'l1_err_files: 1$' "the file is counted, as before"
+  assert_grep "$fd/run-stats.txt" 'l1_err_files_orphaned: 1$' "and counted as one nothing will retry"
+  assert_grep "$root/run.out" 'nothing will retry them: deadbeef0001' "and the log names it"
+  assert_grep "$fd/run-stats.txt" 'l1_missing_after_retries: 0$' "it does not make a finished corpus read as missing"
+  rm -rf "$root"
+}
+
+test_stale_err_is_counted_on_a_night_with_no_session_too(){
+  echo "# #113: the early exit for a night with nothing to triage still counts the stale failures in the directory"
+  local root; root=$(setup_env)
+  mk_win_session "$root" next "$LATE" 2020-01-03T12:00:00Z 2020-01-03T12:10:00Z >/dev/null
+  local fd; fd=$(fdir "$root"); mkdir -p "$fd"
+  printf 'worker produced no findings JSON for /gone/session.jsonl (incomplete run)\n' > "$fd/deadbeef0002.json.err"
+  run_dream "$root"
+  assert_grep "$fd/run-stats.txt" 'sessions_triaged: 0$' "nothing was triaged"
+  assert_grep "$fd/run-stats.txt" 'l1_err_files: 1$' "the stale .err is counted, not reported as 0"
+  assert_grep "$fd/run-stats.txt" 'l1_err_files_orphaned: 1$' "and counted as one nothing will retry"
+  assert_grep "$root/run.out" 'nothing will retry them: deadbeef0002' "and the log names it"
+  rm -rf "$root"
+}
+
+test_findings_outside_the_worklist_are_reported_and_left_in_place(){
+  echo "# window: a findings JSON for a session this run no longer places in the day is counted and named, and not deleted"
+  local root; root=$(setup_env)
+  # TWO sessions in the worklist: session_hash prints no trailing newline, and a list of hashes
+  # run together matches nothing, which made every findings JSON read as outside the worklist.
+  mk_win_session "$root" inday "$STAMP" 2020-01-02T12:00:00Z 2020-01-02T12:10:00Z >/dev/null
+  mk_win_session "$root" inday2 "$STAMP" 2020-01-02T13:00:00Z 2020-01-02T13:10:00Z >/dev/null
+  local fd; fd=$(fdir "$root"); mkdir -p "$fd"
+  # What an earlier mtime-only run left for a session that belongs to another day, and a stale
+  # failure for a session that is gone.
+  printf '{"session_path":"/elsewhere/old.jsonl","findings":[]}\n' > "$fd/0123456789ab.json"
+  printf 'worker produced no findings JSON for /gone/two.jsonl (incomplete run)\n' > "$fd/deadbeef0003.json.err"
+  run_dream "$root"
+  assert_grep "$fd/run-stats.txt" 'sessions_triaged: 2$' "both sessions are in the worklist"
+  assert_grep "$fd/run-stats.txt" 'l1_findings_outside_worklist: 1$' "only the leftover findings JSON is counted, not the two this run wrote"
+  assert_grep "$fd/run-stats.txt" 'l1_err_files_orphaned: 1$' "and only the stale .err"
+  assert_grep "$root/run.out" '0123456789ab' "the log names the leftover"
+  assert_file "$fd/0123456789ab.json" "and it is left in place, not deleted"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" s1; fd=$(fdir "$root")
+  run_dream "$root"
+  assert_grep "$fd/run-stats.txt" 'l1_findings_outside_worklist: 0$' "a clean night reports none outside its worklist"
+  rm -rf "$root"
+}
+
+test_a_night_of_only_out_of_window_files_says_so(){
+  echo "# window: when every modified file is outside the day the stub says that, not 'no session files were modified'"
+  local root; root=$(setup_env)
+  mk_win_session "$root" next "$LATE" 2020-01-03T12:00:00Z 2020-01-03T12:10:00Z >/dev/null
+  run_dream "$root"
+  local fd; fd=$(fdir "$root")
+  assert_grep   "$root/dreams/$DATE.md" 'No session had a record inside this day' "the report says no session had a record in the day"
+  assert_nogrep "$root/dreams/$DATE.md" 'No session files were modified' "and does not claim nothing was modified"
+  assert_grep   "$fd/run-stats.txt" 'sessions_out_of_window: 1$' "the file is counted"
+  assert_grep   "$fd/run-stats.txt" 'sessions_triaged: 0$' "nothing was triaged"
+  rm -rf "$root"
+}
+
+# ---- Report-day window on omp: cut the live chain AFTER it is linearized ---------------
+mk_omp_multiday(){ # $1=root $2=name -> path. Live chain u1 a1 u2 a2 u3 a3 u4 a4 over three days; ax is an abandoned branch ON the report day
+  local d="$1/home/.omp/agent/sessions/proj-o" f
+  mkdir -p "$d"; f="$d/2020-01-01T10-00-00-000Z_$2.jsonl"
+  local msg='"message":{"role":"%s","content":[{"type":"text","text":"%s"}]}'
+  {
+    printf '%s\n' '{"type":"title","title":"t","v":1}'
+    printf '{"type":"session","id":"01a00000-0000-7000-8000-000000000002","cwd":"/tmp/proj-o","timestamp":"2020-01-01T10:00:00.000Z"}\n'
+    printf '{"type":"message","id":"u1","parentId":null,"timestamp":"2020-01-01T12:00:00.000Z",'"$msg"'}\n' user DAY1_USER
+    printf '{"type":"message","id":"a1","parentId":"u1","timestamp":"2020-01-01T12:00:05.000Z",'"$msg"'}\n' assistant DAY1_ASSISTANT
+    printf '{"type":"message","id":"ax","parentId":"u1","timestamp":"2020-01-02T12:00:02.000Z",'"$msg"'}\n' assistant ABANDONED_BRANCH_MARKER
+    printf '{"type":"message","id":"u2","parentId":"a1","timestamp":"2020-01-02T12:00:00.000Z",'"$msg"'}\n' user DAY2_USER_A
+    printf '{"type":"message","id":"a2","parentId":"u2","timestamp":"2020-01-02T12:00:30.000Z",'"$msg"'}\n' assistant DAY2_ASSISTANT_A
+    printf '{"type":"message","id":"u3","parentId":"a2","timestamp":"2020-01-02T12:30:00.000Z",'"$msg"'}\n' user DAY2_USER_B
+    printf '{"type":"message","id":"a3","parentId":"u3","timestamp":"2020-01-02T12:30:05.000Z",'"$msg"'}\n' assistant DAY2_ASSISTANT_B
+    printf '{"type":"message","id":"u4","parentId":"a3","timestamp":"2020-01-03T12:00:00.000Z",'"$msg"'}\n' user DAY3_USER
+    printf '{"type":"message","id":"a4","parentId":"u4","timestamp":"2020-01-03T12:00:05.000Z",'"$msg"'}\n' assistant DAY3_ASSISTANT
+  } > "$f"
+  touch -t "$LATE" "$f"
+  printf '%s' "$f"
+}
+
+test_window_omp_cuts_the_live_chain_after_linearizing(){
+  echo "# window (omp): the live chain is cut to the day after it is linearized; the session is not refused"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local o; o=$(mk_omp_multiday "$root" multi); local h; h=$(hash_of "$o")
+  export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap" MOCK_CALL_LOG="$root/calls.log"; run_dream_omp "$root"; unset FANOUT MOCK_CAPTURE_DIR MOCK_CALL_LOG
+  local fd; fd=$(fdir "$root"); local rd="$root/cap/l1-read-$h.txt"
+  in_list "$fd/sessions.txt" "$o" && ok "an omp session touched after the day, with entries inside it, is enumerated" || no "an omp session touched after the day, with entries inside it, is enumerated"
+  assert_nogrep "$fd/$h.json" 'could not be normalized' "it was not refused by the linearizer (a cut of the raw tree would have left a dangling parentId)"
+  assert_file "$rd" "the omp worker ran"
+  assert_eq "$(head -n 1 "$rd" | jq -r .type)" "autodream_meta" "what it read opens with the session header"
+  assert_grep   "$rd" 'DAY2_USER_A' "it holds the day's entries"
+  assert_grep   "$rd" 'DAY2_ASSISTANT_B' "through the last one of the day"
+  assert_nogrep "$rd" 'DAY1_' "none from the day before"
+  assert_nogrep "$rd" 'DAY3_' "none from the day after"
+  assert_nogrep "$rd" 'ABANDONED_BRANCH_MARKER' "and not the abandoned branch, though its entry is timestamped inside the day"
+  assert_eq "$(jq -s '[.[] | select(.type == "message")] | map(.id) | join(",")' "$rd")" '"u2,a2,u3,a3"' "the kept entries are the live chain's run for the day, in order"
+  assert_eq "$(jq -s '[.[] | select(.type == "message")] as $m | [range(1; $m | length) | select($m[.].parentId != $m[. - 1].id)] | length' "$rd")" "0" "each entry points at the one before it: the slice is one unbroken chain"
+  assert_eq "$(jq -s '[.[] | select(.type == "message")][0].parentId' "$rd")" "null" "which starts at a root, so no parentId in it is dangling"
+  assert_eq "$(jq -r .user_message_count "$fd/$h.stats.json")" "2" "omp stats count the day's two user turns, not the chain's four"
+  assert_grep "$fd/run-stats.txt" 'sessions_windowed: 1$' "one session was cut"
+  assert_eq "$(ls "$fd" | grep -c '\.day\.jsonl$\|\.statsday\.jsonl$\|\.norm\.jsonl$\|\.statsin\.jsonl$')" "0" "no temporary copy is left behind"
+  rm -rf "$root"
+}
+
+test_window_omp_session_active_only_on_an_abandoned_branch_is_gated_not_refused(){
+  echo "# window (omp): a session whose only entries inside the day are on an abandoned branch is gated, not refused or read whole"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local d="$root/home/.omp/agent/sessions/proj-o" f; mkdir -p "$d"; f="$d/2020-01-01T10-00-00-000Z_aband.jsonl"
+  local msg='"message":{"role":"%s","content":[{"type":"text","text":"%s"}]}'
+  {
+    printf '%s\n' '{"type":"title","title":"t","v":1}'
+    printf '{"type":"session","id":"01a00000-0000-7000-8000-000000000003","cwd":"/tmp/proj-o","timestamp":"2020-01-01T10:00:00.000Z"}\n'
+    printf '{"type":"message","id":"u1","parentId":null,"timestamp":"2020-01-01T12:00:00.000Z",'"$msg"'}\n' user DAY1_USER
+    printf '{"type":"message","id":"a1","parentId":"u1","timestamp":"2020-01-01T12:00:05.000Z",'"$msg"'}\n' assistant DAY1_ASSISTANT
+    printf '{"type":"message","id":"ax","parentId":"u1","timestamp":"2020-01-02T12:00:00.000Z",'"$msg"'}\n' user ABANDONED_ONLY
+    printf '{"type":"message","id":"u2","parentId":"a1","timestamp":"2020-01-03T12:00:00.000Z",'"$msg"'}\n' user DAY3_USER
+  } > "$f"; touch -t "$LATE" "$f"
+  local h; h=$(hash_of "$f")
+  export FANOUT=1 MOCK_CALL_LOG="$root/calls.log"; run_dream_omp "$root"; unset FANOUT MOCK_CALL_LOG
+  local fd; fd=$(fdir "$root")
+  in_list "$fd/sessions.txt" "$f" && ok "it is enumerated: the raw file has an entry inside the day" || no "it is enumerated: the raw file has an entry inside the day"
+  assert_grep   "$fd/$h.json" 'below_noise_gate' "the live chain has nothing in the day, so it is gated"
+  assert_nogrep "$fd/$h.json" 'could not be normalized' "and not refused"
+  assert_nogrep "$root/calls.log" "$h" "no worker read it"
+  assert_eq "$(jq -r .user_message_count "$fd/$h.stats.json")" "0" "its stats say no user turns that day"
+  rm -rf "$root"
+}
+
+test_window_places_a_session_by_its_records_not_its_mtime
+test_window_cuts_a_multi_day_session_to_the_report_day
+test_window_off_restores_mtime_enumeration
+test_window_degrades_when_the_helper_is_absent
+test_window_is_dst_correct_end_to_end
+test_rebuild_keeps_a_session_touched_after_its_day_and_retries_its_stale_err
+test_rebuild_of_an_omp_parent_touched_after_its_day_keeps_it_beside_its_advisor
+test_stale_err_with_no_session_in_the_worklist_is_reported_not_silent
+test_stale_err_is_counted_on_a_night_with_no_session_too
+test_findings_outside_the_worklist_are_reported_and_left_in_place
+test_a_night_of_only_out_of_window_files_says_so
+test_window_omp_cuts_the_live_chain_after_linearizing
+test_window_omp_session_active_only_on_an_abandoned_branch_is_gated_not_refused
+
 # ---- The unit suites, run here and not only in CI ---------------------------
 # CLAUDE.md tells contributors "run tests/run-all.sh after any run.sh/prompt
 # change", and these five were wired into the workflow only — so a local pre-push
@@ -4725,7 +5097,7 @@ test_all_excluded_corpus_says_so
 # Their counts fold into the totals below, so a red unit suite fails this script.
 echo
 echo "===== unit suites ====="
-for _suite in lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript apply-pins scheduler-label review-skip review-cmux notes-path install-review-agent install-dry-run; do
+for _suite in lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript session-window apply-pins scheduler-label review-skip review-cmux notes-path install-review-agent install-dry-run; do
   _out=$(bash "$HERE/$_suite.sh" 2>&1)
   _rc=$?
   _p=$(printf '%s\n' "$_out" | sed -n 's/^passed: *\([0-9][0-9]*\).*/\1/p' | tail -1)

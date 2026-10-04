@@ -177,16 +177,22 @@ replay_ingest() { # $1=adapter $2=session root $3=date $4=archived findings dir 
   home="$sb/home"; target="$home/.claude/autodream"
   mkdir -p "$home/.claude/projects"
   local adapters="claude" session_roots="" next stage
-  next=$(date -j -v+1d -f %Y-%m-%d "$date" +%Y-%m-%d 2>/dev/null) || { fail "cannot parse the date $date"; rm -rf "$sb"; return; }
+  # How far past the day the runner looks for a session touched after it: its enumeration
+  # passes the adapter the report day plus five years (ENUM_END in run.sh).
+  next=$(date -j -v+5y -f %Y-%m-%d "$date" +%Y-%m-%d 2>/dev/null) || { fail "cannot parse the date $date"; rm -rf "$sb"; return; }
   # The runner's enumeration is a `find` that does not follow a symlinked root, and a root that
-  # is only a link finds nothing. So the sandbox holds a COPY of just the sessions modified on
-  # that date, mtimes preserved: the real store is only ever read, and the window the runner
-  # applies is the window the archive's run applied.
+  # is only a link finds nothing. So the sandbox holds a COPY of the sessions modified since
+  # that date began, mtimes preserved: the real store is only ever read. The upper bound is
+  # the runner's own reach, not the end of the day. The runner places a session in a day by
+  # the timestamps inside it, so a session written to again after the day closed still
+  # belongs to it, and staging only the files last modified ON the day would leave out
+  # exactly the sessions that matter. The runner applies its own window to what is staged,
+  # so an older runner (which bounds mtime itself) reads the same copy.
   stage="$sb/store"; mkdir -p "$stage"
   ( cd "$root" && find . -type f -name '*.jsonl' -newermt "$date 00:00:00" ! -newermt "$next 00:00:00" -print0 \
       | tar -cf - --null -T - 2>/dev/null ) | tar -xf - -C "$stage" 2>/dev/null
   local staged; staged=$(find "$stage" -type f -name '*.jsonl' | wc -l | tr -d ' ')
-  pass "staged $staged session file(s) modified on $date"
+  pass "staged $staged session file(s) modified from $date until five years after"
   case "$adapter" in
     claude) session_roots="$stage" ;;
     *)
@@ -219,7 +225,13 @@ replay_ingest() { # $1=adapter $2=session root $3=date $4=archived findings dir 
   found=$(stat_of "$fd/run-stats.txt" sessions_found_raw)
   triaged=$(stat_of "$fd/run-stats.txt" sessions_triaged)
   if [ -z "$found" ]; then fail "run-stats has no sessions_found_raw"
-  elif [ "$found" -eq 0 ] && [ "$staged" -gt 0 ]; then fail "$staged session file(s) were staged but the runner enumerated none"
+  elif [ "$found" -eq 0 ] && [ "$staged" -gt 0 ]; then
+    # Files from later days are staged too, so a run whose window holds none of them is a
+    # quiet day, which the runner counts. A runner that counts none of them out of window and
+    # still found nothing lost them.
+    n=$(stat_of "$fd/run-stats.txt" sessions_out_of_window)
+    if [ "${n:-0}" -gt 0 ]; then warn "none of the $staged staged file(s) holds a record on $date ($n out of window), so nothing was replayed"
+    else fail "$staged session file(s) were staged but the runner enumerated none"; fi
   elif [ "$found" -eq 0 ]; then warn "no session was modified on $date, so nothing was replayed"
   else pass "enumerated $found session(s), triaged $triaged"; fi
   normfail=$(grep -l 'could not be normalized' "$fd"/*.json 2>/dev/null | wc -l | tr -d ' ')

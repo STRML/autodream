@@ -58,6 +58,9 @@
 #                        (an adapter under adapters/ is accepted, not enabled, until named)
 #   AUTODREAM_FORCE      set 1 to rebuild even if a report exists    default: 0
 #   AUTODREAM_SLIM_BYTES sessions larger than this are slimmed for L1  default: 262144
+#   AUTODREAM_WINDOW     set 0 to place a session in a report day by its file mtime
+#                        alone, as before. On (default) it is placed by the timestamps
+#                        INSIDE the transcript, and stats and L1 see only that day  default: 1
 #   AUTODREAM_L2_ENGINE  adapter whose engine runs L2                default: the first enabled adapter
 #   AUTODREAM_L2_MODEL   pin the L2 aggregator model (every engine)   default: the adapter's own (claude: the CLI default)
 #   AUTODREAM_L2_MODEL_<NAME> / AUTODREAM_L1_MODEL_<NAME>  the same for one adapter only
@@ -311,6 +314,44 @@ fi
 # runs again, and the repo copy is the one that works in that window.
 APPLY_PINS=$(find_lib apply-pins.sh) || APPLY_PINS="$SCRIPT_DIR/apply-pins.sh"
 
+# Report-day window. A session belongs to a day because of the timestamps INSIDE it, not
+# because of its file mtime: a session written to again after its day closed (resumed, or
+# still running) used to drop out of every later rebuild of that day, and a transcript that
+# spans several days was read whole for each of them (issue #113).
+#
+# The adapter contract is unchanged. enumerate keeps its (root, from, to) arguments and
+# still filters on mtime; the runner passes it a far upper date, so the mtime test is a
+# LOWER bound only (a file last written before the day began cannot hold a record from it),
+# and bin/session-window.sh then keeps the files with a record inside the day and cuts the
+# stats and the worker's read down to that day's records.
+#
+# find_lib, not SCRIPT_DIR alone, for the reason apply-pins.sh gives above: a merge swaps
+# run.sh instantly while the helpers a symlinked run.sh looks for stay missing until
+# install.sh runs again. The helper is run through bash, not gated on -x, for the reason
+# preflight.sh is.
+#
+# The window is ON only when every piece of it works: the helper is there, it turns the
+# report day into epoch bounds, and the far date computes and is accepted by this host's
+# find. Any one missing leaves the original bounded enumeration in place, so a degraded
+# install reads exactly what it read before and never fails a night over this.
+# "Far" is the report day plus five years, not a year-9999 sentinel: BSD find on some macOS
+# releases cannot parse a distant date and fails with "Can't parse date/time", so the date
+# is also probed here with the same find the adapters run.
+SESSION_WINDOW=$(find_lib session-window.sh) || SESSION_WINDOW=""
+ENUM_END="$NEXT_DATE"
+WINDOW_ON=0
+WIN_START_EPOCH=""
+WIN_END_EPOCH=""
+if [ "${AUTODREAM_WINDOW:-1}" != "0" ] && [ -n "$SESSION_WINDOW" ] \
+   && _wb=$(bash "$SESSION_WINDOW" bounds "$TARGET_DATE" "$NEXT_DATE" 2>/dev/null) && [ -n "$_wb" ] \
+   && _far=$(date -j -f %Y-%m-%d -v+5y "$TARGET_DATE" +%Y-%m-%d 2>/dev/null) && [ -n "$_far" ] \
+   && find / -maxdepth 0 ! -newermt "$_far 00:00:00" >/dev/null 2>&1; then
+  WIN_START_EPOCH="${_wb%% *}"
+  WIN_END_EPOCH="${_wb##* }"
+  WINDOW_ON=1
+  ENUM_END="$_far"
+fi
+
 # Provenance of the code actually executing (#29), stamped into run-stats.txt below.
 # Resolved by walking this script's own symlink chain rather than by reusing SCRIPT_DIR,
 # which is a working directory and not a checkout. install.sh symlinks each script
@@ -504,6 +545,8 @@ write_unindexed_flag() {
 NL=$'\n'            # for the newline-in-path check below
 TAB=$'\t'           # ditto; the L1 xargs -I fan-out turns a tab into a space
 REJECTED_PATHS=0    # session paths a line-based sessions.txt cannot represent
+OUT_OF_WINDOW=0     # files modified since the day began that hold no record inside it
+SESSIONS_WINDOWED=0 # triaged sessions that spill outside the day, so their stats are cut to it
 PARTIAL_ROOTS=0     # roots whose enumerator failed but still returned data
 ROOTS_CONFIGURED=0  # roots we were told to scan
 ROOTS_SCANNED=0     # roots that existed and were walked
@@ -762,6 +805,20 @@ scan_one_adapter() { # $1=adapter name
           continue
           ;;
       esac
+      # Report-day window gate. With the window on, the adapter's find bounds mtime from
+      # below only, so a file modified after the day closed is kept when it holds a record
+      # INSIDE the day, and a file modified since the day began that holds none is left out
+      # and COUNTED, so it cannot read as a quiet night. Exit 1 is that verdict: records
+      # with clocks and none in the day, or no clock at all and modified after the day
+      # (its mtime decides, as the bounded find decided). Any other status is the helper
+      # failing, and a failing helper must cost extra work, never drop a session.
+      if [ "$WINDOW_ON" = 1 ]; then
+        bash "$SESSION_WINDOW" in-window "$sp" "$WIN_START_EPOCH" "$WIN_END_EPOCH" </dev/null >/dev/null 2>&1
+        if [ "$?" -eq 1 ]; then
+          OUT_OF_WINDOW=$((OUT_OF_WINDOW + 1))
+          continue
+        fi
+      fi
       # Paired writes, both checked. Losing either half desynchronises the
       # worklist from its provenance, and the collision detector reads the
       # provenance half.
@@ -802,7 +859,10 @@ enumerate_for() { # $1=adapter $2=root -> NUL-delimited paths
     # the exit code examined, and this wrapper handed it a success every time.
     # The suite passed 306 assertions over that, because none of them ran an
     # adapter whose enumerate fails. tests/run-all.sh now has one.
-    adapter_run "$1" enumerate "$2" "$TARGET_DATE" "$NEXT_DATE"
+    #
+    # The upper date is ENUM_END: the day after the report day with the window off, and
+    # far in the future with it on, where the in-transcript timestamps decide instead.
+    adapter_run "$1" enumerate "$2" "$TARGET_DATE" "$ENUM_END"
     return $?
   fi
   # The fallback is CLAUDE-ONLY. It hardcodes *.jsonl, and nothing reads
@@ -818,7 +878,7 @@ enumerate_for() { # $1=adapter $2=root -> NUL-delimited paths
   fi
   find "$2" -type f -name '*.jsonl' \
        -newermt "$TARGET_DATE 00:00:00" \
-       ! -newermt "$NEXT_DATE 00:00:00" \
+       ! -newermt "$ENUM_END 00:00:00" \
        -print0 2>/dev/null
 }
 
@@ -1500,6 +1560,72 @@ findings_json_count() {
     | wc -l | tr -d ' '
 }
 
+# Two kinds of leftover that this run's worklist does not own (#113). Both read SESSIONS_LIST,
+# which is empty on a night that found nothing, so the same scan serves the early stub exit.
+#
+# An orphaned .err is a failed triage nobody has finished: no findings JSON beside it, and its
+# session is not in the worklist (the file is gone, or this run no longer places it in the day).
+# While its session is in the worklist the retry loop owns it and l1_missing_count counts it;
+# one with no owner is retried by nothing and seen by no other counter, so l1_err_files cannot
+# tell "two workers crashed tonight" from "two crashed last week and nobody retried". Counted
+# and named, not retried: the .err is the only record of which session it was, and a worker with
+# the Write tool could have put any path in it.
+#
+# A findings JSON outside the worklist is a session an earlier run triaged under this date that
+# the current run no longer places in it (typically a rebuild of a date first run on file mtime
+# alone). Nothing removes it, and L2 reads every findings JSON in the directory, so the report
+# would quietly include it. Counted and named; left in place, because deleting findings is not
+# this runner's call. A clean rebuild means removing the date's findings directory first.
+worklist_hashes() {
+  [ -f "$SESSIONS_LIST" ] || return 0
+  # session_hash prints no trailing newline, so each hash is printed on its own line here:
+  # grep -x below matches whole lines, and two hashes run together never match anything.
+  local _s _h
+  while IFS= read -r _s; do
+    [ -n "$_s" ] || continue
+    _h=$(session_hash "$_s") || continue
+    printf '%s\n' "$_h"
+  done < "$SESSIONS_LIST"
+}
+scan_worklist_leftovers() {
+  L1_ERR_ORPHANED=0; ORPHAN_ERR_NAMES=""
+  FINDINGS_OUTSIDE_WORKLIST=0; OUTSIDE_FINDINGS_NAMES=""
+  local _hashes _f _h
+  _hashes=$(worklist_hashes)
+  for _f in "$FINDINGS_DIR"/*.json.err; do
+    [ -f "$_f" ] || continue
+    _h=$(basename "$_f" .json.err)
+    [ ! -f "$FINDINGS_DIR/$_h.json" ] || continue
+    printf '%s\n' "$_hashes" | grep -qxF "$_h" && continue
+    L1_ERR_ORPHANED=$((L1_ERR_ORPHANED + 1))
+    ORPHAN_ERR_NAMES="${ORPHAN_ERR_NAMES:+$ORPHAN_ERR_NAMES }$_h"
+  done
+  for _f in "$FINDINGS_DIR"/*.json; do
+    [ -f "$_f" ] || continue
+    _h=$(basename "$_f" .json)
+    case "$_h" in *[!0-9a-f]*|"") continue ;; esac
+    [ "${#_h}" -eq 12 ] || continue
+    printf '%s\n' "$_hashes" | grep -qxF "$_h" && continue
+    FINDINGS_OUTSIDE_WORKLIST=$((FINDINGS_OUTSIDE_WORKLIST + 1))
+    OUTSIDE_FINDINGS_NAMES="${OUTSIDE_FINDINGS_NAMES:+$OUTSIDE_FINDINGS_NAMES }$_h"
+  done
+  if [ "$L1_ERR_ORPHANED" -gt 0 ]; then
+    log "WARNING: $L1_ERR_ORPHANED .err file(s) have no findings JSON and belong to no session in this run's worklist, so nothing will retry them: $ORPHAN_ERR_NAMES"
+  fi
+  if [ "$FINDINGS_OUTSIDE_WORKLIST" -gt 0 ]; then
+    log "WARNING: $FINDINGS_OUTSIDE_WORKLIST findings JSON(s) in $FINDINGS_DIR belong to no session in this run's worklist and L2 will still read them: $OUTSIDE_FINDINGS_NAMES (remove the date's findings directory before a clean rebuild)"
+  fi
+}
+
+# Cut a transcript down to the report day's records. 0 = the slice was written to $2,
+# 1 = nothing to cut (the window is off, or every timestamped record is already inside the
+# day) and $2 is untouched, 2 = the helper failed and the caller reads the whole transcript.
+# A failed cut costs a larger read; it never costs the session.
+day_slice() { # $1=transcript $2=slice path
+  [ "$WINDOW_ON" = 1 ] || return 1
+  bash "$SESSION_WINDOW" day-file "$1" "$WIN_START_EPOCH" "$WIN_END_EPOCH" "$2" </dev/null 2>/dev/null
+}
+
 compute_session_stats() {
   local session hash stats
   while IFS= read -r session; do
@@ -1520,14 +1646,15 @@ compute_session_stats() {
     # The session's own adapter computes its stats (omp records are not claude records). The
     # AUTODREAM_STATS_BIN override still wins, and a session with no recorded source keeps the
     # claude script, so an install that predates the source sidecar degrades instead of failing.
-    local src stats_rc=1
+    local src stats_rc=1 statsin="$session" normtmp="" daytmp="" slice_rc
     src=$(awk -F'\t' -v h="$hash" '$1 == h { print $2; exit }' "$FINDINGS_DIR/sessions-source.txt" 2>/dev/null)
+    local own_adapter=0
     if [ -z "${AUTODREAM_STATS_BIN:-}" ] && [ -n "$src" ] && [ "$src" != "claude" ] \
        && [ -x "$(adapters_root 2>/dev/null)/$src/adapter.sh" ]; then
+      own_adapter=1
       # Stats describe the live conversation the worker will read, not the append-only tree it
       # came from: abandoned branches would otherwise add user turns and stretch the duration,
       # and the noise gate reads these numbers. So a normalizing adapter is linearized first.
-      local statsin="$session" normtmp=""
       if [ "$(adapter_manifest_get "$src" '.normalize' 2>/dev/null)" = "true" ]; then
         normtmp="$FINDINGS_DIR/$hash.statsin.jsonl"
         if adapter_run "$src" normalize "$session" "$normtmp" >/dev/null 2>&1 && [ -s "$normtmp" ]; then
@@ -1536,11 +1663,25 @@ compute_session_stats() {
           rm -f "$normtmp"; normtmp=""
         fi
       fi
-      adapter_run "$src" stats "$statsin" "$stats" >/dev/null 2>&1; stats_rc=$?
-      [ -z "$normtmp" ] || rm -f "$normtmp"
-    elif [ -x "$STATS" ]; then
-      "$STATS" "$session" "$stats" >/dev/null 2>&1; stats_rc=$?
     fi
+    # Then cut to the report day. The order matters and is the same one the worker uses: a
+    # tree is linearized FIRST and the live chain is what gets cut. Cutting the raw tree would
+    # leave entries whose parent was cut away, and the linearizer fails closed on a dangling
+    # parent, which would refuse every omp session that spans a day boundary.
+    daytmp="$FINDINGS_DIR/$hash.statsday.jsonl"
+    day_slice "$statsin" "$daytmp"; slice_rc=$?
+    case "$slice_rc" in
+      0) statsin="$daytmp"; SESSIONS_WINDOWED=$((SESSIONS_WINDOWED + 1)) ;;
+      1) daytmp="" ;;
+      *) daytmp=""; log "  WARNING: could not cut $session to $TARGET_DATE; its stats cover the whole transcript" ;;
+    esac
+    if [ "$own_adapter" = 1 ]; then
+      adapter_run "$src" stats "$statsin" "$stats" >/dev/null 2>&1; stats_rc=$?
+    elif [ -x "$STATS" ]; then
+      "$STATS" "$statsin" "$stats" >/dev/null 2>&1; stats_rc=$?
+    fi
+    [ -z "$normtmp" ] || rm -f "$normtmp"
+    [ -z "$daytmp" ] || rm -f "$daytmp"
     if [ "$stats_rc" -eq 0 ] && [ -s "$stats" ] && jq -e 'type == "object"' "$stats" >/dev/null 2>&1; then
       echo "stats: $session ($hash)" >&2
     else
@@ -1685,6 +1826,21 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
         readpath="$normfile"
         ;;
     esac
+    # A transcript that spans more than the report day is cut to the day first, AFTER the
+    # normalize step above: a tree is linearized and the live chain is what gets cut. The
+    # other order leaves entries whose parent was cut away, which the linearizer refuses.
+    # Status 0 wrote the slice, 1 means nothing to cut, 2 means the helper failed; both of
+    # those read the whole transcript, because a failed cut must cost a larger read and
+    # never the session. The stats sidecar the noise gate read was cut the same way.
+    dayfile=""
+    if [ "${WINDOW_ON:-0}" = 1 ]; then
+      dayfile="$FINDINGS_DIR/$hash.day.jsonl"
+      if bash "$SESSION_WINDOW" day-file "$readpath" "$WIN_START_EPOCH" "$WIN_END_EPOCH" "$dayfile" </dev/null 2>/dev/null; then
+        readpath="$dayfile"
+      else
+        rm -f "$dayfile"; dayfile=""
+      fi
+    fi
     sz=$(wc -c < "$readpath" | tr -d " ")
     if [ "${sz:-0}" -gt "${AUTODREAM_SLIM_BYTES:-262144}" ] && [ -x "$SLIM" ]; then
       slimfile="$FINDINGS_DIR/$hash.slim.jsonl"
@@ -1715,7 +1871,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
     if [ "${#argv[@]}" -eq 0 ]; then
       # Deterministic, so a structured error record that is left in place and skipped on re-run
       # (retrying would not change the answer) and counted by l1_findings_with_error.
-      rm -f "$slimfile" "$normfile"
+      rm -f "$slimfile" "$normfile" "$dayfile"
       printf "{\"session_path\":\"%s\",\"error\":\"no L1 engine for this session (source [%s], model [%s])\",\"findings\":[]}\n" "$session" "$src" "$model" > "$output"
       rm -f "$errlog"
       echo "skip (no engine): $session ($hash)" >&2
@@ -1753,6 +1909,11 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       if [ -n "$src" ] && [ -r "$ADAPTERS_DIR/$src/triage.md" ]; then
         printf "\n"
         cat "$ADAPTERS_DIR/$src/triage.md"
+      fi
+      if [ -n "$dayfile" ]; then
+        # Said plainly, because a worker handed a slice has no other way to know the first
+        # turn it reads is not the start of the session.
+        printf "\n## Report day\n\nThis transcript is the part of a longer session that was recorded on %s (local time). Records from other days were removed, so it can open in the middle of a task and end before the task does. The stats below describe this part only.\n" "$TARGET_DATE"
       fi
       if [ -s "$FINDINGS_DIR/$hash.stats.json" ]; then
         printf "\n## Precomputed session stats (authoritative — copy these into your output)\n\n\`\`\`json\n"
@@ -1806,11 +1967,14 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       if [ -n "$normfile" ]; then
         sed -i "" "s#$normfile#$session#g" "$output" 2>/dev/null || true
       fi
-      rm -f "$slimfile" "$normfile"
+      if [ -n "$dayfile" ]; then
+        sed -i "" "s#$dayfile#$session#g" "$output" 2>/dev/null || true
+      fi
+      rm -f "$slimfile" "$normfile" "$dayfile"
       rm -f "$errlog" "$outlog"
       echo "ok: $session ($hash) [$(($(date +%s) - t0))s]"
     else
-      rm -f "$slimfile" "$normfile"
+      rm -f "$slimfile" "$normfile" "$dayfile"
       # Worker exited without writing findings JSON. Record a diagnostic so the
       # failure is visible.
       printf "worker produced no findings JSON for %s (incomplete run: the engine exited without writing output)\n" "$session" >> "$errlog"
@@ -2101,7 +2265,11 @@ run() {
   fi
 
   # ---- Enumerate sessions modified during the target day ----
-  log "scanning for sessions modified between $TARGET_DATE and $NEXT_DATE..."
+  if [ "$WINDOW_ON" = 1 ]; then
+    log "scanning for sessions with a record between $TARGET_DATE and $NEXT_DATE (placed by the timestamps inside each transcript; a file with none by its mtime)..."
+  else
+    log "scanning for sessions modified between $TARGET_DATE and $NEXT_DATE..."
+  fi
   # Adapter refusals belong with this run's artifacts, not written back into the
   # installed source tree where they persist across runs and vanish entirely on a
   # read-only install.
@@ -2153,7 +2321,7 @@ run() {
   fi
   COUNT=$(wc -l < "$SESSIONS_LIST" | tr -d ' ')
   SKIPPED_EMPTY=$(( COUNT_AFTER_PRUNE - COUNT ))
-  log "found $RAW session files; excluded $EXCLUDED autodream-own, skipped $SKIPPED_EMPTY empty; $COUNT to triage"
+  log "found $RAW session files; excluded $EXCLUDED autodream-own, skipped $SKIPPED_EMPTY empty; $COUNT to triage; $OUT_OF_WINDOW out of window (modified since the day began, nothing inside it)"
 
   if [ "$COUNT" -eq 0 ]; then
     log "no sessions to triage; writing stub report and exiting"
@@ -2166,6 +2334,11 @@ run() {
     # so adding it to a path total understates the loss. Report the two
     # separately rather than inventing a combined figure that is wrong.
     local refused=$(( REJECTED_PATHS + HASH_COLLISIONS ))
+    # An empty worklist owns nothing, so every .err with no findings JSON is orphaned and every
+    # findings JSON is outside it. Counted here too: a night that found no session must not
+    # report zero over a directory that holds stale failures.
+    scan_worklist_leftovers
+    local early_err_files; early_err_files=$(ls -1 "$FINDINGS_DIR"/*.json.err 2>/dev/null | wc -l | tr -d ' ')
     {
       printf '# Autodream run self-audit — %s\n' "$TARGET_DATE"
       printf 'runner_commit: %s\n' "$RUNNER_COMMIT"
@@ -2178,6 +2351,9 @@ run() {
       printf 'self_sessions_excluded: %s\n' "$EXCLUDED"
       printf 'sessions_skipped_empty: %s\n' "$SKIPPED_EMPTY"
       printf 'sessions_rejected_path: %s\n' "$REJECTED_PATHS"
+      printf 'sessions_out_of_window: %s\n' "$OUT_OF_WINDOW"
+      printf 'session_window: %s\n' "$([ "$WINDOW_ON" = 1 ] && echo on || echo off)"
+      printf 'sessions_windowed: 0\n'
       printf 'sessions_duplicate_path: %s\n' "$DUPLICATE_PATHS"
       printf 'sessions_hash_collision: %s\n' "$HASH_COLLISIONS"
       printf 'sessions_dropped_to_collision: %s\n' "$COLLIDED_DROPPED"
@@ -2214,7 +2390,9 @@ run() {
       printf 'l1_breaker_fired: not_reached\n'
       printf 'l1_findings_written: 0\n'
       printf 'l1_missing_after_retries: 0\n'
-      printf 'l1_err_files: 0\n'
+      printf 'l1_err_files: %s\n' "$early_err_files"
+      printf 'l1_err_files_orphaned: %s\n' "$L1_ERR_ORPHANED"
+      printf 'l1_findings_outside_worklist: %s\n' "$FINDINGS_OUTSIDE_WORKLIST"
       printf 'l1_findings_with_error: 0\n'
       printf 'l1_errored_silent: 0\n'
       printf 'l1_errored_provider: 0\n'
@@ -2258,6 +2436,12 @@ $( if [ "${ROOTS_FAILED:-0}" -gt 0 ] || [ "${ROOTS_UNAVAILABLE:-0}" -gt 0 ]; the
      # entirely, so measuring against that under-reported how many were configured.
      printf '%s of %s configured session root(s) were unreadable or failed to enumerate, so this run did not read the whole store. Nothing was triaged from what it did read. See roots_failed and roots_unavailable in run-stats.txt — whether this was an empty night is unknown.' \
        "$(( ROOTS_FAILED + ROOTS_UNAVAILABLE ))" "$ROOTS_CONFIGURED"
+   elif [ "$RAW" -eq 0 ] && [ "$refused" -eq 0 ] && [ "$OUT_OF_WINDOW" -gt 0 ]; then
+     # Files were modified since the day began, so "none were modified" is false. They
+     # hold no record inside the day, which makes this a quiet day for them to be quiet
+     # about, but it is said with the count rather than left to read as an empty store.
+     printf 'No session had a record inside this day. %s file(s) modified since it began hold none and belong to another day. See sessions_out_of_window in run-stats.txt.' \
+       "$OUT_OF_WINDOW"
    elif [ "$RAW" -eq 0 ] && [ "$refused" -eq 0 ]; then
      printf 'No session files were modified.'
    else
@@ -2320,6 +2504,8 @@ EOF
   # call inherit it.
   export CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1
   export CLAUDE_BIN AUTODREAM_DIR FINDINGS_DIR SLIM WORK_DIR
+  # The report-day window, read by the dispatcher subshell to cut a multi-day transcript.
+  export WINDOW_ON SESSION_WINDOW WIN_START_EPOCH WIN_END_EPOCH TARGET_DATE
   # Which adapter runs each session, and which model each adapter's workers use, fixed here
   # before the first model call and held in the environment (see the worker comment). The
   # models are resolved once per adapter, not per session.
@@ -2501,6 +2687,8 @@ EOF
   L1_ELAPSED=$(( $(date +%s) - L1_START ))
   L1_OK=$(findings_json_count)
   L1_FAIL=$(ls -1 "$FINDINGS_DIR"/*.json.err 2>/dev/null | wc -l | tr -d " ")
+  # Leftovers this run's worklist does not own: see scan_worklist_leftovers.
+  scan_worklist_leftovers
   # In-band failures: a worker that ran to completion but couldn't fit the transcript
   # writes a findings JSON carrying a top-level "error" key (empty findings). These are
   # NOT .json.err files, so l1_err_files=0 masked them — count them explicitly so the
@@ -2599,10 +2787,13 @@ EOF
     if [ -z "$sz" ]; then
       STATS_SIDECARS_UNPARSEABLE=$((STATS_SIDECARS_UNPARSEABLE + 1))
       # Measure the transcript directly rather than letting the session fall out of the
-      # count. transcript_bytes is only ever `wc -c` of this same file (session-stats.sh),
-      # and dispatch_l1 sizes it exactly this way before slimming, so this is the same
-      # quantity from its original source — not an estimate. A clamped 0 here would bias
-      # the #12 gate toward staying closed, which is the whole point of the issue.
+      # count. transcript_bytes is `wc -c` of the file the stats were computed over, which
+      # is the file the worker reads: the transcript itself, or the normalized copy, or the
+      # day slice when the transcript spans more than the report day. dispatch_l1 sizes that
+      # same file before slimming, so this is the same quantity from its original source for
+      # a single-day transcript, and the whole file (an overstatement) for a multi-day one. It is
+      # not an estimate. A clamped 0 here would bias the #12 gate toward staying closed,
+      # which is the whole point of the issue.
       sz=$(wc -c < "$session" 2>/dev/null | tr -d ' ')
       case "$sz" in ''|*[!0-9]*) sz=0 ;; esac
     fi
@@ -2757,6 +2948,16 @@ PY
     # transcript exists that no report will ever mention, which is exactly the
     # kind of silent shortfall this file exists to make visible.
     printf 'sessions_rejected_path: %s\n' "$REJECTED_PATHS"
+    # Files modified since the day began that hold no record inside it (a session still
+    # being written on a later day, or one touched after its own day). They belong to
+    # another day's report, and a count here is what keeps a night whose files all
+    # fell outside the window from reading as a quiet one. session_window says whether
+    # the timestamp window was in force at all: a stats file with it off, or without the
+    # key, was placed by file mtime alone. sessions_windowed is how many of the triaged
+    # sessions spill outside the day, whose stats and L1 read are cut to the day.
+    printf 'sessions_out_of_window: %s\n' "$OUT_OF_WINDOW"
+    printf 'session_window: %s\n' "$([ "$WINDOW_ON" = 1 ] && echo on || echo off)"
+    printf 'sessions_windowed: %s\n' "${SESSIONS_WINDOWED:-0}"
     # Roots whose enumerator errored yet still returned paths. Nonzero means this
     # night's corpus may be short by an unknown amount — not a failure, but not a
     # clean read either, and the aggregator should not treat the totals as complete.
@@ -2834,6 +3035,12 @@ PY
     printf 'stats_sidecars_unparseable: %s\n' "$STATS_SIDECARS_UNPARSEABLE"
     printf 'l1_missing_after_retries: %s\n' "$MISSING"
     printf 'l1_err_files: %s\n' "$L1_FAIL"
+    # Of those, the ones with no findings JSON and no session in tonight's worklist: failed
+    # triage that nothing will retry. Nonzero is a stale failure, not tonight's.
+    printf 'l1_err_files_orphaned: %s\n' "$L1_ERR_ORPHANED"
+    # Findings JSONs in the directory that no session in tonight's worklist owns. L2 reads them
+    # all, so a nonzero value means the report includes sessions this run did not place in the day.
+    printf 'l1_findings_outside_worklist: %s\n' "$FINDINGS_OUTSIDE_WORKLIST"
     # Cached vs. fresh: lets the aggregator distinguish a sub-second "elapsed"
     # caused by everything already being done from a broken timer.
     printf 'l1_sessions_already_done_at_start: %s\n' "$L1_PRECACHED"

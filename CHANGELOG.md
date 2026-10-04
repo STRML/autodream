@@ -2,6 +2,19 @@
 
 All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
+## 2026-10-04
+
+### Fixed
+- **A session belongs to the day its records say, not the day its file was last written (#113).** Enumeration was `find -newermt DAY ! -newermt NEXT`, so a session touched again after its day closed (a resumed session, or an OMP title rewrite) vanished from every later rebuild of that day, and from the next day's report too unless a run for that day happened. A rebuild of 2026-08-21 lost two parents whose advisor sidecars it kept, and a stale `<hash>.json.err` with no `.json` was then neither retried nor counted. `run.sh` now bounds mtime from below only and keeps a file when it holds a record timestamped inside the local report day (`bin/session-window.sh`, both adapters, the top-level `.timestamp` string they both write). The session is back in `sessions.txt`, so the existing retry loop retries its stale `.err` and the missing count sees it. The adapter contract is unchanged: the runner passes `enumerate` an upper date of the report day plus five years.
+- A transcript that spans several days is cut to the report day before the stats and the L1 worker see it, so `duration_minutes`, the user-turn and tool counts, the noise gate, the overlap pass and the oversized gate describe that day. A transcript wholly inside the day is read exactly as before. An OMP session is linearized first and the live chain is what is cut, never the raw tree: cutting the tree leaves a dangling `parentId`, which the linearizer refuses. The slice starts at a root (`parentId` null) so no `parentId` in it points outside it. A worker handed a slice is told so in its prompt.
+- A transcript with no timestamps is placed by its mtime, so a no-clock file touched after its day still drops out of that day's rebuild; there is nothing else to place it by. A file modified since the day began that holds records and none inside the day is no longer triaged under that day, which an mtime-only run would have done.
+
+### Added
+- `run-stats.txt` keys `sessions_out_of_window`, `session_window` (`on`/`off`), `sessions_windowed` (triaged sessions cut to the day) and `l1_err_files_orphaned`, the `.err` files with no findings JSON whose session is not in the run's worklist, which nothing retries. They are logged by hash. A stale `.err` is reported, not retried: the `.err` is the only record of which session it was, and a worker with the Write tool could have put any path in it. `l1_findings_outside_worklist` counts findings JSONs left by an earlier run that this run's worklist no longer owns (L2 reads them all); they are named in the log and left in place.
+- `AUTODREAM_WINDOW=0` restores mtime-only placement. The window is also off, with `session_window: off`, when `bin/session-window.sh` cannot be found, the report day does not convert to epoch bounds, or this host's `find` rejects the far upper date, so a degraded install reads exactly what it read before.
+- `install.sh` links `bin/session-window.sh`. `tests/session-window.sh` is a new unit suite, in CI and in `tests/run-all.sh`; it checks DST days in New York, London and Sydney against literal epoch values.
+- `tests/replay.sh --ingest` stages every session modified from the date until five years after (the runner's own reach), not only those last modified on the date, so it can see the sessions this change recovers. A replayed date on which every staged file holds no record in the day is a WARN, not a FAIL.
+
 ## 2026-10-03
 
 ### Added
