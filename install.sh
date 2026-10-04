@@ -9,6 +9,7 @@
 #   ./install.sh                 # symlink into $HOME/.claude/ + schedule nightly job
 #   ./install.sh /path/to        # symlink into /path/to/autodream/ instead
 #   ./install.sh --no-schedule   # symlink only; don't touch launchd
+#   ./install.sh --no-review     # schedule the nightly but not the review triage popup agent
 #   ./install.sh --adapters claude,omp   # harnesses a run scans (names or `all`); written to config
 #   ./install.sh --l2-engine omp         # adapter whose engine runs L2; written to config
 #   ./install.sh --dry-run       # show every change, make none (no links, config, plist, launchctl)
@@ -20,6 +21,7 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ----------------------------------------------------------------- arg parsing --
 SCHEDULE=1
+REVIEW=1
 DRY=0
 ADAPTERS_ARG=""
 L2_ENGINE_ARG=""
@@ -28,12 +30,13 @@ while [ "$#" -gt 0 ]; do
   a="$1"; shift
   case "$a" in
     --no-schedule) SCHEDULE=0 ;;
+    --no-review) REVIEW=0 ;;
     --dry-run) DRY=1 ;;
     --adapters|--l2-engine)
       [ "$#" -gt 0 ] && [ -n "$1" ] || { echo "install: $a needs a value" >&2; exit 64; }
       case "$a" in --adapters) ADAPTERS_ARG="$1" ;; *) L2_ENGINE_ARG="$1" ;; esac
       shift ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
     -*) echo "install: unknown flag '$a'" >&2; exit 64 ;;
     *) TARGET_PARENT="$a" ;;
   esac
@@ -251,6 +254,74 @@ show_plist() { # $1=generated file
   sed 's/^/        /' "$1"
 }
 
+# A directory under a temp location belongs to the shell that ran the installer: a tool shim (cmux
+# puts one ahead of PATH in every terminal it opens), a per-session scratch dir. It is gone by the
+# time launchd runs the job, so a PATH entry or a CLAUDE_BIN taken from one rots the schedule with
+# no error. AUTODREAM_EPHEMERAL_DIRS replaces the colon-separated prefix list; set but empty turns
+# the check off (the test suites build their fake tools under TMPDIR).
+ephemeral_dir() { # $1=dir -> 0 when it lives under a temp location
+  local d p pr list
+  list="${AUTODREAM_EPHEMERAL_DIRS-${TMPDIR:-}:/tmp:/private/tmp:/var/folders:/private/var/folders}"
+  [ -n "$list" ] || return 1
+  d=$(cd "$1" 2>/dev/null && pwd -P) || d="$1"
+  local IFS=:
+  for p in $list; do
+    [ -n "$p" ] || continue
+    pr=$(cd "$p" 2>/dev/null && pwd -P) || pr="$p"
+    [ -n "${pr%/}" ] || continue
+    case "$d/" in "${pr%/}"/*) return 0 ;; esac
+  done
+  return 1
+}
+
+# A value from the install's config, resolved the way run.sh resolves it: by sourcing the file, so
+# `export KEY=value`, quotes and later assignments all read as they will at run time.
+cfg_get() { # $1=variable name
+  [ -f "$TARGET/config" ] || return 0
+  bash -c 'unset "$2"; . "$1" >/dev/null 2>&1; v="$2"; printf "%s" "${!v:-}"' _ "$TARGET/config" "$1"
+}
+
+# The directories of the CLIs the nightly runs, one per line: every enabled adapter's, and the L2
+# engine's (a host can scan claude and run L2 on omp). launchd starts the job with no login shell,
+# so a CLI that lives outside the usual dirs (omp in ~/.bun/bin) is unreachable unless its directory
+# is in the plist PATH. <NAME>_BIN from the config, when it names an executable, wins over the PATH
+# lookup, as the adapters resolve it at run time; the installer's own environment does not count,
+# because launchd will not carry it.
+adapter_bin_dirs() { # $1=PATH to search
+  local list="$ADAPTERS_ARG" l2="$L2_ENGINE_ARG" a m
+  [ -n "$list" ] || list=$(cfg_get AUTODREAM_ADAPTERS)
+  [ -n "$l2" ] || l2=$(cfg_get AUTODREAM_L2_ENGINE)
+  list=$(printf '%s' "${list:-claude}" | tr -d "\"'" | tr ',' ' ')
+  for a in $list; do
+    if [ "$a" = all ]; then
+      for m in "$REPO_DIR"/adapters/*/manifest.json; do
+        [ -e "$m" ] || continue
+        adapter_bin_dirs_one "$(basename "$(dirname "$m")")" "$1"
+      done
+    else
+      adapter_bin_dirs_one "$a" "$1"
+    fi
+  done
+  [ -z "$l2" ] || adapter_bin_dirs_one "$(printf '%s' "$l2" | tr -d "\"'")" "$1"
+}
+adapter_bin_dirs_one() { # $1=adapter name  $2=PATH to search
+  local m="$REPO_DIR/adapters/$1/manifest.json" bin var override="" b
+  # The name reaches an indirect expansion below; the same character set the --adapters
+  # flag enforces keeps a hand-edited config from putting anything else there.
+  case "$1" in ""|_*|*[!a-z0-9_-]*) return 0 ;; esac
+  [ -f "$m" ] || return 0
+  bin=$(sed -n 's/.*"engine_bin"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$m" | head -n 1)
+  [ -n "$bin" ] || return 0
+  var="$(printf '%s' "$1" | tr 'a-z-' 'A-Z_')_BIN"
+  override=$(cfg_get "$var")
+  if [ -n "$override" ] && [ -f "$override" ] && [ -x "$override" ] && [ "${override#/}" != "$override" ] \
+     && ! ephemeral_dir "$(dirname "$override")"; then
+    dirname "$override"; return 0
+  fi
+  b=$(PATH="$2" command -v "$bin" 2>/dev/null) || return 0
+  case "$b" in /*) dirname "$b" ;; esac
+}
+
 install_schedule() {
   local la_dir="$HOME/Library/LaunchAgents" real_la_dir
   real_la_dir="$la_dir"
@@ -277,9 +348,19 @@ install_schedule() {
 
   # launchd agents start with a minimal PATH; seed it with the dirs of the tools
   # the pipeline shells out to (claude, git, bash) plus the usual suspects.
-  local path_dirs="" tool b d CLAUDE_BIN_ABS=""
+  local path_dirs="" tool b d CLAUDE_BIN_ABS="" clean_path="" skipped_dirs="" old_ifs="$IFS"
+  # Resolve every tool against PATH minus the temp-dir entries, so neither the plist PATH nor
+  # the pinned CLAUDE_BIN can come from a shim that will not exist at 03:15.
+  IFS=:
+  for d in $PATH; do
+    [ -n "$d" ] || continue
+    if ephemeral_dir "$d"; then skipped_dirs="${skipped_dirs:+$skipped_dirs }$d"
+    else clean_path="${clean_path:+$clean_path:}$d"; fi
+  done
+  IFS="$old_ifs"
+  [ -z "$skipped_dirs" ] || echo "  note: ignoring PATH entries under a temp directory (launchd will not have them): $skipped_dirs"
   for tool in claude git bash; do
-    if b="$(command -v "$tool" 2>/dev/null)"; then
+    if b="$(PATH="$clean_path" command -v "$tool" 2>/dev/null)"; then
       if [ "$tool" = "claude" ] && [ -n "$b" ]; then
         # review.sh preflights the EXACT binary path (it aborts if CLAUDE_BIN is not -x), and its
         # default $HOME/.local/bin/claude is wrong when claude lives elsewhere. Remember the real
@@ -290,6 +371,12 @@ install_schedule() {
       case ":$path_dirs:" in *":$d:"*) ;; *) path_dirs="${path_dirs:+$path_dirs:}$d" ;; esac
     fi
   done
+  # The CLI of every enabled adapter too, not only claude's: omp lives in ~/.bun/bin on a bun install.
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    d="$(cd "$d" 2>/dev/null && pwd)" || continue
+    case ":$path_dirs:" in *":$d:"*) ;; *) path_dirs="${path_dirs:+$path_dirs:}$d" ;; esac
+  done < <(adapter_bin_dirs "$clean_path")
   local path_val="${path_dirs:+$path_dirs:}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
   local target_plist="$la_dir/$label.plist"
@@ -383,8 +470,10 @@ PLIST
   # scheduled job resolves the same binary install.sh accepted — the launchd
   # env's PATH is fixed and a non-default cmux (e.g. ~/bin/cmux) would
   # otherwise pass the install check but be unfindable at runtime.
-  local cfg_cmux="" cfg_claude=""
+  local cfg_cmux="" cfg_claude="" cfg_review=""
   if [ -f "$TARGET/config" ]; then
+    cfg_review=$( autodream_cfg_scope=${TARGET}/config; bash -c 'unset AUTODREAM_REVIEW_AGENT; . "$1" >/dev/null 2>&1; printf "%s" "${AUTODREAM_REVIEW_AGENT:-}"' _ "$autodream_cfg_scope" )
+    cfg_review=${cfg_review//\"/}
     # Read CMUX_BIN and CLAUDE_BIN with the SAME semantics review.sh uses at
     # runtime (it sources this config as Bash): a subshell apply handles $HOME/~
     # expansion and quotes correctly. A sed/raw-read would grab literal quote
@@ -398,7 +487,7 @@ PLIST
   CMUX_DEFAULT="${AUTODREAM_CMUX_DEFAULT:-/Applications/cmux.app/Contents/Resources/bin/cmux}"
   CMUX_FOUND=""
   { [ -n "$cfg_cmux" ] && [ -x "$cfg_cmux" ]; } && CMUX_FOUND="$cfg_cmux"
-  { [ -z "$CMUX_FOUND" ] && command -v cmux >/dev/null 2>&1; } && CMUX_FOUND=$(command -v cmux)
+  { [ -z "$CMUX_FOUND" ] && PATH="$clean_path" command -v cmux >/dev/null 2>&1; } && CMUX_FOUND=$(PATH="$clean_path" command -v cmux)
   { [ -z "$CMUX_FOUND" ] && [ -x "$CMUX_DEFAULT" ]; } && CMUX_FOUND="$CMUX_DEFAULT"
   # launchd runs the job with no working directory, so a relative CMUX_BIN that
   # passed `-x` here (it resolved against the installer's cwd) would fail at
@@ -422,13 +511,25 @@ PLIST
   for cand in "$cfg_claude" "$CLAUDE_BIN_ABS"; do
     if [ -n "$cand" ] && [ -f "$cand" ] && [ -x "$cand" ]; then eff_claude="$cand"; break; fi
   done
-  if [ -z "$eff_claude" ]; then
+  # --no-review, or AUTODREAM_REVIEW_AGENT=0 in the environment or the config, opts out of the popup
+  # agent. The flag is per run, like --no-schedule; the variable is what makes it stick across
+  # re-installs, which would otherwise provision the agent again.
+  local review_off=""
+  if [ "$REVIEW" = 0 ]; then review_off="--no-review"
+  else
+    case "${AUTODREAM_REVIEW_AGENT-$cfg_review}" in
+      0|no|off|false|NO|OFF|FALSE) review_off="AUTODREAM_REVIEW_AGENT=${AUTODREAM_REVIEW_AGENT-$cfg_review}" ;;
+    esac
+  fi
+  if [ -z "$eff_claude" ] && [ -z "$review_off" ]; then
     echo "  ! claude binary not usable (config [${cfg_claude}], PATH [${CLAUDE_BIN_ABS}]); review LaunchAgent will abort every trigger"
   fi
   CLAUDE_BIN_XML=$(printf '%s' "$eff_claude" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
   local review_label="${label}-review"
-  if [ -z "$CMUX_FOUND" ] || [ -z "$eff_claude" ]; then
-    if [ -z "$CMUX_FOUND" ]; then
+  if [ -n "$review_off" ] || [ -z "$CMUX_FOUND" ] || [ -z "$eff_claude" ]; then
+    if [ -n "$review_off" ]; then
+      echo "  review LaunchAgent not provisioned ($review_off)"
+    elif [ -z "$CMUX_FOUND" ]; then
       echo "  ! cmux not found (config CMUX_BIN, PATH, or $CMUX_DEFAULT); skipping review LaunchAgent"
     else
       echo "  ! claude binary not usable; skipping review LaunchAgent"

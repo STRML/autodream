@@ -67,6 +67,8 @@ jobs:
         run: bash tests/install-review-agent.sh
       - name: install-dry-run
         run: bash tests/install-dry-run.sh
+      - name: install-path
+        run: bash tests/install-path.sh
 
       - name: x-bookmarks
         run: bash tests/x-bookmarks.sh

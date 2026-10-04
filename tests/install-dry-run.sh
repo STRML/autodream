@@ -32,7 +32,7 @@ new_sandbox() {
 }
 run_install() { # args are installer args
   env HOME="$FAKE_HOME" PATH="$SANDBOX/shim:$SANDBOX/bin:/usr/bin:/bin" \
-      AUTODREAM_CMUX_DEFAULT="$SANDBOX/no-such-cmux" \
+      AUTODREAM_CMUX_DEFAULT="$SANDBOX/no-such-cmux" AUTODREAM_EPHEMERAL_DIRS= \
       bash "$REPO/install.sh" "$@" > "$SANDBOX/install.out" 2>&1
 }
 tree_of() { (cd "$SANDBOX" && find . -path ./install.out -prune -o -path ./launchctl-calls -prune -o -print | sort); }
