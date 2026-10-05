@@ -1476,23 +1476,42 @@ l2_diag_snapshot() { # $1=when: the host's state at one moment
   l2_diag_probe "memory pressure at $1" l2_diag_memory
 }
 
-# Run before an attempt launches. Prints the start half of the record, which the caller holds in
-# memory and hands to l2_diag_end, so a clean attempt leaves nothing on disk.
-l2_diag_start() {
-  printf 'start_epoch: %s\n' "$(date +%s)"
+# The start half of the record is gathered by a background job, so an attempt that goes on to
+# succeed (nearly all of them, and every one in the test suite) pays nothing for it. Sets
+# L2_DIAG_T0, L2_DIAG_FILE (the job's output) and L2_DIAG_JOB (its pid); l2_diag_end collects it.
+l2_diag_start_body() {
   printf 'start_time: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
   printf 'runner_pid: %s\n' "$$"
   l2_diag_probe "parent chain at start (runner first)" l2_diag_chain "$$"
   l2_diag_snapshot start
 }
 
-# $1=attempt $2=attempts $3=exit code $4=start half $5=file holding the worker pid
+l2_diag_start() {
+  L2_DIAG_T0=$(date +%s); L2_DIAG_FILE=""; L2_DIAG_JOB=""
+  L2_DIAG_FILE=$(mktemp "${TMPDIR:-/tmp}/l2start.XXXXXX" 2>/dev/null) || { L2_DIAG_FILE=""; L2_DIAG_JOB=""; return 0; }
+  ( l2_diag_start_body > "$L2_DIAG_FILE" 2>&1 < /dev/null ) &
+  L2_DIAG_JOB=$!
+}
+
+# Stop the start job, wait at most 3s for it first when its output is wanted, and print what it wrote.
+l2_diag_collect() { # $1=1 to wait for the job and print its output, 0 to discard it
+  local i=0
+  if [ "$1" = 1 ]; then
+    while [ -n "${L2_DIAG_JOB:-}" ] && kill -0 "${L2_DIAG_JOB:-}" 2>/dev/null && [ "$i" -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
+    cat "${L2_DIAG_FILE:-}" 2>/dev/null
+  fi
+  [ -n "${L2_DIAG_JOB:-}" ] && { pkill -P "${L2_DIAG_JOB:-}" 2>/dev/null; kill "${L2_DIAG_JOB:-}" 2>/dev/null; wait "${L2_DIAG_JOB:-}" 2>/dev/null; }
+  [ -n "${L2_DIAG_FILE:-}" ] && rm -f "${L2_DIAG_FILE:-}"
+  return 0
+}
+
+# $1=attempt $2=attempts $3=exit code $4=file holding the worker pid; reads l2_diag_start's globals
 l2_diag_end() {
-  local n="$1" total="$2" rc="$3" start="$4" pidfile="$5" f end label worker start_epoch
-  case "$rc" in 143|137|124) ;; *) return 0 ;; esac
+  local n="$1" total="$2" rc="$3" pidfile="$4" f end label worker start
+  case "$rc" in 143|137|124) ;; *) l2_diag_collect 0; return 0 ;; esac
   f="$FINDINGS_DIR/l2-attempt-$n.diag"
   end=$(date +%s)
-  start_epoch=$(printf '%s\n' "$start" | sed -n 's/^start_epoch: //p' | head -1)
+  start=$(l2_diag_collect 1)
   worker=$(cat "$pidfile" 2>/dev/null)
   label="${AUTODREAM_LAUNCHD_LABEL:-${XPC_SERVICE_NAME:-}}"
   {
@@ -1500,7 +1519,8 @@ l2_diag_end() {
     printf 'exit_code: %s\n' "$rc"
     printf 'worker_pid: %s\n' "${worker:-unknown}"
     printf 'end_epoch: %s\n' "$end"
-    printf 'elapsed_seconds: %s\n' "$(( end - ${start_epoch:-$end} ))"
+    printf 'start_epoch: %s\n' "${L2_DIAG_T0:-unknown}"
+    printf 'elapsed_seconds: %s\n' "$(( end - ${L2_DIAG_T0:-$end} ))"
     printf 'runner_timeout_fired: no (run.sh applies no timeout to L2, so exit %s came from the engine process or a signal sent to it)\n' "$rc"
     printf 'runner_survived: yes (this runner reached the end of the attempt, so the signal did not hit it)\n'
     printf 'launchd_label: %s\n' "${label:-none}"
@@ -3775,7 +3795,7 @@ PY
     # The engine starts through a one-line sh that records its own pid and then execs, so the
     # pid in the diagnostics is the engine's (issue 42). exec keeps the pid, stdin and argv.
     L2_PIDFILE=$(mktemp "${TMPDIR:-/tmp}/l2pid.XXXXXX" 2>/dev/null) || L2_PIDFILE=/dev/null
-    L2_DIAG_START=$(l2_diag_start 2>/dev/null) || L2_DIAG_START=""
+    l2_diag_start 2>/dev/null || true
     (
       cd "$WORK_DIR" 2>/dev/null || true
       {
@@ -3786,7 +3806,7 @@ PY
     ) > "$L2_STDOUT"
 
     L2_RC=$?
-    l2_diag_end "$attempt" "$L2_ATTEMPTS" "$L2_RC" "$L2_DIAG_START" "$L2_PIDFILE" 2>/dev/null || true
+    l2_diag_end "$attempt" "$L2_ATTEMPTS" "$L2_RC" "$L2_PIDFILE" 2>/dev/null || true
     [ "$L2_PIDFILE" = /dev/null ] || rm -f "$L2_PIDFILE"
     # ---- The runner writes the report from L2's stdout ----
     # The AUTODREAM_REPORT_END sentinel is the completion gate: everything before the LAST
