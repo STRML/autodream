@@ -3688,6 +3688,12 @@ test_install_deploys_the_adapter_runtime(){
   assert_file "$target/adapters.sh"    "adapters.sh is installed"
   assert_file "$target/preflight.sh"   "preflight.sh is installed"
   assert_file "$target/session-window.sh" "session-window.sh is installed"
+  assert_file "$target/chunk-transcript.sh" "chunk-transcript.sh is installed"
+  assert_file "$target/merge-chunks.sh"     "merge-chunks.sh is installed"
+  case "$(printf '{"findings":[]}' > "$T/ck.json"; bash "$target/merge-chunks.sh" --check "$T/ck.json" && echo usable)" in
+    usable) ok "the installed merge helper answers through its link" ;;
+    *) no "the installed merge helper answers through its link" ;;
+  esac
   # Through the symlink, from outside the checkout: the runner finds it in the install dir.
   case "$(bash "$target/session-window.sh" bounds 2020-01-02 2020-01-03 2>/dev/null)" in
     [0-9]*" "[0-9]*) ok "the installed window helper answers" ;;
@@ -4586,7 +4592,7 @@ test_upgrade_lag_install_still_produces_a_report(){
   mk_session_in "$T/home/.claude/projects/proj-a" s1
   HOME="$T/home" AUTODREAM_CHANGELOG=0 CLAUDE_BIN="$MOCK" \
     AUTODREAM_CONFIG="$T/autodream/config" AUTODREAM_CONSUME_DATE="$DATE" \
-    AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1 \
+    AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1 AUTODREAM_L1_CHUNK_BYTES=300000 \
     AUTODREAM_DIR="$T/autodream" DREAMS_DIR="$T/dreams" \
     bash "$T/autodream/run.sh" "$DATE" > "$T/run.out" 2>&1
   local rc=$?
@@ -4596,6 +4602,7 @@ test_upgrade_lag_install_still_produces_a_report(){
   # The helper is not in the install dir yet (install.sh has not run again), and the window is
   # still on: the runner finds session-window.sh in the checkout its symlink points into.
   assert_grep "$T/autodream/findings/$DATE/run-stats.txt" 'session_window: on$' "the window is on although the install has no helper link yet"
+  assert_grep "$T/autodream/findings/$DATE/run-stats.txt" 'l1_chunk_bytes: 300000$' "and so is chunked triage, found in the checkout the same way"
   assert_nonempty "$T/dreams/$DATE.md" "the upgrade-lag install still produced a report"
   rm -rf "$T"
 }
@@ -5779,6 +5786,512 @@ test_findings_outside_the_worklist_are_set_aside_not_deleted
 test_a_night_of_only_out_of_window_files_says_so
 test_window_omp_cuts_the_live_chain_after_linearizing
 test_window_omp_session_active_only_on_an_abandoned_branch_is_gated_not_refused
+
+test_leftover_counts_hold_with_several_sessions_in_the_worklist(){
+  echo "# leftovers: the worklist hashes are one per line, so a findings JSON the worklist owns is never counted as foreign"
+  local root; root=$(setup_env)
+  mk_session "$root" s1; mk_session "$root" s2; mk_session "$root" s3
+  local fd; fd=$(fdir "$root"); mkdir -p "$fd"
+  # Two leftovers the worklist does not own: a findings JSON and an .err with no findings JSON.
+  printf '{"session_path":"/gone/a.jsonl","findings":[]}' > "$fd/deadbeef0001.json"
+  printf 'worker produced no findings JSON for /gone/b.jsonl\n' > "$fd/deadbeef0002.json.err"
+  run_dream "$root"
+  assert_grep "$fd/run-stats.txt" 'sessions_triaged: 3$' "three sessions were triaged"
+  assert_grep "$fd/run-stats.txt" 'l1_findings_outside_worklist: 1$' "exactly the one foreign findings JSON is counted, not the three the worklist owns"
+  assert_grep "$fd/run-stats.txt" 'l1_err_files_orphaned: 1$' "and exactly the one orphan .err"
+  assert_file "$fd/outside-worklist/deadbeef0001.json" "the foreign findings JSON is set aside, so L2 does not read it"
+  rm -rf "$root"
+}
+
+test_leftover_counts_hold_with_several_sessions_in_the_worklist
+
+# ---- Chunked triage: a transcript too big for one worker is read in chunks ---------------
+# One worker per chunk, then a mechanical merge into the one findings JSON per session that L2
+# already reads. The expected counts below come from the fixtures and from what the mock engine
+# was actually handed (MOCK_CAPTURE_DIR keeps every transcript a worker read), not from the code
+# under test. SLIM_BYTES and CHUNK_BYTES are set tiny so a fixture of a few KB behaves like a
+# multi-MB session.
+mk_chunky(){ # $1=root $2=name $3=turns -> path. Turn-NNN user records among bookkeeping and hook noise
+  local f="$1/projects/proj-a/$2.jsonl" i m s
+  : > "$f"
+  for i in $(seq 1 "$3"); do
+    m=$((i / 2)); s=$(( (i % 2) * 30 ))
+    printf '{"type":"mode","mode":"auto","timestamp":"2020-01-02T12:%02d:%02d.000Z"}\n' "$m" "$s" >> "$f"
+    printf '{"type":"attachment","timestamp":"2020-01-02T12:%02d:%02d.000Z","attachment":{"type":"hook_success","stdout":"HOOKNOISE-%03d"}}\n' "$m" "$s" "$i" >> "$f"
+    printf '{"parentUuid":"p%d","type":"user","cwd":"/tmp/proj-a","uuid":"u%d","timestamp":"2020-01-02T12:%02d:%02d.000Z","message":{"role":"user","content":"turn-%03d some user words to give the line a body"}}\n' "$i" "$i" "$m" "$s" "$i" >> "$f"
+    printf '{"parentUuid":"u%d","type":"assistant","uuid":"a%d","timestamp":"2020-01-02T12:%02d:%02d.500Z","message":{"role":"assistant","content":[{"type":"text","text":"reply-%03d and some assistant words"}]}}\n' "$i" "$i" "$m" "$s" "$i" >> "$f"
+  done
+  touch -t "$STAMP" "$f"
+  printf '%s' "$f"
+}
+chunk_reads(){ ls "$1"/cap/l1-read-*.chunkout.txt 2>/dev/null; }   # what each chunk worker was handed
+nreads(){ chunk_reads "$1" | wc -l | tr -d ' '; }
+turn_stats(){ # distinct turn markers handed to chunk workers / the most times any one marker was handed
+  chunk_reads "$1" | xargs cat 2>/dev/null | grep -o 'turn-[0-9][0-9][0-9]' | sort | uniq -c | awk '{ d++; if ($1 > m) m = $1 } END { printf "%d/%d", d, m }'
+}
+run_chunked(){ # $1=root ; env for the run is set by the caller
+  export FANOUT=1 AUTODREAM_SLIM_BYTES=3000 MOCK_CAPTURE_DIR="$1/cap"
+  : "${AUTODREAM_L1_CHUNK_BYTES:=3000}"; export AUTODREAM_L1_CHUNK_BYTES
+  run_dream "$1"
+  unset FANOUT AUTODREAM_SLIM_BYTES MOCK_CAPTURE_DIR
+}
+
+test_chunking_reads_the_whole_conversation_in_chunks(){
+  echo "# chunking: an oversized transcript is read in full, in chunks, and merged into one findings JSON"
+  local root; root=$(setup_env)
+  local f; f=$(mk_chunky "$root" big 60); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
+  export MOCK_MODE=chunked MOCK_CALL_LOG="$root/calls.log"; run_chunked "$root"; unset MOCK_MODE MOCK_CALL_LOG
+  local n; n=$(nreads "$root")
+  [ "$n" -ge 3 ] && ok "the 60-turn transcript was split into $n chunks (at least 3)" || no "the 60-turn transcript was split into chunks (got $n)"
+  assert_eq "$(wc -l < "$root/calls.log" | tr -d ' ')" "$n" "one engine call per chunk, and no call for the whole transcript"
+  assert_eq "$(turn_stats "$root")" "60/1" "every one of the 60 turns was handed to a chunk worker, exactly once"
+  assert_eq "$(chunk_reads "$root" | xargs cat | grep -c 'HOOKNOISE\|"type":"mode"')" "0" "and none of the hook or bookkeeping noise was"
+  local big=0 r; for r in $(chunk_reads "$root"); do [ "$(wc -c < "$r" | tr -d ' ')" -gt 3600 ] && big=1; done
+  assert_eq "$big" "0" "no chunk is much past the 3000-byte limit (a line is never split to fit)"
+  assert_eq "$(jq -r .session_path "$fd/$h.json")" "$f" "the merged findings name the real session, not a chunk file"
+  assert_eq "$(jq -r .meta.chunks "$fd/$h.json")" "$n" "meta records the chunk count"
+  assert_eq "$(jq -r .meta.chunks_elided "$fd/$h.json")" "0" "and that none were elided"
+  assert_eq "$(jq -r .underlying_goal "$fd/$h.json")" "goal-1" "the goal is the first chunk's"
+  assert_eq "$(jq -r .outcome "$fd/$h.json")" "fully_achieved" "the outcome is the last chunk's (only it says fully_achieved)"
+  assert_eq "$(jq -r '[.findings[] | select(.what | startswith("finding-from-chunk-"))] | length' "$fd/$h.json")" "$n" "every chunk's own finding is in the merge"
+  assert_eq "$(jq -r '[.findings[] | select(.what == "shared across chunks")] | length' "$fd/$h.json")" "1" "a finding every chunk reported appears once"
+  assert_eq "$(jq -r '.findings | map(.chunk) | max' "$fd/$h.json")" "$n" "findings are tagged with their chunk"
+  local last; last=$(ls "$root"/cap/l1-stdin-*.chunkout.txt | sort | tail -1)
+  assert_grep "$last" "chunk $n of $n of ONE session" "each chunk worker is told which chunk it holds"
+  assert_grep "$last" 'Precomputed session stats' "and still gets the session stats"
+  assert_eq "$(awk '/^## Chunk note/ {c = NR} /^## Precomputed session stats/ {s = NR} END {print (c > 0 && s > c) ? "ok" : "bad"}' "$last")" "ok" "after the chunk note, so the stats block stays last as the triage prompt says"
+  assert_no_file "$fd/.chunks/$h" "no chunk scratch is left once the session is done"
+  assert_eq "$(ls -A "$fd" | grep -c '^\.chunks$\|\.chunkout$')" "0" "and no chunk directory or chunk answer is in the findings directory"
+  assert_grep "$fd/run-stats.txt" "l1_chunk_bytes: 3000\$" "run-stats records the setting in force"
+  assert_grep "$fd/run-stats.txt" "l1_chunked_sessions: 1\$" "one chunked session"
+  assert_grep "$fd/run-stats.txt" "l1_chunks: $n\$" "the chunk workers it needed"
+  assert_grep "$fd/run-stats.txt" "l1_chunk_calls: $n\$" "and the engine calls actually made"
+  assert_grep "$fd/run-stats.txt" 'l1_chunks_elided: 0$' "none elided"
+  assert_grep "$fd/run-stats.txt" 'l1_missing_after_retries: 0$' "nothing is missing"
+  assert_eq "$(jq -r '.findings | type' "$fd/$h.json")" "array" "and the merged file is an ordinary findings JSON"
+  rm -rf "$root"
+}
+
+test_chunking_leaves_a_transcript_that_fits_alone(){
+  echo "# chunking: a transcript that fits in one worker is read by one worker, exactly as before"
+  local root; root=$(setup_env)
+  local f; f=$(mk_chunky "$root" fits 8); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
+  export MOCK_MODE=chunked MOCK_CALL_LOG="$root/calls.log"
+  AUTODREAM_L1_CHUNK_BYTES=300000 run_chunked "$root"; unset MOCK_MODE MOCK_CALL_LOG
+  assert_eq "$(wc -l < "$root/calls.log" | tr -d ' ')" "1" "one engine call"
+  assert_eq "$(nreads "$root")" "0" "and it was not a chunk"
+  assert_nogrep "$root/cap/l1-stdin-$h.txt" 'Chunk note' "its prompt carries no chunk note"
+  assert_grep "$fd/run-stats.txt" 'l1_chunked_sessions: 0$' "run-stats counts no chunked session"
+  assert_grep "$fd/run-stats.txt" 'l1_chunk_calls: 0$' "and no chunk call"
+  assert_nogrep "$root/cap/l1-read-$h.txt" 'HOOKNOISE' "it was slimmed with the bookkeeping dropped, so it reads as the conversation"
+  assert_grep "$root/cap/l1-read-$h.txt" 'turn-008' "and holds every turn"
+  assert_eq "$(jq -r 'has("meta")' "$fd/$h.json")" "false" "the findings carry no chunk meta"
+  rm -rf "$root"
+}
+
+test_chunk_cap_drops_the_middle_and_counts_it(){
+  echo "# chunking: over AUTODREAM_L1_MAX_CHUNKS the middle is dropped, and said so everywhere"
+  local root; root=$(setup_env)
+  local f; f=$(mk_chunky "$root" big 60); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
+  export MOCK_MODE=chunked AUTODREAM_L1_MAX_CHUNKS=2; run_chunked "$root"; unset MOCK_MODE AUTODREAM_L1_MAX_CHUNKS
+  assert_eq "$(nreads "$root")" "2" "only 2 chunks were read"
+  local e; e=$(jq -r .meta.chunks_elided "$fd/$h.json")
+  [ "$e" -ge 1 ] && ok "and the merged findings say $e were elided" || no "and the merged findings say some were elided (got $e)"
+  assert_grep "$fd/run-stats.txt" "l1_chunks_elided: $e\$" "run-stats counts them: a degraded read cannot pass as a complete one"
+  assert_grep "$fd/run-stats.txt" 'l1_chunks: 2$' "and the chunk workers"
+  local first last; first=$(ls "$root"/cap/l1-read-*.chunkout.txt | sort | head -1); last=$(ls "$root"/cap/l1-read-*.chunkout.txt | sort | tail -1)
+  assert_grep "$first" 'turn-001' "the kept head holds the start of the session"
+  assert_grep "$last" 'turn-060' "the kept tail holds the end of it"
+  assert_nogrep "$first" 'turn-060' "and the head does not reach the end"
+  assert_grep "$root/cap/l1-stdin-$(basename "$first" | sed 's/^l1-read-//; s/\.txt$//').txt" "$e chunks from the middle of the session were omitted" "the worker is told what was omitted"
+  rm -rf "$root"
+}
+
+test_chunk_cap_of_one_reads_one_chunk_never_the_whole_transcript(){
+  echo "# chunking: AUTODREAM_L1_MAX_CHUNKS=1 is a bounded read of the first chunk, never the whole slim"
+  local root; root=$(setup_env)
+  local f; f=$(mk_chunky "$root" big 60); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
+  export MOCK_MODE=chunked AUTODREAM_L1_MAX_CHUNKS=1 MOCK_TRANSCRIPT_LOG="$root/sizes.log"; run_chunked "$root"; unset MOCK_MODE AUTODREAM_L1_MAX_CHUNKS MOCK_TRANSCRIPT_LOG
+  assert_eq "$(wc -l < "$root/sizes.log" | tr -d ' ')" "1" "one engine call"
+  local sz; sz=$(cut -f2 "$root/sizes.log" | head -1)
+  [ "$sz" -le 3600 ] && ok "it was handed $sz bytes, one chunk, not the whole slim" || no "it was handed $sz bytes, more than one chunk"
+  assert_eq "$(jq -r .meta.chunks "$fd/$h.json")" "1" "the findings say one chunk"
+  [ "$(jq -r .meta.chunks_elided "$fd/$h.json")" -ge 1 ] && ok "and that the rest were elided" || no "and that the rest were elided"
+  rm -rf "$root"
+}
+
+test_chunking_off_is_the_old_behaviour(){
+  echo "# chunking: AUTODREAM_L1_CHUNK_BYTES=0 reads an oversized transcript exactly the old way, the head/tail slim"
+  local root; root=$(setup_env)
+  local f; f=$(mk_chunky "$root" big 60); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
+  export MOCK_CALL_LOG="$root/calls.log"
+  mkdir -p "$fd"; printf 'x\n' > "$fd/deadbeefdead.slim.jsonl"
+  AUTODREAM_SLIM_HEAD=10 AUTODREAM_SLIM_TAIL=6 AUTODREAM_L1_CHUNK_BYTES=0 run_chunked "$root"; unset MOCK_CALL_LOG
+  assert_eq "$(wc -l < "$root/calls.log" | tr -d ' ')" "1" "one engine call"
+  rm -f "$root/plain.slim"
+  AUTODREAM_SLIM_HEAD=10 AUTODREAM_SLIM_TAIL=6 "$REPO/bin/slim-transcript.sh" "$f" "$root/plain.slim" >/dev/null 2>&1
+  if cmp -s "$root/plain.slim" "$root/cap/l1-read-$h.txt"; then ok "what the worker read is exactly what the slimmer writes with no mode set"; else no "what the worker read is exactly what the slimmer writes with no mode set"; fi
+  assert_grep "$root/cap/l1-read-$h.txt" 'lines elided by autodream for size' "with the elision marker and the head/tail view"
+  assert_grep "$root/cap/l1-read-$h.txt" 'HOOKNOISE' "the bookkeeping is still in it (the reshape is part of the chunked mode)"
+  assert_nogrep "$root/cap/l1-stdin-$h.txt" 'Chunk note' "no chunk note"
+  assert_eq "$(nreads "$root")" "0" "no chunk worker"
+  assert_grep "$fd/run-stats.txt" 'l1_chunk_bytes: 0$' "run-stats says chunking is off"
+  assert_grep "$fd/run-stats.txt" 'l1_chunk_calls: 0$' "and made no chunk call"
+  assert_no_file "$fd/.chunks" "and no chunk directory exists"
+  assert_no_file "$fd/l1-chunks.txt" "nor a chunk ledger"
+  assert_file "$fd/deadbeefdead.slim.jsonl" "and the post-round cleanup of transcript copies is part of the gated behaviour, so it did not run"
+  assert_eq "$(jq -r 'has("meta")' "$fd/$h.json")" "false" "the findings carry no chunk meta"
+  rm -rf "$root"
+}
+
+test_chunking_is_off_when_the_knob_is_unset(){
+  echo "# chunking: with AUTODREAM_L1_CHUNK_BYTES unset, an oversized session is read exactly as with it set to 0"
+  local root0 rootu; root0=$(setup_env); rootu=$(setup_env)
+  local f0 fu h0 hu
+  f0=$(mk_chunky "$root0" big 60); h0=$(hash_of "$f0")
+  fu=$(mk_chunky "$rootu" big 60); hu=$(hash_of "$fu")
+  ( export FANOUT=1 AUTODREAM_SLIM_BYTES=3000 AUTODREAM_SLIM_HEAD=10 AUTODREAM_SLIM_TAIL=6 MOCK_CAPTURE_DIR="$root0/cap" AUTODREAM_L1_CHUNK_BYTES=0
+    run_dream "$root0" )
+  ( unset AUTODREAM_L1_CHUNK_BYTES AUTODREAM_L1_MAX_CHUNKS
+    export FANOUT=1 AUTODREAM_SLIM_BYTES=3000 AUTODREAM_SLIM_HEAD=10 AUTODREAM_SLIM_TAIL=6 MOCK_CAPTURE_DIR="$rootu/cap"
+    run_dream "$rootu" )
+  local fd0 fdu; fd0=$(fdir "$root0"); fdu=$(fdir "$rootu")
+  assert_grep "$fdu/run-stats.txt" 'l1_chunk_bytes: 0$' "unset means off: run-stats says 0"
+  assert_grep "$rootu/cap/l1-read-$hu.txt" 'lines elided by autodream for size' "the worker read the head/tail slim"
+  if cmp -s "$root0/cap/l1-read-$h0.txt" "$rootu/cap/l1-read-$hu.txt"; then ok "the transcript the worker read is byte for byte the one read with the knob at 0"; else no "the transcript the worker read is byte for byte the one read with the knob at 0"; fi
+  sed "s#$root0#R#g; s#$h0#H#g" "$root0/cap/l1-stdin-$h0.txt" > "$rootu/p0.txt"
+  sed "s#$rootu#R#g; s#$hu#H#g" "$rootu/cap/l1-stdin-$hu.txt" > "$rootu/pu.txt"
+  diff "$rootu/p0.txt" "$rootu/pu.txt" > "$rootu/prompt.diff" 2>&1; if [ ! -s "$rootu/prompt.diff" ]; then ok "and so is the prompt it was given"; else no "and so is the prompt it was given ($(head -c 300 "$rootu/prompt.diff"))"; fi
+  assert_eq "$(jq -S 'del(.session_path)' "$fdu/$hu.json" | sed "s#$hu#H#g")" "$(jq -S 'del(.session_path)' "$fd0/$h0.json" | sed "s#$h0#H#g")" "and so is the findings JSON"
+  assert_no_file "$fdu/.chunks" "no chunk directory"
+  rm -rf "$root0" "$rootu"
+}
+
+test_chunk_knobs_are_validated(){
+  echo "# chunking: its knobs are validated at startup, in the house style"
+  local root; root=$(setup_env); mk_session "$root" s1
+  AUTODREAM_L1_CHUNK_BYTES=abc run_dream "$root"
+  assert_eq "$(cat "$root/run.exit")" "1" "a non-numeric AUTODREAM_L1_CHUNK_BYTES refuses to start"
+  assert_grep "$root/run.out" 'AUTODREAM_L1_CHUNK_BYTES must be a non-negative integer' "and says why"
+  AUTODREAM_L1_MAX_CHUNKS=0 run_dream "$root"
+  assert_eq "$(cat "$root/run.exit")" "1" "AUTODREAM_L1_MAX_CHUNKS=0 refuses to start"
+  AUTODREAM_L1_MAX_CHUNKS=abc run_dream "$root"
+  assert_eq "$(cat "$root/run.exit")" "1" "and so does a non-numeric one"
+  AUTODREAM_L1_CHUNK_BYTES=0 run_dream "$root"
+  assert_eq "$(cat "$root/run.exit")" "0" "AUTODREAM_L1_CHUNK_BYTES=0 is valid: it is the off switch"
+  assert_grep "$(fdir "$root")/run-stats.txt" 'l1_chunk_bytes: 0$' "and run-stats says off"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" s1
+  AUTODREAM_L1_CHUNK_BYTES=0300000 AUTODREAM_L1_MAX_CHUNKS=08 run_dream "$root"
+  assert_eq "$(cat "$root/run.exit")" "0" "leading zeros are decimal, not an invalid octal (0300000 and 08)"
+  assert_grep "$(fdir "$root")/run-stats.txt" 'l1_chunk_bytes: 300000$' "0300000 is 300000"
+  assert_grep "$(fdir "$root")/run-stats.txt" 'l1_max_chunks: 8$' "and 08 is 8"
+  rm -rf "$root"
+}
+
+test_chunking_degrades_when_the_helpers_are_absent(){
+  echo "# chunking: an install whose helpers are not there reads the old way, loudly"
+  local root; root=$(setup_env)
+  local inst="$root/inst"; mkdir -p "$inst/bin"
+  cp -R "$REPO/adapters" "$inst/adapters"
+  local b; for b in "$REPO"/bin/*.sh; do case "$(basename "$b")" in chunk-transcript.sh|merge-chunks.sh) ;; *) cp "$b" "$inst/bin/" ;; esac; done
+  local f; f=$(mk_chunky "$root" big 60); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
+  mkdir -p "$root/shim-default"; printf '#!/bin/bash\nprintf %s "200"\n' "'%s'" > "$root/shim-default/curl"; chmod +x "$root/shim-default/curl"
+  PATH="$root/shim-default:$PATH" FANOUT=1 AUTODREAM_SLIM_BYTES=3000 AUTODREAM_L1_CHUNK_BYTES=2000 AUTODREAM_SLIM_HEAD=10 AUTODREAM_SLIM_TAIL=6 MOCK_CAPTURE_DIR="$root/cap" \
+    AUTODREAM_CHANGELOG=0 CLAUDE_BIN="$MOCK" AUTODREAM_CONFIG="$root/autodream/config" \
+    AUTODREAM_CONSUME_DATE="$DATE" AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1 \
+    PROJECTS_DIR="$root/projects" AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
+    /bin/bash "$inst/bin/run.sh" "$DATE" > "$root/run.out" 2>&1
+  local rc=$?
+  cat "$root/autodream/logs/run-$DATE.log" >> "$root/run.out" 2>/dev/null || true
+  assert_eq "$rc" "0" "the run exits 0"
+  assert_grep "$root/run.out" 'chunk-transcript.sh or merge-chunks.sh was not found' "and the log says chunking is configured but could not run"
+  assert_grep "$fd/run-stats.txt" 'l1_chunk_bytes: 0$' "run-stats records chunking as off"
+  assert_eq "$(nreads "$root")" "0" "no chunk worker ran"
+  assert_grep "$root/cap/l1-read-$h.txt" 'lines elided by autodream for size' "the transcript was read the old way, head and tail"
+  rm -rf "$root"
+}
+
+test_a_failed_chunker_never_hands_a_worker_the_whole_slim(){
+  echo "# chunking: when the chunker fails, the worker reads the capped head/tail slim, never the uncapped one"
+  local root; root=$(setup_env)
+  local inst="$root/inst"; mkdir -p "$inst/bin"
+  cp -R "$REPO/adapters" "$inst/adapters"
+  local b; for b in "$REPO"/bin/*.sh; do cp "$b" "$inst/bin/"; done
+  printf '#!/bin/bash\nexit 2\n' > "$inst/bin/chunk-transcript.sh"; chmod +x "$inst/bin/chunk-transcript.sh"
+  local f; f=$(mk_chunky "$root" big 60); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
+  mkdir -p "$root/shim-default"; printf '#!/bin/bash\nprintf %s "200"\n' "'%s'" > "$root/shim-default/curl"; chmod +x "$root/shim-default/curl"
+  PATH="$root/shim-default:$PATH" FANOUT=1 AUTODREAM_SLIM_BYTES=3000 AUTODREAM_L1_CHUNK_BYTES=2000 AUTODREAM_SLIM_HEAD=10 AUTODREAM_SLIM_TAIL=6 \
+    MOCK_CAPTURE_DIR="$root/cap" MOCK_TRANSCRIPT_LOG="$root/sizes.log" \
+    AUTODREAM_CHANGELOG=0 CLAUDE_BIN="$MOCK" AUTODREAM_CONFIG="$root/autodream/config" \
+    AUTODREAM_CONSUME_DATE="$DATE" AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1 \
+    PROJECTS_DIR="$root/projects" AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
+    /bin/bash "$inst/bin/run.sh" "$DATE" > "$root/run.out" 2>&1
+  cat "$root/autodream/logs/run-$DATE.log" >> "$root/run.out" 2>/dev/null || true
+  assert_grep "$root/run.out" "chunker failed for $f" "the log names the failed chunker"
+  assert_eq "$(wc -l < "$root/sizes.log" | tr -d ' ')" "1" "one engine call for the session"
+  assert_grep "$root/cap/l1-read-$h.txt" 'lines elided by autodream for size' "it was handed the capped head/tail slim"
+  assert_nogrep "$root/cap/l1-read-$h.txt" 'turn-030' "not the whole conversation"
+  assert_eq "$(jq -r '.findings | type' "$fd/$h.json")" "array" "and the session was triaged"
+  assert_grep "$fd/run-stats.txt" 'l1_chunked_sessions: 0$' "run-stats counts no chunked session"
+  rm -rf "$root"
+}
+
+test_a_failed_chunker_on_a_transcript_that_was_never_slimmed_is_still_bounded(){
+  echo "# chunking: a transcript under the slim threshold but over the chunk size, with a failed chunker, is still read bounded"
+  local root; root=$(setup_env)
+  local inst="$root/inst"; mkdir -p "$inst/bin"
+  cp -R "$REPO/adapters" "$inst/adapters"
+  local b; for b in "$REPO"/bin/*.sh; do cp "$b" "$inst/bin/"; done
+  printf '#!/bin/bash\nexit 2\n' > "$inst/bin/chunk-transcript.sh"; chmod +x "$inst/bin/chunk-transcript.sh"
+  local f; f=$(mk_chunky "$root" big 60); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
+  mkdir -p "$root/shim-default"; printf '#!/bin/bash\nprintf %s "200"\n' "'%s'" > "$root/shim-default/curl"; chmod +x "$root/shim-default/curl"
+  PATH="$root/shim-default:$PATH" FANOUT=1 AUTODREAM_SLIM_BYTES=1000000 AUTODREAM_L1_CHUNK_BYTES=2000 AUTODREAM_SLIM_HEAD=10 AUTODREAM_SLIM_TAIL=6 \
+    MOCK_CAPTURE_DIR="$root/cap" MOCK_TRANSCRIPT_LOG="$root/sizes.log" \
+    AUTODREAM_CHANGELOG=0 CLAUDE_BIN="$MOCK" AUTODREAM_CONFIG="$root/autodream/config" \
+    AUTODREAM_CONSUME_DATE="$DATE" AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1 \
+    PROJECTS_DIR="$root/projects" AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
+    /bin/bash "$inst/bin/run.sh" "$DATE" > "$root/run.out" 2>&1
+  cat "$root/autodream/logs/run-$DATE.log" >> "$root/run.out" 2>/dev/null || true
+  assert_grep "$root/run.out" "chunker failed for $f" "the log names the failed chunker"
+  assert_eq "$(wc -l < "$root/sizes.log" | tr -d ' ')" "1" "one engine call for the session"
+  assert_grep "$root/cap/l1-read-$h.txt" 'lines elided by autodream for size' "it was handed the capped head/tail slim"
+  assert_nogrep "$root/cap/l1-read-$h.txt" 'turn-030' "not the whole conversation"
+  assert_eq "$(jq -r '.findings | type' "$fd/$h.json")" "array" "and the session was triaged"
+  assert_grep "$fd/run-stats.txt" 'l1_chunked_sessions: 0$' "run-stats counts no chunked session"
+  rm -rf "$root"
+}
+
+test_a_chunk_that_fails_is_retried_alone_and_finished_chunks_are_reused(){
+  echo "# chunking: a chunk failure blocks the merge, only that chunk is redone, and finished ones are reused"
+  local root; root=$(setup_env)
+  local f; f=$(mk_chunky "$root" big 60); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
+  export MOCK_MODE=chunked MOCK_CALL_LOG="$root/calls.log" MOCK_FAIL_CHUNK=2 MOCK_FAIL_ONCE=1 AUTODREAM_L1_ROUNDS=2
+  run_chunked "$root"; unset MOCK_MODE MOCK_CALL_LOG MOCK_FAIL_CHUNK MOCK_FAIL_ONCE AUTODREAM_L1_ROUNDS
+  local n; n=$(jq -r .meta.chunks "$fd/$h.json" 2>/dev/null)
+  [ "${n:-0}" -ge 3 ] && ok "round 2 finished the session ($n chunks)" || no "round 2 finished the session (got [$n])"
+  assert_eq "$(wc -l < "$root/calls.log" | tr -d ' ')" "$((n + 1))" "$n chunks plus the one retry: only chunk 2 was called twice"
+  assert_eq "$(grep -c '^01-' <(sed 's#.*/##' "$root/calls.log"))" "1" "chunk 1 was called once (round 2 reused its answer)"
+  assert_eq "$(grep -c '^02-' <(sed 's#.*/##' "$root/calls.log"))" "2" "chunk 2 twice"
+  assert_grep "$root/run.out" "reuse: chunk 1/$n of $f" "the log says it reused a finished chunk"
+  assert_grep "$fd/run-stats.txt" "l1_chunk_calls: $((n + 1))\$" "run-stats counts the retry"
+  assert_grep "$fd/run-stats.txt" "l1_chunks: $n\$" "and the chunks the session needed"
+  assert_no_file "$fd/$h.json.err" "the failure's .err is gone once the session finished"
+  assert_no_file "$fd/.chunks/$h" "and so is the chunk scratch"
+  rm -rf "$root"
+}
+
+test_a_cached_chunk_answer_is_not_reused_after_the_instructions_or_the_session_change(){
+  echo "# chunking: a finished chunk answer is reused only under the same prompt and the same stats block"
+  local scenario
+  for scenario in prompt stats; do
+    local root; root=$(setup_env)
+    local f; f=$(mk_chunky "$root" big 60); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
+    # Run 1: a permanent refusal on chunk 2 defers the date and leaves chunk 1's answer behind.
+    export MOCK_MODE=chunked MOCK_CALL_LOG="$root/calls1.log" MOCK_FAIL_CHUNK=2 MOCK_FAIL_KIND=refusal AUTODREAM_L1_ROUNDS=1
+    run_chunked "$root"; unset MOCK_MODE MOCK_CALL_LOG MOCK_FAIL_CHUNK MOCK_FAIL_KIND AUTODREAM_L1_ROUNDS
+    assert_eq "$(ls "$fd/.chunks/$h"/01-*.chunkout 2>/dev/null | wc -l | tr -d ' ')" "1" "[$scenario] run 1 left chunk 1's answer behind"
+    case "$scenario" in
+      prompt) printf '\nA changed instruction.\n' >> "$root/autodream/SESSION_TRIAGE.md" ;;
+      stats)  # the session gained a turn between runs, so its stats block differs
+        printf '{"parentUuid":"u60","type":"user","cwd":"/tmp/proj-a","uuid":"u61","timestamp":"2020-01-02T12:31:00.000Z","message":{"role":"user","content":"turn-061 one more"}}\n' >> "$f"
+        touch -t "$STAMP" "$f" ;;
+    esac
+    export MOCK_MODE=chunked MOCK_CALL_LOG="$root/calls2.log" AUTODREAM_L1_ROUNDS=1
+    run_chunked "$root"; unset MOCK_MODE MOCK_CALL_LOG AUTODREAM_L1_ROUNDS
+    assert_eq "$(grep -c '^01-' <(sed 's#.*/##' "$root/calls2.log"))" "1" "[$scenario] chunk 1 was called again, not served from the old answer"
+    assert_nogrep "$root/run.out" "reuse: chunk 1/" "[$scenario] and the log does not say it reused it"
+    assert_eq "$(jq -r 'has("error")' "$fd/$h.json" 2>/dev/null)" "false" "[$scenario] the session finished"
+    rm -rf "$root"
+  done
+}
+
+test_a_bad_chunk_answer_is_never_merged_around(){
+  echo "# chunking: an error, partial or malformed chunk answer blocks the merge and is redone alone"
+  local kind
+  for kind in error nofindings typed two; do
+    local root; root=$(setup_env)
+    local f; f=$(mk_chunky "$root" big 60); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
+    export MOCK_MODE=chunked MOCK_CALL_LOG="$root/calls.log" MOCK_BAD_CHUNK=2 MOCK_BAD_KIND="$kind" AUTODREAM_L1_ROUNDS=1
+    run_chunked "$root"; unset MOCK_MODE MOCK_CALL_LOG MOCK_BAD_CHUNK MOCK_BAD_KIND AUTODREAM_L1_ROUNDS
+    # One round, so that round is the last: the session gets the honest stub, never a merge of
+    # the chunks that did answer.
+    assert_eq "$(jq -r 'has("error")' "$fd/$h.json")" "true" "[$kind] after the only round the session carries the error stub"
+    assert_eq "$(jq -r '[.findings[]?] | length' "$fd/$h.json")" "0" "[$kind] and none of the other chunks' findings were published"
+    assert_eq "$(jq -r 'has("underlying_goal")' "$fd/$h.json")" "false" "[$kind] it is not a merge of the chunks that answered"
+    assert_grep "$fd/$h.json.err" 'no usable .findings key' "[$kind] the .err says the answer was refused"
+    rm -rf "$root"
+    root=$(setup_env)
+    f=$(mk_chunky "$root" big 60); h=$(hash_of "$f"); fd=$(fdir "$root")
+    export MOCK_MODE=chunked MOCK_CALL_LOG="$root/calls.log" MOCK_BAD_CHUNK=2 MOCK_BAD_KIND="$kind" AUTODREAM_L1_ROUNDS=2
+    run_chunked "$root"; unset MOCK_MODE MOCK_CALL_LOG MOCK_BAD_CHUNK MOCK_BAD_KIND AUTODREAM_L1_ROUNDS
+    local n; n=$(jq -r .meta.chunks "$fd/$h.json" 2>/dev/null)
+    assert_eq "$(jq -r 'has("error")' "$fd/$h.json")" "false" "[$kind] with a second round the session is merged properly"
+    assert_eq "$(wc -l < "$root/calls.log" | tr -d ' ')" "$((n + 1))" "[$kind] and only chunk 2 was redone"
+    assert_eq "$(jq -r '[.findings[] | select(.what | startswith("finding-from-chunk-"))] | length' "$fd/$h.json")" "$n" "[$kind] every chunk's finding is in the merge, none twice"
+    rm -rf "$root"
+  done
+}
+
+test_a_chunk_failure_is_classified_like_any_worker_failure(){
+  echo "# chunking: a chunk failure leaves the same evidence and the same classification as a whole-session one"
+  # shellcheck source=../bin/failure-class.sh
+  . "$REPO/bin/failure-class.sh"
+  local kind want root f h fd
+  for kind in silent:silent noisy:provider context:size; do
+    want=${kind#*:}; kind=${kind%%:*}
+    root=$(setup_env); f=$(mk_chunky "$root" big 60); h=$(hash_of "$f"); fd=$(fdir "$root")
+    export MOCK_MODE=chunked MOCK_FAIL_CHUNK=2 MOCK_FAIL_KIND="$kind" AUTODREAM_L1_ROUNDS=1
+    run_chunked "$root"; unset MOCK_MODE MOCK_FAIL_CHUNK MOCK_FAIL_KIND AUTODREAM_L1_ROUNDS
+    assert_eq "$(classify_failure "$fd/$h.json.err")" "$want" "[$kind] chunk 2 failing is classified $want"
+    assert_grep "$fd/$h.json.err" "worker produced no findings JSON for chunk 2/" "[$kind] the .err names the chunk that failed"
+    assert_grep "$fd/$h.json.err" '^worker exit code: ' "[$kind] with the exit code line the classifier reads"
+    assert_eq "$(jq -r 'has("error")' "$fd/$h.json")" "true" "[$kind] the last round writes the session-level stub"
+    assert_eq "$(jq -r .meta.chunks "$fd/$h.json")" "$(awk 'END {print $2}' "$fd/l1-chunks.txt")" "[$kind] and the stub says how many chunks the session had"
+    rm -rf "$root"
+  done
+}
+
+test_a_provider_refusal_on_a_chunk_defers_the_date_and_stops_the_other_chunks(){
+  echo "# chunking: a permanent provider refusal on a chunk defers the date like any worker, and no stub, no further calls"
+  local root; root=$(setup_env)
+  local f; f=$(mk_chunky "$root" big 60); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
+  mk_session "$root" other
+  export MOCK_MODE=chunked MOCK_CALL_LOG="$root/calls.log" MOCK_FAIL_CHUNK=2 MOCK_FAIL_KIND=refusal AUTODREAM_L1_ROUNDS=2
+  run_chunked "$root"; unset MOCK_MODE MOCK_CALL_LOG MOCK_FAIL_CHUNK MOCK_FAIL_KIND AUTODREAM_L1_ROUNDS
+  assert_grep "$fd/l1-netdown.txt" "^$h [12] provider\$" "the failure is ledgered as a provider refusal"
+  assert_no_file "$fd/$h.json" "no stub: the session is left for a later run"
+  assert_eq "$(grep -c '^0[3-9]-' <(sed 's#.*/##' "$root/calls.log"))" "0" "no chunk after the refused one was called, in either round"
+  assert_eq "$(cat "$root/run.exit")" "1" "the date is deferred, so the run exits non-zero"
+  assert_no_file "$root/dreams/$DATE.md" "and writes no report from a short corpus"
+  assert_grep "$fd/run-stats.txt" 'network_deferred: yes' "run-stats says it was deferred"
+  assert_eq "$(ls "$fd/.chunks/$h"/01-*.chunkout 2>/dev/null | wc -l | tr -d ' ')" "1" "the answer chunk 1 gave is kept for the next run"
+  rm -rf "$root"
+}
+
+test_chunk_files_are_never_mistaken_for_findings(){
+  echo "# chunking: chunk outputs left on disk are invisible to every consumer of the findings directory"
+  local root; root=$(setup_env)
+  local f; f=$(mk_chunky "$root" big 60); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
+  mk_session "$root" other; local ho; ho=$(hash_of "$root/projects/proj-a/other.jsonl")
+  export MOCK_MODE=chunked MOCK_FAIL_CHUNK=2 MOCK_FAIL_KIND=refusal AUTODREAM_L1_ROUNDS=1
+  run_chunked "$root"; unset MOCK_MODE MOCK_FAIL_CHUNK MOCK_FAIL_KIND AUTODREAM_L1_ROUNDS
+  # The state a killed or deferred run leaves: finished chunk answers, a failed chunk's .err/.out.
+  assert_eq "$(ls "$fd/.chunks/$h" | grep -c '\.chunkout$')" "1" "(a finished chunk answer is on disk)"
+  assert_eq "$(find "$fd" -type f -name '*.json' ! -name '*.stats.json' | wc -l | tr -d ' ')" "1" "the recursive findings count sees only the other session's findings JSON"
+  assert_eq "$(find "$fd" -maxdepth 1 -type f -name '*.json' ! -name '*.stats.json' | wc -l | tr -d ' ')" "1" "and so does the flat one"
+  assert_eq "$(ls "$fd"/*.json.err 2>/dev/null | wc -l | tr -d ' ')" "1" "the failed session's own .err is the one error file (chunk errs live under .chunks)"
+  assert_grep "$fd/run-stats.txt" 'l1_findings_written: 1$' "run-stats counts one findings JSON"
+  local out; out=$(bash "$REPO/tests/replay.sh" --artifacts "$fd" 2>&1); local rc=$?
+  assert_eq "$rc" "0" "replay --artifacts passes over the directory"
+  printf '%s' "$out" > "$root/replay.out"
+  assert_grep "$root/replay.out" 'all 1 findings JSONs have the findings-array shape' "and counts one findings JSON, not the chunk answers"
+  out=$(bash "$REPO/bin/oversized-gate.sh" "$fd" 2>&1); rc=$?
+  assert_eq "$rc" "0" "oversized-gate runs"
+  # A chunk directory no session in tonight's worklist owns (a killed run of a session that is gone).
+  mkdir -p "$fd/.chunks/deadbeef0000"
+  printf '{"findings":[]}' > "$fd/.chunks/deadbeef0000/01-aaaaaaaaaaaa.chunkout"
+  printf 'worker exit code: 1 after 3s\n' > "$fd/.chunks/deadbeef0000/01.err"
+  # The next run, no longer failing, reuses chunk 1 and finishes.
+  export MOCK_MODE=chunked; AUTODREAM_FORCE=1 run_chunked "$root"; unset MOCK_MODE
+  assert_eq "$(jq -r '.findings | type' "$fd/$h.json")" "array" "the retry run finishes the session"
+  assert_no_file "$fd/.chunks/$h" "and its own chunk directory is gone"
+  assert_file "$fd/.chunks/deadbeef0000/01-aaaaaaaaaaaa.chunkout" "(the foreign one is still there: nothing that scans the directory touched it)"
+  assert_grep "$fd/run-stats.txt" 'l1_findings_outside_worklist: 0$' "a chunk answer does not read as a findings JSON outside the worklist"
+  assert_grep "$fd/run-stats.txt" 'l1_err_files_orphaned: 0$' "and a chunk .err does not read as an orphan"
+  assert_grep "$fd/run-stats.txt" "l1_findings_written: 2\$" "and only the two sessions have findings"
+  rm -rf "$root"
+}
+
+test_the_circuit_breaker_counts_finished_chunks_as_progress(){
+  echo "# chunking: a round that finishes chunks but no whole session is progress, not a barren round"
+  local root; root=$(setup_env)
+  local f; f=$(mk_chunky "$root" big 60); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
+  # Chunk 3 always fails. Round 1 finishes every other chunk (progress), rounds 2 and 3 finish
+  # nothing new, so the breaker fires after round 3. Counting sessions alone it would have fired
+  # after round 2, having called round 1 barren while it did most of the work.
+  export MOCK_MODE=chunked MOCK_FAIL_CHUNK=3 MOCK_FAIL_KIND=silent AUTODREAM_L1_ROUNDS=5
+  run_chunked "$root"; unset MOCK_MODE MOCK_FAIL_CHUNK MOCK_FAIL_KIND AUTODREAM_L1_ROUNDS
+  assert_grep "$root/run.out" 'circuit breaker: 2 consecutive rounds recovered nothing.*as of round 3' "the breaker fired after round 3, not round 2"
+  assert_grep "$fd/run-stats.txt" 'l1_breaker_fired: yes' "and run-stats says it fired"
+  assert_eq "$(jq -r 'has("error")' "$fd/$h.json")" "true" "the stub round still ran, so the session is visible and not an empty slot"
+  rm -rf "$root"
+}
+
+test_chunk_inputs_are_private_and_removed(){
+  echo "# chunking: chunk inputs are transcript text, so they are private and never survive the round"
+  local root; root=$(setup_env)
+  local f; f=$(mk_chunky "$root" big 60); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
+  mk_session "$root" other
+  # What a worker killed mid-round leaves behind: transcript copies no worker is going to remove.
+  mkdir -p "$fd"
+  printf 'leftover transcript text\n' > "$fd/deadbeefdead.slim.jsonl"; printf 'x\n' > "$fd/deadbeefdead.day.jsonl"; printf 'x\n' > "$fd/deadbeefdead.norm.jsonl"
+  export MOCK_MODE=chunked MOCK_FAIL_CHUNK=2 MOCK_FAIL_KIND=refusal AUTODREAM_L1_ROUNDS=1
+  ( umask 022; run_chunked "$root" ); unset MOCK_MODE MOCK_FAIL_CHUNK MOCK_FAIL_KIND AUTODREAM_L1_ROUNDS
+  assert_no_file "$fd/.chunks/$h/in" "the chunk inputs are removed after the round, even though the session is still pending"
+  assert_eq "$(ls "$fd" | grep -c '\.slim\.jsonl$\|\.day\.jsonl$\|\.norm\.jsonl$')" "0" "and so are the slim and the other transcript copies, including ones a killed worker left"
+  rm -rf "$root"
+}
+
+# ---- Chunking on omp: chunk the linearized copy AFTER the day cut ----------------------------
+mk_omp_long(){ # $1=root $2=name $3=pairs on DATE -> path. One day-1 pair and one day-3 pair frame the DATE entries
+  local d="$1/home/.omp/agent/sessions/proj-o" f i prev="a0" m s
+  mkdir -p "$d"; f="$d/2020-01-01T10-00-00-000Z_$2.jsonl"
+  local msg='"message":{"role":"%s","content":[{"type":"text","text":"%s"}]}'
+  {
+    printf '%s\n' '{"type":"title","title":"t","v":1}'
+    printf '{"type":"session","id":"01a00000-0000-7000-8000-000000000004","cwd":"/tmp/proj-o","timestamp":"2020-01-01T10:00:00.000Z"}\n'
+    printf '{"type":"message","id":"a0","parentId":null,"timestamp":"2020-01-01T12:00:00.000Z",'"$msg"'}\n' user DAY1_ENTRY
+    for i in $(seq 1 "$3"); do
+      m=$((i / 2)); s=$(( (i % 2) * 30 ))
+      printf '{"type":"message","id":"u%d","parentId":"%s","timestamp":"2020-01-02T12:%02d:%02d.000Z",'"$msg"'}\n' "$i" "$prev" "$m" "$s" user "turn-$(printf '%03d' "$i") user words for the line to have a body" 
+      printf '{"type":"message","id":"a%d","parentId":"u%d","timestamp":"2020-01-02T12:%02d:%02d.500Z",'"$msg"'}\n' "$i" "$i" "$m" "$s" assistant "reply-$(printf '%03d' "$i") assistant words"
+      prev="a$i"
+    done
+    printf '{"type":"message","id":"z1","parentId":"%s","timestamp":"2020-01-03T12:00:00.000Z",'"$msg"'}\n' "$prev" user DAY3_ENTRY
+  } > "$f"
+  touch -t "$LATE" "$f"
+  printf '%s' "$f"
+}
+
+test_chunking_an_omp_session_cuts_the_day_then_chunks_the_live_chain(){
+  echo "# chunking (omp): the linearized copy is cut to the day first and the day is what is chunked"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local o; o=$(mk_omp_long "$root" long 40); local h; h=$(hash_of "$o"); local fd; fd=$(fdir "$root")
+  export FANOUT=1 MOCK_MODE=chunked MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_SLIM_BYTES=3000 AUTODREAM_L1_CHUNK_BYTES=2500
+  run_dream_omp "$root"; unset FANOUT MOCK_MODE MOCK_CAPTURE_DIR AUTODREAM_SLIM_BYTES AUTODREAM_L1_CHUNK_BYTES
+  local n; n=$(nreads "$root")
+  [ "$n" -ge 2 ] && ok "the omp session was split into $n chunks" || no "the omp session was split into chunks (got $n)"
+  assert_nogrep "$fd/$h.json" 'could not be normalized' "it was not refused by the linearizer"
+  assert_eq "$(chunk_reads "$root" | xargs cat | grep -c 'DAY1_ENTRY\|DAY3_ENTRY')" "0" "no chunk holds an entry from another day"
+  assert_eq "$(turn_stats "$root")" "40/1" "the 40 turns of the day are in exactly one chunk each"
+  assert_eq "$(head -n 1 "$(chunk_reads "$root" | sort | head -1)" | jq -r .type)" "autodream_meta" "the first chunk opens with the session header"
+  assert_eq "$(jq -r .meta.chunks "$fd/$h.json")" "$n" "the merged findings record the chunk count"
+  assert_eq "$(jq -r .session_path "$fd/$h.json")" "$o" "and name the real session"
+  assert_grep "$fd/sessions-source.txt" "^$h	omp$" "it is an omp session"
+  assert_grep "$fd/run-stats.txt" 'l1_chunked_sessions: 1$' "run-stats counts it"
+  rm -rf "$root"
+}
+
+test_chunking_reads_the_whole_conversation_in_chunks
+test_chunking_leaves_a_transcript_that_fits_alone
+test_chunk_cap_drops_the_middle_and_counts_it
+test_chunk_cap_of_one_reads_one_chunk_never_the_whole_transcript
+test_chunking_off_is_the_old_behaviour
+test_chunking_is_off_when_the_knob_is_unset
+test_chunk_knobs_are_validated
+test_chunking_degrades_when_the_helpers_are_absent
+test_a_failed_chunker_never_hands_a_worker_the_whole_slim
+test_a_failed_chunker_on_a_transcript_that_was_never_slimmed_is_still_bounded
+test_a_chunk_that_fails_is_retried_alone_and_finished_chunks_are_reused
+test_a_cached_chunk_answer_is_not_reused_after_the_instructions_or_the_session_change
+test_a_bad_chunk_answer_is_never_merged_around
+test_a_chunk_failure_is_classified_like_any_worker_failure
+test_a_provider_refusal_on_a_chunk_defers_the_date_and_stops_the_other_chunks
+test_chunk_files_are_never_mistaken_for_findings
+test_the_circuit_breaker_counts_finished_chunks_as_progress
+test_chunk_inputs_are_private_and_removed
+test_chunking_an_omp_session_cuts_the_day_then_chunks_the_live_chain
 
 # ---- The unit suites, run here and not only in CI ---------------------------
 # CLAUDE.md tells contributors "run tests/run-all.sh after any run.sh/prompt

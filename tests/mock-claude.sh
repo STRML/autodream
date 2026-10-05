@@ -61,6 +61,20 @@
 #   MOCK_TRIAGE_MODE=fail|nosentinel|empty  the dream-triage call (bin/triage-dream.sh) fails, is cut off
 #                            before the sentinel, or delivers nothing. It writes triage-*.txt to
 #                            MOCK_CAPTURE_DIR, never l2-*.
+#   MOCK_MODE=chunked        L1 answers as one chunk of a longer session (chunk I of N is read from
+#                            the chunk note in the prompt): goal-I, a finding unique to the chunk
+#                            and one shared by every chunk, outcome fully_achieved on the last
+#                            chunk only. A call with no chunk note is answered as in good mode.
+#   MOCK_FAIL_CHUNK=N        chunk N fails (every attempt, or only the first with MOCK_FAIL_ONCE=1).
+#   MOCK_FAIL_KIND=silent|noisy|context|refusal   how it fails: exit 0 with nothing at all, a
+#                            429 on stdout with exit 7, a context overflow with exit 7, or the
+#                            Z.ai insufficient-balance refusal with exit 1 (default silent).
+#   MOCK_BAD_CHUNK=N         chunk N answers with the WRONG thing, once per output path.
+#   MOCK_BAD_KIND=error|nofindings|typed|two   what that wrong answer is (default error): the L1
+#                            error object, an object with no findings, findings a string, or two
+#                            JSON values in one file.
+#   MOCK_TRANSCRIPT_LOG=<file>  append "<transcript path><TAB><its bytes>" for every L1 call, so a
+#                            test can prove how much a worker was handed.
 #   MOCK_CAPTURE_DIR=<dir>   dump each layer's stdin + argv to <dir>/l{1,2}-*.txt
 #                            so tests can assert on the exact prompt framing.
 #   MOCK_CALL_LOG=<file>     append the L1 output path for every invocation of
@@ -118,11 +132,45 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
   [ -n "${MOCK_CAPTURE_DIR:-}" ] && [ -r "$sess" ] && cp "$sess" "$MOCK_CAPTURE_DIR/l1-read-$(basename "$out" .json).txt"
   [ -n "${MOCK_CAPTURE_DIR:-}" ] && printf '%s\n' "$@" > "$MOCK_CAPTURE_DIR/l1-args-$(basename "$out" .json).txt"
   [ -n "${MOCK_CAPTURE_DIR:-}" ] && printf '%s' "$input" > "$MOCK_CAPTURE_DIR/l1-stdin-$(basename "$out" .json).txt"
+  [ -n "${MOCK_TRANSCRIPT_LOG:-}" ] && printf '%s\t%s\n' "$sess" "$(wc -c < "$sess" 2>/dev/null | tr -d ' ')" >> "$MOCK_TRANSCRIPT_LOG"
+  # Chunk I of N, from the chunk note the runner appends to the prompt of one chunk of a longer
+  # session. Empty for an ordinary session.
+  ci=""; cn=""
+  read -r ci cn <<< "$(printf '%s' "$input" | sed -n 's/.*chunk \([0-9][0-9]*\) of \([0-9][0-9]*\) of ONE session.*/\1 \2/p' | head -1)"
+  write_chunked() { # $1=i $2=n
+    jq -cn --argjson i "$1" --argjson n "$2" '{session_path:"x",project:"proj-a",turn_count:2,tool_call_count:0,tools_used:[],
+      skills_invoked:[],models_used:[],notable_initiatives:["initiative-\($i)"],underlying_goal:"goal-\($i)",
+      outcome:(if $i == $n then "fully_achieved" else "partially_achieved" end),
+      satisfaction_signals:{happy:0,satisfied:1,dissatisfied:0,frustrated:0},instructions_given:[],
+      findings:[{category:"permission_prompt",severity:"low",what:"finding-from-chunk-\($i)",evidence_excerpt:"x",proposed_rule:"y"},
+                {category:"other",severity:"low",what:"shared across chunks",evidence_excerpt:"x",proposed_rule:"y"}]}' > "$out"
+  }
+  if [ -n "$ci" ] && [ "$ci" = "${MOCK_FAIL_CHUNK:-0}" ] && { [ -z "${MOCK_FAIL_ONCE:-}" ] || [ ! -f "$out.failed" ]; }; then
+    : > "$out.failed"
+    case "${MOCK_FAIL_KIND:-silent}" in
+      silent) exit 0 ;;
+      noisy) echo "provider error: 429 rate_limit_exceeded"; exit 7 ;;
+      context) echo "provider error: 400 context_length_exceeded: prompt is too long"; exit 7 ;;
+      refusal) echo '429 {"type":"error","error":{"type":"rate_limit_error","code":"1113","message":"[1113][Insufficient balance or no resource package. Please recharge.]"}}'; exit 1 ;;
+    esac
+  fi
+  if [ -n "$ci" ] && [ "$ci" = "${MOCK_BAD_CHUNK:-0}" ] && [ ! -f "$out.bad" ]; then
+    : > "$out.bad"
+    case "${MOCK_BAD_KIND:-error}" in
+      error) printf '{"session_path":"x","error":"could not read","findings":[]}' > "$out" ;;
+      nofindings) printf '{"session_path":"x"}' > "$out" ;;
+      typed) printf '{"session_path":"x","findings":"oops"}' > "$out" ;;
+      two) printf '{"error":"x","findings":[]}\n{"session_path":"x","findings":[]}\n' > "$out" ;;
+    esac
+    echo done
+    exit 0
+  fi
   write_findings() { printf '{"session_path":"x","project":"proj-a","turn_count":2,"tool_call_count":0,"tools_used":[],"skills_invoked":[],"models_used":[],"notable_initiatives":[],"underlying_goal":null,"outcome":"fully_achieved","satisfaction_signals":{"happy":0,"satisfied":1,"dissatisfied":0,"frustrated":0},"instructions_given":["always run tests after edits"],"findings":[]}' > "$out"; }
   # Emit a real session_path but a deliberately WRONG project (what nondeterministic
   # haiku does), so run.sh's path-based normalization pass has something to correct.
   write_badproject() { printf '{"session_path":"%s","project":"WRONG-PROJECT","turn_count":2,"tool_call_count":0,"tools_used":[],"skills_invoked":[],"models_used":[],"notable_initiatives":[],"findings":[]}' "$sess" > "$out"; }
   case "$mode" in
+    chunked) if [ -n "$ci" ]; then write_chunked "$ci" "$cn"; else write_findings; fi ;;
     l1_incomplete) : ;;                 # never write — simulates a worker that exits empty
     l1_silent) exit 0 ;;                # never write AND print nothing: the 2026-09-13 omp
                                         # death (first-turn recall), exit 0 with empty stdout.
