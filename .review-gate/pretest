@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Run by review-gate-lib.sh before a review round; output is inlined into the review prompt.
+# Runs the unit suites. Skips mocks, replay.sh (needs arguments) and run-all.sh (the integration
+# suite takes over 10 minutes; run it by hand before merging a run.sh change). A suite that
+# exceeds its cap is reported as TIMEOUT and the rest still run.
+set -u
+rc=0
+ps_ok=1; ps -p $$ >/dev/null 2>&1 || ps_ok=0
+for t in tests/*.sh; do
+  case "$t" in tests/mock-*|tests/replay.sh|tests/run-all.sh) continue ;; esac
+  echo "=== $t ==="
+  # These two need ps and a pty, which the Claude Code sandbox denies. Both pass outside it.
+  case "$t" in tests/adapter-claude.sh|tests/review-cmux.sh)
+    [[ $ps_ok -eq 1 ]] || { echo "SKIPPED: $t (ps denied by the sandbox, not a failure)"; continue; } ;;
+  esac
+  timeout 120 bash "$t"
+  s=$?
+  [[ $s -ne 124 ]] || echo "TIMEOUT: $t exceeded 120s"
+  [[ $s -eq 0 ]] || { echo "FAILED: $t (exit $s)"; rc=1; }
+done
+exit "$rc"
