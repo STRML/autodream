@@ -6080,6 +6080,116 @@ test_question_streaks
 test_question_streaks_reruns_and_mismatch
 test_question_streaks_state_lives_with_the_install
 
+# ---- L2 attempt diagnostics (issue 42): a signal-shaped L2 death leaves evidence ----
+# Exit 143 on the aggregator was seen on 2026-08-01, 08-31, 09-02, 09-04, 09-19 and 10-02 with
+# nothing in the log to say who sent the TERM. A 143, 137 or 124 now writes
+# findings/<date>/l2-attempt-N.diag. The probes must never fail or stall the run.
+diag_of(){ printf '%s' "$(fdir "$1")/l2-attempt-$2.diag"; }
+diag_litter(){ ls "$(fdir "$1")" 2>/dev/null | grep -c 'l2-attempt' || true; }
+
+test_l2_diag_written_on_exit_143(){
+  echo "# L2 diag: an attempt that exits 143 writes l2-attempt-N.diag for every attempt"
+  local root; root=$(setup_env); mk_session "$root" s1
+  export MOCK_MODE=l2_exit143 AUTODREAM_L2_ATTEMPTS=2
+  run_dream "$root"
+  unset MOCK_MODE AUTODREAM_L2_ATTEMPTS
+  local d1; d1=$(diag_of "$root" 1)
+  assert_file "$d1" "attempt 1 left a diag file"
+  assert_file "$(diag_of "$root" 2)" "attempt 2 left its own diag file"
+  assert_grep "$d1" '^exit_code: 143$' "the diag records exit 143"
+  assert_grep "$d1" '^attempt: 1/2$' "the diag names the attempt"
+  assert_grep "$d1" '^start_epoch: [0-9][0-9]*$' "the diag records the start time"
+  assert_grep "$d1" '^end_epoch: [0-9][0-9]*$' "the diag records the end time"
+  assert_grep "$d1" '^elapsed_seconds: [0-9][0-9]*$' "the diag records the elapsed time"
+  assert_grep "$d1" '^runner_timeout_fired: no' "the diag says the runner applied no timeout"
+  assert_grep "$d1" '^runner_survived: yes' "the diag notes the runner outlived the attempt"
+  assert_grep "$d1" '^worker_pid: [0-9][0-9]*$' "the diag records the worker pid"
+  assert_grep "$d1" '^runner_pid: [0-9][0-9]*$' "the diag records the runner pid"
+  assert_grep "$d1" '^## parent chain at start' "the diag has the parent chain"
+  assert_grep "$d1" "run.sh" "the parent chain names the runner's command line"
+  assert_grep "$d1" '^launchd_label:' "the diag records the launchd label slot"
+  assert_grep "$d1" '^## load average at start' "the diag has load at start"
+  assert_grep "$d1" '^## load average at end' "the diag has load at end"
+  assert_grep "$d1" '^## memory pressure at start' "the diag has memory pressure at start"
+  assert_grep "$d1" '^## memory pressure at end' "the diag has memory pressure at end"
+  assert_grep "$d1" '^## sleep and wake times' "the diag has the kernel sleep and wake times"
+  assert_grep "$d1" '^## other autodream or claude processes at end' "the diag lists other autodream or claude processes"
+  assert_grep "$root/run.out" "L2 done in" "the run reached its normal L2 summary"
+  assert_eq "$(ls "$(fdir "$root")" | grep -c 'l2-attempt.*start' || true)" "0" "no start snapshot is left beside the diag"
+  rm -rf "$root"
+}
+
+test_l2_diag_written_on_exit_137(){
+  echo "# L2 diag: exit 137 (SIGKILL) is recorded too"
+  local root; root=$(setup_env); mk_session "$root" s1
+  export MOCK_MODE=l2_exit137 AUTODREAM_L2_ATTEMPTS=1
+  run_dream "$root"
+  unset MOCK_MODE AUTODREAM_L2_ATTEMPTS
+  assert_grep "$(diag_of "$root" 1)" '^exit_code: 137$' "the diag records exit 137"
+  rm -rf "$root"
+}
+
+test_l2_diag_absent_on_other_outcomes(){
+  echo "# L2 diag: a good attempt and a plain failure (exit 1) write no diag"
+  local root; root=$(setup_env); mk_session "$root" s1
+  run_dream "$root"
+  assert_no_file "$(diag_of "$root" 1)" "a delivered report leaves no diag"
+  assert_eq "$(diag_litter "$root")" "0" "and no leftover start snapshot"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" s1
+  export MOCK_MODE=l2_fail AUTODREAM_L2_ATTEMPTS=1
+  run_dream "$root"
+  unset MOCK_MODE AUTODREAM_L2_ATTEMPTS
+  assert_no_file "$(diag_of "$root" 1)" "exit 1 is not a signal death and leaves no diag"
+  assert_eq "$(diag_litter "$root")" "0" "and no leftover start snapshot"
+  rm -rf "$root"
+}
+
+test_l2_diag_probes_never_fail_or_stall_the_run(){
+  echo "# L2 diag: broken and hanging probes cannot fail the run or hold it"
+  local root; root=$(setup_env); mk_session "$root" s1
+  mkdir -p "$root/shim-diag"
+  # launchctl hangs, the rest fail outright. AUTODREAM_LAUNCHD_LABEL makes the label non-empty so the
+  # per-label launchctl probe runs too (macOS resets XPC_SERVICE_NAME to 0 in a child).
+  printf '#!/bin/bash\nexec sleep 60\n' > "$root/shim-diag/launchctl"
+  for c in ps uptime vm_stat sysctl pmset; do printf '#!/bin/bash\nexit 1\n' > "$root/shim-diag/$c"; done
+  chmod +x "$root/shim-diag"/*
+  local t0 t1; t0=$(date +%s)
+  export MOCK_MODE=l2_exit143 AUTODREAM_L2_ATTEMPTS=1 AUTODREAM_LAUNCHD_LABEL=com.example.autodream
+  PATH="$root/shim-diag:$PATH" run_dream "$root"
+  unset MOCK_MODE AUTODREAM_L2_ATTEMPTS AUTODREAM_LAUNCHD_LABEL
+  t1=$(date +%s)
+  assert_file "$(diag_of "$root" 1)" "the diag is still written with every probe broken"
+  assert_grep "$(diag_of "$root" 1)" '^exit_code: 143$' "and its own fields stand"
+  assert_grep "$(diag_of "$root" 1)" 'abandoned' "the hung probe is named as abandoned in the diag"
+  assert_grep "$(diag_of "$root" 1)" '^launchd_label: com.example.autodream$' "the label override reaches the diag"
+  assert_grep "$root/run.out" "L2 done in" "the run completed"
+  [ $((t1 - t0)) -lt 40 ] && ok "a hung launchctl was bounded (run took $((t1 - t0))s)" || no "a hung launchctl held the run for $((t1 - t0))s"
+  rm -rf "$root"
+}
+
+test_l2_diag_long_command_lines_keep_the_sections_intact(){
+  echo "# L2 diag: a huge parent command line cannot swallow the next section's heading"
+  local root; root=$(setup_env); mk_session "$root" s1
+  mkdir -p "$root/shim-diag"
+  # A real claude launch carries a very long argv. The shim answers every ps with one 9000-byte
+  # line and no trailing newline.
+  printf '#!/bin/bash\nhead -c 9000 /dev/zero | tr "\\0" x\n' > "$root/shim-diag/ps"
+  chmod +x "$root/shim-diag/ps"
+  export MOCK_MODE=l2_exit143 AUTODREAM_L2_ATTEMPTS=1
+  PATH="$root/shim-diag:$PATH" run_dream "$root"
+  unset MOCK_MODE AUTODREAM_L2_ATTEMPTS
+  assert_grep "$(diag_of "$root" 1)" '^## load average at start' "the heading after the parent chain starts its own line"
+  assert_grep "$(diag_of "$root" 1)" '^## other autodream or claude processes at end' "and so does the last section"
+  rm -rf "$root"
+}
+
+test_l2_diag_written_on_exit_143
+test_l2_diag_written_on_exit_137
+test_l2_diag_long_command_lines_keep_the_sections_intact
+test_l2_diag_absent_on_other_outcomes
+test_l2_diag_probes_never_fail_or_stall_the_run
+
 echo
 echo "----------------------------------------"
 echo "passed: $pass   failed: $fail"
