@@ -81,9 +81,9 @@ export const triagePrompt = (date: string, path: string): string =>
     `Read the report first: ${path}. Keep it in context; do not dump it back to me.`,
     '',
     'Workflow:',
-    '1. Restate ONE open question (in order, from the report\'s "Open questions for the user" section).',
-    '2. Cite the findings driving it: one sentence, plus the section number in the report.',
-    '3. Recommend a concrete action. Be opinionated; I trust your judgment.',
+    '1. Restate ONE open question (in order, from the report\'s "Open questions for the user" section), in full, before asking me for any decision. I have not read the report this morning, so a bare label ("now question 2") is never enough. Carry (a) the question in plain words, (b) every motivation behind it: findings, session counts, evidence quotes and report section numbers, and (c) every potential fix, each with its trade-off. Ask for the decision only after (a), (b) and (c) are on screen.',
+    '2. Say what you checked or could not check since the report was written, if anything.',
+    '3. Recommend one concrete action from (c). Be opinionated; I trust your judgment.',
     '4. Wait for: approve / modify / skip / discuss.',
     `5. If approved: execute it. If modified: incorporate the change, confirm, then execute. If skipped or discussed: log the decision as one line under a "## Triage decisions" section at the bottom of ${path} (create it if absent).`,
     '6. Move to the next question. Do not batch questions.',
@@ -92,7 +92,7 @@ export const triagePrompt = (date: string, path: string): string =>
     '',
     'Rules:',
     '- Edits to ~/.claude/CLAUDE.md, ~/.claude/rules/*, ~/.claude/docs/guardrails/* and any other global file need my explicit per-edit approval.',
-    '- Be terse: one question, one decision, one action, then the next.',
+    '- Be terse everywhere except the question restatement in step 1, which is always complete. One question, one decision, one action, then the next.',
   ].join('\n')
 
 /** One shell word, whatever is in it. */
