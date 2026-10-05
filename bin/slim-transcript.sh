@@ -25,7 +25,7 @@
 #                             footer. For the chunker, which sizes the pieces itself at line
 #                             boundaries; a footer would land in the last chunk as a line that is
 #                             not JSON, which the worker would read as transcript.
-# run.sh sets both only while chunked triage is on (AUTODREAM_L1_CHUNK_BYTES above 0), so turning
+# Nothing in this repo sets either yet: the chunked reader will, only while it is on, so turning
 # that off restores the head/tail view byte for byte.
 set -u
 
@@ -114,7 +114,7 @@ if [ "$reshape" = "1" ]; then
         | (if (.message | type) == "object"
              then .message |= with_entries(select(.key | IN("role", "content")))
              else . end)
-        | (if (.message.content | type) == "array"
+        | (if (.message | type) == "object" and (.message.content | type) == "array"
              then .message.content |= map(if type == "object" and .type == "thinking" then del(.signature) else . end)
              else . end)
       else . end;
