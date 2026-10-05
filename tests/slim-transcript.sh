@@ -415,6 +415,10 @@ assert_eq "$(stat -f %Lp "$TMP/mode.out" 2>/dev/null)" "600" "the slimmed output
 rm -f "$TMP/mode2.out"
 ( umask 022; "$SLIM" "$TMP/mode.jsonl" "$TMP/mode2.out" >/dev/null 2>&1 )
 assert_eq "$(stat -f %Lp "$TMP/mode2.out" 2>/dev/null)" "600" "and so is the default mode's"
+printf 'old\n' > "$TMP/mode3.out"; chmod 644 "$TMP/mode3.out"
+"$SLIM" "$TMP/mode.jsonl" "$TMP/mode3.out" >/dev/null 2>&1
+assert_eq "$(stat -f %Lp "$TMP/mode3.out" 2>/dev/null)" "600" "and a destination the caller already made with mode 644 is tightened to 600"
+hasnt 'old' "$(head -c 3 "$TMP/mode3.out")" "and its old contents are replaced"
 
 printf '\npassed: %s   failed: %s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
