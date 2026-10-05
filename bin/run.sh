@@ -2426,7 +2426,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
           # A transcript under AUTODREAM_SLIM_BYTES was never slimmed, so there may be no slim file
           # yet; the fallback still has to be bounded, so it makes one from the input itself.
           [ -n "$slimfile" ] || slimfile="$FINDINGS_DIR/$hash.slim.jsonl"
-          if "$SLIM" "${slimsrc:-$readpath}" "$slimfile" 2>/dev/null && [ -s "$slimfile" ]; then
+          if AUTODREAM_SLIM_FULL=0 AUTODREAM_SLIM_RESHAPE=0 "$SLIM" "${slimsrc:-$readpath}" "$slimfile" 2>/dev/null && [ -s "$slimfile" ]; then
             readpath="$slimfile"
           else
             cap="${AUTODREAM_SLIM_CAP:-262144}"
@@ -2631,13 +2631,14 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       # burn a call.
       parts=(); cfail=0; cfirst=""; ci=1
       # An answer is reusable only for the same chunk text read under the same instructions: the
-      # triage prompt, the harness addendum, the engine and model, and the stats block the worker
+      # triage prompt, the harness addendum, the engine and model, the chunk count and omitted count the
+      # chunk note states, and the stats block the worker
       # copies from (merge-chunks.sh takes the stats fields from chunk 1). All of it is in the
       # cache name, so a retry after the prompt, the model or the session changed redoes the chunk
       # instead of merging a stale answer with fresh ones.
       ccfg=$( { cat "$AUTODREAM_DIR/SESSION_TRIAGE.md" 2>/dev/null
                 if [ -n "$src" ] && [ -r "$ADAPTERS_DIR/$src/triage.md" ]; then cat "$ADAPTERS_DIR/$src/triage.md"; fi
-                printf "%s %s\n" "$src" "$model"
+                printf "%s %s %s %s\n" "$src" "$model" "$nchunks" "$elided"
                 cat "$FINDINGS_DIR/$hash.stats.json" 2>/dev/null; } | shasum -a 1 2>/dev/null | cut -c1-8 )
       while [ "$ci" -le "$nchunks" ]; do
         cin=$(printf "%s/in/chunk-%02d.jsonl" "$chunkroot" "$ci")

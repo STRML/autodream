@@ -108,6 +108,12 @@ w d2.json '{"findings":[{"category":"b","severity":"low","what":"x"},{"category"
 "$MG" --session /s "$TMP/d1.json" "$TMP/d2.json" > "$TMP/out.json"
 assert_eq "$(J '.findings | length')" "3" "the same what under another category, or another what, is kept"
 
+echo "# merge: findings with neither a category nor a what are never merged into one"
+w m1.json '{"session_path":"x","findings":[{"severity":"high","evidence_excerpt":"A"}]}'
+w m2.json '{"session_path":"x","findings":[{"severity":"low","evidence_excerpt":"B"}]}'
+"$MG" --session /s "$TMP/m1.json" "$TMP/m2.json" > "$TMP/out.json" 2>/dev/null
+assert_eq "$(J '.findings | length')" "2" "two different keyless findings both survive"
+
 echo "# merge: a duplicate seen at two severities keeps the higher one"
 w sv1.json '{"session_path":"x","findings":[{"category":"c","severity":"low","what":"same"}]}'
 w sv2.json '{"session_path":"x","findings":[{"category":"c","severity":"high","what":"same"}]}'

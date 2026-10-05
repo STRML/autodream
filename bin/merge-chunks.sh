@@ -73,9 +73,10 @@ jq -s --arg session "$session" --argjson elided "$elided" '
   def num: if type == "number" then . else 0 end;
   def sig($all; $k): [$all[] | .satisfaction_signals | (if type == "object" then .[$k] else null end) | num] | add;
   def uniq_ordered: reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end);
+  # A finding with neither a category nor a what has no identity to merge on, so it is kept.
   def dedupe: reduce .[] as $f ({seen: {}, out: []};
       ((($f.category // "") | tostring) + "|" + (($f.what // "") | tostring)) as $k
-      | if .seen[$k] then . else (.seen[$k] = true | .out += [$f]) end) | .out;
+      | if $k != "|" and .seen[$k] then . else (.seen[$k] = true | .out += [$f]) end) | .out;
   . as $all
   | ($all[0] + {
       session_path: $session,
