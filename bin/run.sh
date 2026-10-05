@@ -58,6 +58,17 @@
 #                        (an adapter under adapters/ is accepted, not enabled, until named)
 #   AUTODREAM_FORCE      set 1 to rebuild even if a report exists    default: 0
 #   AUTODREAM_SLIM_BYTES sessions larger than this are slimmed for L1  default: 262144
+#   AUTODREAM_L1_CHUNK_BYTES  a transcript whose worker input is bigger than this is split at line
+#                        boundaries and read by one worker per chunk, then merged into the one
+#                        findings JSON per session. 0 turns chunking off and restores the head/tail
+#                        slim exactly. COST: every oversized session costs up to MAX_CHUNKS worker
+#                        calls instead of one, per round, so a night costs up to
+#                        (oversized sessions x MAX_CHUNKS) calls plus the rest one each; a session
+#                        takes up to MAX_CHUNKS x AUTODREAM_L1_TIMEOUT of wall time (its chunks run
+#                        in sequence in one slot)                              default: 0 (off; 300000 is
+#                        the value the replay in the PR was run with)
+#   AUTODREAM_L1_MAX_CHUNKS  most chunks read per session; over it the middle is dropped and counted
+#                        (l1_chunks_elided), the first half and last half are kept   default: 8
 #   AUTODREAM_WINDOW     set 0 to place a session in a report day by its file mtime
 #                        alone, as before. On (default) it is placed by the timestamps
 #                        INSIDE the transcript, and stats and L1 see only that day  default: 1
@@ -184,6 +195,20 @@ case "$AUTODREAM_L1_WARMUP_TIMEOUT" in
 esac
 # SIGKILL grace after the SIGTERM. The worst-case bound is AUTODREAM_L1_TIMEOUT + L1_KILL_GRACE.
 L1_KILL_GRACE=30
+# Chunked triage, OFF unless asked for (default 0). 0 is a real value, so only a non-number is refused; a cap below 1 would
+# mean no chunk is ever read. Decimal whatever the user wrote: bash arithmetic reads 08 as an
+# invalid octal number.
+AUTODREAM_L1_CHUNK_BYTES="${AUTODREAM_L1_CHUNK_BYTES:-0}"
+case "$AUTODREAM_L1_CHUNK_BYTES" in
+  ''|*[!0-9]*) echo "FATAL: AUTODREAM_L1_CHUNK_BYTES must be a non-negative integer (got '$AUTODREAM_L1_CHUNK_BYTES'); 0 turns chunking off" >&2; exit 1 ;;
+esac
+AUTODREAM_L1_CHUNK_BYTES=$((10#$AUTODREAM_L1_CHUNK_BYTES))
+AUTODREAM_L1_MAX_CHUNKS="${AUTODREAM_L1_MAX_CHUNKS:-8}"
+case "$AUTODREAM_L1_MAX_CHUNKS" in
+  ''|*[!0-9]*) echo "FATAL: AUTODREAM_L1_MAX_CHUNKS must be a positive integer (got '$AUTODREAM_L1_MAX_CHUNKS')" >&2; exit 1 ;;
+esac
+AUTODREAM_L1_MAX_CHUNKS=$((10#$AUTODREAM_L1_MAX_CHUNKS))
+[ "$AUTODREAM_L1_MAX_CHUNKS" -ge 1 ] || { echo "FATAL: AUTODREAM_L1_MAX_CHUNKS must be at least 1" >&2; exit 1; }
 
 # Isolated cwd for every `claude --print` worker (see "AI-title stubs" below). The
 # workers all read/write by ABSOLUTE path, so their cwd is functionally irrelevant —
@@ -356,6 +381,21 @@ if [ "${AUTODREAM_WINDOW:-1}" != "0" ] && [ -n "$SESSION_WINDOW" ] \
   WIN_END_EPOCH="${_wb##* }"
   WINDOW_ON=1
   ENUM_END="$_far"
+fi
+
+# Chunked triage: a transcript too big for one worker is split at line boundaries (chunk-transcript.sh),
+# one worker reads each chunk, and merge-chunks.sh turns the answers back into the one findings JSON
+# per session that L2 reads. It is ON only when it is asked for (AUTODREAM_L1_CHUNK_BYTES above 0)
+# and BOTH helpers are found, found the way session-window.sh is (find_lib: a merge swaps run.sh
+# before install.sh links the new helpers). With either missing the oversized transcript is read
+# the old way, the head/tail slim, and the run says so. Everything new is behind this one switch:
+# L1_CHUNKING=0 reaches the slimmer with no reshape and no full mode, no chunker, no merge and no
+# chunk note, so the off path is what it was.
+CHUNKER=$(find_lib chunk-transcript.sh) || CHUNKER=""
+MERGER=$(find_lib merge-chunks.sh) || MERGER=""
+L1_CHUNKING=0
+if [ "$AUTODREAM_L1_CHUNK_BYTES" -gt 0 ] && [ -n "$CHUNKER" ] && [ -n "$MERGER" ]; then
+  L1_CHUNKING=1
 fi
 
 # Provenance of the code actually executing (#29), stamped into run-stats.txt below.
@@ -1901,6 +1941,25 @@ l1_missing_count() { # count sessions in $SESSIONS_LIST that still have no findi
   printf '%s' "$m"
 }
 
+# What chunked triage cost tonight, from the two ledgers: "sessions chunks elided calls". Sessions
+# and chunks count what the chunker planned (the last plan per session, since a retry plans again),
+# elided the chunks it dropped from the middle, calls the engine calls actually made. A night with
+# chunking off, or with nothing over the limit, reads 0 0 0 0.
+l1_chunk_totals() {
+  local plans calls
+  plans=$(awk 'NF >= 3 { n[$1] = $2; e[$1] = $3 } END { for (h in n) { s++; c += n[h]; x += e[h] } printf "%d %d %d", s, c, x }' \
+            "$FINDINGS_DIR/l1-chunks.txt" 2>/dev/null)
+  calls=$(grep -c . "$FINDINGS_DIR/l1-chunk-calls.txt" 2>/dev/null || true)
+  printf '%s %s\n' "${plans:-0 0 0}" "${calls:-0}"
+}
+
+# Finished chunk answers on disk. A round that completes chunks but no whole session has still made
+# progress, and the circuit breaker below would otherwise read it as a barren round. Always 0 when
+# chunking is off (the directory does not exist), so the breaker is what it was.
+l1_chunk_answers() {
+  find "$FINDINGS_DIR/.chunks" -type f -name '*.chunkout' 2>/dev/null | wc -l | tr -d ' '
+}
+
 # True when a findings file carries the top-level error key: what the runner writes for a
 # failed triage and what the L1 prompt tells a worker to write when it cannot fit a
 # transcript. A text match on "error": would also fire on a successful file whose evidence
@@ -2290,9 +2349,14 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       fi
     fi
     sz=$(wc -c < "$readpath" | tr -d " ")
+    slimsrc=""
     if [ "${sz:-0}" -gt "${AUTODREAM_SLIM_BYTES:-262144}" ] && [ -x "$SLIM" ]; then
       slimfile="$FINDINGS_DIR/$hash.slim.jsonl"
-      if "$SLIM" "$readpath" "$slimfile" 2>/dev/null && [ -s "$slimfile" ]; then
+      slimsrc="$readpath"
+      # While chunked triage is on the slim keeps every conversation line (the chunker sizes the
+      # pieces) and drops Claude Code bookkeeping first, so the lines it keeps are conversation.
+      # Off, both variables are 0 and the slimmer writes what it always wrote.
+      if AUTODREAM_SLIM_RESHAPE="${L1_CHUNKING:-0}" AUTODREAM_SLIM_FULL="${L1_CHUNKING:-0}" "$SLIM" "$readpath" "$slimfile" 2>/dev/null && [ -s "$slimfile" ]; then
         readpath="$slimfile"
         echo "slimmed: $session ($sz bytes) ($hash)" >&2
       else
@@ -2326,6 +2390,57 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       exit 0
     fi
 
+    # ---- Chunked triage: split a transcript too big for one worker ----
+    # The worker input (the slim, or the transcript itself when it was small enough not to be slimmed)
+    # over AUTODREAM_L1_CHUNK_BYTES is cut at line boundaries into at most AUTODREAM_L1_MAX_CHUNKS
+    # chunks, one engine call each, merged below. Chunk INPUTS are rebuilt on every dispatch (they are
+    # deterministic for an unchanged transcript) and live under .chunks/<hash>/in/, which the parent
+    # removes after the round whatever happened to this worker. Chunk OUTPUTS are model answers, kept
+    # under .chunks/<hash>/ with a non-.json suffix so nothing that globs the findings directory can
+    # mistake one for a session, and named by the sha1 of their chunk, so a retry reuses an answer
+    # only for an identical chunk.
+    chunked=0; nchunks=1; elided=0; chunkroot=""; l1_blocked=0
+    if [ "${L1_CHUNKING:-0}" = 1 ]; then
+      csz=$(wc -c < "$readpath" | tr -d " ")
+      if [ "${csz:-0}" -gt "$AUTODREAM_L1_CHUNK_BYTES" ]; then
+        chunkroot="$FINDINGS_DIR/.chunks/$hash"
+        cinfo=""
+        if ( umask 077; mkdir -p "$chunkroot/in" ) 2>/dev/null; then
+          cinfo=$(bash "$CHUNKER" "$readpath" "$chunkroot/in" "$AUTODREAM_L1_CHUNK_BYTES" "$AUTODREAM_L1_MAX_CHUNKS" 2>/dev/null) || cinfo=""
+        fi
+        read -r nchunks elided <<< "$cinfo"
+        case "$nchunks" in ""|*[!0-9]*) nchunks=0 ;; esac
+        case "$elided" in ""|*[!0-9]*) elided=0 ;; esac
+        if [ "$nchunks" -ge 1 ]; then
+          chunked=1
+          printf "%s %s %s\n" "$hash" "$nchunks" "$elided" >> "$FINDINGS_DIR/l1-chunks.txt"
+          echo "chunked: $session ($hash) $nchunks chunks ($elided elided)" >&2
+        else
+          # The chunker could not run (a full disk, an unwritable directory). Never hand one worker
+          # the whole uncapped slim: fall back to the exact off path, the capped head/tail slim of
+          # the same input. If that cannot be made either, read nothing this round: the output stays
+          # absent, the session is retried, and the last round writes the honest stub.
+          nchunks=1; elided=0
+          rm -rf "$chunkroot/in"
+          echo "WARNING: chunker failed for $session ($hash); falling back to the capped head/tail slim" >&2
+          # A transcript under AUTODREAM_SLIM_BYTES was never slimmed, so there may be no slim file
+          # yet; the fallback still has to be bounded, so it makes one from the input itself.
+          [ -n "$slimfile" ] || slimfile="$FINDINGS_DIR/$hash.slim.jsonl"
+          if "$SLIM" "${slimsrc:-$readpath}" "$slimfile" 2>/dev/null && [ -s "$slimfile" ]; then
+            readpath="$slimfile"
+          else
+            cap="${AUTODREAM_SLIM_CAP:-262144}"
+            case "$cap" in ""|*[!0-9]*) cap=262144 ;; esac
+            if ( umask 077; head -c "$cap" "$readpath" > "$slimfile.cap" ) 2>/dev/null && mv -f "$slimfile.cap" "$slimfile"; then
+              readpath="$slimfile"
+            else
+              rm -f "$slimfile.cap"; l1_blocked=1
+            fi
+          fi
+        fi
+      fi
+    fi
+
     # Pass the paths as LITERAL data (not KEY=value) so the worker hands them
     # straight to the Read/Write tools and never tries to $-expand them in a shell
     # (there is no such env var, so it would expand to nothing and fail — exactly
@@ -2342,101 +2457,115 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
     # there is invisible to the right-hand side and the wrapper would silently disappear.
     l1wrap=()
     [ -n "$TIMEOUT_BIN" ] && l1wrap=("$TIMEOUT_BIN" -k "$L1_KILL_GRACE" "$AUTODREAM_L1_TIMEOUT")
-    # Stamped here, NOT reused from t0. t0 is taken before validation, the noise gate and
-    # slimming, so a large transcript can burn real time before timeout is even launched;
-    # counting that as worker runtime lets an intrinsic 124 or 137 clear the elapsed check with
-    # no deadline having fired. Only the interval timeout itself was running can answer that.
-    l1start=$(date +%s)
-    {
-      printf "Session transcript to analyze (literal absolute path): %s\n" "$readpath"
-      printf "Write your findings JSON to this literal absolute path: %s\n\n" "$output"
-      cat "$AUTODREAM_DIR/SESSION_TRIAGE.md"
-      # One triage document for every harness. A harness whose transcripts differ from the
-      # claude shape the document describes adds adapters/<name>/triage.md, appended here for
-      # that adapter sessions only, so claude workers receive exactly the text they always did.
-      if [ -n "$src" ] && [ -r "$ADAPTERS_DIR/$src/triage.md" ]; then
-        printf "\n"
-        cat "$ADAPTERS_DIR/$src/triage.md"
+    # What the worker is told about a chunk, appended to its prompt before the stats block (which
+    # SESSION_TRIAGE.md says comes last). The wording "chunk I of N of ONE session" is matched by
+    # tests/mock-claude.sh, so change both together. The stats belong to the whole session (or day),
+    # which is why they are copied verbatim and not recounted from one chunk.
+    l1_chunk_note() { # $1=i $2=n $3=chunks dropped from the middle
+      printf "This transcript is chunk %s of %s of ONE session, split at line boundaries. Other workers triage the other chunks. A tool call and its result can fall in different chunks, and the opening goal and the final outcome may be in a chunk other than yours. Long lines were cut by the slimmer, so a cut line is not malformed input. Report only what is in this chunk, and judge the outcome from the end state of this chunk. The stats below describe the whole session (or the report day, when a note above says so), not this chunk: copy them verbatim." "$1" "$2"
+      if [ "${3:-0}" -gt 0 ]; then
+        printf " %s chunks from the middle of the session were omitted for size." "$3"
       fi
-      if [ -n "$dayfile" ]; then
-        # Said plainly, because a worker handed a slice has no other way to know the first
-        # turn it reads is not the start of the session.
-        printf "\n## Report day\n\nThis transcript is the part of a longer session that was recorded on %s (local time). Records from other days were removed, so it can open in the middle of a task and end before the task does. The stats below describe this part only.\n" "$TARGET_DATE"
+    }
+    # One engine call. $1 is the transcript to read, $2 the findings path the worker is told to
+    # write, $3 and $4 hold the engine stderr and stdout. Returns 0 only when $2 ends up holding a
+    # findings object; on a failure it leaves its evidence in $3 and the network verdict in
+    # netdown (and in the ledger), and the caller decides what the failure costs the session.
+    # $5, set only for one chunk of a chunked session, is the chunk note for the prompt, and makes
+    # the answer be judged by the chunk contract (merge-chunks.sh --check: exactly one object, no
+    # error key) rather than by a findings array alone. l1_subject names what failed in the
+    # diagnostic line: the session, or a chunk of it. That line is skipped by failure-class.sh on
+    # its prefix, so naming a chunk there costs the classifier nothing.
+    l1_attempt() {
+      # Stamped here, NOT reused from t0. t0 is taken before validation, the noise gate and
+      # slimming, so a large transcript can burn real time before timeout is even launched;
+      # counting that as worker runtime lets an intrinsic 124 or 137 clear the elapsed check with
+      # no deadline having fired. Only the interval timeout itself was running can answer that.
+      l1start=$(date +%s)
+      {
+        printf "Session transcript to analyze (literal absolute path): %s\n" "$1"
+        printf "Write your findings JSON to this literal absolute path: %s\n\n" "$2"
+        cat "$AUTODREAM_DIR/SESSION_TRIAGE.md"
+        # One triage document for every harness. A harness whose transcripts differ from the
+        # claude shape the document describes adds adapters/<name>/triage.md, appended here for
+        # that adapter sessions only, so claude workers receive exactly the text they always did.
+        if [ -n "$src" ] && [ -r "$ADAPTERS_DIR/$src/triage.md" ]; then
+          printf "\n"
+          cat "$ADAPTERS_DIR/$src/triage.md"
+        fi
+        if [ -n "$dayfile" ]; then
+          # Said plainly, because a worker handed a slice has no other way to know the first
+          # turn it reads is not the start of the session.
+          printf "\n## Report day\n\nThis transcript is the part of a longer session that was recorded on %s (local time). Records from other days were removed, so it can open in the middle of a task and end before the task does. The stats below describe this part only.\n" "$TARGET_DATE"
+        fi
+        if [ -n "${5:-}" ]; then
+          printf "\n## Chunk note\n\n%s\n" "$5"
+        fi
+        if [ -s "$FINDINGS_DIR/$hash.stats.json" ]; then
+          printf "\n## Precomputed session stats (authoritative — copy these into your output)\n\n\`\`\`json\n"
+          cat "$FINDINGS_DIR/$hash.stats.json"
+          printf "\n\`\`\`\n"
+        fi
+      } | ${l1wrap[@]+"${l1wrap[@]}"} env ${envs[@]+"${envs[@]}"} "${argv[@]}" > "$4" 2> "$3"
+      # Index 1 is the engine side of the pipe; index 0 is the brace group.
+      l1rc="${PIPESTATUS[1]}"
+      l1elapsed=$(($(date +%s) - l1start))
+      # 124 is timeout reporting that it fired; 137 is 128+SIGKILL, which is what the -k grace
+      # period escalates to. Elapsed is the positive evidence that the deadline actually fired: GNU
+      # timeout propagates the exit status of the child, so a worker that exits 124 by itself, or
+      # that the OOM killer SIGKILLs at second zero, arrives here looking identical to a real
+      # timeout (verified against coreutils 9.11: a self-killed child returned 137 after 0s under a
+      # 100s bound). Only trust 137 as a timeout when the wrapper is actually in the pipeline.
+      # Second resolution leaves a one-second boundary window, against a bound of twenty minutes.
+      if [ -n "$TIMEOUT_BIN" ] && { [ "$l1rc" = "124" ] || [ "$l1rc" = "137" ]; } \
+         && [ "$l1elapsed" -ge "$AUTODREAM_L1_TIMEOUT" ]; then
+        printf "worker exceeded AUTODREAM_L1_TIMEOUT=%ss and was killed with its process group (rc=%s)\n" \
+          "$AUTODREAM_L1_TIMEOUT" "$l1rc" >> "$3"
+        # The errlog cannot carry this fact: it is truncated by the next retry and deleted outright
+        # whenever the worker leaves any output, so a timeout that later succeeds, or that wrote
+        # something before dying, would vanish from the stats. The ledger is per-run and
+        # append-only, so neither can erase it.
+        printf "%s\n" "$hash" >> "$FINDINGS_DIR/l1-timeouts.txt"
+        # A worker killed mid-write leaves a truncated findings JSON. That is not a result: kept,
+        # it reads as success, deletes the errlog, and feeds partial input to L2. Drop it so this
+        # session retries like any other failure.
+        rm -f "$2"
       fi
-      if [ -s "$FINDINGS_DIR/$hash.stats.json" ]; then
-        printf "\n## Precomputed session stats (authoritative — copy these into your output)\n\n\`\`\`json\n"
-        cat "$FINDINGS_DIR/$hash.stats.json"
-        printf "\n\`\`\`\n"
-      fi
-    } | ${l1wrap[@]+"${l1wrap[@]}"} env ${envs[@]+"${envs[@]}"} "${argv[@]}" > "$outlog" 2> "$errlog"
-    # Index 1 is the engine side of the pipe; index 0 is the brace group.
-    l1rc="${PIPESTATUS[1]}"
-    l1elapsed=$(($(date +%s) - l1start))
-    # 124 is timeout reporting that it fired; 137 is 128+SIGKILL, which is what the -k grace
-    # period escalates to. Elapsed is the positive evidence that the deadline actually fired: GNU
-    # timeout propagates the exit status of the child, so a worker that exits 124 by itself, or
-    # that the OOM killer SIGKILLs at second zero, arrives here looking identical to a real
-    # timeout (verified against coreutils 9.11: a self-killed child returned 137 after 0s under a
-    # 100s bound). Only trust 137 as a timeout when the wrapper is actually in the pipeline.
-    # Second resolution leaves a one-second boundary window, against a bound of twenty minutes.
-    if [ -n "$TIMEOUT_BIN" ] && { [ "$l1rc" = "124" ] || [ "$l1rc" = "137" ]; } \
-       && [ "$l1elapsed" -ge "$AUTODREAM_L1_TIMEOUT" ]; then
-      printf "worker exceeded AUTODREAM_L1_TIMEOUT=%ss and was killed with its process group (rc=%s)\n" \
-        "$AUTODREAM_L1_TIMEOUT" "$l1rc" >> "$errlog"
-      # The errlog cannot carry this fact: it is truncated by the next retry and deleted outright
-      # whenever the worker leaves any output, so a timeout that later succeeds, or that wrote
-      # something before dying, would vanish from the stats. The ledger is per-run and
-      # append-only, so neither can erase it.
-      printf "%s\n" "$hash" >> "$FINDINGS_DIR/l1-timeouts.txt"
-      # A worker killed mid-write leaves a truncated findings JSON. That is not a result: kept,
-      # it reads as success, deletes the errlog, and feeds partial input to L2. Drop it so this
-      # session retries like any other failure.
-      rm -f "$output"
-    fi
 
-    # Non-empty is not the same as valid. A worker that writes malformed JSON, or JSON with no
-    # .findings array, used to take the success branch below: both diagnostics were deleted and
-    # the file was left for L2. The dispatcher validates .findings on its way IN, so the next
-    # round would re-run the session, but by then the exit code, the stdout capture and the
-    # reason were gone, and on the final round the malformed file simply reached the aggregator.
-    # Validate the same way on the way out, so a bad write is a failure with its evidence intact.
-    if [ -s "$output" ] && ! jq -e ".findings | arrays" "$output" >/dev/null 2>&1; then
-      printf "worker wrote output with no usable .findings key; treating as a failure\n" >> "$errlog"
-      head -c 2000 "$output" >> "$errlog" 2>/dev/null
-      rm -f "$output"
-    fi
+      # Non-empty is not the same as valid. A worker that writes malformed JSON, or JSON with no
+      # .findings array, used to take the success branch below: both diagnostics were deleted and
+      # the file was left for L2. The dispatcher validates .findings on its way IN, so the next
+      # round would re-run the session, but by then the exit code, the stdout capture and the
+      # reason were gone, and on the final round the malformed file simply reached the aggregator.
+      # Validate the same way on the way out, so a bad write is a failure with its evidence intact.
+      if [ -n "${5:-}" ]; then
+        l1_ok() { bash "$MERGER" --check "$1"; }
+      else
+        l1_ok() { jq -e ".findings | arrays" "$1" >/dev/null 2>&1; }
+      fi
+      if [ -s "$2" ] && ! l1_ok "$2"; then
+        printf "worker wrote output with no usable .findings key; treating as a failure\n" >> "$3"
+        head -c 2000 "$2" >> "$3" 2>/dev/null
+        rm -f "$2"
+      fi
 
-    if [ -s "$output" ]; then
-      # Reported path should be the real session, not the temp slim copy. Then drop
-      # the slim file (regenerable; keeps the findings dir clean).
-      # A literal replace inside the JSON strings: sed would read a # or & in the session
-      # path as part of its own syntax, and a quote or backslash would break the JSON.
-      for tmpcopy in "$slimfile" "$normfile" "$dayfile"; do
-        [ -n "$tmpcopy" ] || continue
-        jq -c --arg a "$tmpcopy" --arg b "$session" "walk(if type == \"string\" then split(\$a) | join(\$b) else . end)" "$output" > "$output.rw" 2>/dev/null \
-          && mv "$output.rw" "$output" || rm -f "$output.rw"
-      done
-      rm -f "$slimfile" "$normfile" "$dayfile"
-      rm -f "$errlog" "$outlog"
-      echo "ok: $session ($hash) [$(($(date +%s) - t0))s]"
-    else
-      rm -f "$slimfile" "$normfile" "$dayfile"
+      [ -s "$2" ] && return 0
       # Worker exited without writing findings JSON. Record a diagnostic so the
       # failure is visible.
-      printf "worker produced no findings JSON for %s (incomplete run: the engine exited without writing output)\n" "$session" >> "$errlog"
+      printf "worker produced no findings JSON for %s (incomplete run: the engine exited without writing output)\n" "${l1_subject:-$session}" >> "$3"
       # The three facts that were missing every time this fired. Without the exit code a provider
       # refusal and a killed process read identically, and without the stdout capture the whole
       # diagnosis went to /dev/null while the .err kept the one line the worker happened to put
       # on stderr (omp-autodream, 2026-09-04: a dead network hid behind three fine transcripts and
       # the report blamed their size).
-      printf "worker exit code: %s after %ss\n" "$l1rc" "$l1elapsed" >> "$errlog"
-      if [ -s "$outlog" ]; then
-        printf -- "--- worker stdout, last 40 lines ---\n" >> "$errlog"
-        tail -n 40 "$outlog" >> "$errlog"
+      printf "worker exit code: %s after %ss\n" "$l1rc" "$l1elapsed" >> "$3"
+      if [ -s "$4" ]; then
+        printf -- "--- worker stdout, last 40 lines ---\n" >> "$3"
+        tail -n 40 "$4" >> "$3"
       else
-        printf "worker stdout was empty\n" >> "$errlog"
+        printf "worker stdout was empty\n" >> "$3"
       fi
-      rm -f "$outlog"
+      rm -f "$4"
       # Was the host reachable at the moment this worker failed? Without this a failure
       # caused by a sleeping Mac is indistinguishable from a transcript the worker could
       # not digest, and the oversized gate would count it as evidence it is not. One curl,
@@ -2455,14 +2584,14 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
         netcode=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" "$probeurl" 2>/dev/null)
         netrc=$?
         if [ "$netrc" -eq 127 ] || [ "$netrc" -eq 126 ]; then
-          printf "curl could not be run here (exit %s: not found, or not executable); this failure is unclassified, not an outage\n" "$netrc" >> "$errlog"
+          printf "curl could not be run here (exit %s: not found, or not executable); this failure is unclassified, not an outage\n" "$netrc" >> "$3"
         elif [ -z "$netcode" ] || [ "$netcode" = "000" ]; then
           netdown=true
         else
           netdown=false
         fi
         if [ "$netdown" = "true" ]; then
-          printf "no route to %s when this worker failed (curl http_code=%s)\n" "$probehost" "${netcode:-000}" >> "$errlog"
+          printf "no route to %s when this worker failed (curl http_code=%s)\n" "$probehost" "${netcode:-000}" >> "$3"
         fi
       fi
       # Ledger every classified failure, with its round, and never rewrite a line. A
@@ -2477,13 +2606,98 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       # failure from its own .err; a permanent refusal (no balance or quota) is ledgered as
       # "provider" and defers like an outage. A transient 429 or 5xx keeps its stub.
       if [ "$netdown" != "true" ] && [ -r "$FAILURE_CLASS" ] \
-         && (. "$FAILURE_CLASS"; provider_is_permanent "$errlog"); then
+         && (. "$FAILURE_CLASS"; provider_is_permanent "$3"); then
         netdown=provider
-        printf "provider refusal when this worker failed; no stub, the session is left for a later run\n" >> "$errlog"
+        printf "provider refusal when this worker failed; no stub, the session is left for a later run\n" >> "$3"
       fi
       if [ "$netdown" != "unknown" ]; then
         printf "%s %s %s\n" "$hash" "${AUTODREAM_CURRENT_ROUND:-1}" "$netdown" >> "$FINDINGS_DIR/l1-netdown.txt"
       fi
+      return 1
+    }
+    netdown=unknown
+    if [ "$l1_blocked" = 1 ]; then
+      printf "no bounded input could be made for %s; skipping the engine call this round\n" "$session" >> "$errlog"
+      echo "WARNING: no bounded input for $session ($hash); skipping L1 this round" >&2
+    elif [ "$chunked" = 1 ]; then
+      # One engine call per chunk, in sequence in this slot. A chunk answer is untrusted: it counts
+      # only if it is exactly one findings object with no error key (merge-chunks.sh --check), and
+      # anything else is discarded so the retry round redoes THAT chunk alone. A finished answer is
+      # reused, which is what makes a retry cheap and a failure partway not start over. A chunk
+      # failure is a worker failure: l1_attempt writes the same evidence, makes the same network
+      # and provider verdict and ledgers it the same way, and the final-round stub below is the
+      # session level and only the session level. After a no-route or a permanent provider refusal
+      # the rest of the chunks are not tried, since they would fail the same way and each would
+      # burn a call.
+      parts=(); cfail=0; cfirst=""; ci=1
+      # An answer is reusable only for the same chunk text read under the same instructions: the
+      # triage prompt, the harness addendum, the engine and model, and the stats block the worker
+      # copies from (merge-chunks.sh takes the stats fields from chunk 1). All of it is in the
+      # cache name, so a retry after the prompt, the model or the session changed redoes the chunk
+      # instead of merging a stale answer with fresh ones.
+      ccfg=$( { cat "$AUTODREAM_DIR/SESSION_TRIAGE.md" 2>/dev/null
+                if [ -n "$src" ] && [ -r "$ADAPTERS_DIR/$src/triage.md" ]; then cat "$ADAPTERS_DIR/$src/triage.md"; fi
+                printf "%s %s\n" "$src" "$model"
+                cat "$FINDINGS_DIR/$hash.stats.json" 2>/dev/null; } | shasum -a 1 2>/dev/null | cut -c1-8 )
+      while [ "$ci" -le "$nchunks" ]; do
+        cin=$(printf "%s/in/chunk-%02d.jsonl" "$chunkroot" "$ci")
+        csha=$(shasum -a 1 "$cin" 2>/dev/null | cut -c1-12)
+        cout=$(printf "%s/%02d-%s-%s.chunkout" "$chunkroot" "$ci" "$csha" "$ccfg")
+        parts+=("$cout")
+        if bash "$MERGER" --check "$cout"; then
+          echo "reuse: chunk $ci/$nchunks of $session ($hash)" >&2
+        else
+          rm -f "$cout"
+          cerr=$(printf "%s/%02d.err" "$chunkroot" "$ci")
+          cof=$(printf "%s/%02d.out" "$chunkroot" "$ci")
+          printf "%s %s %s\n" "$hash" "${AUTODREAM_CURRENT_ROUND:-1}" "$ci" >> "$FINDINGS_DIR/l1-chunk-calls.txt"
+          l1_subject="chunk $ci/$nchunks of $session"
+          if l1_attempt "$cin" "$cout" "$cerr" "$cof" "$(l1_chunk_note "$ci" "$nchunks" "$elided")"; then
+            rm -f "$cerr" "$cof"
+          else
+            cfail=1
+            [ -n "$cfirst" ] || cfirst="$cerr"
+            if [ "$netdown" = "true" ] || [ "$netdown" = "provider" ]; then break; fi
+          fi
+          l1_subject=""
+        fi
+        ci=$((ci + 1))
+      done
+      if [ "$cfail" = 0 ]; then
+        # Merged only when EVERY chunk answered properly, and merge-chunks.sh refuses anything else
+        # itself. A merge that fails anyway drops every cached answer so the next round cannot
+        # loop on them.
+        if bash "$MERGER" --session "$session" --elided "$elided" "${parts[@]}" > "$output.merge" 2>> "$errlog" \
+           && [ -s "$output.merge" ] && jq -e ".findings | arrays" "$output.merge" >/dev/null 2>&1; then
+          mv -f "$output.merge" "$output"
+        else
+          rm -f "$output.merge" "${parts[@]}"
+          printf "merging the %s chunk answers of %s failed; they were discarded so the next round redoes them\n" "$nchunks" "$session" >> "$errlog"
+        fi
+      else
+        # The first failing chunk is the session evidence: a later chunk that succeeds must not
+        # overwrite what the failure said, and failure-class.sh classifies this file as it does any.
+        cp "$cfirst" "$errlog" 2>/dev/null
+      fi
+    else
+      l1_attempt "$readpath" "$output" "$errlog" "$outlog"
+    fi
+
+    if [ -s "$output" ]; then
+      # Reported path should be the real session, not the temp slim copy. Then drop
+      # the slim file (regenerable; keeps the findings dir clean).
+      # A literal replace inside the JSON strings: sed would read a # or & in the session
+      # path as part of its own syntax, and a quote or backslash would break the JSON.
+      for tmpcopy in "$slimfile" "$normfile" "$dayfile"; do
+        [ -n "$tmpcopy" ] || continue
+        jq -c --arg a "$tmpcopy" --arg b "$session" "walk(if type == \"string\" then split(\$a) | join(\$b) else . end)" "$output" > "$output.rw" 2>/dev/null \
+          && mv "$output.rw" "$output" || rm -f "$output.rw"
+      done
+      rm -f "$slimfile" "$normfile" "$dayfile"
+      rm -f "$errlog" "$outlog"
+      echo "ok: $session ($hash) [$(($(date +%s) - t0))s]"
+    else
+      rm -f "$slimfile" "$normfile" "$dayfile"
       # On the FINAL retry round, fall back to a metadata-only findings stub so
       # the session is visible to L1_ERRORED and the L2 aggregator instead of
       # disappearing into a silent .err file (the old behavior, which the
@@ -2503,14 +2717,38 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       elif [ "${AUTODREAM_CURRENT_ROUND:-1}" -ge "${AUTODREAM_L1_ROUNDS:-5}" ]; then
         sz=$(wc -c < "$session" 2>/dev/null | tr -d " ")
         lines=$(wc -l < "$session" 2>/dev/null | tr -d " ")
-        jq -cn --arg p "$session" --arg r "${AUTODREAM_L1_ROUNDS:-5}" --argjson b "${sz:-0}" --argjson l "${lines:-0}" --argjson sl "$([ -n "$slimfile" ] && echo true || echo false)" \
-          "{session_path: \$p, error: (\"worker exited without findings JSON after \" + \$r + \" rounds\"), meta: {bytes: \$b, lines: \$l, slimmed: \$sl}, findings: []}" > "$output"
+        cmeta="{}"
+        [ "$chunked" = 1 ] && cmeta="{\"chunks\":$nchunks,\"chunks_elided\":$elided}"
+        jq -cn --arg p "$session" --arg r "${AUTODREAM_L1_ROUNDS:-5}" --argjson b "${sz:-0}" --argjson l "${lines:-0}" --argjson sl "$([ -n "$slimfile" ] && echo true || echo false)" --argjson cm "$cmeta" \
+          "{session_path: \$p, error: (\"worker exited without findings JSON after \" + \$r + \" rounds\"), meta: ({bytes: \$b, lines: \$l, slimmed: \$sl} + \$cm), findings: []}" > "$output"
         echo "FAIL (metadata stub written): $session ($hash) [$(($(date +%s) - t0))s] — see $errlog" >&2
       else
         echo "FAIL: $session ($hash) [$(($(date +%s) - t0))s] — see $errlog" >&2
       fi
     fi
+    # Chunk scratch is only worth keeping while a retry is pending: the inputs never (they are
+    # rebuilt), the answers until the session has a findings JSON, a stub included.
+    if [ -n "$chunkroot" ]; then
+      rm -rf "$chunkroot/in"
+      if [ -s "$output" ]; then rm -rf "$chunkroot"; fi
+    fi
   ' _
+  # A worker killed mid-round never reached its own cleanup, and what it leaves is transcript text:
+  # the chunk inputs and, with chunking on, a slim that is now the whole conversation. Every
+  # worker has returned by here, so any of these still on disk is a leftover, and the parent
+  # removes them. The chunk ANSWERS stay for the retry. This is deliberately not a trap in the
+  # worker: a trapped TERM is deferred until the foreground engine exits (the adapter comment
+  # says what that cost), so a trap would trade a stale file for a worker that ignores SIGTERM.
+  # Gated on L1_CHUNKING so the off path leaves exactly what it always left.
+  # The empty .chunks directory goes here and not in a worker: eight workers create their own
+  # subdirectory in it at once, and one removing it between another's two mkdir steps would make
+  # that chunker fail for no reason.
+  if [ "${L1_CHUNKING:-0}" = 1 ]; then
+    rm -rf "$FINDINGS_DIR"/.chunks/*/in 2>/dev/null
+    rm -f "$FINDINGS_DIR"/*.slim.jsonl "$FINDINGS_DIR"/*.slim.jsonl.cap "$FINDINGS_DIR"/*.day.jsonl "$FINDINGS_DIR"/*.norm.jsonl 2>/dev/null
+    rmdir "$FINDINGS_DIR/.chunks" 2>/dev/null
+  fi
+  return 0
 }
 
 # What L2 needs to know about each harness that contributed sessions tonight, and which skills are
@@ -2787,6 +3025,11 @@ run() {
   fi
   COUNT=$(wc -l < "$SESSIONS_LIST" | tr -d ' ')
   SKIPPED_EMPTY=$(( COUNT_AFTER_PRUNE - COUNT ))
+  if [ "$L1_CHUNKING" = 1 ]; then
+    log "L1 chunked triage on: worker input over $AUTODREAM_L1_CHUNK_BYTES bytes is read in chunks, at most $AUTODREAM_L1_MAX_CHUNKS per session (worst case $AUTODREAM_L1_MAX_CHUNKS engine calls for one session in one round); AUTODREAM_L1_CHUNK_BYTES=0 turns it off"
+  elif [ "$AUTODREAM_L1_CHUNK_BYTES" -gt 0 ]; then
+    log "WARNING: chunked triage is configured (AUTODREAM_L1_CHUNK_BYTES=$AUTODREAM_L1_CHUNK_BYTES) but chunk-transcript.sh or merge-chunks.sh was not found; oversized transcripts are read the old way, the head/tail slim"
+  fi
   log "found $RAW session files; excluded $EXCLUDED autodream-own, skipped $SKIPPED_EMPTY empty; $COUNT to triage; $OUT_OF_WINDOW out of window (modified since the day began, nothing inside it)"
 
   if [ "$COUNT" -eq 0 ]; then
@@ -2855,6 +3098,12 @@ run() {
       printf 'l1_timed_out: 0\n'
       printf 'l1_warmup: not_reached\n'
       printf 'l1_breaker_fired: not_reached\n'
+      printf 'l1_chunk_bytes: %s\n' "$([ "$L1_CHUNKING" = 1 ] && echo "$AUTODREAM_L1_CHUNK_BYTES" || echo 0)"
+      printf 'l1_max_chunks: %s\n' "$AUTODREAM_L1_MAX_CHUNKS"
+      printf 'l1_chunked_sessions: 0\n'
+      printf 'l1_chunks: 0\n'
+      printf 'l1_chunk_calls: 0\n'
+      printf 'l1_chunks_elided: 0\n'
       printf 'l1_findings_written: 0\n'
       printf 'l1_missing_after_retries: 0\n'
       printf 'l1_err_files: %s\n' "$early_err_files"
@@ -2992,6 +3241,9 @@ EOF
   export CLAUDE_BIN AUTODREAM_DIR FINDINGS_DIR SLIM WORK_DIR
   # The report-day window, read by the dispatcher subshell to cut a multi-day transcript.
   export WINDOW_ON SESSION_WINDOW WIN_START_EPOCH WIN_END_EPOCH TARGET_DATE
+  # Chunked triage, read by the dispatcher subshell. L1_CHUNKING is the one switch: 0 leaves the
+  # slimmer in its default mode and never reaches the chunker or the merge.
+  export L1_CHUNKING CHUNKER MERGER AUTODREAM_L1_CHUNK_BYTES AUTODREAM_L1_MAX_CHUNKS
   # Which adapter runs each session, and which model each adapter's workers use, fixed here
   # before the first model call and held in the environment (see the worker comment). The
   # models are resolved once per adapter, not per session.
@@ -3028,6 +3280,14 @@ EOF
   # that date's record of what timed out.
   : > "$FINDINGS_DIR/l1-timeouts.txt"
   : > "$FINDINGS_DIR/l1-netdown.txt"
+  # Per-run chunk ledgers, append-only like the two above. l1-chunks.txt holds one "hash chunks
+  # elided" line each time a session is planned (a retry plans it again, so readers keep the last
+  # line per hash); l1-chunk-calls.txt one "hash round chunk" line per engine call actually made, a
+  # reused answer making none, which is what a night cost in model calls.
+  if [ "$L1_CHUNKING" = 1 ]; then
+    : > "$FINDINGS_DIR/l1-chunks.txt"
+    : > "$FINDINGS_DIR/l1-chunk-calls.txt"
+  fi
 
   sweep_killed_leftovers
   reconcile_findings_with_worklist
@@ -3124,13 +3384,14 @@ EOF
     # Sampled before the dispatch, so "did THIS round recover anything" is answerable without
     # inferring it from the previous round's ending count.
     round_start_missing=$(l1_missing_count)
+    round_start_chunks=$(l1_chunk_answers)
     dispatch_l1
     LAST_ROUND_RUN="$round"
     MISSING=$(l1_missing_count)
     L1_DONE=$(findings_json_count)
     log "L1 round $round: $L1_DONE done, $MISSING still missing"
     [ "$MISSING" -eq 0 ] && break
-    if [ "$MISSING" -lt "$round_start_missing" ]; then
+    if [ "$MISSING" -lt "$round_start_missing" ] || [ "$(l1_chunk_answers)" -gt "$round_start_chunks" ]; then
       L1_NOPROGRESS=0
     else
       L1_NOPROGRESS=$((L1_NOPROGRESS + 1))
@@ -3181,6 +3442,7 @@ EOF
   L1_FAIL=$(ls -1 "$FINDINGS_DIR"/*.json.err 2>/dev/null | wc -l | tr -d " ")
   # Leftovers this run's worklist does not own: see scan_worklist_leftovers.
   scan_worklist_leftovers
+  read -r L1_CHUNKED_SESSIONS L1_CHUNKS L1_CHUNKS_ELIDED L1_CHUNK_CALLS <<< "$(l1_chunk_totals)"
   # In-band failures: a worker that ran to completion but couldn't fit the transcript
   # writes a findings JSON carrying a top-level "error" key (empty findings). These are
   # NOT .json.err files, so l1_err_files=0 masked them — count them explicitly so the
@@ -3509,6 +3771,18 @@ PY
     # yes when the circuit breaker cut the retry budget, so a short l1_rounds_used is not
     # mistaken for a run that finished early and cleanly.
     printf 'l1_breaker_fired: %s\n' "${L1_BREAKER:-not_reached}"
+    # What chunked triage cost. l1_chunk_bytes is the setting in force (0 = off, including when the
+    # helpers were not found); the rest are 0 on a night nothing was over the limit. l1_chunks is the
+    # chunk workers the oversized sessions needed, l1_chunk_calls the engine calls actually made
+    # (retries add, a reused answer makes none), and l1_chunks_elided how many chunks the cap
+    # dropped from the middle of a session: a nonzero value is a degraded read, named here so it
+    # cannot pass as a complete one.
+    printf 'l1_chunk_bytes: %s\n' "$([ "$L1_CHUNKING" = 1 ] && echo "$AUTODREAM_L1_CHUNK_BYTES" || echo 0)"
+    printf 'l1_max_chunks: %s\n' "$AUTODREAM_L1_MAX_CHUNKS"
+    printf 'l1_chunked_sessions: %s\n' "${L1_CHUNKED_SESSIONS:-0}"
+    printf 'l1_chunks: %s\n' "${L1_CHUNKS:-0}"
+    printf 'l1_chunk_calls: %s\n' "${L1_CHUNK_CALLS:-0}"
+    printf 'l1_chunks_elided: %s\n' "${L1_CHUNKS_ELIDED:-0}"
     printf 'l1_findings_written: %s\n' "$L1_OK"
     printf 'l1_findings_with_error: %s\n' "$L1_ERRORED"
     # Why those stubs exist, by class. A silent worker death (exit 0, empty stdout), a provider

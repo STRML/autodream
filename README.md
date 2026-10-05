@@ -153,6 +153,24 @@ the old mtime-only placement back. `install.sh` links the helper, `bin/session-w
 until it has run again after an update the runner finds it in the checkout, and a runner that
 finds it nowhere reads the old way and says `session_window: off`.
 
+### Long sessions are read in chunks
+
+Layer 1 used to give a worker the first 400 and last 200 lines of an oversized transcript, bookkeeping
+records included. On a real 3,479-line session only 36% of the lines were conversation, so the worker
+saw about 2% of it. With `AUTODREAM_L1_CHUNK_BYTES=300000` (**off by default**, `0`) a transcript over that many bytes is cleaned
+of Claude Code bookkeeping, split at line boundaries, read by one worker per chunk, and merged into the
+one findings JSON per session that Layer 2 already reads: the goal from the first chunk, the outcome from
+the last, the findings unioned. A chunk answer is untrusted, so only one findings object with no `error`
+counts; anything else is redone on its own, and a session is merged only when every chunk answered.
+
+**It costs more.** An oversized session now takes up to `AUTODREAM_L1_MAX_CHUNKS` worker calls (default
+8) instead of one, so a night costs up to *oversized sessions x 8* calls plus one per other session, and
+a session takes up to 8 x `AUTODREAM_L1_TIMEOUT` of wall time because its chunks run in sequence. On
+this host's 2026-10-02 (70 oversized sessions) that was 73 calls instead of 70: two sessions needed more
+than one chunk. Over the cap the middle is dropped and counted (`l1_chunks_elided`). `run-stats.txt`
+records `l1_chunks`, `l1_chunk_calls`, `l1_chunked_sessions` and `l1_chunks_elided`. Unset or `0`
+is the old head/tail view exactly.
+
 `review.sh` exits without opening a session when the report has no open questions
 or already carries a `## Triage decisions` section, printing where the report is
 and the `--force` line to open it anyway. It reads the
