@@ -46,6 +46,11 @@ full="${AUTODREAM_SLIM_FULL:-0}"
 
 [ -r "$src" ] || { echo "slim-transcript: cannot read $src" >&2; exit 1; }
 
+# umask only governs a file this script creates. A destination the caller already made keeps its
+# own mode through the redirects below, so truncate it here and set 0600 explicitly.
+rm -f "$dst.pre.jsonl"
+: > "$dst" && chmod 600 "$dst" || { echo "slim-transcript: cannot write $dst" >&2; exit 1; }
+
 lines=$(wc -l < "$src" | tr -d ' ')
 bytes=$(wc -c < "$src" | tr -d ' ')
 
