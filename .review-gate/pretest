@@ -13,7 +13,7 @@ failed=(); timedout=(); skipped=(); notrun=()
 
 # adapter-claude.sh needs a usable ps; review-cmux.sh needs a pty. The Claude Code sandbox denies
 # both, and both suites pass outside it. Each is probed for what it needs, not for the sandbox.
-can_ps()  { ps -p $$ >/dev/null 2>&1; }
+can_ps()  { [ -n "$(ps -o state= -p $$ 2>/dev/null | tr -d ' ')" ]; }   # same test as ps_usable in tests/adapter-claude.sh
 can_pty() { python3 -c 'import pty; pty.openpty()' >/dev/null 2>&1; }
 
 cap_cmd=()
