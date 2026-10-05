@@ -6021,7 +6021,10 @@ test_a_failed_chunker_never_hands_a_worker_the_whole_slim(){
   printf '#!/bin/bash\nexit 2\n' > "$inst/bin/chunk-transcript.sh"; chmod +x "$inst/bin/chunk-transcript.sh"
   local f; f=$(mk_chunky "$root" big 60); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
   mkdir -p "$root/shim-default"; printf '#!/bin/bash\nprintf %s "200"\n' "'%s'" > "$root/shim-default/curl"; chmod +x "$root/shim-default/curl"
+  # AUTODREAM_SLIM_FULL=1 and RESHAPE=1 are exported on purpose: a mode a caller has set must not
+  # leak into the fallback and turn the capped slim into the whole transcript.
   PATH="$root/shim-default:$PATH" FANOUT=1 AUTODREAM_SLIM_BYTES=3000 AUTODREAM_L1_CHUNK_BYTES=2000 AUTODREAM_SLIM_HEAD=10 AUTODREAM_SLIM_TAIL=6 \
+    AUTODREAM_SLIM_FULL=1 AUTODREAM_SLIM_RESHAPE=1 \
     MOCK_CAPTURE_DIR="$root/cap" MOCK_TRANSCRIPT_LOG="$root/sizes.log" \
     AUTODREAM_CHANGELOG=0 CLAUDE_BIN="$MOCK" AUTODREAM_CONFIG="$root/autodream/config" \
     AUTODREAM_CONSUME_DATE="$DATE" AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1 \
@@ -6082,9 +6085,9 @@ test_a_chunk_that_fails_is_retried_alone_and_finished_chunks_are_reused(){
 }
 
 test_a_cached_chunk_answer_is_not_reused_after_the_instructions_or_the_session_change(){
-  echo "# chunking: a finished chunk answer is reused only under the same prompt and the same stats block"
+  echo "# chunking: a finished chunk answer is reused only under the same prompt, stats block and chunk note"
   local scenario
-  for scenario in prompt stats; do
+  for scenario in prompt stats cap; do
     local root; root=$(setup_env)
     local f; f=$(mk_chunky "$root" big 60); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
     # Run 1: a permanent refusal on chunk 2 defers the date and leaves chunk 1's answer behind.
@@ -6096,9 +6099,11 @@ test_a_cached_chunk_answer_is_not_reused_after_the_instructions_or_the_session_c
       stats)  # the session gained a turn between runs, so its stats block differs
         printf '{"parentUuid":"u60","type":"user","cwd":"/tmp/proj-a","uuid":"u61","timestamp":"2020-01-02T12:31:00.000Z","message":{"role":"user","content":"turn-061 one more"}}\n' >> "$f"
         touch -t "$STAMP" "$f" ;;
+      cap)    # chunk 1 keeps its text but is now chunk 1 of 2 with the middle omitted
+        export AUTODREAM_L1_MAX_CHUNKS=2 ;;
     esac
     export MOCK_MODE=chunked MOCK_CALL_LOG="$root/calls2.log" AUTODREAM_L1_ROUNDS=1
-    run_chunked "$root"; unset MOCK_MODE MOCK_CALL_LOG AUTODREAM_L1_ROUNDS
+    run_chunked "$root"; unset MOCK_MODE MOCK_CALL_LOG AUTODREAM_L1_ROUNDS AUTODREAM_L1_MAX_CHUNKS
     assert_eq "$(grep -c '^01-' <(sed 's#.*/##' "$root/calls2.log"))" "1" "[$scenario] chunk 1 was called again, not served from the old answer"
     assert_nogrep "$root/run.out" "reuse: chunk 1/" "[$scenario] and the log does not say it reused it"
     assert_eq "$(jq -r 'has("error")' "$fd/$h.json" 2>/dev/null)" "false" "[$scenario] the session finished"
