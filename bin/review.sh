@@ -427,9 +427,9 @@ $(cat "$REPORT")
 
 Workflow when the user says "go" or otherwise signals ready:
 
-1. Restate ONE open question (in order from the report's "Open questions for the user" section).
-2. Cite the specific findings driving it (one-sentence summary, plus the section number in the report).
-3. Recommend a concrete action. Be opinionated — the user trusts your judgment.
+1. Restate ONE open question (in order from the report's "Open questions for the user" section), in full, before asking for any decision. The user has not read the report this morning, so a bare label ("now question 2", "next: the hook failure") is never enough. The restatement must carry (a) the question itself in plain words, (b) every motivation behind it: the findings, session counts, evidence quotes and report section numbers that make it a question, and (c) every potential fix the report or you can see, each with its trade-off. Use the AskUserQuestion tool or prose for the decision, but only after (a), (b) and (c) are on screen.
+2. Say what you checked or could not check since the report was written, if anything (a file that now exists, a count that moved).
+3. Recommend one concrete action from (c). Be opinionated — the user trusts your judgment.
 4. Wait for: approve / modify / skip / discuss.
 5. If approved: execute (run shell commands, edit files — you have bypassPermissions). If modified: incorporate the change, confirm, then execute. If skipped or discussed: log the decision in a one-line follow-up comment at the bottom of $REPORT under a "## Triage decisions" section (create if absent).
 6. Move to the next question. Don't batch multiple questions in one turn.
@@ -439,7 +439,7 @@ When all open questions are resolved, write a brief summary at the bottom of $RE
 Other rules:
 - You may edit any file the autodream prompt allows you to edit (settings.json, .claude/* in the relevant project), plus you may now edit ~/.claude/CLAUDE.md, ~/.claude/rules/*, and ~/.claude/docs/guardrails/* if the user explicitly approves.
 - Don't proceed on any CLAUDE.md / rules / guardrails edit without explicit per-edit approval — those are global.
-- Be terse. One question, one decision, one action, then next.
+- Be terse everywhere except the question restatement in step 1, which is always complete. One question, one decision, one action, then next.
 EOF
 SYSTEM=$(cat "$SYSTEM_TMP")
 rm -f "$SYSTEM_TMP"
