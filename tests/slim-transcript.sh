@@ -386,6 +386,23 @@ if cmp -s "$TMP/mm-a.out" "$TMP/mm-b.out"; then ok "RESHAPE=0 FULL=0 writes exac
 has '"type":"mode"' "$(cat "$TMP/mm-a.out")" "and the default mode keeps the bookkeeping record, as it always did"
 has 'HOOK' "$(cat "$TMP/mm-a.out")" "and the hook attachment"
 
+echo "# slim: with both modes unset the output is byte for byte what the slimmer wrote before the modes existed"
+# A golden digest, taken with bin/slim-transcript.sh as it stood on origin/main before the reshape
+# landed, over a 2,800-line Claude-shaped fixture (envelope fields, bookkeeping, hook attachments,
+# thinking signatures) big enough to hit the head/tail elision and the footer. It pins the default
+# path itself, not "reshape off equals reshape off", so a change that leaks into a plain call fails.
+i=1; : > "$TMP/golden.jsonl"
+while [ "$i" -le 700 ]; do
+  printf '{"parentUuid":"p%d","type":"user","message":{"role":"user","content":"turn %d with some text"},"uuid":"u%d","timestamp":"2026-10-01T10:00:00.000Z","cwd":"/x"}\n' "$i" "$i" "$i"
+  printf '{"type":"mode","mode":"auto"}\n{"type":"attachment","attachment":{"type":"hook_success","content":"HOOK %d"}}\n' "$i"
+  printf '{"type":"assistant","message":{"model":"m","id":"i%d","role":"assistant","content":[{"type":"thinking","thinking":"t","signature":"SIG"},{"type":"text","text":"reply %d"}],"usage":{"input_tokens":1}},"timestamp":"2026-10-01T10:00:01.000Z"}\n' "$i" "$i"
+  i=$((i + 1))
+done >> "$TMP/golden.jsonl"
+rm -f "$TMP/golden.out"
+env -u AUTODREAM_SLIM_RESHAPE -u AUTODREAM_SLIM_FULL "$SLIM" "$TMP/golden.jsonl" "$TMP/golden.out" >/dev/null 2>&1
+if command -v shasum >/dev/null 2>&1; then digest=$(shasum -a 256 "$TMP/golden.out" | cut -d' ' -f1); else digest=$(sha256sum "$TMP/golden.out" | cut -d' ' -f1); fi
+assert_eq "$digest" "6ef17cb7b05ccef8de93a9a181f6a79c5628db404f8664da1f64991813d6ea80" "a plain call writes the pre-reshape bytes (2,800-line fixture, elision and footer included)"
+
 echo "# slim: nothing it writes is readable by another local account"
 printf '%s\n' "$SENT" > "$TMP/mode.jsonl"
 rm -f "$TMP/mode.out"
