@@ -79,8 +79,8 @@ jq -s --arg session "$session" --argjson elided "$elided" '
   . as $all
   | ($all[0] + {
       session_path: $session,
-      underlying_goal: ([$all[].underlying_goal | select(type == "string")] | .[0]),
-      outcome: ([$all[].outcome | select(type == "string")] | .[-1]),
+      underlying_goal: ([$all[].underlying_goal | select(type == "string" and length > 0)] | .[0]),
+      outcome: ([$all[].outcome | select(type == "string" and length > 0)] | .[-1]),
       notable_initiatives: ([$all[].notable_initiatives | strs | .[]] | uniq_ordered),
       instructions_given: ([$all[].instructions_given | strs | .[]] | uniq_ordered | .[0:3]),
       satisfaction_signals: {
@@ -90,6 +90,6 @@ jq -s --arg session "$session" --argjson elided "$elided" '
         frustrated: sig($all; "frustrated")
       },
       findings: ([$all | to_entries[] | .key as $i | (.value.findings | objs)[] | . + {chunk: ($i + 1)}]
-                 | dedupe | sort_by(.severity | sev) | .[0:10]),
+                 | sort_by(.severity | sev) | dedupe | .[0:10]),
       meta: {chunks: ($all | length), chunks_elided: $elided}
     })' "${files[@]}"

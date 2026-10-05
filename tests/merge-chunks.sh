@@ -108,6 +108,21 @@ w d2.json '{"findings":[{"category":"b","severity":"low","what":"x"},{"category"
 "$MG" --session /s "$TMP/d1.json" "$TMP/d2.json" > "$TMP/out.json"
 assert_eq "$(J '.findings | length')" "3" "the same what under another category, or another what, is kept"
 
+echo "# merge: a duplicate seen at two severities keeps the higher one"
+w sv1.json '{"session_path":"x","findings":[{"category":"c","severity":"low","what":"same"}]}'
+w sv2.json '{"session_path":"x","findings":[{"category":"c","severity":"high","what":"same"}]}'
+"$MG" --session /s "$TMP/sv1.json" "$TMP/sv2.json" > "$TMP/out.json" 2>/dev/null
+assert_eq "$(J '.findings | length')" "1" "the two are one finding"
+assert_eq "$(J '.findings[0].severity')" "high" "and it is the high one, not the first chunk's low"
+assert_eq "$(J '.findings[0].chunk')" "2" "tagged with the chunk that rated it high"
+
+echo "# merge: an empty goal or outcome does not mask a real one"
+w g1.json '{"session_path":"x","underlying_goal":"","outcome":"fully_achieved","findings":[]}'
+w g2.json '{"session_path":"x","underlying_goal":"ship it","outcome":"","findings":[]}'
+"$MG" --session /s "$TMP/g1.json" "$TMP/g2.json" > "$TMP/out.json" 2>/dev/null
+assert_eq "$(J '.underlying_goal')" "ship it" "the goal is the first non-empty one"
+assert_eq "$(J '.outcome')" "fully_achieved" "the outcome is the last non-empty one"
+
 echo "# merge: findings are capped at 10, keeping the most severe"
 { printf '{"findings":['
   for i in 1 2 3 4 5 6 7 8; do printf '{"category":"c","severity":"low","what":"low-%d"},' "$i"; done
