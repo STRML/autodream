@@ -21,7 +21,7 @@
 # No model call: the merge is mechanical, so it has to say what each field means when the
 # answers disagree.
 #   session_path     the ORIGINAL transcript, never a chunk file
-#   underlying_goal  the first non-null one: the session says what it wants where it begins
+#   underlying_goal  the first non-empty one: the session says what it wants where it begins
 #   outcome          the last chunk that states one: the end state is where the outcome is judged
 #   stats fields     taken once from the first chunk. Every worker copies the same precomputed
 #                    sidecar verbatim, so summing them would be nonsense.
