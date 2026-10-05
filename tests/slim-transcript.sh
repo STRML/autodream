@@ -218,7 +218,7 @@ ls "$TMP"/*.pre.jsonl >/dev/null 2>&1 && no "the pre-pass temp is cleaned up" \
   || ok "the pre-pass temp is cleaned up"
 
 # ---- Reshape mode (AUTODREAM_SLIM_RESHAPE=1): the denylist and the rebuilt record ----------
-# Off unless asked for. run.sh asks for it only while chunked triage is on, so every assertion
+# Off unless asked for. Nothing sets it yet; the chunked reader will, only while it is on, so every assertion
 # above runs in the default mode and still means what it did, and the ones below are about the
 # mode alone.
 slim_re() { # $1=jsonl text, extra env as KEY=VAL args after -> slimmed output
@@ -298,8 +298,12 @@ got=$(slim_re '{"type":"user","message":{"role":"user","content":"no clock"}}')
 jq_is "$got" 'has("timestamp")' 'false' "a record with no timestamp does not gain a null one"
 got=$(slim_re '{"type":"user","timestamp":"2026-10-01T14:21:52.155Z","message":{"content":"no role"}}')
 jq_is "$got" '.message | has("role")' 'false' "a message with no role does not gain a null role"
-got=$(slim_re '{"type":"assistant","timestamp":"2026-10-01T14:21:52.155Z","message":{"role":"assistant","content":["a bare string block",{"type":"thinking","thinking":"t","signature":"S"}]}}')
-jq_is "$got" '.message.content[0]' 'a bare string block' "a content array holding a bare string does not abort the reshape"
+got=$(slim_re "$(printf '%s\n%s\n%s' "$SENT" '{"type":"assistant","timestamp":"2026-10-01T14:21:52.155Z","message":{"role":"assistant","content":["a bare string block",{"type":"thinking","thinking":"t","signature":"S"}]}}' '{"type":"mode","mode":"auto"}')")
+has 'sentinel' "$got" "a content array holding a bare string does not abort the reshape (the sentinel survives)"
+hasnt '"type":"mode"' "$got" "and bookkeeping is still dropped, so the raw fallback did not run"
+got=$(slim_re "$(printf '%s\n%s\n%s' "$SENT" '{"type":"user","message":"strmsg"}' '{"type":"mode","mode":"auto"}')")
+has 'strmsg' "$got" "a Claude record whose message is a string is kept, not deleted by the reshape"
+hasnt '"type":"mode"' "$got" "and bookkeeping is still dropped around it"
 
 echo "# slim reshape: OMP and unknown-schema records come out exactly as they do with the reshape off"
 # Not "raw": the pre-pass has always re-serialised every record with jq -c and stripped OMP toolResult
