@@ -181,7 +181,7 @@ l1counts=$(mktemp "${TMPDIR:-/tmp}/l1model.XXXXXX")
 # pass: the assertions inside it never reached the totals.
 if read -r _p _f < "$l1counts" 2>/dev/null; then pass=$_p; fail=$_f
 else no "adapter_l1_model assertions did not report their counts"; fi
-trash "$l1counts" 2>/dev/null
+rm -f "$l1counts" 2>/dev/null
 
 echo "# provider_probe_url: net_up probes the provider a layer actually calls"
 probecounts=$(mktemp)
@@ -200,7 +200,7 @@ probecounts=$(mktemp)
 )
 if read -r _p _f < "$probecounts" 2>/dev/null; then pass=$_p; fail=$_f
 else no "provider_probe_url assertions did not report their counts"; fi
-trash "$probecounts" 2>/dev/null
+rm -f "$probecounts" 2>/dev/null
 
 printf '\npassed: %s   failed: %s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

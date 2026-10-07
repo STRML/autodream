@@ -65,6 +65,12 @@
 # still escalating tomorrow.
 set -uo pipefail
 
+_pp="$(dirname "${BASH_SOURCE[0]}")/portable.sh"
+# Installed copies are symlinks: a merge updates them before install.sh links a new helper.
+[ -r "$_pp" ] || _pp="$(dirname "$(readlink "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/portable.sh"
+# shellcheck source=/dev/null
+. "$_pp"
+
 # install.sh links this script into the install's own AUTODREAM_DIR, so a bare invocation
 # (status, clear, or run.sh's early empty-night path) finds the store there, the same way
 # run.sh finds its install dir. The legacy ~/.claude/autodream stays the last resort
@@ -158,7 +164,7 @@ acquire_lock() {
   local i=0
   while ! mkdir "$LOCK" 2>/dev/null; do
     if [ -d "$LOCK" ]; then
-      local age; age=$(( $(date +%s) - $(stat -f %m "$LOCK" 2>/dev/null || date +%s) ))
+      local age; age=$(( $(date +%s) - $(pstat_mtime "$LOCK" || date +%s) ))
       [ "$age" -gt 120 ] && { rmdir "$LOCK" 2>/dev/null; continue; }
     fi
     i=$(( i + 1 ))

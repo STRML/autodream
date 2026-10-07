@@ -219,8 +219,13 @@ AUTODREAM_L1_MAX_CHUNKS=$((10#$AUTODREAM_L1_MAX_CHUNKS))
 WORK_DIR="$AUTODREAM_DIR/work"
 WORK_BUCKET="$PROJECTS_DIR/$(printf '%s' "$WORK_DIR" | sed 's#[/.]#-#g')"
 
-TARGET_DATE="${1:-$(date -v-1d +%Y-%m-%d)}"
-NEXT_DATE=$(date -j -f %Y-%m-%d -v+1d "$TARGET_DATE" +%Y-%m-%d)
+_pp="$(dirname "${BASH_SOURCE[0]}")/portable.sh"
+# Installed copies are symlinks: a merge updates them before install.sh links a new helper.
+[ -r "$_pp" ] || _pp="$(dirname "$(readlink "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/portable.sh"
+# shellcheck source=/dev/null
+. "$_pp"
+TARGET_DATE="${1:-$(pdate_yesterday)}"
+NEXT_DATE=$(pdate_shift "$TARGET_DATE" 1 d)
 
 FINDINGS_DIR="$AUTODREAM_DIR/findings/$TARGET_DATE"
 REPORT_PATH="$DREAMS_DIR/$TARGET_DATE.md"
@@ -375,7 +380,7 @@ WIN_START_EPOCH=""
 WIN_END_EPOCH=""
 if [ "${AUTODREAM_WINDOW:-1}" != "0" ] && [ -n "$SESSION_WINDOW" ] \
    && _wb=$(bash "$SESSION_WINDOW" bounds "$TARGET_DATE" "$NEXT_DATE" 2>/dev/null) && [ -n "$_wb" ] \
-   && _far=$(date -j -f %Y-%m-%d -v+5y "$TARGET_DATE" +%Y-%m-%d 2>/dev/null) && [ -n "$_far" ] \
+   && _far=$(pdate_shift "$TARGET_DATE" 5 y) && [ -n "$_far" ] \
    && find / -maxdepth 0 ! -newermt "$_far 00:00:00" >/dev/null 2>&1; then
   WIN_START_EPOCH="${_wb%% *}"
   WIN_END_EPOCH="${_wb##* }"
@@ -1502,7 +1507,7 @@ l2_diag_sleepwake() { # the kernel's last sleep and wake, so a sleep inside the 
   local k v
   for k in sleeptime waketime boottime; do
     v=$(sysctl -n "kern.$k" 2>/dev/null | sed -n 's/.*sec = \([0-9]*\).*/\1/p')
-    printf '%s: %s (%s)\n' "$k" "${v:-unknown}" "$([ -n "$v" ] && date -r "$v" 2>/dev/null)"
+    printf '%s: %s (%s)\n' "$k" "${v:-unknown}" "$([ -n "$v" ] && pdate_fmt_epoch "$v" "+%a %b %e %H:%M:%S %Y")"
   done
   pmset -g batt 2>/dev/null | head -2
 }
@@ -4333,7 +4338,7 @@ PY
     # AUTODREAM_OVERLAP_BIN do: the suite pins a fixed historical TARGET_DATE, so without
     # an override every consume path would take the skip branch and the tests that cover
     # archiving would pass while asserting nothing.
-    NORMAL_TARGET_DATE="${AUTODREAM_CONSUME_DATE:-$(date -v-1d +%Y-%m-%d)}"
+    NORMAL_TARGET_DATE="${AUTODREAM_CONSUME_DATE:-$(pdate_yesterday)}"
     if ! report_complete; then
       log "report is present but carries no open-questions marker; skipping vault-notes archive and x-bookmark mark-read rather than consuming input against a truncated report"
     else

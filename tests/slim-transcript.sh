@@ -14,6 +14,8 @@ set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
+# shellcheck source=/dev/null
+. "$REPO/bin/portable.sh"
 SLIM="$REPO/bin/slim-transcript.sh"
 
 pass=0; fail=0
@@ -411,13 +413,13 @@ echo "# slim: nothing it writes is readable by another local account"
 printf '%s\n' "$SENT" > "$TMP/mode.jsonl"
 rm -f "$TMP/mode.out"
 ( umask 022; AUTODREAM_SLIM_RESHAPE=1 AUTODREAM_SLIM_FULL=1 "$SLIM" "$TMP/mode.jsonl" "$TMP/mode.out" >/dev/null 2>&1 )
-assert_eq "$(stat -f %Lp "$TMP/mode.out" 2>/dev/null)" "600" "the slimmed output is mode 600 even when the caller umask is 022"
+assert_eq "$(pstat_mode "$TMP/mode.out")" "600" "the slimmed output is mode 600 even when the caller umask is 022"
 rm -f "$TMP/mode2.out"
 ( umask 022; "$SLIM" "$TMP/mode.jsonl" "$TMP/mode2.out" >/dev/null 2>&1 )
-assert_eq "$(stat -f %Lp "$TMP/mode2.out" 2>/dev/null)" "600" "and so is the default mode's"
+assert_eq "$(pstat_mode "$TMP/mode2.out")" "600" "and so is the default mode's"
 printf 'old\n' > "$TMP/mode3.out"; chmod 644 "$TMP/mode3.out"
 "$SLIM" "$TMP/mode.jsonl" "$TMP/mode3.out" >/dev/null 2>&1
-assert_eq "$(stat -f %Lp "$TMP/mode3.out" 2>/dev/null)" "600" "and a destination the caller already made with mode 644 is tightened to 600"
+assert_eq "$(pstat_mode "$TMP/mode3.out")" "600" "and a destination the caller already made with mode 644 is tightened to 600"
 hasnt 'old' "$(head -c 3 "$TMP/mode3.out")" "and its old contents are replaced"
 
 printf '\npassed: %s   failed: %s\n' "$pass" "$fail"

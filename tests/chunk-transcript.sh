@@ -17,6 +17,8 @@ set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
+# shellcheck source=/dev/null
+. "$REPO/bin/portable.sh"
 CH="$REPO/bin/chunk-transcript.sh"
 
 pass=0; fail=0
@@ -134,7 +136,7 @@ assert_eq "$(ls "$OUT" | grep -vc '^chunk-[0-9][0-9]\.jsonl$')" "0" "and nothing
 echo "# chunk: chunk files are private to the user"
 OUT="$TMP/o5m"; mkdir -p "$OUT"
 ( umask 022; "$CH" "$TMP/ten.jsonl" "$OUT" 350 20 >/dev/null 2>&1 )
-modes=$(for f in "$OUT"/chunk-*.jsonl; do stat -f %Lp "$f"; done | sort -u | tr '\n' ' ')
+modes=$(for f in "$OUT"/chunk-*.jsonl; do pstat_mode "$f"; done | sort -u | tr '\n' ' ')
 assert_eq "$modes" "600 " "every chunk is mode 600 even when the caller umask is 022 (they hold transcript text)"
 
 echo "# chunk: numbers with leading zeros are decimal, not an invalid octal"

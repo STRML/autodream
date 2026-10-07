@@ -29,6 +29,8 @@ set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
+# shellcheck source=/dev/null
+. "$REPO/bin/portable.sh"
 REVIEW="$REPO/bin/review.sh"
 
 pass=0; fail=0
@@ -245,7 +247,7 @@ test_confirmed_marker_survives_grace(){
   run_review "$root" 2020-01-02                      # 1 create, confirmed stamped
   local dir; dir=$(marker_dir "$root" 2020-01-02)
   local conf; conf=$(marker_confirmed "$root" 2020-01-02)
-  touch -t "$(date -v-2d +%Y%m%d%H%M.%S)" "$dir" "$conf"   # >900s grace, <14d prune
+  touch -t "$(pdate_fmt_epoch $(( $(date +%s) - 172800 )) +%Y%m%d%H%M.%S)" "$dir" "$conf"   # >900s grace, <14d prune
   run_review "$root" 2020-01-02
   assert_eq "$(cmux_calls "$root")" 1 "confirmed launch is deduped even past the grace window"
 }
@@ -258,7 +260,7 @@ test_abandoned_claim_is_reclaimed(){
   mk_report "$root" 2020-01-02 "$REPORT_OPEN"
   local dir; dir=$(marker_dir "$root" 2020-01-02)
   mkdir -p "$dir"
-  touch -t "$(date -v-2d +%Y%m%d%H%M.%S)" "$dir"     # unconfirmed, >grace, <14d prune
+  touch -t "$(pdate_fmt_epoch $(( $(date +%s) - 172800 )) +%Y%m%d%H%M.%S)" "$dir"     # unconfirmed, >grace, <14d prune
   run_review "$root" 2020-01-02
   assert_eq "$(cmux_calls "$root")" 1 "abandoned claim is reclaimed and the popup opens"
   assert_grep "$root/out" 'reclaiming abandoned claim' "reclaim is reported"
@@ -450,7 +452,9 @@ test_missing_shasum_fails_closed(){
   local root; root=$(setup_env)
   mk_report "$root" 2020-01-02 "$REPORT_OPEN"
   local rc=0
-  # PATH without /usr/bin hides shasum while keeping bash/coreutils.
+  # A shasum that is not there, first on PATH: /bin is /usr/bin on Linux, so a PATH that
+  # leaves /usr/bin out cannot hide it there.
+  printf '#!/bin/sh\nexit 127\n' > "$root/shasum"; chmod +x "$root/shasum"
   env AUTODREAM_DIR="$root/autodream" \
     AUTODREAM_CONFIG="$root/nonexistent-config" \
     AUTODREAM_TRIAGE_SURFACE=cmux \

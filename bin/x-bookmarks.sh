@@ -55,6 +55,12 @@
 #   X_QUERYID_TTL   seconds to reuse a scraped queryId           default 86400
 set -uo pipefail
 
+_pp="$(dirname "${BASH_SOURCE[0]}")/portable.sh"
+# Installed copies are symlinks: a merge updates them before install.sh links a new helper.
+[ -r "$_pp" ] || _pp="$(dirname "$(readlink "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/portable.sh"
+# shellcheck source=/dev/null
+. "$_pp"
+
 AUTODREAM_DIR="${AUTODREAM_DIR:-$HOME/.claude/autodream}"
 
 # Source the config here too, not only in run.sh — `status` is meant to be run by hand
@@ -148,7 +154,7 @@ load_creds() {
 # user. Warn rather than refuse: a nightly job silently doing nothing is worse than a
 # nightly job that works and complains.
 warn_perms() {
-  local mode; mode=$(stat -f '%OLp' "$CREDS_FILE" 2>/dev/null) || return 0
+  local mode; mode=$(pstat_mode "$CREDS_FILE") || return 0
   case "$mode" in
     600|400) : ;;
     *) echo "  WARNING: $CREDS_FILE is mode $mode; these cookies are a full account session. chmod 600 it." >&2 ;;
@@ -273,7 +279,7 @@ detect_query_id() {
 
 get_query_id() {
   if [ -s "$QID_CACHE" ]; then
-    local age; age=$(( $(date +%s) - $(stat -f '%m' "$QID_CACHE" 2>/dev/null || echo 0) ))
+    local age; age=$(( $(date +%s) - $(pstat_mtime "$QID_CACHE" || echo 0) ))
     if [ "$age" -lt "$QUERYID_TTL" ]; then
       printf 'cache' > "$QID_SOURCE_FILE"
       cat "$QID_CACHE"; return 0
@@ -556,7 +562,7 @@ status() {
     printf 'credentials: absent (%s) — feature is off\n' "$CREDS_FILE"
     return 0
   fi
-  printf 'credentials: %s (mode %s)\n' "$CREDS_FILE" "$(stat -f '%OLp' "$CREDS_FILE" 2>/dev/null || echo '?')"
+  printf 'credentials: %s (mode %s)\n' "$CREDS_FILE" "$(pstat_mode "$CREDS_FILE" || echo '?')"
   warn_perms
   if load_creds; then
     printf 'keys:        X_AUTH_TOKEN and X_CT0 both set\n'
@@ -573,7 +579,7 @@ status() {
   fi
   if [ -s "$QID_CACHE" ]; then
     printf 'queryId:     cached, %ss old (ttl %ss)\n' \
-      "$(( $(date +%s) - $(stat -f '%m' "$QID_CACHE" 2>/dev/null || echo 0) ))" "$QUERYID_TTL"
+      "$(( $(date +%s) - $(pstat_mtime "$QID_CACHE" || echo 0) ))" "$QUERYID_TTL"
   else
     printf 'queryId:     not yet scraped\n'
   fi

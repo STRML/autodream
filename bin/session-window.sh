@@ -32,6 +32,12 @@
 # a half-open window over whole-second bounds means.
 set -u
 
+_pp="$(dirname "${BASH_SOURCE[0]}")/portable.sh"
+# Installed copies are symlinks: a merge updates them before install.sh links a new helper.
+[ -r "$_pp" ] || _pp="$(dirname "$(readlink "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/portable.sh"
+# shellcheck source=/dev/null
+. "$_pp"
+
 # Shared by every jq program below. No apostrophes anywhere in these programs: they sit
 # inside single-quoted shell strings, and one stray quote ends the string.
 TS_DEF='def ts: (try .timestamp catch null)
@@ -49,8 +55,8 @@ cmd="${1:-}"
 case "$cmd" in
   bounds)
     [ "$#" -eq 3 ] || usage
-    a=$(date -j -f '%Y-%m-%d %H:%M:%S' "$2 00:00:00" +%s 2>/dev/null) || exit 1
-    b=$(date -j -f '%Y-%m-%d %H:%M:%S' "$3 00:00:00" +%s 2>/dev/null) || exit 1
+    a=$(pdate_epoch "$2 00:00:00") || exit 1
+    b=$(pdate_epoch "$3 00:00:00") || exit 1
     is_int "$a" && is_int "$b" && [ "$b" -gt "$a" ] || exit 1
     printf '%s %s\n' "$a" "$b"
     ;;
@@ -79,7 +85,7 @@ case "$cmd" in
         # of the day -> yes (bias to triage), modified after it -> no. Without this, the
         # find that no longer has an upper bound would enumerate a no-clock file on every
         # later date as well and triage it twice, filed under the wrong day.
-        mt=$(stat -f %m "$f" 2>/dev/null) || exit 0
+        mt=$(pstat_mtime "$f") || exit 0
         case "$mt" in ''|*[!0-9]*) exit 0 ;; esac
         [ "$mt" -lt "$e" ] && exit 0
         exit 1
