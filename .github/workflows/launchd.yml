@@ -27,6 +27,9 @@ on:
       - 'tests/portable.sh'
       - '.github/workflows/launchd.yml'
   pull_request:
+    # ready_for_review is not a default type: without it, marking a draft ready starts nothing
+    # and the job's draft skip would leave the PR with no test run.
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'install.sh'
       - 'launchd/**'

@@ -6312,7 +6312,7 @@ echo
 echo "===== unit suites ====="
 # The suites that drive launchd need plutil and launchctl, so they run on macOS only (CI runs
 # them in launchd.yml, when a launchd file changes).
-_suites="portable lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux notes-path tmp-cleanup dream-triage"
+_suites="portable lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks"
 [ "$(uname -s)" = Darwin ] && _suites="$_suites scheduler-label autodream-now install-review-agent install-dry-run install-dir"
 for _suite in $_suites; do
   _out=$(bash "$HERE/$_suite.sh" 2>&1)
