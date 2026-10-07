@@ -4,10 +4,30 @@ name: tests
 # unfiltered push trigger runs every PR commit twice. Branch work is covered by
 # the PR trigger; both routes into main - a merge and a direct push - fire the
 # push trigger. A feature branch with no PR runs nothing, which is the trade.
+#
+# Cost: this is a macOS job, billed at 10x a Linux minute, and a run takes about 11 minutes.
+# 100 runs in two days (83 on one of them) came from every push to a PR branch starting a
+# fresh run while the last one was still going. Three controls: a newer push to the same
+# ref cancels the older run, a change that touches no code or test starts nothing, and a
+# draft PR starts nothing until it is marked ready.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'example/**'
+      - 'LICENSE'
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'example/**'
+      - 'LICENSE'
+
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -17,6 +37,7 @@ jobs:
     # macOS, not Linux: the suites use BSD `date` and `touch` semantics and will
     # fail on GNU coreutils. Every suite runs against tests/mock-claude.sh, so
     # nothing here needs network or a real model.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: macos-latest
     timeout-minutes: 15
     steps:

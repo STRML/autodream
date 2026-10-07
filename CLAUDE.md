@@ -6,7 +6,7 @@ Operating notes for working on this repo. Read this before changing `bin/run.sh`
 
 A nightly two-layer pipeline that reads yesterday's Claude Code session transcripts and produces a ranked daily report plus a few pins to the shared Mnemopi memory store.
 
-- **Layer 1** (`prompts/SESSION_TRIAGE.md`, haiku, fanned out one per session): reads one transcript, writes one findings JSON.
+- **Layer 1** (`prompts/SESSION_TRIAGE.md`, `claude-haiku-5-5` at effort high, fanned out one per session): reads one transcript, writes one findings JSON.
 - **Layer 2** (`prompts/PROMPT.md`, opus, single call): reads all findings JSONs, writes `dreams/YYYY-MM-DD.md`, optionally proposes pins to `pins.jsonl` for `run.sh` to apply.
 - `bin/run.sh` orchestrates both layers and everything around them.
 
@@ -105,6 +105,7 @@ plus env `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REP
 `dispatch_l1` no longer names an engine. For each session it takes the adapter from the source map, the adapter's argv from `adapter.sh l1-argv <model>`, and its environment from `l1-env`, and runs `env <env> <argv>` with the prompt on stdin. The claude adapter's argv is the invocation listed above, byte for byte (`tests/adapter-claude.sh` pins it against the old literal text).
 
 - **The source map is held in the environment, not read from the findings dir.** `AUTODREAM_SOURCE_MAP` (hash and adapter per session) and `AUTODREAM_L1_MODELS` (model per adapter) are built before the first model call. An L1 worker holds the Write tool and could rewrite `sessions-source.txt`, and the source decides which binary the next worker executes. `test_l1_engine_cannot_be_redirected_by_a_worker` has a worker do exactly that and checks the next session still runs on the real engine; reading the file instead fails it.
+- **Haiku 5.5, effort and a replaced system prompt (2026-10-07).** The claude manifest's `l1_model` is `claude-haiku-5-5` (verified: `--model claude-haiku-5-5` and the `haiku` alias both answer as it; an id the CLI does not know falls back silently, so re-check `modelUsage` in `--output-format json` when changing it). `l1-argv` and `warmup-argv` add `--effort` from `AUTODREAM_L1_EFFORT_CLAUDE`, then `AUTODREAM_L1_EFFORT`, then `high`; `off` omits it and an unknown level exits 2. They also pass `--system-prompt` instead of `--append-system-prompt`, which drops Claude Code's default prompt: one-word call 6.9k -> 5.0k input tokens, and a real triage run on a 250 KB slice cost $0.159 against $0.215 with the same number of findings. L2 is untouched.
 - **The model** resolves `AUTODREAM_L1_MODEL_<ADAPTER>`, then `AUTODREAM_L1_MODEL`, then the manifest's `l1_model` (`adapter_l1_model`). A model id belongs to one engine, which is why a host with two engines pins them per adapter.
 - **No engine is a deterministic error.** A session whose adapter is not executable, or resolves no model, gets a findings record with `error: no L1 engine for this session`, left in place and counted by `l1_findings_with_error`. Retrying cannot change the answer, and the run still reports.
 

@@ -2,7 +2,7 @@
 # Autodream runner — invoked by launchd at ~3am local time.
 #
 # Two-layer pipeline:
-#   L1: For each of yesterday's session JSONLs, spawn a parallel `claude --model haiku`
+#   L1: For each of yesterday's session JSONLs, spawn a parallel `claude --model claude-haiku-5-5`
 #       running SESSION_TRIAGE.md → writes one findings.json per session.
 #   L2: One `claude` (CLI default model) running PROMPT.md with Glob and Read only → reads
 #       all findings JSONs and prints the report on stdout, ending with AUTODREAM_REPORT_END,

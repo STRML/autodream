@@ -2,6 +2,12 @@
 
 All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
+## 2026-10-07
+
+### Changed
+- **Layer 1 on the claude adapter runs `claude-haiku-5-5`, at effort `high`, with Claude Code's default system prompt replaced.** `AUTODREAM_L1_EFFORT` (or `_CLAUDE`) takes `low|medium|high|xhigh|max|off`. The warmup uses the same flags as a worker. Measured on one real transcript slice: $0.159 per worker against $0.215 with the appended prompt, three findings each.
+- **CI no longer starts a macOS run per push.** A newer push to the same PR or ref cancels the older run, a docs-only change and a draft PR start nothing. 100 runs in two days (83 on one) at about 11 macOS minutes each had been billing at the 10x macOS rate.
+
 ## 2026-10-04
 
 ### Added

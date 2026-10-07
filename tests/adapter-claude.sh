@@ -255,20 +255,25 @@ echo "# l1-argv reproduces the invocation run.sh hard-coded before the engine mo
 # derived from the adapter, so this fails if the adapter and the old nightly ever disagree.
 OLD_SYSPROMPT="Headless triage worker. Read the session transcript and write exactly one findings JSON object, via the Write tool, to the literal output path given on line 2 of the prompt. Those paths are literal strings, not shell variables — never \$-expand them. Print only the literal word done and exit."
 OLD_SETTINGS="{\"disableAllHooks\":true}"
-printf '%s\0' /opt/test/claude --print --permission-mode bypassPermissions --model claude-haiku-4-5 \
+printf '%s\0' /opt/test/claude --print --permission-mode bypassPermissions --model claude-haiku-5-5 --effort high \
   --no-session-persistence --tools Read Write --disable-slash-commands --strict-mcp-config \
-  --settings "$OLD_SETTINGS" --append-system-prompt "$OLD_SYSPROMPT" > "$tmp/old-argv"
-CLAUDE_BIN=/opt/test/claude "$A" l1-argv claude-haiku-4-5 > "$tmp/new-argv"
-if cmp -s "$tmp/old-argv" "$tmp/new-argv"; then ok "the claude L1 argv is byte for byte the old hard-coded one"
-else no "the claude L1 argv is byte for byte the old hard-coded one"; fi
+  --settings "$OLD_SETTINGS" --system-prompt "$OLD_SYSPROMPT" > "$tmp/old-argv"
+CLAUDE_BIN=/opt/test/claude "$A" l1-argv claude-haiku-5-5 > "$tmp/new-argv"
+if cmp -s "$tmp/old-argv" "$tmp/new-argv"; then ok "the claude L1 argv is the old hard-coded one with --effort high and --system-prompt"
+else no "the claude L1 argv is the old hard-coded one with --effort high and --system-prompt"; fi
+echo "# l1 effort: env override, off, and an invalid level"
+assert_eq "$(AUTODREAM_L1_EFFORT=low CLAUDE_BIN=/opt/test/claude "$A" l1-argv m | tr '\0' '\n' | sed -n '/^--effort$/{n;p;}')" "low" "AUTODREAM_L1_EFFORT sets the level"
+assert_eq "$(AUTODREAM_L1_EFFORT=low AUTODREAM_L1_EFFORT_CLAUDE=max CLAUDE_BIN=/opt/test/claude "$A" l1-argv m | tr '\0' '\n' | sed -n '/^--effort$/{n;p;}')" "max" "the per-adapter variable wins"
+assert_eq "$(AUTODREAM_L1_EFFORT=off CLAUDE_BIN=/opt/test/claude "$A" l1-argv m | tr '\0' '\n' | grep -c '^--effort$')" "0" "off omits the flag"
+if AUTODREAM_L1_EFFORT=turbo CLAUDE_BIN=/opt/test/claude "$A" l1-argv m >/dev/null 2>&1; then no "an unknown level is refused"; else ok "an unknown level is refused"; fi
 assert_eq "$(CLAUDE_BIN=/opt/test/claude "$A" engine-bin)" "/opt/test/claude" "engine-bin honors CLAUDE_BIN"
 assert_eq "$(env -u CLAUDE_BIN HOME=/h "$A" engine-bin)" "/h/.local/bin/claude" "engine-bin defaults to the installer's location"
 assert_eq "$("$A" l1-env | tr '\n' ' ')" "CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 " "l1-env is the lean-query environment"
 
 echo "# warmup-argv: the worker's flags with a one-word system prompt"
-WA=$(CLAUDE_BIN=/opt/test/claude "$A" warmup-argv claude-haiku-4-5 | tr '\0' '\n')
+WA=$(CLAUDE_BIN=/opt/test/claude "$A" warmup-argv claude-haiku-5-5 | tr '\0' '\n')
 assert_eq "$(printf '%s\n' "$WA" | tail -1)" "Reply with the single word ok and exit." "the system prompt asks for one word"
-LA=$(CLAUDE_BIN=/opt/test/claude "$A" l1-argv claude-haiku-4-5 | tr '\0' '\n')
+LA=$(CLAUDE_BIN=/opt/test/claude "$A" l1-argv claude-haiku-5-5 | tr '\0' '\n')
 # Everything but the tools list and the system prompt must match the worker's, so the warmup takes the same auth path.
 assert_eq "$(printf '%s\n' "$WA" | sed -n '1,/^--tools$/p' | sed '$d')" "$(printf '%s\n' "$LA" | sed -n '1,/^--tools$/p' | sed '$d')" "the flags before --tools match the worker's"
 
