@@ -164,7 +164,7 @@ l1counts=$(mktemp "${TMPDIR:-/tmp}/l1model.XXXXXX")
   export ADAPTERS_ROOT="$REPO/adapters"
   . "$REPO/bin/adapters.sh"
   unset AUTODREAM_L1_MODEL AUTODREAM_L1_MODEL_CLAUDE AUTODREAM_L1_MODEL_OMP
-  assert_eq "$(adapter_l1_model claude)" "claude-haiku-4-5" "the manifest default"
+  assert_eq "$(adapter_l1_model claude)" "claude-haiku-5-5" "the manifest default"
   assert_eq "$(adapter_l1_model omp)" "deepseek/deepseek-flash" "each adapter has its own default"
   AUTODREAM_L1_MODEL=generic/model
   assert_eq "$(adapter_l1_model claude)" "generic/model" "the generic override applies to every adapter"
@@ -181,7 +181,7 @@ l1counts=$(mktemp "${TMPDIR:-/tmp}/l1model.XXXXXX")
 # pass: the assertions inside it never reached the totals.
 if read -r _p _f < "$l1counts" 2>/dev/null; then pass=$_p; fail=$_f
 else no "adapter_l1_model assertions did not report their counts"; fi
-trash "$l1counts" 2>/dev/null
+rm -f "$l1counts" 2>/dev/null
 
 echo "# provider_probe_url: net_up probes the provider a layer actually calls"
 probecounts=$(mktemp)
@@ -189,7 +189,7 @@ probecounts=$(mktemp)
   assert_eq "$(provider_probe_url omp deepseek/deepseek-flash)" "https://api.deepseek.com/" "an omp deepseek model probes deepseek"
   assert_eq "$(provider_probe_url omp anthropic/claude-opus-5)" "https://api.anthropic.com/" "an omp anthropic model probes anthropic"
   assert_eq "$(provider_probe_url omp neuralwatt/glm-5.3-flash)" "https://api.neuralwatt.com/" "an omp neuralwatt model probes neuralwatt"
-  assert_eq "$(provider_probe_url claude claude-haiku-4-5)" "https://api.anthropic.com/" "claude has no provider prefix and probes anthropic"
+  assert_eq "$(provider_probe_url claude claude-haiku-5-5)" "https://api.anthropic.com/" "claude has no provider prefix and probes anthropic"
   assert_eq "$(provider_probe_url claude '')" "https://api.anthropic.com/" "claude with no model (the CLI default) probes anthropic"
   provider_probe_url omp nosuchprovider/x >/dev/null 2>&1; assert_eq "$?" "1" "an unknown provider has no probe"
   provider_probe_url omp '' >/dev/null 2>&1; assert_eq "$?" "1" "an omp layer with no model resolved has no probe"
@@ -200,7 +200,7 @@ probecounts=$(mktemp)
 )
 if read -r _p _f < "$probecounts" 2>/dev/null; then pass=$_p; fail=$_f
 else no "provider_probe_url assertions did not report their counts"; fi
-trash "$probecounts" 2>/dev/null
+rm -f "$probecounts" 2>/dev/null
 
 printf '\npassed: %s   failed: %s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

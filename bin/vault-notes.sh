@@ -68,6 +68,12 @@
 # never by `collect`.
 set -euo pipefail
 
+_pp="$(dirname "${BASH_SOURCE[0]}")/portable.sh"
+# Installed copies are symlinks: a merge updates them before install.sh links a new helper.
+[ -r "$_pp" ] || _pp="$(dirname "$(readlink "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/portable.sh"
+# shellcheck source=/dev/null
+. "$_pp"
+
 # Resolve the install dir the way notify.sh, review.sh and run.sh do: env first, else this
 # script's own directory when it carries an install marker (install.sh writes `config` and links
 # PROMPT.md), else the legacy default with a warning. BASH_SOURCE stays unresolved on purpose:
@@ -215,7 +221,7 @@ tag_pending() {
   [ -s "$TAGS_LEDGER" ] && ledger="$TAGS_LEDGER"
   # First instant after the reported local day. BSD date, like session-window.sh, so a DST day
   # is 23 or 25 hours; if it cannot be computed, everything made so far is due.
-  cutoff=$(date -j -v+1d -f '%Y-%m-%d %H:%M:%S' "$1 00:00:00" +%s 2>/dev/null) || true
+  cutoff=$(pdate_epoch "$(pdate_shift "$1" 1 d) 00:00:00") || true
   [ -n "$cutoff" ] || cutoff=$(( $(date +%s) + 1 ))
   jq -n -R -c --argjson cutoff "$cutoff" --arg day "$1" --rawfile ledger "$ledger" '
     def clean: tostring | gsub("[\u001f\t\n]"; " ");
@@ -364,7 +370,7 @@ collect() {
         fields=$(printf '%s' "$rec" | jq -r '[.id, (.session // ""), (.role // "turn"), (.atEpoch // ""), (.taggedAt // ""), (.cwd // ""), .key] | map(tostring | gsub("[\u001f\n]"; " ")) | join("\u001f")')
         IFS=$'\037' read -r id session role epoch at cwd key <<< "$fields"
         # No usable timestamp: the tag is due, and belongs to the report being built.
-        day=$(date -r "$epoch" +%F 2>/dev/null) || day="$report_date"
+        day=$(pdate_fmt_epoch "$epoch" +%F) || day="$report_date"
         [ -n "$epoch" ] || day="$report_date"
         text=$(printf '%s' "$rec" | jq -r '.text')
         transcript="$(tag_transcript "$session")"

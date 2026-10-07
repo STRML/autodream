@@ -13,6 +13,8 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
 # shellcheck source=/dev/null
+. "$REPO/bin/portable.sh"
+# shellcheck source=/dev/null
 . "$HERE/lib-tmp.sh"; suite_tmp runall
 RUN="$REPO/bin/run.sh"
 MOCK="$HERE/mock-claude.sh"
@@ -468,7 +470,7 @@ test_notes_expiry_uses_report_date(){
 # in the file, and one swallowed because jq is missing.
 
 focus_at(){ # $1=local day $2=local time — the UTC taggedAt the mod would write for that LOCAL moment
-  date -u -r "$(date -j -f '%Y-%m-%d %H:%M:%S' "$1 $2:00" +%s)" +%Y-%m-%dT%H:%M:%S.000Z
+  TZ=UTC pdate_fmt_epoch "$(pdate_epoch "$1 $2:00")" +%Y-%m-%dT%H:%M:%S.000Z
 }
 mk_focus_tag(){ # $1=root $2=session $3=row $4=local day $5=text [$6=local time, default 12:00] — one line, as the mod writes it
   # The mod writes only a UTC timestamp, so the fixture states the LOCAL moment it stands for.
@@ -1146,7 +1148,7 @@ test_l1_engine_comes_from_the_adapter(){
   export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap"; run_dream "$root"; unset FANOUT MOCK_CAPTURE_DIR
   local args="$root/cap/l1-args.txt"
   assert_file "$args" "captured the L1 argv"
-  assert_eq "$(sed -n '/^--model$/{n;p;}' "$args")" "claude-haiku-4-5" "the manifest's default model is used"
+  assert_eq "$(sed -n '/^--model$/{n;p;}' "$args")" "claude-haiku-5-5" "the manifest's default model is used"
   assert_grep "$args" '^--no-session-persistence$' "the adapter's flags are present"
   assert_grep "$root/cap/l1-env.txt" '^CLAUDE_CODE_DISABLE_CLAUDE_MDS=1$' "the adapter's l1-env reaches the worker"
   rm -rf "$root"
@@ -4297,7 +4299,7 @@ test_unavailable_skills_inventory_says_so(){
   local root; root=$(setup_env); mk_session "$root" sess1
   local ad="$root/adapters"; cp -R "$REPO/adapters" "$ad"
   # claude's skills-inventory subcommand fails
-  sed -i.bak 's|^  skills-inventory)$|  skills-inventory)\n    exit 1|' "$ad/claude/adapter.sh"; trash "$ad/claude/adapter.sh.bak"
+  sed -i.bak 's|^  skills-inventory)$|  skills-inventory)\n    exit 1|' "$ad/claude/adapter.sh"; rm -f "$ad/claude/adapter.sh.bak"
   export ADAPTERS_ROOT="$ad"; AUTODREAM_ADAPTERS=claude run_dream_omp "$root"; unset ADAPTERS_ROOT
   assert_grep "$(fdir "$root")/skills-inventory.txt" '^# skills-inventory.txt unavailable' "the sentinel line is written"
   rm -rf "$root"
@@ -4414,7 +4416,7 @@ test_l2_engine_comes_from_an_adapter(){
   export MOCK_CAPTURE_DIR="$root/cap"; run_dream "$root"; unset MOCK_CAPTURE_DIR
   assert_grep "$(fdir "$root")/run-stats.txt" '^l2_engine: claude$' "default: the first enabled adapter"
   assert_grep "$(fdir "$root")/run-stats.txt" '^l2_model: default$' "claude names no L2 model, so the CLI default runs"
-  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_model_claude: claude-haiku-4-5$' "run-stats records each adapter's L1 model"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_model_claude: claude-haiku-5-5$' "run-stats records each adapter's L1 model"
   assert_nogrep "$root/cap/l2-args.txt" '^--model$' "no --model reached the claude engine"
   rm -rf "$root"
 
@@ -4536,7 +4538,7 @@ test_builtin_slash_commands_are_not_skill_invocations(){
     '{"type":"user","message":{"content":"<command-name>/triage</command-name>"}}' > "$f"
   "$REPO/bin/session-stats.sh" "$f" "$out"
   assert_eq "$(jq -r '.skills_invoked | join(",")' "$out")" "triage" "only the real skill is counted"
-  trash "$f" "$out" 2>/dev/null || true
+  rm -f "$f" "$out" 2>/dev/null || true
 }
 
 test_skill_fields_are_enforced_from_the_sidecar(){
@@ -5157,7 +5159,7 @@ test_pins_ledger_wiped_by_a_worker_stores_nothing_twice(){
   # worker empties the ledger while it runs. The runner's snapshot, taken before any model
   # ran, puts it back before the pins are applied.
   # The first run's findings go, or L1 treats the sessions as done and never starts a worker.
-  find "$(fdir "$root")" -maxdepth 1 -name '*.json' -exec trash {} +
+  find "$(fdir "$root")" -maxdepth 1 -name '*.json' -exec rm -f {} +
   export MOCK_MODE=pins_ledger_wipe AUTODREAM_FORCE=1; pins_run "$root"; unset MOCK_MODE AUTODREAM_FORCE MOCK_PIN_PROJECT
   assert_eq "$(sm_calls "$root")" "1" "the rebuild stored nothing a second time"
   assert_eq "$(wc -l < "$(fdir "$root")/pins-applied.tsv" | tr -d ' ')" "1" "the ledger row is back"
@@ -5206,7 +5208,7 @@ test_pins_sweep_leaves_what_it_must(){
   local root; root=$(setup_env); mk_session "$root" sess1
   mk_stranded_pins "$root" 2019-12-29 $'pins_total: 1\npins_applied: 1\npins_failed: 0\npins_cli_missing: 0\npins_unreadable: 0'
   mk_stranded_pins "$root" 2019-12-30 ""
-  trash "$root/autodream/findings/2019-12-30/pin-projects.tsv"
+  rm -f "$root/autodream/findings/2019-12-30/pin-projects.tsv"
   mk_stranded_pins "$root" 2019-12-31 ""
   printf '# half a report\n' > "$root/dreams/2019-12-31.md"
   pins_run "$root"
@@ -5496,7 +5498,7 @@ test_window_cuts_a_multi_day_session_to_the_report_day(){
   assert_eq "$(jq -r .user_message_count "$fd/$hm.stats.json")" "2" "stats count the two user turns of the day, not the four of the file"
   assert_eq "$(jq -r .duration_minutes "$fd/$hm.stats.json")" "30" "the duration is the day's 30 minutes, not two days"
   assert_eq "$(jq -r .tool_call_count "$fd/$hm.stats.json")" "1" "and the one tool call of the day"
-  assert_eq "$(jq -r .transcript_mtime "$fd/$hm.stats.json")" "$(stat -f %m "$f")" "the sidecar carries the session's own mtime, not the moment it was cut"
+  assert_eq "$(jq -r .transcript_mtime "$fd/$hm.stats.json")" "$(pstat_mtime "$f")" "the sidecar carries the session's own mtime, not the moment it was cut"
   assert_grep   "$root/cap/l1-read-$hm.txt" 'TODAY-ONE' "the worker read the day's first turn"
   assert_grep   "$root/cap/l1-read-$hm.txt" 'TODAY-TWO' "and its last"
   assert_nogrep "$root/cap/l1-read-$hm.txt" 'DAY-BEFORE-ONE' "and nothing from the day before"
@@ -5831,8 +5833,10 @@ turn_stats(){ # distinct turn markers handed to chunk workers / the most times a
 }
 run_chunked(){ # $1=root ; env for the run is set by the caller
   export FANOUT=1 AUTODREAM_SLIM_BYTES=3000 MOCK_CAPTURE_DIR="$1/cap"
-  : "${AUTODREAM_L1_CHUNK_BYTES:=3000}"; export AUTODREAM_L1_CHUNK_BYTES
-  run_dream "$1"
+  # A subshell, so the knob cannot outlive the call. `VAR=x run_chunked` plus an `export VAR`
+  # in this function leaves VAR set afterwards on bash 5 (bash 3.2 restores it), and the next
+  # test then inherited a stale CHUNK_BYTES and never chunked. Linux CI runs bash 5.
+  ( export AUTODREAM_L1_CHUNK_BYTES="${AUTODREAM_L1_CHUNK_BYTES:-3000}"; run_dream "$1" )
   unset FANOUT AUTODREAM_SLIM_BYTES MOCK_CAPTURE_DIR
 }
 
@@ -6306,7 +6310,11 @@ test_chunking_an_omp_session_cuts_the_day_then_chunks_the_live_chain
 # Their counts fold into the totals below, so a red unit suite fails this script.
 echo
 echo "===== unit suites ====="
-for _suite in lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript session-window merge-chunks chunk-transcript apply-pins scheduler-label autodream-now review-skip review-cmux notes-path install-review-agent install-dry-run install-dir tmp-cleanup dream-triage; do
+# The suites that drive launchd need plutil and launchctl, so they run on macOS only (CI runs
+# them in launchd.yml, when a launchd file changes).
+_suites="portable lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks"
+[ "$(uname -s)" = Darwin ] && _suites="$_suites scheduler-label autodream-now install-review-agent install-dry-run install-dir"
+for _suite in $_suites; do
   _out=$(bash "$HERE/$_suite.sh" 2>&1)
   _rc=$?
   _p=$(printf '%s\n' "$_out" | sed -n 's/^passed: *\([0-9][0-9]*\).*/\1/p' | tail -1)

@@ -8,6 +8,10 @@
 
 set -u
 
+_pp="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/../../bin" && pwd)/portable.sh"
+# shellcheck source=/dev/null
+. "$_pp"
+
 if [ "$#" -ne 2 ]; then
   echo "usage: $0 <transcript.jsonl> <out.stats.json>" >&2
   exit 2
@@ -22,7 +26,7 @@ output="$2"
 }
 
 bytes=$(wc -c < "$transcript" | tr -d ' ')
-mtime=$(stat -f %m "$transcript" 2>/dev/null) || {
+mtime=$(pstat_mtime "$transcript") || {
   echo "session-stats: could not read transcript mtime: $transcript" >&2
   exit 1
 }

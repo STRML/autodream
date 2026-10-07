@@ -4,79 +4,79 @@ name: tests
 # unfiltered push trigger runs every PR commit twice. Branch work is covered by
 # the PR trigger; both routes into main - a merge and a direct push - fire the
 # push trigger. A feature branch with no PR runs nothing, which is the trade.
+#
+# Cost: this job used to run on macOS, billed at 10x a Linux minute, for about 11 minutes.
+# 100 runs in two days (83 on one of them) came from every push to a PR branch starting a
+# fresh run while the last one was still going. Now: it runs on Linux, a newer push to the
+# same ref cancels the older run, a change that touches no code or test starts nothing, and
+# a draft PR starts nothing until it is marked ready. The launchd suites stay on macOS in
+# launchd.yml and run only when a launchd file changes.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'example/**'
+      - 'LICENSE'
   pull_request:
+    # ready_for_review is not a default type: without it, marking a draft ready starts nothing
+    # and the job's draft skip would leave the PR with no test run.
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'example/**'
+      - 'LICENSE'
+
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
   test:
-    # macOS, not Linux: the suites use BSD `date` and `touch` semantics and will
-    # fail on GNU coreutils. Every suite runs against tests/mock-claude.sh, so
-    # nothing here needs network or a real model.
-    runs-on: macos-latest
+    # Linux. The suites went through bin/portable.sh for the BSD and GNU date and stat, so
+    # they no longer need a Mac. The suites that drive launchd (install, scheduler-label,
+    # autodream-now) run in launchd.yml on macOS, and only when launchd files change.
+    # Every suite runs against tests/mock-claude.sh, so nothing here needs a model.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
-      # coreutils is for `gtimeout` only: four oversized-gate assertions need GNU
-      # timeout and stock macOS ships neither name. Deliberately NOT adding
-      # coreutils' gnubin to PATH - the suite depends on BSD `date` and `touch`,
-      # and GNU versions of those would break far more than they fix.
+      # gtimeout: four oversized-gate assertions look for GNU timeout under that name,
+      # which is how it is installed on a Mac. On Linux it is plain `timeout`.
       - name: check deps
         run: |
           jq --version
           python3 --version
-          command -v gtimeout >/dev/null 2>&1 || brew install coreutils
-          gtimeout --version | head -1
+          mkdir -p "$HOME/.local/bin"
+          ln -sf "$(command -v timeout)" "$HOME/.local/bin/gtimeout"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: run-all
         run: bash tests/run-all.sh
 
-      # Every suite runs here. The adapter suites were added without being wired
-      # into run-all.sh or this workflow, so 314 green assertions did not include
-      # any of them and a regression in adapter containment, the manifest name
-      # check, or any adapter subcommand would have shipped clean. A suite nobody
-      # runs is documentation, not a test.
+      # Every suite runs here except the launchd ones. A suite nobody runs is
+      # documentation, not a test: the adapter suites were once added without being wired
+      # in, and 314 green assertions did not include any of them.
       - name: unit suites
         run: |
           rc=0
-          for t in tests/lib-project.sh tests/preflight.sh tests/adapters.sh \
+          for t in tests/portable.sh tests/lib-project.sh tests/preflight.sh tests/adapters.sh \
                    tests/adapter-claude.sh tests/adapter-omp.sh tests/adapter-contract.sh \
-                   tests/slim-transcript.sh tests/apply-pins.sh tests/scheduler-label.sh \
-                   tests/session-window.sh tests/autodream-now.sh tests/dream-triage.sh tests/chunk-transcript.sh tests/merge-chunks.sh; do
+                   tests/slim-transcript.sh tests/apply-pins.sh \
+                   tests/session-window.sh tests/dream-triage.sh tests/chunk-transcript.sh tests/merge-chunks.sh \
+                   tests/cookie-cadence.sh tests/review-skip.sh tests/review-cmux.sh tests/notes-path.sh \
+                   tests/tmp-cleanup.sh tests/x-bookmarks.sh; do
             echo "== $t"
             bash "$t" || rc=1
           done
           exit $rc
-
-      - name: cookie-cadence
-        run: bash tests/cookie-cadence.sh
-
-      - name: review-skip
-        run: bash tests/review-skip.sh
-
-      - name: review-cmux
-        run: bash tests/review-cmux.sh
-
-      - name: notes-path
-        run: bash tests/notes-path.sh
-      - name: install-review-agent
-        run: bash tests/install-review-agent.sh
-      - name: install-dry-run
-        run: bash tests/install-dry-run.sh
-      - name: install-dir
-        run: bash tests/install-dir.sh
-      - name: tmp-cleanup
-        run: bash tests/tmp-cleanup.sh
-      - name: install-path
-        run: bash tests/install-path.sh
-
-      - name: x-bookmarks
-        run: bash tests/x-bookmarks.sh
 
   shellcheck:
     runs-on: ubuntu-latest

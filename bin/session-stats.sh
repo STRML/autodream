@@ -3,6 +3,12 @@
 
 set -u
 
+_pp="$(dirname "${BASH_SOURCE[0]}")/portable.sh"
+# Installed copies are symlinks: a merge updates them before install.sh links a new helper.
+[ -r "$_pp" ] || _pp="$(dirname "$(readlink "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/portable.sh"
+# shellcheck source=/dev/null
+. "$_pp"
+
 if [ "$#" -ne 2 ]; then
   echo "usage: $0 <transcript.jsonl> <out.stats.json>" >&2
   exit 2
@@ -17,7 +23,7 @@ output="$2"
 }
 
 bytes=$(wc -c < "$transcript" | tr -d ' ')
-mtime=$(stat -f %m "$transcript" 2>/dev/null) || {
+mtime=$(pstat_mtime "$transcript") || {
   echo "session-stats: could not read transcript mtime: $transcript" >&2
   exit 1
 }

@@ -23,6 +23,12 @@
 
 set -u
 
+_pp="$(dirname "${BASH_SOURCE[0]}")/portable.sh"
+# Installed copies are symlinks: a merge updates them before install.sh links a new helper.
+[ -r "$_pp" ] || _pp="$(dirname "$(readlink "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/portable.sh"
+# shellcheck source=/dev/null
+. "$_pp"
+
 AUTODREAM_DIR="${AUTODREAM_DIR:-$HOME/.claude/autodream}"
 DAYS=0            # 0 = no limit
 QUIET=0
@@ -55,7 +61,7 @@ if [ "$DAYS" -gt 0 ] && [ "${#DATES[@]}" -gt "$DAYS" ]; then
   DATES=("${DATES[@]: -$DAYS}")
 fi
 
-epoch_of() { date -j -f '%Y-%m-%d' "$1" '+%s' 2>/dev/null; }
+epoch_of() { pdate_epoch "$1"; }
 
 days_between() { # $1 earlier date, $2 later date -> whole days, or empty if unparseable
   local a b

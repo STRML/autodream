@@ -17,6 +17,12 @@
 # Everything is auto-detected — nothing is hardcoded to a particular user or host.
 set -euo pipefail
 
+_pp="$(dirname "${BASH_SOURCE[0]}")/portable.sh"
+# Installed copies are symlinks: a merge updates them before install.sh links a new helper.
+[ -r "$_pp" ] || _pp="$(dirname "$(readlink "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/portable.sh"
+# shellcheck source=/dev/null
+. "$_pp"
+
 # ---------------------------------------------------------------- arg parsing --
 DATE_ARG=""
 FORCE=0
@@ -77,7 +83,7 @@ mkdir -p "$AUTODREAM_DIR/logs"
 if [ -n "$DATE_ARG" ]; then
   TARGET="$DATE_ARG"
 else
-  TARGET="$(date -v-1d +%Y-%m-%d)"
+  TARGET="$(pdate_yesterday)"
 fi
 
 # --------------------------------------------------------------- launchd label --

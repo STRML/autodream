@@ -17,6 +17,8 @@ set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
+# shellcheck source=/dev/null
+. "$REPO/bin/portable.sh"
 WIN="$REPO/bin/session-window.sh"
 
 pass=0; fail=0
@@ -183,7 +185,7 @@ touch -t 202610051200 "$TMP/slice-in.jsonl"
 rm -f "$out"; "$WIN" day-file "$TMP/slice-in.jsonl" $START $END "$out" >/dev/null 2>&1; src=$?
 assert_eq "$src" "0" "a file that spills outside the day -> 0 and the slice is written"
 assert_eq "$(cat "$out")" "$(cat "$TMP/slice-want.jsonl")" "the slice holds exactly the in-window records"
-assert_eq "$(stat -f %m "$out")" "$(stat -f %m "$TMP/slice-in.jsonl")" "the slice carries the original mtime (the stats transcript_mtime stays the session's)"
+assert_eq "$(pstat_mtime "$out")" "$(pstat_mtime "$TMP/slice-in.jsonl")" "the slice carries the original mtime (the stats transcript_mtime stays the session's)"
 assert_eq "$(ls "$TMP" | grep -c '^day\.jsonl\.tmp\.')" "0" "no temp file is left beside the slice"
 rm -f "$out"; "$WIN" day-file "$TMP/inside.jsonl" $START $END "$out" >/dev/null 2>&1; src=$?
 assert_eq "$src" "1" "a file wholly inside the day -> 1, nothing to cut"

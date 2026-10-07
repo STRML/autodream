@@ -26,6 +26,12 @@
 
 set -u
 
+_pp="$(dirname "${BASH_SOURCE[0]}")/portable.sh"
+# Installed copies are symlinks: a merge updates them before install.sh links a new helper.
+[ -r "$_pp" ] || _pp="$(dirname "$(readlink "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/portable.sh"
+# shellcheck source=/dev/null
+. "$_pp"
+
 # The install symlinks the scripts INTO $AUTODREAM_DIR (install.sh), so on a
 # bare shell invocation with no env the script's own location IS the install
 # dir. This is what lets `review.sh <date>` run from a terminal without the
@@ -252,8 +258,8 @@ if [ "$AUTODREAM_TRIAGE_SURFACE" = "cmux" ]; then
     # current report, letting a tied/older report open for triage (executor 6.1).
     LEGACY_MARKER="$LOGS_DIR/review-launched-$DATE"
     if [ -f "$LEGACY_MARKER" ]; then
-      LEGACY_MTIME=$(stat -f %m "$LEGACY_MARKER" 2>/dev/null || echo 0)
-      if [ "$LEGACY_MTIME" -gt "$(stat -f %m "$REPORT" 2>/dev/null || echo 0)" ]; then
+      LEGACY_MTIME=$(pstat_mtime "$LEGACY_MARKER" || echo 0)
+      if [ "$LEGACY_MTIME" -gt "$(pstat_mtime "$REPORT" || echo 0)" ]; then
         echo "review.sh: migrating legacy marker $LEGACY_MARKER -> $LAUNCH_CONFIRMED"
         mv "$LEGACY_MARKER" "$LAUNCH_CONFIRMED" 2>/dev/null && touch "$LAUNCH_CONFIRMED"
       else
@@ -281,7 +287,7 @@ if [ "$AUTODREAM_TRIAGE_SURFACE" = "cmux" ]; then
       # claim to reclaim, so a killed popup can never suppress triggers
       # forever.
       if [ -d "$LAUNCH_MARKER" ]; then
-        MARKER_AGE=$(( $(date +%s) - $(stat -f %m "$LAUNCH_MARKER" 2>/dev/null || echo "$(date +%s)") ))
+        MARKER_AGE=$(( $(date +%s) - $(pstat_mtime "$LAUNCH_MARKER" || echo "$(date +%s)") ))
         if [ "$MARKER_AGE" -ge "$CLAIM_GRACE" ]; then
           echo "review.sh: reclaiming abandoned claim $LAUNCH_MARKER"
           rmdir "$LAUNCH_MARKER" 2>/dev/null || true
@@ -349,7 +355,7 @@ if [ "$AUTODREAM_TRIAGE_SURFACE" = "cmux" ]; then
       if [ "$CLAIMED_OWN" -eq 1 ]; then
         rmdir "$LAUNCH_MARKER" 2>/dev/null || true
       elif [ -d "$LAUNCH_MARKER" ]; then
-        MARKER_AGE=$(( $(date +%s) - $(stat -f %m "$LAUNCH_MARKER" 2>/dev/null || echo "$(date +%s)") ))
+        MARKER_AGE=$(( $(date +%s) - $(pstat_mtime "$LAUNCH_MARKER" || echo "$(date +%s)") ))
         [ "$MARKER_AGE" -ge "$CLAIM_GRACE" ] && rmdir "$LAUNCH_MARKER" 2>/dev/null || true
       fi
       echo "review.sh: cmux workspace create failed (exit $WS_RC); triage not opened" >&2

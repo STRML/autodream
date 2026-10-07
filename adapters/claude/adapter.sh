@@ -13,6 +13,19 @@ set -u
 # resolves to the real bin/ regardless of what else exists alongside.
 BIN=$(cd -P "$(dirname "${BASH_SOURCE[0]}")/../../bin" && pwd)
 
+# Effort for an L1 worker: AUTODREAM_L1_EFFORT_CLAUDE, then AUTODREAM_L1_EFFORT, then high.
+# Haiku 5.5 trades cost for quality on this dial and triage yield was the weak point of the
+# old Haiku, so the default leans to quality; the pricing makes that cheap. "off" omits the
+# flag (the model's own default). An unknown level is an error, never a silent fallback.
+l1_effort() {
+  local e="${AUTODREAM_L1_EFFORT_CLAUDE:-${AUTODREAM_L1_EFFORT:-high}}"
+  case "$e" in
+    off) return 0 ;;
+    low|medium|high|xhigh|max) printf '%s\n' "$e" ;;
+    *) echo "adapter claude: bad AUTODREAM_L1_EFFORT '$e' (low|medium|high|xhigh|max|off)" >&2; return 1 ;;
+  esac
+}
+
 cmd="${1:-}"
 [ "$#" -gt 0 ] && shift
 
@@ -149,20 +162,28 @@ case "$cmd" in
 
   l1-argv) # $1=model -> NUL-delimited argv for one L1 worker; the prompt arrives on stdin
     [ "$#" -ge 1 ] && [ -n "$1" ] || exit 2
-    # Byte for byte the invocation run.sh hard-coded before the engine moved behind the
+    # --system-prompt REPLACES Claude Code's default prompt (about 1.9k tokens a call, measured
+    # 2026-10-07: 6.9k -> 5.0k input on a one-word call, and 26% cheaper on a real triage run with
+    # the same findings count). The worker prompt is self-contained, so nothing is lost. Tools are
+    # already Read and Write only; hooks, skills, MCP and CLAUDE.md are off.
+    # The invocation run.sh hard-coded before the engine moved behind the
     # adapter: tests/adapter-claude.sh pins it against that literal text, so a change here
     # that alters what the nightly runs has to say so. NO shell expansion of the paths in
     # the system prompt, hence the escaped dollar sign in the text.
+    effort=$(l1_effort) || exit 2
+    set -- "$1" ${effort:+--effort "$effort"}
+    model=$1; shift
     printf '%s\0' "${CLAUDE_BIN:-$HOME/.local/bin/claude}" \
       --print \
       --permission-mode bypassPermissions \
-      --model "$1" \
+      --model "$model" \
+      "$@" \
       --no-session-persistence \
       --tools Read Write \
       --disable-slash-commands \
       --strict-mcp-config \
       --settings '{"disableAllHooks":true}' \
-      --append-system-prompt 'Headless triage worker. Read the session transcript and write exactly one findings JSON object, via the Write tool, to the literal output path given on line 2 of the prompt. Those paths are literal strings, not shell variables — never $-expand them. Print only the literal word done and exit.'
+      --system-prompt 'Headless triage worker. Read the session transcript and write exactly one findings JSON object, via the Write tool, to the literal output path given on line 2 of the prompt. Those paths are literal strings, not shell variables — never $-expand them. Print only the literal word done and exit.'
     ;;
 
   warmup-argv) # $1=model -> NUL-delimited argv for the auth warmup call; the word ping arrives on stdin
@@ -170,16 +191,20 @@ case "$cmd" in
     # The same flags as an L1 worker, so the warmup exercises the same auth and settings path,
     # with a system prompt that asks for one word instead of a findings file. A warmup that took
     # a different path would refresh a token the workers never use.
+    effort=$(l1_effort) || exit 2
+    set -- "$1" ${effort:+--effort "$effort"}
+    model=$1; shift
     printf '%s\0' "${CLAUDE_BIN:-$HOME/.local/bin/claude}" \
       --print \
       --permission-mode bypassPermissions \
-      --model "$1" \
+      --model "$model" \
+      "$@" \
       --no-session-persistence \
       --tools Read \
       --disable-slash-commands \
       --strict-mcp-config \
       --settings '{"disableAllHooks":true}' \
-      --append-system-prompt 'Reply with the single word ok and exit.'
+      --system-prompt 'Reply with the single word ok and exit.'
     ;;
 
   l1-env) # -> KEY=VALUE lines the engine needs in its environment

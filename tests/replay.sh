@@ -27,6 +27,8 @@ set -u
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
+# shellcheck source=/dev/null
+. "$REPO/bin/portable.sh"
 MOCK="$HERE/mock-claude.sh"
 
 PASS=0; FAIL=0; WARN=0
@@ -179,7 +181,7 @@ replay_ingest() { # $1=adapter $2=session root $3=date $4=archived findings dir 
   local adapters="claude" session_roots="" next stage
   # How far past the day the runner looks for a session touched after it: its enumeration
   # passes the adapter the report day plus five years (ENUM_END in run.sh).
-  next=$(date -j -v+5y -f %Y-%m-%d "$date" +%Y-%m-%d 2>/dev/null) || { fail "cannot parse the date $date"; rm -rf "$sb"; return; }
+  next=$(pdate_shift "$date" 5 y) || { fail "cannot parse the date $date"; rm -rf "$sb"; return; }
   # The runner's enumeration is a `find` that does not follow a symlinked root, and a root that
   # is only a link finds nothing. So the sandbox holds a COPY of the sessions modified since
   # that date began, mtimes preserved: the real store is only ever read. The upper bound is

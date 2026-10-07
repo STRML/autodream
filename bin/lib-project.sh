@@ -65,6 +65,8 @@ encode_project() { # $1=absolute path -> encoded bucket name on stdout
 # silent split is precisely what this function exists to prevent.
 canonical_project() { # $1=path -> encoded name on stdout, or exit 1 with nothing
   local real
+  # GNU realpath resolves a missing leaf, BSD realpath refuses it; a missing path fails on both.
+  [ -e "$1" ] || return 1
   real=$(realpath "$1" 2>/dev/null) || return 1
   [ -n "$real" ] || return 1
   encode_project "$real"
