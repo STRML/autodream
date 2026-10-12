@@ -51,6 +51,28 @@ A tag is consumed only after a complete report, under the same gates as an inbox
 failed run, or a rebuild of an old date, leaves it pending. Consumed tags (id, report date and `taggedAt`) go in `tags-consumed.txt`, a ledger this script
 writes and the mod never does, so a session open at 03:15 cannot race the run. `vault-notes.sh status` shows both counts.
 
+## OMP and Codex
+
+Neither can draw a button on a transcript row, so they tag through `bin/autodream-focus.sh`, which writes the same
+`tags.jsonl` (with a `harness` and the session's `transcript` path, so the nightly run can open a session that is not a
+Claude one).
+
+- **OMP:** an extension, `extensions/omp/autodream-focus.ts`: `/focus`, `/focus prompt` and a shortcut. See
+  `extensions/omp/README.md`.
+- **Codex:** run this from a second terminal in the same directory. It tags the last reply of the newest Codex session
+  recorded for that directory:
+
+  ```bash
+  ~/.claude/autodream/autodream-focus.sh last --harness codex             # the last reply
+  ~/.claude/autodream/autodream-focus.sh last --harness codex --role user # the last thing you typed
+  ~/.claude/autodream/autodream-focus.sh last --harness codex --dry-run   # show which turn, tag nothing
+  ```
+
+  Run it again to take the tag back. With two Codex sessions open in one directory it picks the newer, so use
+  `--file <rollout.jsonl>` to name one. Codex has no UI extension; the 30 days this was designed against held 11
+  interactive Codex sessions and 396 headless `codex exec` runs, so a command from outside is the proportionate answer.
+  `last --harness omp` does the same for OMP.
+
 `vault-notes.sh` needs `jq` for this. Without it the tags are reported as `UNREADABLE` in the operator notes and nothing
 is consumed.
 
