@@ -338,8 +338,8 @@ sessions' cwds ─► repo root + owner/repo ─► gh issue list ─► untriag
 ```
 
 An issue is untriaged when it has none of `needs-info`, `ready-for-agent`, `ready-for-human` and
-`wontfix`, or when it carries `needs-triage`. A repo that has no issue with any of those labels does not
-use the scheme and is skipped (`no-scheme`). Also skipped, with the reason in
+`wontfix`, or when it carries `needs-triage`. A repo that was never triaged has none of those labels, so
+all its open issues count and its first triage gets suggested. Skipped, with the reason in
 `findings/<date>/triage-candidates.tsv`: a removed or non-git working directory, an origin that is not on
 GitHub, issues turned off, and any `gh` failure (the step never fails the run). A repo already suggested
 in the last `AUTODREAM_TRIAGE_COOLDOWN_DAYS` (7) days is held back unless its untriaged count grew by

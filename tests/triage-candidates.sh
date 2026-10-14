@@ -118,10 +118,11 @@ printf '[{"number":1,"createdAt":"2020-01-01T00:00:00Z","labels":[{"name":"needs
 run_t 2026-10-01 "$R"
 assert_eq "$(row test/gamma | cut -f4)" 3 "needs-triage and unlabeled count, wontfix does not"
 
-echo "== a repo that does not use the label scheme =="
+echo "== a repo that was never triaged =="
 make_repo delta; issues delta 5 0 bugonly
 run_t 2026-10-01 "$R"
-row test/delta | grep -q '^skipped	' && row test/delta | grep -q 'no-scheme' && ok "no state label anywhere is skipped as no-scheme" || no "delta: $(cat "$(tsv)")"
+row test/delta | grep -q '^candidate	' && ok "no state label anywhere: every open issue counts and the repo is suggested" || no "delta: $(cat "$(tsv)")"
+assert_eq "$(row test/delta | cut -f4)" 5 "all 5 open issues are untriaged"
 
 echo "== no open issues =="
 make_repo eps; issues eps 0 0
