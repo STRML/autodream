@@ -341,7 +341,7 @@ An issue is untriaged when it has none of `needs-info`, `ready-for-agent`, `read
 `wontfix`, or when it carries `needs-triage`. A repo that was never triaged has none of those labels, so
 all its open issues count and its first triage gets suggested. Skipped, with the reason in
 `findings/<date>/triage-candidates.tsv`: a removed or non-git working directory, an origin that is not on
-GitHub, issues turned off, and any `gh` failure (the step never fails the run). A repo already suggested
+GitHub, issues turned off, a repo you cannot triage in (read-only access, so an upstream project) or an archived one, and any `gh` failure (the step never fails the run). A repo already suggested
 in the last `AUTODREAM_TRIAGE_COOLDOWN_DAYS` (7) days is held back unless its untriaged count grew by
 `AUTODREAM_TRIAGE_GROW` (3). The record is `~/.claude/autodream/triage-suggested.tsv`. A suggestion never
 counts as an open question. It is on by default and only reads; set `AUTODREAM_TRIAGE_SUGGEST=0` to turn it off.
