@@ -40,16 +40,19 @@ mkdir -p "$FAKE_GH_DIR" "$T/bin"
 cat > "$T/bin/gh" <<'SH'
 #!/bin/bash
 [ -n "${FAKE_GH_FAIL:-}" ] && { echo "gh: simulated failure" >&2; exit 1; }
+[ -z "${FAKE_GH_SLEEP:-}" ] || sleep "$FAKE_GH_SLEEP"
 case "$1 $2" in
   "auth status") exit 0 ;;
   "pr list")
-    shift 2; repo=""; head=""; state=""
+    shift 2; repo=""; head=""; state=""; base=""
     while [ $# -gt 0 ]; do
-      case "$1" in -R) repo=$2 ;; --head) head=$2 ;; --state) state=$2 ;; esac
+      case "$1" in -R) repo=$2 ;; --head) head=$2 ;; --state) state=$2 ;; --base) base=$2 ;; esac
       shift
     done
     name=${repo#test/}
-    if [ "$state" = open ]; then
+    if [ -n "$base" ]; then
+      f="$FAKE_GH_DIR/base-$name-$base.json"
+    elif [ "$state" = open ]; then
       f="$FAKE_GH_DIR/open-$name.json"
     else
       f="$FAKE_GH_DIR/pr-$name-$head.json"
@@ -141,7 +144,9 @@ run_prune(){
   # PRUNE_TEST_DEBUG=<repo name> traces the script for that repo and shows what it reported.
   local sh=""; [ "${PRUNE_TEST_DEBUG:-}" = "$NAME" ] && sh="bash -x"
   AUTODREAM_PRUNE_ROOTS="$T/roots-$NAME" AUTODREAM_PRUNE_GRACE_MIN=60 $sh "$BIN" "$@" "$OUT" >"$OUT.stdout" 2>&1
+  PRUNE_RC=$?
   [ "${PRUNE_TEST_DEBUG:-}" != "$NAME" ] || { echo "--- $NAME"; cat "$OUT.stdout" "$OUT/worktree-prune.tsv"; }
+  return 0
 }
 
 echo "== script exists"
@@ -150,6 +155,7 @@ echo "== script exists"
 # ==== pass 1: one repo, every state =============================================================
 make_repo main1
 OUT="$T/out1"; mkdir -p "$OUT"
+g -C "$R" config status.showUntrackedFiles no   # the dirty check must still see untracked files
 
 worktree sq;        commit_in sq;        push sq;        pr sq MERGED "$(tip sq)"
 echo junk > "$(wt sq)/ignored.out"
@@ -183,6 +189,12 @@ open_prs openpr:main child:parent
 worktree submod;    commit_in submod;    echo '[submodule "x"]' > "$(wt submod)/.gitmodules"; g -C "$(wt submod)" add -A; g -C "$(wt submod)" commit -qm gm; push submod; pr submod MERGED "$(tip submod)"
 worktree rebasing;  commit_in rebasing;  push rebasing;  pr rebasing MERGED "$(tip rebasing)"
 mkdir -p "$R/.git/worktrees/rebasing/rebase-merge"; echo refs/heads/rebasing > "$R/.git/worktrees/rebasing/rebase-merge/head-name"
+# A long-lived branch under an unlisted name that an earlier PR targeted, and an OPEN row that
+# only the head lookup shows.
+worktree qa;        commit_in qa;        push qa;        pr qa MERGED "$(tip qa)"
+printf '[{"number":1}]\n' > "$FAKE_GH_DIR/base-main1-qa.json"
+worktree hiddenopen; commit_in hiddenopen; push hiddenopen
+printf '[{"number":1,"state":"MERGED","closedAt":"2020-01-01T00:00:00Z","headRefOid":"%s","baseRefName":"main","isCrossRepository":false},{"number":2,"state":"OPEN","closedAt":null,"headRefOid":"%s","baseRefName":"main","isCrossRepository":false}]\n' "$(tip hiddenopen)" "$(tip hiddenopen)" > "$FAKE_GH_DIR/pr-main1-hiddenopen.json"
 # F4: a push lands between the fetch and the delete.
 worktree racy;      commit_in racy;      push racy;      pr racy MERGED "$(tip racy)"
 g clone -q "$BARE" "$T/other-racy"; g -C "$T/other-racy" checkout -q racy
@@ -196,7 +208,7 @@ g clone -q "$BARE" "$T/other-moved"; g -C "$T/other-moved" checkout -q moved; ec
 g -C "$T/other-moved" add -A; g -C "$T/other-moved" commit -qm later; g -C "$T/other-moved" push -q origin moved
 
 # Everything gets old except `fresh`, which a session touched a minute ago.
-for n in sq dirty unpushed openpr newer moved closedold closednew develop staging locked gone closedlater fork 'fix#42' nonmain parent submod rebasing racy; do age "$(wt "$n")"; done
+for n in sq dirty unpushed openpr newer moved closedold closednew develop staging locked gone closedlater fork 'fix#42' nonmain parent submod rebasing racy qa hiddenopen; do age "$(wt "$n")"; done
 age "$T/elsewhere/outside"; age "$(wt detached)"
 rm -rf "$(wt gone)"
 
@@ -220,6 +232,8 @@ expect_kept nonmain "merged PR into a base that is not the default branch"
 expect_kept parent "branch that is the base of an open PR"
 expect_kept submod "worktree with submodules"
 expect_kept rebasing "rebase in progress"
+expect_kept qa "branch that an earlier PR targeted as its base"
+expect_kept hiddenopen "OPEN row in the head lookup that the repo-wide list missed"
 { ! has_wt 'fix#42' && ! has_local 'fix#42' && ! has_remote 'fix#42'; } && ok "branch with # in its name: removed" || no "branch with # in its name: removed"
 { has_local fix && has_remote fix; } && ok "branch with # in its name: the sibling branch is untouched" || no "branch with # in its name: the sibling branch is untouched"
 { ! has_wt racy && ! has_local racy && has_remote racy; } && ok "push after the fetch: the lease refuses the remote delete" || no "push after the fetch: the lease refuses the remote delete"
@@ -236,6 +250,7 @@ assert_grep "$OUT/worktree-prune.tsv" "^kept.*base-of-open-pr" "report names the
 assert_grep "$OUT/worktree-prune.tsv" "^kept.*recent" "report names the recent edit"
 assert_grep "$OUT/worktree-prune.tsv" "^kept.*submodules" "report names the submodules"
 assert_grep "$OUT/worktree-prune.tsv" "^kept.*rebase-or-bisect" "report names the rebase"
+assert_grep "$OUT/worktree-prune.tsv" "^kept.*base-of-pr" "report names the base-of-pr"
 assert_grep "$OUT/worktree-prune.tsv" "^removed.*moved.*remote kept" "report says the remote branch was kept"
 assert_grep "$OUT/worktree-prune.tsv" "^removed.*racy.*remote kept" "report says the lease refused"
 assert_grep "$OUT/worktree-prune.md" "removed" "markdown summary written"
@@ -331,6 +346,44 @@ run_prune
 echo "== pass 11: missing volume"
 g -C "$R" worktree list --porcelain | grep -q "worktrees/vm1" && ok "worktree record whose parent directory is missing: not pruned" || no "worktree record whose parent directory is missing: not pruned"
 assert_grep "$OUT/worktree-prune.tsv" "volume-missing" "report names the missing volume"
+
+# ==== pass 12: a rebase in the main checkout, and a detached worktree mid-rebase ===============
+make_repo rb; OUT="$T/out12"; mkdir -p "$OUT"
+worktree mainrb; commit_in mainrb; push mainrb; pr mainrb MERGED "$(tip mainrb)"; g -C "$R" worktree remove "$(wt mainrb)"
+worktree detrb;  commit_in detrb;  push detrb;  pr detrb MERGED "$(tip detrb)"
+g -C "$(wt detrb)" checkout -q --detach
+mkdir -p "$R/.git/worktrees/detrb/rebase-merge"; echo refs/heads/detrb > "$R/.git/worktrees/detrb/rebase-merge/head-name"
+age "$(wt detrb)"
+mkdir -p "$R/.git/rebase-merge"; echo refs/heads/mainrb > "$R/.git/rebase-merge/head-name"
+run_prune
+echo "== pass 12: rebases"
+{ has_local mainrb && has_remote mainrb; } && ok "branch being rebased in the main checkout: kept" || no "branch being rebased in the main checkout: kept"
+{ has_wt detrb && has_local detrb && has_remote detrb; } && ok "detached worktree mid-rebase: its worktree and branch kept" || no "detached worktree mid-rebase: its worktree and branch kept"
+
+# ==== pass 13: no timeout binary, and gh hangs ==================================================
+mkdir -p "$T/minbin"
+for tool in bash env git jq awk sed grep find sort cat mkdir mktemp dirname readlink date tr wc head rm mv touch sleep pkill basename cut cp ls uniq xargs chmod realpath; do
+  tp=$(command -v "$tool") && [ -x "$tp" ] && ln -sf "$tp" "$T/minbin/$tool"
+done
+make_repo nt; OUT="$T/out13"; mkdir -p "$OUT"
+worktree n1; commit_in n1; push n1; pr n1 MERGED "$(tip n1)"; age "$(wt n1)"
+start=$SECONDS
+PATH="$T/minbin:$T/bin" FAKE_GH_SLEEP=25 AUTODREAM_PRUNE_CALL_SEC=1 run_prune
+echo "== pass 13: no timeout binary"
+[ $((SECONDS - start)) -lt 15 ] && ok "a hanging gh is cut off by the built-in watchdog ($((SECONDS - start))s)" || no "a hanging gh is cut off by the built-in watchdog ($((SECONDS - start))s)"
+expect_kept n1 "gh hung"
+assert_grep "$OUT/worktree-prune.tsv" "gh-unavailable" "report names the gh failure after the cut-off"
+
+# ==== pass 14: the hard cap stops a run and still writes the report =============================
+make_repo wd; OUT="$T/out14"; mkdir -p "$OUT"
+worktree w1; commit_in w1; push w1; pr w1 MERGED "$(tip w1)"; age "$(wt w1)"
+start=$SECONDS
+FAKE_GH_SLEEP=25 AUTODREAM_PRUNE_CALL_SEC=100 AUTODREAM_PRUNE_BUDGET_SEC=1 AUTODREAM_PRUNE_KILL_SLACK=0 run_prune
+echo "== pass 14: hard cap"
+[ "$PRUNE_RC" -eq 0 ] && ok "watchdog stop exits 0" || no "watchdog stop exits 0 (rc=$PRUNE_RC)"
+[ $((SECONDS - start)) -lt 15 ] && ok "watchdog stops the run in time ($((SECONDS - start))s)" || no "watchdog stops the run in time ($((SECONDS - start))s)"
+assert_grep "$OUT/worktree-prune.tsv" "watchdog" "report records the watchdog stop"
+expect_kept w1 "run stopped by the watchdog"
 
 echo
 echo "passed: $pass   failed: $fail"
