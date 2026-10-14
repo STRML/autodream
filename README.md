@@ -305,12 +305,16 @@ report says why:
 Every removal is written to `~/.claude/autodream/prune-ledger.tsv` before anything changes. The file
 is append-only. Per removal it gets an `intent` line (repo, branch, local tip, remote tip, worktree
 path, the PR URL that proves it, and the exact commands that put the branch back), then one line per
-step, then `complete`. If the ledger cannot be written, nothing is removed. To undo a removal, run the
-`recover` column of its `intent` line:
+step, then `complete`. If the ledger cannot be written, nothing is removed. Before the first change
+the tip is pinned as `refs/prune-ledger/<run id>/<branch>` in the repo, so `git gc` cannot prune it,
+and a failed pin also means nothing is removed. To undo a removal, run the `recover` column of its
+`intent` line (it works in bash, zsh and fish):
 
 ```
 git -C <repo> branch <branch> <tip> ; git -C <repo> push origin <tip>:refs/heads/<branch>
 ```
+
+The push half is there only when the branch existed on the remote.
 
 The remote branch is deleted by a push that names the proven commit as the lease, so a push
 that landed after the fetch makes GitHub refuse the delete. The worktree directory goes to

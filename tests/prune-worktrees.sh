@@ -202,6 +202,8 @@ worktree qa2;       commit_in qa2;       push qa2;       pr qa2 CLOSED "$(tip qa
 printf '[{"number":1}]\n' > "$FAKE_GH_DIR/base-main1-qa2.json"
 worktree hiddenopen; commit_in hiddenopen; push hiddenopen
 printf '[{"number":1,"state":"MERGED","closedAt":"2020-01-01T00:00:00Z","headRefOid":"%s","baseRefName":"main","isCrossRepository":false},{"number":2,"state":"OPEN","closedAt":null,"headRefOid":"%s","baseRefName":"main","isCrossRepository":false}]\n' "$(tip hiddenopen)" "$(tip hiddenopen)" > "$FAKE_GH_DIR/pr-main1-hiddenopen.json"
+# A quote in a branch name must survive the recover commands.
+worktree "it's"; commit_in "it's"; push "it's"; pr "it's" MERGED "$(tip "it's")"
 # F4: a push lands between the fetch and the delete.
 worktree racy;      commit_in racy;      push racy;      pr racy MERGED "$(tip racy)"
 g clone -q "$BARE" "$T/other-racy"; g -C "$T/other-racy" checkout -q racy
@@ -215,11 +217,11 @@ g clone -q "$BARE" "$T/other-moved"; g -C "$T/other-moved" checkout -q moved; ec
 g -C "$T/other-moved" add -A; g -C "$T/other-moved" commit -qm later; g -C "$T/other-moved" push -q origin moved
 
 # Everything gets old except `fresh`, which a session touched a minute ago.
-for n in sq dirty unpushed openpr newer moved closedold closednew develop staging locked gone closedlater fork 'fix#42' nonmain parent submod rebasing racy qa qa2 hiddenopen; do age "$(wt "$n")"; done
+for n in sq dirty unpushed openpr newer moved closedold closednew develop staging locked gone closedlater fork 'fix#42' nonmain parent submod rebasing racy qa qa2 hiddenopen "it's"; do age "$(wt "$n")"; done
 age "$T/elsewhere/outside"; age "$(wt detached)"
 rm -rf "$(wt gone)"
 
-SQ_TIP=$(tip sq); MOVED_TIP=$(tip moved); SQ_PATH=$(wt sq)
+SQ_TIP=$(tip sq); MOVED_TIP=$(tip moved); SQ_PATH=$(cd -P "$(wt sq)" && pwd -P)
 RACE_BRANCH=racy FAKE_RACE_DIR="$T/other-racy" run_prune
 echo "== pass 1: every state"
 expect_removed sq "squash-merged PR at the branch tip (with an ignored build file)"
@@ -274,9 +276,21 @@ li=$(ledger_row "$L" intent sq); lw=$(ledger_row "$L" worktree-removed sq); ld=$
 ledger_col "$L" intent sq 10 | grep -q "https://github.com/test/main1/pull/.* MERGED head=$SQ_TIP base=main" && ok "intent records the PR url, state, head and base as proof" || no "intent records the PR url, state, head and base as proof"
 [ -z "$(ledger_row "$L" intent dirty)" ] && [ -z "$(ledger_row "$L" intent openpr)" ] && ok "kept items leave no intent line" || no "kept items leave no intent line"
 [ "$(ledger_col "$L" remote-kept moved 10 | grep -c "differs from the proven tip")" = 1 ] && ok "a moved remote branch is recorded as kept, with both tips" || no "a moved remote branch is recorded as kept, with both tips"
+ledger_col "$L" intent sq 10 | grep -q "commit held by refs/prune-ledger/" && ok "intent names the pin ref that holds the commit" || no "intent names the pin ref that holds the commit"
+g -C "$R" for-each-ref --format='%(objectname)' refs/prune-ledger | grep -q "^$SQ_TIP$" && ok "a pin ref holds the removed tip" || no "a pin ref holds the removed tip"
+g -C "$R" gc --prune=now -q 2>/dev/null   # without the pin this would delete the tip's commit
 rec=$(ledger_col "$L" intent sq 11)
 bash -c "$rec" >/dev/null 2>&1
-{ has_local sq && has_remote sq && [ "$(tip sq)" = "$SQ_TIP" ]; } && ok "the recorded recover commands restore the local and the remote branch at the same tip" || no "the recorded recover commands restore the local and the remote branch at the same tip"
+{ has_local sq && has_remote sq && [ "$(tip sq)" = "$SQ_TIP" ]; } && ok "after git gc --prune=now, the recorded recover commands restore the local and the remote branch at the same tip" || no "after git gc --prune=now, the recorded recover commands restore the local and the remote branch at the same tip"
+expect_removed "it's" "branch with a quote in its name"
+rec=$(ledger_col "$L" intent "it's" 11)
+bash -c "$rec" >/dev/null 2>&1
+{ has_local "it's" && has_remote "it's"; } && ok "recover commands for a branch with a quote in its name restore both branches" || no "recover commands for a branch with a quote in its name restore both branches"
+if command -v fish >/dev/null 2>&1; then
+  g -C "$R" branch -D "it's" >/dev/null 2>&1; g --git-dir="$BARE" update-ref -d "refs/heads/it's"
+  fish -c "$rec" >/dev/null 2>&1
+  { has_local "it's" && has_remote "it's"; } && ok "the same recover commands also run under fish" || no "the same recover commands also run under fish"
+fi
 
 # ==== pass 2: dry run changes nothing ===========================================================
 make_repo dry; OUT="$T/out2"; mkdir -p "$OUT"
@@ -314,6 +328,7 @@ age "$(wt done1)"; age "$(wt todo1)"; age "$(wt empty1)"
 AUTODREAM_PRUNE_TRASH=0 run_prune
 echo "== pass 5: no remote"
 { ! has_wt done1 && ! has_local done1; } && ok "no remote: branch merged into main is removed" || no "no remote: branch merged into main is removed"
+ledger_col "$OUT/ledger.tsv" intent done1 11 | grep -q push && no "no remote: the recover command must not push a remote branch" || ok "no remote: the recover command has no push half"
 { has_wt todo1 && has_local todo1; } && ok "no remote: unmerged branch kept" || no "no remote: unmerged branch kept"
 { has_wt empty1 && has_local empty1; } && ok "no remote: a branch with no commits of its own is kept" || no "no remote: a branch with no commits of its own is kept"
 
@@ -424,6 +439,16 @@ LEDGER_OVERRIDE=/dev/null/nope/ledger.tsv run_prune
 echo "== pass 15: unwritable ledger"
 expect_kept l1 "ledger that cannot be written"
 assert_grep "$OUT/worktree-prune.tsv" "ledger-unwritable" "report names the unwritable ledger"
+
+# ==== pass 16: no pin, no delete ================================================================
+make_repo pf; OUT="$T/out16"; mkdir -p "$OUT"
+worktree p1; commit_in p1; push p1; pr p1 MERGED "$(tip p1)"; age "$(wt p1)"
+mkdir -p "$R/.git/refs/prune-ledger"; chmod 555 "$R/.git/refs/prune-ledger"   # the pin namespace cannot be written
+run_prune
+echo "== pass 16: pin fails"
+expect_kept p1 "pin ref that cannot be created"
+assert_grep "$OUT/worktree-prune.tsv" "pin-failed" "report names the failed pin"
+[ -n "$(ledger_row "$OUT/ledger.tsv" pin-failed p1)" ] && [ -z "$(ledger_row "$OUT/ledger.tsv" intent p1)" ] && ok "a failed pin is logged and no intent follows" || no "a failed pin is logged and no intent follows"
 
 echo
 echo "passed: $pass   failed: $fail"
