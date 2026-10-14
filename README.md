@@ -302,6 +302,16 @@ report says why:
 | `gh-unavailable` | `gh` is missing, logged out or failed, or the repo has `AUTODREAM_PRUNE_OPEN_LIMIT` (200) open PRs or more |
 | `cap`, `time-budget` | `AUTODREAM_PRUNE_MAX` removals (25) or `AUTODREAM_PRUNE_BUDGET_SEC` (1200 seconds) used up tonight |
 
+Every removal is written to `~/.claude/autodream/prune-ledger.tsv` before anything changes. The file
+is append-only. Per removal it gets an `intent` line (repo, branch, local tip, remote tip, worktree
+path, the PR URL that proves it, and the exact commands that put the branch back), then one line per
+step, then `complete`. If the ledger cannot be written, nothing is removed. To undo a removal, run the
+`recover` column of its `intent` line:
+
+```
+git -C <repo> branch <branch> <tip> ; git -C <repo> push origin <tip>:refs/heads/<branch>
+```
+
 The remote branch is deleted by a push that names the proven commit as the lease, so a push
 that landed after the fetch makes GitHub refuse the delete. The worktree directory goes to
 the Trash (`AUTODREAM_PRUNE_TRASH=0` deletes it with git instead). Read the result in

@@ -63,3 +63,4 @@ AUTODREAM_TRIAGE_SURFACE=cmux
 # AUTODREAM_PRUNE_OPEN_LIMIT=200
 # AUTODREAM_PRUNE_PROTECT="live:legacy-*"   # extra branch globs to never prune, colon-separated
 # AUTODREAM_PRUNE_TRASH=1
+# AUTODREAM_PRUNE_LEDGER=$HOME/.claude/autodream/prune-ledger.tsv   # append-only record of every removal, with undo commands

@@ -41,6 +41,19 @@
 #   time-budget      AUTODREAM_PRUNE_BUDGET_SEC ran out
 #   cap              AUTODREAM_PRUNE_MAX removals already happened this run
 #
+# THE LEDGER: NO REMOVAL WITHOUT A RECORD
+#
+# Every real run appends to one file that is never rewritten, AUTODREAM_PRUNE_LEDGER (default
+# ~/.claude/autodream/prune-ledger.tsv). Per removal it writes an `intent` line BEFORE it touches
+# anything, then one line per step, then `complete`. A run opens with `run-start` and closes with
+# `run-end`. Columns: time (UTC), run id, event, repo, owner/repo, branch, local tip, remote tip
+# before the delete, worktree path, detail (the proof: PR URL, state, head, base), recover.
+# The `recover` column holds the exact commands that put the branch back, local and remote:
+#     git -C <repo> branch <branch> <tip> ; git -C <repo> push origin <tip>:refs/heads/<branch>
+# The commit objects stay in the repo until git gc, so the commands work after a deletion. A
+# worktree directory is in the Trash under its own name. If the ledger cannot be written, nothing
+# is removed ("no log, no delete"). A dry run writes nothing to it.
+#
 # NO CALL CAN HANG THE NIGHT
 #
 # Every network call and `trash` runs under a timeout (AUTODREAM_PRUNE_CALL_SEC), through
@@ -73,6 +86,7 @@
 #   AUTODREAM_PRUNE_OPEN_LIMIT   open PRs read per repo; at the limit the repo
 #                                is kept whole                                  default 200
 #   AUTODREAM_PRUNE_TRASH        0 to delete with git instead of trash          default 1
+#   AUTODREAM_PRUNE_LEDGER       append-only record of every removal           default ~/.claude/autodream/prune-ledger.tsv
 #   AUTODREAM_PRUNE_DRY_RUN      1 is the same as --dry-run
 set -uo pipefail
 
@@ -105,6 +119,9 @@ export GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=$CALL_SEC
 
 TSV="$OUT/worktree-prune.tsv"
 MD="$OUT/worktree-prune.md"
+LEDGER=${AUTODREAM_PRUNE_LEDGER:-${AUTODREAM_DIR:-$HOME/.claude/autodream}/prune-ledger.tsv}
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+LEDGER_OK=1
 : > "$TSV"
 N_REMOVED=0; N_KEPT=0; N_SKIPPED=0
 SECONDS=0
@@ -128,6 +145,28 @@ tmo() { # tmo SECONDS cmd... - always bounded: timeout, gtimeout, or a watchdog 
 
 budget_ok() { [ "$SECONDS" -lt "$BUDGET" ]; }
 
+# ledger EVENT REPO SLUG BRANCH TIP REMOTE_TIP WORKTREE DETAIL RECOVER - one append, a failure returns 1.
+# A tab or newline inside a field would shift the columns, so both become spaces.
+ledger() {
+  [ "$DRY" = 1 ] && return 0
+  local f out="" sep=""
+  for f in "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RUN_ID" "$@"; do
+    f=${f//$'\t'/ }; f=${f//$'\n'/ }
+    out="$out$sep$f"; sep=$'\t'
+  done
+  printf '%s\n' "$out" >> "$LEDGER" 2>/dev/null
+}
+
+# recover_cmds REPO BRANCH TIP -> the commands that restore the local and the remote branch
+recover_cmds() {
+  printf "git -C %q branch %q %s ; git -C %q push origin %s:refs/heads/%q" "$1" "$2" "$3" "$1" "$3" "$2"
+}
+
+if [ "$DRY" != 1 ]; then
+  mkdir -p "$(dirname "$LEDGER")" 2>/dev/null
+  ledger run-start "" "" "" "" "" "" "script=$0 dry=0 max=$MAXN grace_min=$GRACE call_sec=$CALL_SEC budget_sec=$BUDGET host=$(hostname -s 2>/dev/null)" "" || LEDGER_OK=0
+fi
+
 row() { # action repo branch path reason
   printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" >> "$TSV"
   case "$1" in
@@ -150,6 +189,7 @@ finish() {
     awk -F'\t' -v a="$a" '$1 == a { printf "- %s `%s`: %s\n", ($4 != "" ? $4 : $2), $3, $5 }' "$TSV"
   done
   } > "$MD"
+  [ "$LEDGER_OK" = 1 ] && ledger run-end "" "" "" "" "" "" "removed=$N_REMOVED kept=$N_KEPT skipped=$N_SKIPPED" ""
   printf 'prune: removed=%s kept=%s skipped=%s%s\n' "$N_REMOVED" "$N_KEPT" "$N_SKIPPED" "$([ "$DRY" = 1 ] && echo ' (dry run)')"
 }
 
@@ -236,13 +276,14 @@ in_list() { printf '%s\n' "$2" | grep -qxF -- "$1"; }
 # judge REPO SLUG BRANCH TIP -> VERDICT=finished|keep, WHY
 judge() {
   local repo=$1 slug=$2 br=$3 tip=$4 json rsha closed based
-  VERDICT=keep; WHY="no proof the work landed"
+  VERDICT=keep; WHY="no proof the work landed"; PROOF=""
   if [ -z "$slug" ]; then
     if [ -n "$(git -C "$repo" remote 2>/dev/null)" ]; then WHY="non-github-remote: no proof source"; return 0; fi
     if [ -n "$DEF_TIP" ] && [ "$tip" != "$DEF_TIP" ] \
        && git -C "$repo" merge-base --is-ancestor "$tip" "$DEF_REF" 2>/dev/null \
        && [ "$(git -C "$repo" reflog show --format=%H "refs/heads/$br" 2>/dev/null | wc -l | tr -d ' ')" -ge 2 ]; then
       VERDICT=finished; WHY="merged into $DEF_NAME (no remote)"
+      PROOF="tip $tip is an ancestor of $DEF_REF $DEF_TIP; the repo has no remote"
     fi
     return 0
   fi
@@ -256,12 +297,14 @@ judge() {
   if [ "$(printf '%s' "$json" | jq --arg t "$tip" --arg d "$DEF_NAME" \
         'any(.[]; .state == "MERGED" and .headRefOid == $t and .baseRefName == $d and .isCrossRepository == false)')" = true ]; then
     VERDICT=finished; WHY="PR merged into $DEF_NAME at this tip"
+    PROOF=$(printf '%s' "$json" | jq -r --arg t "$tip" '[.[] | select(.state == "MERGED" and .headRefOid == $t)][0] | "PR \(.url) MERGED head=\(.headRefOid) base=\(.baseRefName)"')
   fi
   rsha=$(git -C "$repo" rev-parse -q --verify "refs/remotes/origin/$br" 2>/dev/null) || rsha=""
   closed=$(printf '%s' "$json" | jq -r --arg t "$tip" \
         '[.[] | select(.state == "CLOSED" and .headRefOid == $t and .isCrossRepository == false) | .closedAt] | max // empty')
   if [ "$VERDICT" != finished ] && [ -n "$closed" ] && [ "$rsha" = "$tip" ] && [[ "$closed" < "$CUTOFF" ]]; then
     VERDICT=finished; WHY="PR closed unmerged on $closed at this tip, branch fully on the remote"
+    PROOF=$(printf '%s' "$json" | jq -r --arg t "$tip" '[.[] | select(.state == "CLOSED" and .headRefOid == $t)][0] | "PR \(.url) CLOSED head=\(.headRefOid) base=\(.baseRefName) closedAt=\(.closedAt); remote tip equals the local tip"')
   fi
   [ "$VERDICT" = finished ] || return 0
   # Either proof: a branch that other PRs have targeted is a long-lived branch, and deleting it
@@ -275,16 +318,19 @@ judge() {
 
 delete_remote() { # repo slug branch tip -> REMOTE_NOTE
   local repo=$1 slug=$2 br=$3 tip=$4 rsha
-  REMOTE_NOTE=""
+  REMOTE_NOTE=""; REMOTE_EVENT="remote-none"; REMOTE_DETAIL="no GitHub remote or no remote branch"
   [ -n "$slug" ] || return 0
   rsha=$(git -C "$repo" rev-parse -q --verify "refs/remotes/origin/$br" 2>/dev/null) || rsha=""
   [ -n "$rsha" ] || return 0
-  if [ "$rsha" != "$tip" ]; then REMOTE_NOTE="; remote kept: moved since the proof"; return 0; fi
+  if [ "$rsha" != "$tip" ]; then
+    REMOTE_NOTE="; remote kept: moved since the proof"; REMOTE_EVENT="remote-kept"; REMOTE_DETAIL="remote tip $rsha differs from the proven tip $tip"
+    return 0
+  fi
   if tmo $((CALL_SEC * 2)) git -C "$repo" push --no-verify --force-with-lease="refs/heads/$br:$tip" origin ":refs/heads/$br" >/dev/null 2>&1; then
-    REMOTE_NOTE="; remote deleted"
+    REMOTE_NOTE="; remote deleted"; REMOTE_EVENT="remote-deleted"; REMOTE_DETAIL="deleted refs/heads/$br on origin at $tip"
     git -C "$repo" update-ref -d "refs/remotes/origin/$br" 2>/dev/null
   else
-    REMOTE_NOTE="; remote kept: delete refused or failed"
+    REMOTE_NOTE="; remote kept: delete refused or failed"; REMOTE_EVENT="remote-kept"; REMOTE_DETAIL="push refused or failed; remote branch is still at $rsha"
   fi
 }
 
@@ -300,20 +346,42 @@ drop_worktree() { # repo path -> 0 when the directory is gone and git forgot it
   return 1
 }
 
-# remove_item REPO SLUG BRANCH TIP PATH WHY - PATH or BRANCH may be empty.
+# remove_item REPO SLUG BRANCH TIP PATH WHY - PATH or BRANCH may be empty. PROOF holds the evidence.
 remove_item() {
-  local repo=$1 slug=$2 br=$3 tip=$4 path=$5 why=$6 note=""
+  local repo=$1 slug=$2 br=$3 tip=$4 path=$5 why=$6 note="" rsha="" rec="" detail
   if ! budget_ok; then row skipped "$repo" "$br" "$path" "time-budget"; return 0; fi
   if [ "$N_REMOVED" -ge "$MAXN" ]; then row kept "$repo" "$br" "$path" "cap: $MAXN removals per run reached"; return 0; fi
   if [ "$DRY" = 1 ]; then row would-remove "$repo" "$br" "$path" "$why"; return 0; fi
-  if [ -n "$path" ] && ! drop_worktree "$repo" "$path"; then
-    row kept "$repo" "$br" "$path" "${DROP_ERR:-remove-failed}"; return 0
+  if [ "$LEDGER_OK" != 1 ]; then row kept "$repo" "$br" "$path" "ledger-unwritable: no log, no delete"; return 0; fi
+  [ -z "$br" ] || rsha=$(git -C "$repo" rev-parse -q --verify "refs/remotes/origin/$br" 2>/dev/null) || rsha=""
+  [ -z "$br" ] || rec=$(recover_cmds "$repo" "$br" "$tip")
+  [ -n "$br" ] || rec="detached worktree: no branch; the commit is $tip"
+  # Write-ahead: the intent is on disk before the first change.
+  if ! ledger intent "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "$why | proof: $PROOF" "$rec"; then
+    row kept "$repo" "$br" "$path" "ledger-write-failed: no log, no delete"; return 0
+  fi
+  if [ -n "$path" ]; then
+    if drop_worktree "$repo" "$path"; then
+      if [ "$USE_TRASH" = 1 ]; then detail="moved to the Trash: look for '$(basename "$path")' in ~/.Trash"
+      else detail="deleted with git worktree remove (a clean tree; tracked files come back from $tip)"; fi
+      ledger worktree-removed "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "$detail" ""
+    else
+      ledger worktree-failed "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "${DROP_ERR:-remove-failed}; nothing else was changed" ""
+      row kept "$repo" "$br" "$path" "${DROP_ERR:-remove-failed}"; return 0
+    fi
   fi
   if [ -n "$br" ]; then
     delete_remote "$repo" "$slug" "$br" "$tip"
-    git -C "$repo" branch -D "$br" >/dev/null 2>&1 || note="; local branch delete failed"
+    ledger "$REMOTE_EVENT" "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "$REMOTE_DETAIL" ""
+    if git -C "$repo" branch -D "$br" >/dev/null 2>&1; then
+      ledger local-deleted "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "deleted refs/heads/$br at $tip" ""
+    else
+      note="; local branch delete failed"
+      ledger local-failed "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "git branch -D failed; the local branch is still there" ""
+    fi
     note="$note$REMOTE_NOTE"
   fi
+  ledger complete "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "$why$note" ""
   row removed "$repo" "$br" "$path" "$why$note"
 }
 
@@ -366,6 +434,7 @@ sweep_worktree() { # repo slug path head branch flags
   if ! budget_ok; then row skipped "$repo" "$br" "$path" "time-budget"; return 0; fi
   if [ -z "$br" ]; then # detached HEAD
     if [ -n "$DEF_TIP" ] && [ "$head" != "$DEF_TIP" ] && git -C "$repo" merge-base --is-ancestor "$head" "$DEF_REF" 2>/dev/null; then
+      PROOF="detached HEAD $head is an ancestor of $DEF_REF $DEF_TIP"
       remove_item "$repo" "$slug" "" "$head" "$path" "detached at a commit already in $DEF_NAME"
     else
       row kept "$repo" "(detached)" "$path" "no proof the work landed"
