@@ -124,6 +124,7 @@ RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 LEDGER_OK=1
 : > "$TSV"
 N_REMOVED=0; N_KEPT=0; N_SKIPPED=0
+CUR_REPO=""; CUR_SLUG=""; CUR_BR=""; CUR_TIP=""; CUR_PATH=""; LBAD=""
 SECONDS=0
 NOW=$(date +%s)
 CUTOFF=$(TZ=UTC pdate_fmt_epoch $((NOW - CLOSED_DAYS * 86400)) +%Y-%m-%dT%H:%M:%SZ)
@@ -157,10 +158,19 @@ ledger() {
   printf '%s\n' "$out" >> "$LEDGER" 2>/dev/null
 }
 
-# recover_cmds REPO BRANCH TIP -> the commands that restore the local and the remote branch
+# shq STRING -> STRING in single quotes. Unlike printf %q this never prints $'..', which fish cannot read.
+shq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+# recover_cmds REPO BRANCH TIP REMOTE_TIP -> the commands that restore the local branch, and the
+# remote branch when it existed. They work in bash, zsh and fish.
 recover_cmds() {
-  printf "git -C %q branch %q %s ; git -C %q push origin %s:refs/heads/%q" "$1" "$2" "$3" "$1" "$3" "$2"
+  local r b; r=$(shq "$1"); b=$(shq "$2")
+  printf 'git -C %s branch %s %s' "$r" "$b" "$3"
+  [ -z "$4" ] || printf ' ; git -C %s push origin %s:refs/heads/%s' "$r" "$3" "$b"
 }
+
+# lstep ... -> ledger, remembering a failed append so the report can say the record is incomplete
+lstep() { ledger "$@" || LBAD=1; }
 
 if [ "$DRY" != 1 ]; then
   mkdir -p "$(dirname "$LEDGER")" 2>/dev/null
@@ -197,6 +207,9 @@ finish() {
 # sends TERM to this shell, the trap kills the children, writes the report and exits 0.
 on_term() {
   pkill -P $$ 2>/dev/null
+  if [ -n "$CUR_REPO" ] && [ "$LEDGER_OK" = 1 ]; then
+    ledger interrupted "$CUR_REPO" "$CUR_SLUG" "$CUR_BR" "$CUR_TIP" "" "$CUR_PATH" "the watchdog stopped the run after the intent and before complete: check whether the worktree, the remote branch and the local branch are gone" ""
+  fi
   row skipped "" "" "" "watchdog: the run outlasted its time cap"
   finish
   exit 0
@@ -348,40 +361,53 @@ drop_worktree() { # repo path -> 0 when the directory is gone and git forgot it
 
 # remove_item REPO SLUG BRANCH TIP PATH WHY - PATH or BRANCH may be empty. PROOF holds the evidence.
 remove_item() {
-  local repo=$1 slug=$2 br=$3 tip=$4 path=$5 why=$6 note="" rsha="" rec="" detail
+  local repo=$1 slug=$2 br=$3 tip=$4 path=$5 why=$6 note="" rsha="" rec="" detail pin dd
+  LBAD=""
   if ! budget_ok; then row skipped "$repo" "$br" "$path" "time-budget"; return 0; fi
   if [ "$N_REMOVED" -ge "$MAXN" ]; then row kept "$repo" "$br" "$path" "cap: $MAXN removals per run reached"; return 0; fi
   if [ "$DRY" = 1 ]; then row would-remove "$repo" "$br" "$path" "$why"; return 0; fi
   if [ "$LEDGER_OK" != 1 ]; then row kept "$repo" "$br" "$path" "ledger-unwritable: no log, no delete"; return 0; fi
   [ -z "$br" ] || rsha=$(git -C "$repo" rev-parse -q --verify "refs/remotes/origin/$br" 2>/dev/null) || rsha=""
-  [ -z "$br" ] || rec=$(recover_cmds "$repo" "$br" "$tip")
-  [ -n "$br" ] || rec="detached worktree: no branch; the commit is $tip"
+  if [ -n "$br" ]; then rec=$(recover_cmds "$repo" "$br" "$tip" "$rsha"); pin="refs/prune-ledger/$RUN_ID/$br"
+  else rec="detached worktree: no branch; the commit is $tip"; pin="refs/prune-ledger/$RUN_ID/detached-$(basename "$path")"; fi
+  # Pin first. After the branch and the worktree are gone, nothing else keeps a squash-merged tip
+  # reachable, and git gc would prune it and break the recover commands. The pin is never removed.
+  if ! git -C "$repo" update-ref "$pin" "$tip" 2>/dev/null; then
+    ledger pin-failed "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "could not create $pin; nothing was changed" ""
+    row kept "$repo" "$br" "$path" "pin-failed: no safe undo, no delete"; return 0
+  fi
   # Write-ahead: the intent is on disk before the first change.
-  if ! ledger intent "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "$why | proof: $PROOF" "$rec"; then
+  if ! ledger intent "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "$why | proof: $PROOF | commit held by $pin" "$rec"; then
+    git -C "$repo" update-ref -d "$pin" 2>/dev/null   # nothing was changed, so the pin is not needed
     row kept "$repo" "$br" "$path" "ledger-write-failed: no log, no delete"; return 0
   fi
+  CUR_REPO=$repo; CUR_SLUG=$slug; CUR_BR=$br; CUR_TIP=$tip; CUR_PATH=$path
   if [ -n "$path" ]; then
     if drop_worktree "$repo" "$path"; then
       if [ "$USE_TRASH" = 1 ]; then detail="moved to the Trash: look for '$(basename "$path")' in ~/.Trash"
       else detail="deleted with git worktree remove (a clean tree; tracked files come back from $tip)"; fi
-      ledger worktree-removed "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "$detail" ""
+      lstep worktree-removed "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "$detail" ""
     else
-      ledger worktree-failed "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "${DROP_ERR:-remove-failed}; nothing else was changed" ""
+      if [ -e "$path" ]; then dd="the directory is still at the path"; else dd="the directory is NOT at the path: look in ~/.Trash"; fi
+      lstep worktree-failed "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "${DROP_ERR:-remove-failed}; $dd" ""
+      CUR_REPO=""
       row kept "$repo" "$br" "$path" "${DROP_ERR:-remove-failed}"; return 0
     fi
   fi
   if [ -n "$br" ]; then
     delete_remote "$repo" "$slug" "$br" "$tip"
-    ledger "$REMOTE_EVENT" "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "$REMOTE_DETAIL" ""
+    lstep "$REMOTE_EVENT" "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "$REMOTE_DETAIL" ""
     if git -C "$repo" branch -D "$br" >/dev/null 2>&1; then
-      ledger local-deleted "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "deleted refs/heads/$br at $tip" ""
+      lstep local-deleted "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "deleted refs/heads/$br at $tip" ""
     else
       note="; local branch delete failed"
-      ledger local-failed "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "git branch -D failed; the local branch is still there" ""
+      lstep local-failed "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "git branch -D failed; the local branch is still there" ""
     fi
     note="$note$REMOTE_NOTE"
   fi
-  ledger complete "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "$why$note" ""
+  [ -z "$LBAD" ] || note="$note; ledger-incomplete: a step line could not be written, the intent line still holds the undo"
+  lstep complete "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "$why$note" ""
+  CUR_REPO=""
   row removed "$repo" "$br" "$path" "$why$note"
 }
 
