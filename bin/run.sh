@@ -3973,6 +3973,8 @@ PY
   # list of working directories and not something a model could have rewritten. A failure here
   # logs and the report is unaffected.
   TRIAGE_SUMMARY="triage: off"
+  # A rerun must not leave the earlier run's list for L2 to copy.
+  rm -f "$FINDINGS_DIR/triage-candidates.md" "$FINDINGS_DIR/triage-candidates.tsv" 2>/dev/null
   if [ "${AUTODREAM_TRIAGE_SUGGEST:-1}" = 0 ]; then
     :
   elif [ -x "$TRIAGE_CANDIDATES" ]; then

@@ -50,8 +50,11 @@ _pp="$(dirname "${BASH_SOURCE[0]}")/portable.sh"
 OUT=${1:-}
 [ -n "$OUT" ] || { echo "usage: triage-candidates.sh <out-dir>   (session rows on stdin)" >&2; exit 2; }
 
-if [ "${AUTODREAM_TRIAGE_SUGGEST:-1}" = 0 ]; then echo "triage: disabled"; exit 0; fi
 if ! mkdir -p "$OUT" 2>/dev/null || [ ! -w "$OUT" ]; then echo "triage: findings dir unusable"; exit 0; fi
+# A rerun of the same night must never leave the earlier run's list for L2 to copy, whatever
+# happens below, so the artifacts go before the first early exit.
+{ rm -f "$OUT/triage-candidates.md" "$OUT/triage-candidates.tsv"; } 2>/dev/null
+if [ "${AUTODREAM_TRIAGE_SUGGEST:-1}" = 0 ]; then echo "triage: disabled"; exit 0; fi
 
 MIN=${AUTODREAM_TRIAGE_MIN:-3}
 COOLDOWN=${AUTODREAM_TRIAGE_COOLDOWN_DAYS:-7}
@@ -72,7 +75,6 @@ MD="$OUT/triage-candidates.md"
 DATE=$(basename "$OUT")
 _p_is_date "$DATE" || DATE=$(date +%Y-%m-%d)
 : > "$TSV" 2>/dev/null || { echo "triage: findings dir unusable"; exit 0; }
-{ rm -f "$MD"; } 2>/dev/null
 
 tmo() { # tmo SECONDS cmd... - always bounded: timeout, gtimeout, or a watchdog that kills the child
   local s=$1 pid wd rc; shift
@@ -135,7 +137,11 @@ repo_slug() { # owner/repo from a github.com origin URL, empty otherwise
 # last_suggestion SLUG -> "DATE<TAB>COUNT" of its most recent state row, empty when none
 last_suggestion() {
   [ -r "$STATE" ] || return 0
-  awk -F'\t' -v s="$1" '$1 == s { d = $2; c = $3 } END { if (d != "") printf "%s\t%s", d, c }' "$STATE" 2>/dev/null
+  # The latest valid row for the slug (any case): a garbage row must not hide a good one.
+  awk -F'\t' -v s="$1" '
+    BEGIN { s = tolower(s) }
+    tolower($1) == s && $2 ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/ && $3 ~ /^[0-9][0-9]*$/ && $2 >= d { d = $2; c = $3 }
+    END { if (d != "") printf "%s\t%s", d, c }' "$STATE" 2>/dev/null
 }
 
 # held_back SLUG UNTRIAGED -> 0 when the cooldown applies
@@ -147,6 +153,8 @@ held_back() {
   [ "$d" != "$DATE" ] || return 1                       # a retried night
   ep=$(pdate_epoch "$d") || return 1
   days=$(( (DATE_EPOCH - ep) / 86400 ))
+  # A negative gap is a retry of an older night or a skewed clock: no cooldown applies.
+  [ "$days" -lt 0 ] && return 1
   [ "$days" -ge "$COOLDOWN" ] && return 1
   [ "$2" -ge $((c + GROW)) ] && return 1                # the pile grew
   return 0
@@ -165,7 +173,7 @@ record_suggestion() { # SLUG UNTRIAGED - appends unless the last row already say
 read_issues() {
   local slug=$1 errf json
   errf=$(mktemp "${TMPDIR:-/tmp}/triage-err.XXXXXX") || { I_ERR="no temp file"; return 1; }
-  json=$(tmo "$CALL_SEC" gh issue list -R "$slug" --state open --limit "$LIMIT" --json number,labels,createdAt 2>"$errf")
+  json=$(tmo "$CALL_SEC" gh issue list -R "$slug" --state open --limit "$LIMIT" --json number,labels,createdAt 2>"$errf" </dev/null)
   local rc=$?
   I_ERR=$(head -c 300 "$errf" 2>/dev/null | tr '\n\t' '  ')
   { rm -f "$errf"; } 2>/dev/null
@@ -173,7 +181,7 @@ read_issues() {
   local fields
   fields=$(printf '%s' "$json" | jq -r '
     ["needs-info","ready-for-agent","ready-for-human","wontfix","needs-triage"] as $S
-    | map(. + {n: (.labels | map(.name))})
+    | map(. + {n: ((.labels // []) | map(.name))})
     | map(. + {st: (.n | map(select(. as $x | $S | index($x))) | length)})
     | map(. + {u: ((.n | index("needs-triage") != null) or .st == 0)})
     | [ length,
@@ -190,7 +198,7 @@ read_issues() {
 age_days() { # ISO timestamp -> whole days since, empty when it does not parse
   local ts=${1:-} ep
   [ -n "$ts" ] || return 0
-  ep=$(TZ=UTC pdate_epoch "${ts%Z}" 2>/dev/null) || ep=$(pdate_epoch "$(printf '%s' "$ts" | sed 's/T/ /; s/Z$//')" 2>/dev/null) || return 0
+  ep=$(pdate_epoch "$(printf '%s' "$ts" | sed 's/T/ /; s/Z$//')" 2>/dev/null) || return 0
   [ -n "$ep" ] && printf '%s' $(( (NOW - ep) / 86400 ))
 }
 
@@ -204,8 +212,9 @@ while IFS= read -r cwd; do
   repo=$(dirname "$common")
   slug=$(repo_slug "$repo")
   if [ -z "$slug" ]; then tsvrow skipped - "$repo" "" "" "" non-github; N_SKIP=$((N_SKIP + 1)); continue; fi
-  case $'\n'"$SEEN_SLUGS"$'\n' in *$'\n'"$slug"$'\n'*) continue ;; esac
-  SEEN_SLUGS="$SEEN_SLUGS$slug"$'\n'
+  key=$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]')
+  case $'\n'"$SEEN_SLUGS"$'\n' in *$'\n'"$key"$'\n'*) continue ;; esac
+  SEEN_SLUGS="$SEEN_SLUGS$key"$'\n'
   N_CHECKED=$((N_CHECKED + 1))
 
   if ! read_issues "$slug"; then
@@ -233,7 +242,7 @@ while IFS= read -r cwd; do
   fi
   tsvrow candidate "$slug" "$repo" "$u$mark" "$t$mark" "$age" ""
   N_CAND=$((N_CAND + 1))
-  CAND_LINES="$CAND_LINES$(printf '| `%s` | %s | %s | %s | `%s` |' "$slug" "$u$mark" "$t$mark" "${age:+$age days}" "$repo")"$'\n'
+  CAND_LINES="$CAND_LINES$(printf '| `%s` | %s | %s | %s | `%s` |' "$slug" "$u$mark" "$t$mark" "${age:+$age days}" "${repo//|/\\|}")"$'\n'
   record_suggestion "$slug" "$I_UNTRIAGED" || UNSAVED=1
 done <<< "$CWDS"
 
