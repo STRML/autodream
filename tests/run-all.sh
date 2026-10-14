@@ -6312,7 +6312,7 @@ echo
 echo "===== unit suites ====="
 # The suites that drive launchd need plutil and launchctl, so they run on macOS only (CI runs
 # them in launchd.yml, when a launchd file changes).
-_suites="portable lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks"
+_suites="portable lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees"
 [ "$(uname -s)" = Darwin ] && _suites="$_suites scheduler-label autodream-now install-review-agent install-dry-run install-dir"
 for _suite in $_suites; do
   _out=$(bash "$HERE/$_suite.sh" 2>&1)
@@ -6710,6 +6710,37 @@ test_l2_diag_long_command_lines_keep_the_sections_intact(){
   rm -rf "$root"
 }
 
+test_prune_worktrees_wiring(){
+  echo "# prune: run.sh calls the helper only when roots are set, records the summary, and survives a failing helper"
+  local keep; keep=$(mktemp -d "${TMPDIR:-/tmp}/ccad.XXXXXX")   # outlives the per-run roots below
+  local stub="$keep/prune-stub.sh" calls="$keep/prune-calls" root
+  printf '#!/bin/bash\necho "$1" >> "%s"\necho "prune: removed=2 kept=1 skipped=0"\n' "$calls" > "$stub"
+  chmod +x "$stub"
+  export AUTODREAM_PRUNE_BIN="$stub"
+
+  root=$(setup_env); mk_session "$root" s1
+  run_dream "$root"
+  assert_no_file "$calls" "roots unset: the helper is not called"
+  assert_grep "$(fdir "$root")/run-stats.txt" "worktree_prune: prune: not configured" "roots unset: run-stats says not configured"
+  rm -rf "$root"
+
+  root=$(setup_env); mk_session "$root" s1
+  export AUTODREAM_PRUNE_ROOTS="$root/repos"
+  run_dream "$root"
+  assert_grep "$calls" "findings/$DATE" "roots set: the helper gets the findings dir"
+  assert_grep "$(fdir "$root")/run-stats.txt" "worktree_prune: prune: removed=2 kept=1 skipped=0" "roots set: run-stats carries the summary"
+  rm -rf "$root"
+
+  root=$(setup_env); mk_session "$root" s1
+  printf '#!/bin/bash\nexit 1\n' > "$stub"
+  run_dream "$root"
+  assert_nonempty "$root/dreams/$DATE.md" "a failing helper does not cost the report"
+  assert_grep "$(fdir "$root")/run-stats.txt" "worktree_prune: prune: failed" "a failing helper is recorded as failed"
+  unset AUTODREAM_PRUNE_BIN AUTODREAM_PRUNE_ROOTS
+  rm -rf "$root" "$keep"
+}
+
+test_prune_worktrees_wiring
 test_l2_diag_written_on_exit_143
 test_l2_diag_written_on_exit_137
 test_l2_diag_long_command_lines_keep_the_sections_intact
