@@ -99,6 +99,9 @@
 #                            worktrees and branches are pruned     default: unset (off)
 #   AUTODREAM_PRUNE_BIN      override the resolved prune-worktrees.sh path, authoritative
 #                            (the other AUTODREAM_PRUNE_* knobs are in prune-worktrees.sh)
+#   AUTODREAM_TRIAGE_SUGGEST 0 turns off the "repos worth triaging" list  default: on
+#   AUTODREAM_TRIAGE_BIN     override the resolved triage-candidates.sh path, authoritative
+#                            (the other AUTODREAM_TRIAGE_* knobs are in triage-candidates.sh)
 
 set -u
 
@@ -356,6 +359,13 @@ if [ -n "${AUTODREAM_PRUNE_BIN:-}" ]; then
 else
   PRUNE_WORKTREES="$SCRIPT_DIR/prune-worktrees.sh"
   [ -x "$PRUNE_WORKTREES" ] || PRUNE_WORKTREES="$AUTODREAM_DIR/prune-worktrees.sh"
+fi
+# Touched-repo triage list. On by default: it only reads issues. Override is authoritative.
+if [ -n "${AUTODREAM_TRIAGE_BIN:-}" ]; then
+  TRIAGE_CANDIDATES="$AUTODREAM_TRIAGE_BIN"
+else
+  TRIAGE_CANDIDATES="$SCRIPT_DIR/triage-candidates.sh"
+  [ -x "$TRIAGE_CANDIDATES" ] || TRIAGE_CANDIDATES="$AUTODREAM_DIR/triage-candidates.sh"
 fi
 # Memory pin applier. find_lib, not SCRIPT_DIR alone: an install that predates
 # apply-pins.sh has run.sh symlinked in and no apply-pins.sh beside it until install.sh
@@ -3955,6 +3965,25 @@ PY
     PRUNE_SUMMARY="prune: helper missing"
   fi
   printf 'worktree_prune: %s\n' "$PRUNE_SUMMARY" >> "$FINDINGS_DIR/run-stats.txt"
+
+  # ---- Repos worth triaging ----
+  # Counts untriaged open issues in the repos tonight's sessions ran in and writes
+  # triage-candidates.md for L2 to copy into the report (L2 has no shell or gh, so the runner
+  # does the counting). SESSION_ROWS was built before any model ran, so it is the runner's own
+  # list of working directories and not something a model could have rewritten. A failure here
+  # logs and the report is unaffected.
+  TRIAGE_SUMMARY="triage: off"
+  if [ "${AUTODREAM_TRIAGE_SUGGEST:-1}" = 0 ]; then
+    :
+  elif [ -x "$TRIAGE_CANDIDATES" ]; then
+    TRIAGE_SUMMARY=$(printf '%s\n' "$SESSION_ROWS" | "$TRIAGE_CANDIDATES" "$FINDINGS_DIR" 2>>"$RUN_LOG" | tail -1) || TRIAGE_SUMMARY="triage: failed"
+    [ -n "$TRIAGE_SUMMARY" ] || TRIAGE_SUMMARY="triage: failed"
+    log "$TRIAGE_SUMMARY (details: $FINDINGS_DIR/triage-candidates.md)"
+  else
+    log "triage-candidates.sh not found at $TRIAGE_CANDIDATES; skipping the triage list"
+    TRIAGE_SUMMARY="triage: helper missing"
+  fi
+  printf 'triage_candidates: %s\n' "$TRIAGE_SUMMARY" >> "$FINDINGS_DIR/run-stats.txt"
 
   # ---- Skills inventory and per-source facts (written for L2 to read) ----
   write_adapter_inputs

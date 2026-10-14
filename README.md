@@ -325,6 +325,27 @@ the Trash (`AUTODREAM_PRUNE_TRASH=0` deletes it with git instead). Read the resu
 `~/.claude/autodream/prune-worktrees.sh --dry-run <out-dir>`. The step needs `gh`, `jq` and
 `git`, and a failure in it never costs the report: every network call and `trash` has a timeout (`AUTODREAM_PRUNE_CALL_SEC`, 60), and a hard stop at the budget plus `AUTODREAM_PRUNE_KILL_SLACK` (120) writes the report and exits.
 
+## Suggesting a triage
+
+When tonight's sessions ran in a GitHub repo with a pile of untriaged issues, the report says so under
+"Repos to triage" and names the checkout to run `/triage` in. The runner counts, because the aggregator
+has no shell or `gh`; the aggregator only copies the table.
+
+```
+sessions' cwds ─► repo root + owner/repo ─► gh issue list ─► untriaged >= 3 ─► cooldown ─► report
+                  (worktree = its repo)      (open, 200 max)  (no state label    (7 days, or
+                                                              or needs-triage)   +3 issues)
+```
+
+An issue is untriaged when it has none of `needs-info`, `ready-for-agent`, `ready-for-human` and
+`wontfix`, or when it carries `needs-triage`. A repo that has no issue with any of those labels does not
+use the scheme and is skipped (`no-scheme`). Also skipped, with the reason in
+`findings/<date>/triage-candidates.tsv`: a removed or non-git working directory, an origin that is not on
+GitHub, issues turned off, and any `gh` failure (the step never fails the run). A repo already suggested
+in the last `AUTODREAM_TRIAGE_COOLDOWN_DAYS` (7) days is held back unless its untriaged count grew by
+`AUTODREAM_TRIAGE_GROW` (3). The record is `~/.claude/autodream/triage-suggested.tsv`. A suggestion never
+counts as an open question. It is on by default and only reads; set `AUTODREAM_TRIAGE_SUGGEST=0` to turn it off.
+
 ## Running long jobs
 
 A full run usually takes more than 10 minutes. If you're kicking it off from
