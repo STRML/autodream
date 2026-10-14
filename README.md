@@ -293,7 +293,7 @@ report says why:
 
 | Reason | Meaning |
 |---|---|
-| `open-pr`, `base-of-open-pr` | a PR for the branch is open, or an open PR targets it |
+| `open-pr`, `base-of-open-pr`, `base-of-pr` | a PR for the branch is open, an open PR targets it, or any PR ever targeted it (a long-lived branch) |
 | `dirty` | uncommitted or untracked files in the worktree |
 | `recent` | a file changed in the last 12 hours (`AUTODREAM_PRUNE_GRACE_MIN`) |
 | `rebase-or-bisect`, `locked`, `submodules` | a rebase or bisect is running; `git worktree lock`; the worktree has a `.gitmodules` |
@@ -307,7 +307,7 @@ that landed after the fetch makes GitHub refuse the delete. The worktree directo
 the Trash (`AUTODREAM_PRUNE_TRASH=0` deletes it with git instead). Read the result in
 `findings/<date>/worktree-prune.md`, or try it first with
 `~/.claude/autodream/prune-worktrees.sh --dry-run <out-dir>`. The step needs `gh`, `jq` and
-`git`, and a failure in it never costs the report.
+`git`, and a failure in it never costs the report: every network call and `trash` has a timeout (`AUTODREAM_PRUNE_CALL_SEC`, 60), and a hard stop at the budget plus `AUTODREAM_PRUNE_KILL_SLACK` (120) writes the report and exits.
 
 ## Running long jobs
 

@@ -22,7 +22,8 @@
 # WHAT IS KEPT, WHATEVER ELSE IS TRUE
 #
 #   open-pr          a PR for the branch is open
-#   base-of-open-pr an open PR targets the branch
+#   base-of-open-pr  an open PR targets the branch
+#   base-of-pr       a PR, open or not, has ever targeted the branch (a long-lived branch)
 #   dirty            uncommitted or untracked files in the worktree
 #   recent           a file in the worktree or its gitdir changed inside the grace window
 #                    (default 12 hours), which also covers a session still running there
@@ -39,6 +40,13 @@
 #                    hit its limit, so there is no proof
 #   time-budget      AUTODREAM_PRUNE_BUDGET_SEC ran out
 #   cap              AUTODREAM_PRUNE_MAX removals already happened this run
+#
+# NO CALL CAN HANG THE NIGHT
+#
+# Every network call and `trash` runs under a timeout (AUTODREAM_PRUNE_CALL_SEC), through
+# timeout, gtimeout, or a built-in watchdog when neither exists. A hard cap covers the rest:
+# AUTODREAM_PRUNE_BUDGET_SEC plus AUTODREAM_PRUNE_KILL_SLACK seconds after the start, the
+# script stops its children, writes the report and exits 0.
 #
 # The remote branch is deleted by a push that names the proven commit as the lease
 # (`--force-with-lease=refs/heads/<b>:<tip>`), so a push that landed after the fetch makes
@@ -59,6 +67,8 @@
 #   AUTODREAM_PRUNE_MAX          most removals in one run                       default 25
 #   AUTODREAM_PRUNE_CLOSED_DAYS  how long a closed PR must have been closed     default 7
 #   AUTODREAM_PRUNE_BUDGET_SEC   wall-clock budget for the whole run            default 1200
+#   AUTODREAM_PRUNE_KILL_SLACK   seconds after the budget before a hard stop     default 120
+#   AUTODREAM_PRUNE_CALL_SEC     timeout for one network call or trash           default 60
 #   AUTODREAM_PRUNE_PROTECT      extra protected branch globs, colon-separated  default none
 #   AUTODREAM_PRUNE_OPEN_LIMIT   open PRs read per repo; at the limit the repo
 #                                is kept whole                                  default 200
@@ -84,11 +94,14 @@ MAXN=${AUTODREAM_PRUNE_MAX:-25}
 CLOSED_DAYS=${AUTODREAM_PRUNE_CLOSED_DAYS:-7}
 BUDGET=${AUTODREAM_PRUNE_BUDGET_SEC:-1200}
 OPEN_LIMIT=${AUTODREAM_PRUNE_OPEN_LIMIT:-200}
-for _v in GRACE MAXN CLOSED_DAYS BUDGET OPEN_LIMIT; do _p_is_int "${!_v}" || { echo "prune: $_v must be a whole number" >&2; exit 0; }; done
+CALL_SEC=${AUTODREAM_PRUNE_CALL_SEC:-60}
+KILL_SLACK=${AUTODREAM_PRUNE_KILL_SLACK:-120}
+for _v in GRACE MAXN CLOSED_DAYS BUDGET OPEN_LIMIT CALL_SEC KILL_SLACK; do _p_is_int "${!_v}" || { echo "prune: $_v must be a whole number" >&2; exit 0; }; done
 
 # A network call that waits for a password or a dead host would stall the nightly run.
+# Without a tty (launchd) ssh and git cannot prompt either. Slow transfers abort on their own.
 export GIT_TERMINAL_PROMPT=0 GH_PROMPT_DISABLED=1
-export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh} -o BatchMode=yes -o ConnectTimeout=15"
+export GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=$CALL_SEC
 
 TSV="$OUT/worktree-prune.tsv"
 MD="$OUT/worktree-prune.md"
@@ -101,17 +114,16 @@ CUTOFF=$(TZ=UTC pdate_fmt_epoch $((NOW - CLOSED_DAYS * 86400)) +%Y-%m-%dT%H:%M:%
 PROTECT_DEFAULT="main:master:develop:dev:development:trunk:staging:stage:production:prod:next:canary:gh-pages:release:release-*:release/*:v[0-9]*"
 IFS=: read -r -a PROTECT <<< "$PROTECT_DEFAULT:${AUTODREAM_PRUNE_PROTECT:-}"
 
-GH_OK=0
-if command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then GH_OK=1; fi
-
-USE_TRASH=0
-if [ "${AUTODREAM_PRUNE_TRASH:-1}" = 1 ] && command -v trash >/dev/null 2>&1; then USE_TRASH=1; fi
-
-tmo() { # tmo SECONDS cmd... - bounded when a timeout binary exists (macOS has gtimeout from coreutils)
-  local s=$1; shift
-  if command -v timeout >/dev/null 2>&1; then timeout "$s" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$s" "$@"
-  else "$@"; fi
+tmo() { # tmo SECONDS cmd... - always bounded: timeout, gtimeout, or a watchdog that kills the child
+  local s=$1 pid wd rc; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$s" "$@"; return $?
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$s" "$@"; return $?; fi
+  "$@" & pid=$!
+  ( sleep "$s"; pkill -P "$pid" 2>/dev/null; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 & wd=$!
+  wait "$pid"; rc=$?
+  kill "$wd" 2>/dev/null
+  wait "$wd" 2>/dev/null
+  return $rc
 }
 
 budget_ok() { [ "$SECONDS" -lt "$BUDGET" ]; }
@@ -124,6 +136,43 @@ row() { # action repo branch path reason
     *) N_SKIPPED=$((N_SKIPPED + 1)) ;;
   esac
 }
+
+finish() {
+  [ -z "${FINISHED:-}" ] || return 0
+  FINISHED=1
+  kill "${WD:-}" 2>/dev/null
+  {
+  printf '# Worktree prune %s%s\n\n' "$(date +%F)" "$([ "$DRY" = 1 ] && echo ' (dry run)')"
+  printf 'removed: %s, kept: %s, skipped: %s\n' "$N_REMOVED" "$N_KEPT" "$N_SKIPPED"
+  for a in removed would-remove kept skipped; do
+    grep -q "^$a	" "$TSV" || continue
+    printf '\n## %s\n\n' "$a"
+    awk -F'\t' -v a="$a" '$1 == a { printf "- %s `%s`: %s\n", ($4 != "" ? $4 : $2), $3, $5 }' "$TSV"
+  done
+  } > "$MD"
+  printf 'prune: removed=%s kept=%s skipped=%s%s\n' "$N_REMOVED" "$N_KEPT" "$N_SKIPPED" "$([ "$DRY" = 1 ] && echo ' (dry run)')"
+}
+
+# The whole run has a hard cap no hung child can outlast: the budget plus a slack. The watchdog
+# sends TERM to this shell, the trap kills the children, writes the report and exits 0.
+on_term() {
+  pkill -P $$ 2>/dev/null
+  row skipped "" "" "" "watchdog: the run outlasted its time cap"
+  finish
+  exit 0
+}
+trap on_term TERM
+# bash runs a trap only after its foreground child exits, so the children are killed right after the TERM.
+( sleep $((BUDGET + KILL_SLACK)); kill -TERM $$; pkill -P $$ ) >/dev/null 2>&1 &
+WD=$!
+trap 'kill "$WD" 2>/dev/null' EXIT
+
+GH_OK=0
+if command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && tmo "$CALL_SEC" gh auth status >/dev/null 2>&1; then GH_OK=1; fi
+
+USE_TRASH=0
+if [ "${AUTODREAM_PRUNE_TRASH:-1}" = 1 ] && command -v trash >/dev/null 2>&1; then USE_TRASH=1; fi
+
 
 # ---- per-repo facts ------------------------------------------------------------------------
 
@@ -138,8 +187,9 @@ repo_slug() { # owner/repo from a github.com origin URL, empty otherwise
 default_facts() { # sets DEF_NAME DEF_REF DEF_TIP for repo $1; DEF_NAME is empty when unknown
   local repo=$1 b
   DEF_NAME=$(git -C "$repo" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null) || DEF_NAME=""
-  if [ -z "$DEF_NAME" ] && git -C "$repo" remote get-url origin >/dev/null 2>&1; then
-    tmo 60 git -C "$repo" remote set-head origin -a >/dev/null 2>&1
+  # Ask the remote every night: a renamed default branch leaves origin/HEAD pointing at the old name.
+  if git -C "$repo" remote get-url origin >/dev/null 2>&1; then
+    tmo "$CALL_SEC" git -C "$repo" remote set-head origin -a >/dev/null 2>&1
     DEF_NAME=$(git -C "$repo" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null) || DEF_NAME=""
   fi
   DEF_NAME=${DEF_NAME#origin/}
@@ -171,7 +221,7 @@ load_open_prs() { # slug -> OPEN_HEADS OPEN_BASES REPO_GH_OK
   local json
   REPO_GH_OK=0; OPEN_HEADS=""; OPEN_BASES=""
   { [ "$GH_OK" = 1 ] && [ -n "$1" ]; } || return 0
-  json=$(tmo 60 gh pr list -R "$1" --state open --limit "$OPEN_LIMIT" --json headRefName,baseRefName 2>/dev/null) || return 0
+  json=$(tmo "$CALL_SEC" gh pr list -R "$1" --state open --limit "$OPEN_LIMIT" --json headRefName,baseRefName 2>/dev/null) || return 0
   [ "$(printf '%s' "$json" | jq -r 'if type == "array" then length else -1 end' 2>/dev/null)" -ge 0 ] 2>/dev/null || return 0
   [ "$(printf '%s' "$json" | jq length)" -lt "$OPEN_LIMIT" ] || return 0
   OPEN_HEADS=$(printf '%s' "$json" | jq -r '.[].headRefName')
@@ -185,7 +235,7 @@ in_list() { printf '%s\n' "$2" | grep -qxF -- "$1"; }
 
 # judge REPO SLUG BRANCH TIP -> VERDICT=finished|keep, WHY
 judge() {
-  local repo=$1 slug=$2 br=$3 tip=$4 json rsha closed
+  local repo=$1 slug=$2 br=$3 tip=$4 json rsha closed based
   VERDICT=keep; WHY="no proof the work landed"
   if [ -z "$slug" ]; then
     if [ -n "$(git -C "$repo" remote 2>/dev/null)" ]; then WHY="non-github-remote: no proof source"; return 0; fi
@@ -199,11 +249,14 @@ judge() {
   [ "$REPO_GH_OK" = 1 ] || { WHY="gh-unavailable"; return 0; }
   if in_list "$br" "$OPEN_HEADS"; then WHY="open-pr"; return 0; fi
   if in_list "$br" "$OPEN_BASES"; then WHY="base-of-open-pr"; return 0; fi
-  json=$(tmo 60 gh pr list -R "$slug" --head "$br" --state all --limit 20 \
+  json=$(tmo "$CALL_SEC" gh pr list -R "$slug" --head "$br" --state all --limit 20 \
          --json number,state,closedAt,headRefOid,baseRefName,isCrossRepository,url 2>/dev/null) \
     && printf '%s' "$json" | jq -e 'type == "array"' >/dev/null 2>&1 || { WHY="gh-unavailable: PR lookup failed"; return 0; }
+  if [ "$(printf '%s' "$json" | jq 'any(.[]; .state == "OPEN")')" = true ]; then WHY="open-pr"; return 0; fi
   if [ "$(printf '%s' "$json" | jq --arg t "$tip" --arg d "$DEF_NAME" \
         'any(.[]; .state == "MERGED" and .headRefOid == $t and .baseRefName == $d and .isCrossRepository == false)')" = true ]; then
+    based=$(tmo "$CALL_SEC" gh pr list -R "$slug" --base "$br" --state all --limit 1 --json number 2>/dev/null) \
+      && [ "$(printf '%s' "$based" | jq length 2>/dev/null)" = 0 ] || { WHY="base-of-pr: a PR has targeted this branch"; return 0; }
     VERDICT=finished; WHY="PR merged into $DEF_NAME at this tip"; return 0
   fi
   rsha=$(git -C "$repo" rev-parse -q --verify "refs/remotes/origin/$br" 2>/dev/null) || rsha=""
@@ -224,7 +277,7 @@ delete_remote() { # repo slug branch tip -> REMOTE_NOTE
   rsha=$(git -C "$repo" rev-parse -q --verify "refs/remotes/origin/$br" 2>/dev/null) || rsha=""
   [ -n "$rsha" ] || return 0
   if [ "$rsha" != "$tip" ]; then REMOTE_NOTE="; remote kept: moved since the proof"; return 0; fi
-  if tmo 120 git -C "$repo" push --force-with-lease="refs/heads/$br:$tip" origin ":refs/heads/$br" >/dev/null 2>&1; then
+  if tmo $((CALL_SEC * 2)) git -C "$repo" push --no-verify --force-with-lease="refs/heads/$br:$tip" origin ":refs/heads/$br" >/dev/null 2>&1; then
     REMOTE_NOTE="; remote deleted"
     git -C "$repo" update-ref -d "refs/remotes/origin/$br" 2>/dev/null
   else
@@ -236,7 +289,7 @@ drop_worktree() { # repo path -> 0 when the directory is gone and git forgot it
   local repo=$1 path=$2 err
   DROP_ERR=""
   if [ "$USE_TRASH" = 1 ]; then
-    if trash "$path" >/dev/null 2>&1 && [ ! -e "$path" ]; then git -C "$repo" worktree prune; return 0; fi
+    if tmo "$CALL_SEC" trash "$path" >/dev/null 2>&1 && [ ! -e "$path" ]; then git -C "$repo" worktree prune; return 0; fi
     DROP_ERR="trash-failed"; return 1
   fi
   if err=$(git -C "$repo" worktree remove "$path" 2>&1); then return 0; fi
@@ -298,7 +351,7 @@ sweep_worktree() { # repo slug path head branch flags
   if recent_edit "$path"; then row kept "$repo" "$br" "$path" "recent: edited within ${GRACE} minutes"; return 0; fi
   if rebase_branch "$path" >/dev/null; then row kept "$repo" "$br" "$path" "rebase-or-bisect in progress"; return 0; fi
   if [ -e "$path/.gitmodules" ]; then row kept "$repo" "$br" "$path" "submodules: their git data lives in the worktree gitdir"; return 0; fi
-  st=$(git -C "$path" status --porcelain 2>&1) || { row kept "$repo" "$br" "$path" "status-failed"; return 0; }
+  st=$(git -C "$path" status --porcelain --untracked-files=all 2>&1) || { row kept "$repo" "$br" "$path" "status-failed"; return 0; }
   [ -z "$st" ] || { row kept "$repo" "$br" "$path" "dirty: uncommitted or untracked files"; return 0; }
   if [ "$USE_TRASH" != 1 ] && ignored_beyond_build "$path"; then
     row kept "$repo" "$br" "$path" "ignored-files: no Trash, git would delete them for good"; return 0
@@ -353,7 +406,7 @@ sweep_repo() { # repo
   if ! budget_ok; then row skipped "$repo" "" "" "time-budget"; return 0; fi
   slug=$(repo_slug "$repo")
   if git -C "$repo" remote get-url origin >/dev/null 2>&1; then
-    tmo 120 git -C "$repo" fetch -q --prune origin >/dev/null 2>&1 || { row skipped "$repo" "" "" "fetch-failed"; return 0; }
+    tmo $((CALL_SEC * 2)) git -C "$repo" fetch -q --prune origin >/dev/null 2>&1 || { row skipped "$repo" "" "" "fetch-failed"; return 0; }
   fi
   default_facts "$repo"
   [ -n "$DEF_NAME" ] || { row skipped "$repo" "" "" "default-branch-unknown"; return 0; }
@@ -375,14 +428,15 @@ sweep_repo() { # repo
     [ -n "$path" ] || continue
     checked="$checked
 ${br#refs/heads/}"
-    if [ "$first" = 1 ]; then first=0; continue; fi # the main checkout
     rb=$(rebase_branch "$path") && checked="$checked
 $rb"
+    if [ "$first" = 1 ]; then first=0; continue; fi # the main checkout
     sweep_worktree "$repo" "$slug" "$path" "$head" "$br" "$flags"
   done < "$list"
   rm -f "$list"
   sweep_branches "$repo" "$slug" "$checked"
 }
+
 
 if [ -n "$ROOTS" ]; then
   repos=$(mktemp "${TMPDIR:-/tmp}/prune-repos.XXXXXX") || exit 0
@@ -399,15 +453,5 @@ if [ -n "$ROOTS" ]; then
   rm -f "$repos"
 fi
 
-{
-  printf '# Worktree prune %s%s\n\n' "$(date +%F)" "$([ "$DRY" = 1 ] && echo ' (dry run)')"
-  printf 'removed: %s, kept: %s, skipped: %s\n' "$N_REMOVED" "$N_KEPT" "$N_SKIPPED"
-  for a in removed would-remove kept skipped; do
-    grep -q "^$a	" "$TSV" || continue
-    printf '\n## %s\n\n' "$a"
-    awk -F'\t' -v a="$a" '$1 == a { printf "- %s `%s`: %s\n", ($4 != "" ? $4 : $2), $3, $5 }' "$TSV"
-  done
-} > "$MD"
-
-printf 'prune: removed=%s kept=%s skipped=%s%s\n' "$N_REMOVED" "$N_KEPT" "$N_SKIPPED" "$([ "$DRY" = 1 ] && echo ' (dry run)')"
+finish
 exit 0
