@@ -2,6 +2,11 @@
 
 All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
+## 2026-10-14
+
+### Added
+- **The pruner keeps a write-ahead ledger, and refuses to remove anything it cannot log.** `AUTODREAM_PRUNE_LEDGER` (default `~/.claude/autodream/prune-ledger.tsv`) is append-only. Each removal writes an `intent` line before the first change, with the repo, branch, local tip, remote tip, worktree path, the PR URL, state, head and base that prove it, and the exact commands that restore the local and the remote branch. One line follows per step (`worktree-removed`, `remote-deleted` or `remote-kept`, `local-deleted`), then `complete`; a run is bracketed by `run-start` and `run-end`. If the ledger cannot be opened or an `intent` cannot be written, the item stays (`ledger-unwritable`, `ledger-write-failed`). A dry run writes nothing. 88 assertions now, including one that runs the recorded recover commands and checks both branches come back at the same tip.
+
 ## 2026-10-13
 
 ### Added

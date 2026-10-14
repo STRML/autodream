@@ -28,6 +28,8 @@ assert_grep(){   grep -q "$2" "$1" 2>/dev/null && ok "$3" || no "$3 (no /$2/ in 
 assert_nogrep(){ grep -q "$2" "$1" 2>/dev/null && no "$3 (/$2/ unexpectedly in $1)" || ok "$3"; }
 
 T=$SUITE_TMP
+# Any call that forgets a ledger of its own must not write to the real one.
+export AUTODREAM_PRUNE_LEDGER="$T/ledger-default.tsv"
 export FAKE_GH_DIR="$T/gh"
 export FAKE_GH_ROOT="$T"
 mkdir -p "$FAKE_GH_DIR" "$T/bin"
@@ -127,6 +129,9 @@ age(){
   find "$1" -path '*/.git' -prune -o -type f -exec touch -t 202001010000 {} + 2>/dev/null
   find "$R/.git/worktrees" -type f -exec touch -t 202001010000 {} + 2>/dev/null
 }
+# Ledger columns: 1 time, 2 run, 3 event, 4 repo, 5 slug, 6 branch, 7 tip, 8 remote tip, 9 worktree, 10 detail, 11 recover.
+ledger_row(){ awk -F'\t' -v e="$2" -v b="$3" '$3==e && $6==b {print NR; exit}' "$1"; }   # LEDGER EVENT BRANCH -> line number
+ledger_col(){ awk -F'\t' -v e="$2" -v b="$3" -v c="$4" '$3==e && $6==b {print $c; exit}' "$1"; }   # LEDGER EVENT BRANCH COLUMN
 has_wt(){ [ -d "$(wt "$1")" ]; }
 has_local(){ g -C "$R" rev-parse -q --verify "refs/heads/$1" >/dev/null; }
 has_remote(){ g --git-dir="$BARE" rev-parse -q --verify "refs/heads/$1" >/dev/null; }
@@ -143,7 +148,7 @@ expect_kept(){ # NAME LABEL
 run_prune(){
   # PRUNE_TEST_DEBUG=<repo name> traces the script for that repo and shows what it reported.
   local sh=""; [ "${PRUNE_TEST_DEBUG:-}" = "$NAME" ] && sh="bash -x"
-  AUTODREAM_PRUNE_ROOTS="$T/roots-$NAME" AUTODREAM_PRUNE_GRACE_MIN=60 $sh "$BIN" "$@" "$OUT" >"$OUT.stdout" 2>&1
+  AUTODREAM_PRUNE_LEDGER="${LEDGER_OVERRIDE:-$OUT/ledger.tsv}" AUTODREAM_PRUNE_ROOTS="$T/roots-$NAME" AUTODREAM_PRUNE_GRACE_MIN=60 $sh "$BIN" "$@" "$OUT" >"$OUT.stdout" 2>&1
   PRUNE_RC=$?
   [ "${PRUNE_TEST_DEBUG:-}" != "$NAME" ] || { echo "--- $NAME"; cat "$OUT.stdout" "$OUT/worktree-prune.tsv"; }
   return 0
@@ -214,6 +219,7 @@ for n in sq dirty unpushed openpr newer moved closedold closednew develop stagin
 age "$T/elsewhere/outside"; age "$(wt detached)"
 rm -rf "$(wt gone)"
 
+SQ_TIP=$(tip sq); MOVED_TIP=$(tip moved); SQ_PATH=$(wt sq)
 RACE_BRANCH=racy FAKE_RACE_DIR="$T/other-racy" run_prune
 echo "== pass 1: every state"
 expect_removed sq "squash-merged PR at the branch tip (with an ignored build file)"
@@ -258,6 +264,20 @@ assert_grep "$OUT/worktree-prune.tsv" "^removed.*moved.*remote kept" "report say
 assert_grep "$OUT/worktree-prune.tsv" "^removed.*racy.*remote kept" "report says the lease refused"
 assert_grep "$OUT/worktree-prune.md" "removed" "markdown summary written"
 
+echo "== pass 1: the ledger"
+L="$OUT/ledger.tsv"
+[ "$(ledger_row "$L" run-start "")" = 1 ] && [ -n "$(ledger_row "$L" run-end "")" ] && ok "ledger opens with run-start and closes with run-end" || no "ledger opens with run-start and closes with run-end"
+li=$(ledger_row "$L" intent sq); lw=$(ledger_row "$L" worktree-removed sq); ld=$(ledger_row "$L" local-deleted sq); lr=$(ledger_row "$L" remote-deleted sq); lc=$(ledger_row "$L" complete sq)
+{ [ -n "$li" ] && [ "$li" -lt "$lw" ] && [ "$lw" -lt "$lr" ] && [ "$lr" -lt "$ld" ] && [ "$ld" -lt "$lc" ]; } && ok "ledger order for a removal: intent, worktree, remote, local, complete" || no "ledger order for a removal (li=$li lw=$lw lr=$lr ld=$ld lc=$lc)"
+[ "$(ledger_col "$L" intent sq 7)" = "$SQ_TIP" ] && [ "$(ledger_col "$L" intent sq 8)" = "$SQ_TIP" ] && ok "intent records the local tip and the remote tip" || no "intent records the local tip and the remote tip"
+[ "$(ledger_col "$L" intent sq 9)" = "$SQ_PATH" ] && ok "intent records the worktree path" || no "intent records the worktree path"
+ledger_col "$L" intent sq 10 | grep -q "https://github.com/test/main1/pull/.* MERGED head=$SQ_TIP base=main" && ok "intent records the PR url, state, head and base as proof" || no "intent records the PR url, state, head and base as proof"
+[ -z "$(ledger_row "$L" intent dirty)" ] && [ -z "$(ledger_row "$L" intent openpr)" ] && ok "kept items leave no intent line" || no "kept items leave no intent line"
+[ "$(ledger_col "$L" remote-kept moved 10 | grep -c "differs from the proven tip")" = 1 ] && ok "a moved remote branch is recorded as kept, with both tips" || no "a moved remote branch is recorded as kept, with both tips"
+rec=$(ledger_col "$L" intent sq 11)
+bash -c "$rec" >/dev/null 2>&1
+{ has_local sq && has_remote sq && [ "$(tip sq)" = "$SQ_TIP" ]; } && ok "the recorded recover commands restore the local and the remote branch at the same tip" || no "the recorded recover commands restore the local and the remote branch at the same tip"
+
 # ==== pass 2: dry run changes nothing ===========================================================
 make_repo dry; OUT="$T/out2"; mkdir -p "$OUT"
 worktree d1; commit_in d1; push d1; pr d1 MERGED "$(tip d1)"; age "$(wt d1)"
@@ -265,6 +285,7 @@ run_prune --dry-run
 echo "== pass 2: dry run"
 expect_kept d1 "dry run"
 assert_grep "$OUT/worktree-prune.tsv" "^would-remove" "dry run lists what it would remove"
+[ ! -e "$OUT/ledger.tsv" ] && ok "dry run writes no ledger" || no "dry run writes no ledger"
 
 # ==== pass 3: gh down means no proof, so nothing goes ===========================================
 make_repo ghdown; OUT="$T/out3"; mkdir -p "$OUT"
@@ -311,6 +332,8 @@ TRASH_FAIL=1 run_prune
 echo "== pass 7: trash fails"
 expect_kept t1 "trash failing"
 assert_grep "$OUT/worktree-prune.tsv" "trash-failed" "report names the trash failure"
+L="$OUT/ledger.tsv"
+{ [ -n "$(ledger_row "$L" intent t1)" ] && [ -n "$(ledger_row "$L" worktree-failed t1)" ] && [ -z "$(ledger_row "$L" local-deleted t1)" ] && [ -z "$(ledger_row "$L" complete t1)" ]; } && ok "a failed trash is logged after the intent, and nothing else is logged as done" || no "a failed trash is logged after the intent, and nothing else is logged as done"
 
 # ==== pass 8: ignored files with no Trash ======================================================
 make_repo ign; OUT="$T/out8"; mkdir -p "$OUT"
@@ -393,6 +416,14 @@ echo "== pass 14: hard cap"
 [ $((SECONDS - start)) -lt 15 ] && ok "watchdog stops the run in time ($((SECONDS - start))s)" || no "watchdog stops the run in time ($((SECONDS - start))s)"
 assert_grep "$OUT/worktree-prune.tsv" "watchdog" "report records the watchdog stop"
 expect_kept w1 "run stopped by the watchdog"
+
+# ==== pass 15: no log, no delete ===============================================================
+make_repo lg; OUT="$T/out15"; mkdir -p "$OUT"
+worktree l1; commit_in l1; push l1; pr l1 MERGED "$(tip l1)"; age "$(wt l1)"
+LEDGER_OVERRIDE=/dev/null/nope/ledger.tsv run_prune
+echo "== pass 15: unwritable ledger"
+expect_kept l1 "ledger that cannot be written"
+assert_grep "$OUT/worktree-prune.tsv" "ledger-unwritable" "report names the unwritable ledger"
 
 echo
 echo "passed: $pass   failed: $fail"
