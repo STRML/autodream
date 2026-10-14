@@ -2,6 +2,11 @@
 
 All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
+## 2026-10-13
+
+### Added
+- **The nightly run can prune finished worktrees and branches (`AUTODREAM_PRUNE_ROOTS`, off when unset).** New `bin/prune-worktrees.sh` searches the listed directories for repos and, in each, removes worktrees under `.claude/worktrees/` and `.worktrees/` plus local and remote branches whose work has landed: a PR merged at the branch tip, a PR closed unmerged for 7 days with the branch fully on the remote, or (for a repo with no GitHub remote) a tip already in the default branch. It keeps anything with an open PR, uncommitted files, an edit in the last 12 hours, a lock, a protected name or no proof, and it deletes a remote branch only while that branch still points at the proven commit. At most 25 removals per run. Worktree directories go to the Trash. `run.sh` calls it after the report inputs are collected, writes `findings/<date>/worktree-prune.md` and `.tsv`, and records `worktree_prune:` in `run-stats.txt`. A failure logs and never costs the report. `tests/prune-worktrees.sh` runs real temporary repos with `gh` and `trash` shimmed (36 assertions, most of them pinning a keep), and CI runs it. `install.sh` links the script.
+
 ## 2026-10-07
 
 ### Changed

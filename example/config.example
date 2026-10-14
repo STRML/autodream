@@ -49,3 +49,12 @@ AUTODREAM_TRIAGE_SURFACE=cmux
 # README for how to fill it in — the official API is not usable for this ($200/mo tier).
 # X_CREDS_FILE=$HOME/.claude/autodream/x-credentials
 # X_MAX_PAGES=3
+
+# ---- Worktree and branch pruning ---------------------------------------------------
+# Removes worktrees and local/remote branches whose PR merged. Off unless this is set.
+# Uses gh, jq and git. See "Pruning finished worktrees and branches" in the README.
+# AUTODREAM_PRUNE_ROOTS="$HOME/git"
+# AUTODREAM_PRUNE_GRACE_MIN=720
+# AUTODREAM_PRUNE_MAX=25
+# AUTODREAM_PRUNE_CLOSED_DAYS=7
+# AUTODREAM_PRUNE_TRASH=1

@@ -273,6 +273,37 @@ Bookmarks are marked read once a report has covered them, so each one gives you 
 idea once. Without that file the feature is simply off. When the cookies expire the
 report says so and tells you to re-paste; the run itself never fails over it.
 
+## Pruning finished worktrees and branches
+
+Sessions leave worktrees under `<repo>/.claude/worktrees/` and `<repo>/.worktrees/`, and
+branches on GitHub, long after the PR merged. Set `AUTODREAM_PRUNE_ROOTS` and each
+nightly run removes the ones that are provably finished. Without it the step does nothing.
+
+```
+~/.claude/autodream/config
+AUTODREAM_PRUNE_ROOTS="$HOME/git"      # colon-separated, searched 3 levels deep
+```
+
+A branch counts as finished when its PR is merged and the PR's head commit is the branch
+tip (squash merges count), or when its PR was closed unmerged at least 7 days ago and the
+whole branch is on the remote. A repo with no GitHub remote uses plain ancestry: the tip is
+already in the default branch. Everything else stays, and the report says why:
+
+| Reason | Meaning |
+|---|---|
+| `open-pr` | a PR for the branch is open |
+| `dirty` | uncommitted or untracked files in the worktree |
+| `recent` | a file changed in the last 12 hours (`AUTODREAM_PRUNE_GRACE_MIN`) |
+| `locked`, `protected` | `git worktree lock`; main, master, develop, dev, trunk, release\*, the default branch |
+| `gh-unavailable` | `gh` is missing or logged out, so there is no proof |
+| `cap` | `AUTODREAM_PRUNE_MAX` removals (default 25) already happened tonight |
+
+The remote branch is deleted only while it still points at the commit the proof was made
+for. The worktree directory goes to the Trash (`AUTODREAM_PRUNE_TRASH=0` deletes it with
+git instead). Read the result in `findings/<date>/worktree-prune.md`, or try it first with
+`~/.claude/autodream/prune-worktrees.sh --dry-run <out-dir>`. The step needs `gh`, `jq` and `git`,
+and a failure in it never costs the report.
+
 ## Running long jobs
 
 A full run usually takes more than 10 minutes. If you're kicking it off from

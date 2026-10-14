@@ -72,7 +72,7 @@ jobs:
                    tests/slim-transcript.sh tests/apply-pins.sh \
                    tests/session-window.sh tests/dream-triage.sh tests/chunk-transcript.sh tests/merge-chunks.sh \
                    tests/cookie-cadence.sh tests/review-skip.sh tests/review-cmux.sh tests/notes-path.sh \
-                   tests/tmp-cleanup.sh tests/x-bookmarks.sh; do
+                   tests/tmp-cleanup.sh tests/x-bookmarks.sh tests/prune-worktrees.sh; do
             echo "== $t"
             bash "$t" || rc=1
           done

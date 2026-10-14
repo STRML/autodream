@@ -95,6 +95,10 @@
 #                        inbox note surface + report publishing       default: unset (off)
 #   AUTODREAM_VAULT_BIN  override the resolved vault-notes.sh path, authoritative
 #   AUTODREAM_XBOOKMARKS_BIN override the resolved x-bookmarks.sh path, authoritative
+#   AUTODREAM_PRUNE_ROOTS    colon-separated dirs to search for repos whose finished
+#                            worktrees and branches are pruned     default: unset (off)
+#   AUTODREAM_PRUNE_BIN      override the resolved prune-worktrees.sh path, authoritative
+#                            (the other AUTODREAM_PRUNE_* knobs are in prune-worktrees.sh)
 
 set -u
 
@@ -344,6 +348,14 @@ if [ -n "${AUTODREAM_XBOOKMARKS_BIN:-}" ]; then
 else
   XBOOKMARKS="$SCRIPT_DIR/x-bookmarks.sh"
   [ -x "$XBOOKMARKS" ] || XBOOKMARKS="$AUTODREAM_DIR/x-bookmarks.sh"
+fi
+# Worktree and branch pruner. Opt-in through AUTODREAM_PRUNE_ROOTS, so an install that
+# never sets it runs the helper as a no-op. Override is authoritative, as above.
+if [ -n "${AUTODREAM_PRUNE_BIN:-}" ]; then
+  PRUNE_WORKTREES="$AUTODREAM_PRUNE_BIN"
+else
+  PRUNE_WORKTREES="$SCRIPT_DIR/prune-worktrees.sh"
+  [ -x "$PRUNE_WORKTREES" ] || PRUNE_WORKTREES="$AUTODREAM_DIR/prune-worktrees.sh"
 fi
 # Memory pin applier. find_lib, not SCRIPT_DIR alone: an install that predates
 # apply-pins.sh has run.sh symlinked in and no apply-pins.sh beside it until install.sh
@@ -3925,6 +3937,24 @@ PY
     [ -n "$XQID_SOURCE" ] || XQID_SOURCE=not_attempted
   fi
   printf 'x_queryid_source: %s\n' "$XQID_SOURCE" >> "$FINDINGS_DIR/run-stats.txt"
+
+  # ---- Finished worktrees and branches ----
+  # Removes worktrees and local/remote branches whose PR merged (see prune-worktrees.sh for
+  # the full proof rules). Opt-in via AUTODREAM_PRUNE_ROOTS. It needs nothing from L1 or L2
+  # and L2 does not read its output, so a failure here logs and the report is unaffected.
+  # The artifact lands in the findings dir: worktree-prune.md (read it) and .tsv (grep it).
+  PRUNE_SUMMARY="prune: not configured"
+  if [ -z "${AUTODREAM_PRUNE_ROOTS:-}" ]; then
+    :
+  elif [ -x "$PRUNE_WORKTREES" ]; then
+    PRUNE_SUMMARY=$("$PRUNE_WORKTREES" "$FINDINGS_DIR" 2>>"$RUN_LOG" | tail -1) || PRUNE_SUMMARY="prune: failed"
+    [ -n "$PRUNE_SUMMARY" ] || PRUNE_SUMMARY="prune: failed"
+    log "$PRUNE_SUMMARY (details: $FINDINGS_DIR/worktree-prune.md)"
+  else
+    log "prune-worktrees.sh not found at $PRUNE_WORKTREES; skipping worktree prune"
+    PRUNE_SUMMARY="prune: helper missing"
+  fi
+  printf 'worktree_prune: %s\n' "$PRUNE_SUMMARY" >> "$FINDINGS_DIR/run-stats.txt"
 
   # ---- Skills inventory and per-source facts (written for L2 to read) ----
   write_adapter_inputs
