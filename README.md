@@ -284,25 +284,30 @@ nightly run removes the ones that are provably finished. Without it the step doe
 AUTODREAM_PRUNE_ROOTS="$HOME/git"      # colon-separated, searched 3 levels deep
 ```
 
-A branch counts as finished when its PR is merged and the PR's head commit is the branch
-tip (squash merges count), or when its PR was closed unmerged at least 7 days ago and the
-whole branch is on the remote. A repo with no GitHub remote uses plain ancestry: the tip is
-already in the default branch. Everything else stays, and the report says why:
+A branch counts as finished when a PR from the same repo into the default branch is merged
+and the PR's head commit is the branch tip (squash merges count), or when such a PR was
+closed unmerged at least 7 days ago with its head at the tip and the branch fully on the
+remote. A repo with no remote at all uses plain ancestry: the tip is already in the default
+branch. A repo whose origin is not on GitHub is left alone. Everything else stays, and the
+report says why:
 
 | Reason | Meaning |
 |---|---|
-| `open-pr` | a PR for the branch is open |
+| `open-pr`, `base-of-open-pr` | a PR for the branch is open, or an open PR targets it |
 | `dirty` | uncommitted or untracked files in the worktree |
 | `recent` | a file changed in the last 12 hours (`AUTODREAM_PRUNE_GRACE_MIN`) |
-| `locked`, `protected` | `git worktree lock`; main, master, develop, dev, trunk, release\*, the default branch |
-| `gh-unavailable` | `gh` is missing or logged out, so there is no proof |
-| `cap` | `AUTODREAM_PRUNE_MAX` removals (default 25) already happened tonight |
+| `rebase-or-bisect`, `locked`, `submodules` | a rebase or bisect is running; `git worktree lock`; the worktree has a `.gitmodules` |
+| `protected` | main, master, develop, dev, development, trunk, staging, stage, production, prod, next, canary, gh-pages, release\*, v\<digit\>\*, the default branch, and `AUTODREAM_PRUNE_PROTECT` (colon-separated globs) |
+| `ignored-files`, `trash-failed` | ignored files other than build output and no Trash to put them in; `trash` failed |
+| `gh-unavailable` | `gh` is missing, logged out or failed, or the repo has `AUTODREAM_PRUNE_OPEN_LIMIT` (200) open PRs or more |
+| `cap`, `time-budget` | `AUTODREAM_PRUNE_MAX` removals (25) or `AUTODREAM_PRUNE_BUDGET_SEC` (1200 seconds) used up tonight |
 
-The remote branch is deleted only while it still points at the commit the proof was made
-for. The worktree directory goes to the Trash (`AUTODREAM_PRUNE_TRASH=0` deletes it with
-git instead). Read the result in `findings/<date>/worktree-prune.md`, or try it first with
-`~/.claude/autodream/prune-worktrees.sh --dry-run <out-dir>`. The step needs `gh`, `jq` and `git`,
-and a failure in it never costs the report.
+The remote branch is deleted by a push that names the proven commit as the lease, so a push
+that landed after the fetch makes GitHub refuse the delete. The worktree directory goes to
+the Trash (`AUTODREAM_PRUNE_TRASH=0` deletes it with git instead). Read the result in
+`findings/<date>/worktree-prune.md`, or try it first with
+`~/.claude/autodream/prune-worktrees.sh --dry-run <out-dir>`. The step needs `gh`, `jq` and
+`git`, and a failure in it never costs the report.
 
 ## Running long jobs
 

@@ -3,12 +3,12 @@
 #
 # Everything here is a real git repo in a temp dir. The remote is a local bare repo that a
 # per-repo `url.insteadOf` makes answer to https://github.com/test/<name>.git, and `gh` is a
-# shim earlier on PATH that serves PR state from files and performs ref deletions against the
-# bare repo. No network, no GitHub.
+# shim earlier on PATH that serves PR state from files. `trash` is a shim that moves the
+# directory aside. No network, no GitHub.
 #
 # The script deletes branches on a remote, so most of these cases pin a KEEP: a dirty tree, an
-# unpushed commit, an open PR, a fresh file, a lock, a protected name. A wrong delete cannot be
-# undone and a wrong keep costs one more night.
+# unpushed commit, an open PR, a fresh file, a lock, a protected name, a PR that does not match
+# the tip. A wrong delete cannot be undone and a wrong keep costs one more night.
 #
 # Usage:  tests/prune-worktrees.sh
 # Exit:   0 if every assertion passes, 1 otherwise.
@@ -33,32 +33,36 @@ export FAKE_GH_ROOT="$T"
 mkdir -p "$FAKE_GH_DIR" "$T/bin"
 
 # ---- the gh shim ----------------------------------------------------------------------------
+# pr list --state open  -> $FAKE_GH_DIR/open-<name>.json   (default [])
+# pr list --head B ...  -> $FAKE_GH_DIR/pr-<name>-B.json   (default [])
+# RACE_BRANCH=B makes the remote branch B advance while the head lookup is answered, which is
+# a push landing between the script's fetch and its delete.
 cat > "$T/bin/gh" <<'SH'
 #!/bin/bash
 [ -n "${FAKE_GH_FAIL:-}" ] && { echo "gh: simulated failure" >&2; exit 1; }
 case "$1 $2" in
   "auth status") exit 0 ;;
   "pr list")
-    shift 2; repo=""; head=""
+    shift 2; repo=""; head=""; state=""
     while [ $# -gt 0 ]; do
-      case "$1" in -R) repo=$2 ;; --head) head=$2 ;; esac
+      case "$1" in -R) repo=$2 ;; --head) head=$2 ;; --state) state=$2 ;; esac
       shift
     done
-    f="$FAKE_GH_DIR/pr-${repo#test/}-$head.json"
+    name=${repo#test/}
+    if [ "$state" = open ]; then
+      f="$FAKE_GH_DIR/open-$name.json"
+    else
+      f="$FAKE_GH_DIR/pr-$name-$head.json"
+      if [ -n "${RACE_BRANCH:-}" ] && [ "$head" = "$RACE_BRANCH" ]; then
+        git -C "$FAKE_RACE_DIR" -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -q --allow-empty -m race
+        git -C "$FAKE_RACE_DIR" push -q origin "$head"
+      fi
+    fi
     [ -f "$f" ] && cat "$f" || echo '[]' ;;
-  "api -X")
-    # gh api -X DELETE repos/test/<name>/git/refs/heads/<branch>
-    path=$4; rest=${path#repos/test/}; name=${rest%%/*}; ref=${rest#*/git/}
-    echo "$name $ref" >> "$FAKE_GH_DIR/deletes.log"
-    git --git-dir="$FAKE_GH_ROOT/remotes/$name.git" update-ref -d "$ref" ;;
   *) echo "fake gh: unhandled: $*" >&2; exit 2 ;;
 esac
 SH
 chmod +x "$T/bin/gh"
-export PATH="$T/bin:$PATH"
-
-# Every commit is from 2020, so a branch with no worktree clears the recent-commit gate.
-export GIT_AUTHOR_DATE="2020-01-01T00:00:00Z" GIT_COMMITTER_DATE="2020-01-01T00:00:00Z"
 
 # trash shim: moves the path under $T/trashed and fails when TRASH_FAIL is set.
 cat > "$T/bin/trash" <<'SH'
@@ -67,6 +71,10 @@ cat > "$T/bin/trash" <<'SH'
 mkdir -p "$FAKE_GH_ROOT/trashed" && mv "$1" "$FAKE_GH_ROOT/trashed/$(basename "$1")-$RANDOM"
 SH
 chmod +x "$T/bin/trash"
+export PATH="$T/bin:$PATH"
+
+# Every commit is from 2020, so a branch with no worktree clears the recent-commit gate.
+export GIT_AUTHOR_DATE="2020-01-01T00:00:00Z" GIT_COMMITTER_DATE="2020-01-01T00:00:00Z"
 
 g(){ git -c user.name=t -c user.email=t@t -c commit.gpgsign=false -c init.defaultBranch=main "$@"; }
 
@@ -100,10 +108,16 @@ wt(){ echo "$R/.claude/worktrees/$1"; }
 commit_in(){ echo "$RANDOM$1" > "$(wt "$1")/f-$1"; g -C "$(wt "$1")" add -A; g -C "$(wt "$1")" commit -qm "work $1"; }
 tip(){ g -C "$R" rev-parse "refs/heads/$1"; }
 push(){ g -C "$R" push -q origin "$1"; }
-# pr NAME STATE HEAD [CLOSED_AT] - what the shim answers for `gh pr list --head NAME`.
+# pr NAME STATE HEAD [CLOSED_AT] [BASE] [CROSS] - what the shim answers for `gh pr list --head NAME`.
 pr(){
-  printf '[{"number":%s,"state":"%s","mergedAt":null,"closedAt":"%s","headRefOid":"%s","url":"https://github.com/test/%s/pull/%s"}]\n' \
-    "$RANDOM" "$2" "${4:-2020-01-01T00:00:00Z}" "$3" "$NAME" "$RANDOM" > "$FAKE_GH_DIR/pr-$NAME-$1.json"
+  printf '[{"number":%s,"state":"%s","mergedAt":null,"closedAt":"%s","headRefOid":"%s","baseRefName":"%s","isCrossRepository":%s,"url":"https://github.com/test/%s/pull/%s"}]\n' \
+    "$RANDOM" "$2" "${4:-2020-01-01T00:00:00Z}" "$3" "${5:-main}" "${6:-false}" "$NAME" "$RANDOM" > "$FAKE_GH_DIR/pr-$NAME-$1.json"
+}
+# open_prs HEAD:BASE... - the repo-wide open PR list the shim serves.
+open_prs(){
+  local out="[" sep="" pair
+  for pair in "$@"; do out="$out$sep{\"headRefName\":\"${pair%%:*}\",\"baseRefName\":\"${pair#*:}\"}"; sep=","; done
+  printf '%s]\n' "$out" > "$FAKE_GH_DIR/open-$NAME.json"
 }
 # age PATH - push every mtime under a worktree (and its gitdir) far into the past.
 age(){
@@ -113,39 +127,66 @@ age(){
 has_wt(){ [ -d "$(wt "$1")" ]; }
 has_local(){ g -C "$R" rev-parse -q --verify "refs/heads/$1" >/dev/null; }
 has_remote(){ g --git-dir="$BARE" rev-parse -q --verify "refs/heads/$1" >/dev/null; }
+yn(){ "$@" && echo y || echo n; }
 expect_removed(){ # NAME LABEL
   if ! has_wt "$1" && ! has_local "$1" && ! has_remote "$1"; then ok "$2: worktree, local and remote branch removed"
-  else no "$2: expected full removal (wt=$(has_wt "$1" && echo y || echo n) local=$(has_local "$1" && echo y || echo n) remote=$(has_remote "$1" && echo y || echo n))"; fi
+  else no "$2: expected full removal (wt=$(yn has_wt "$1") local=$(yn has_local "$1") remote=$(yn has_remote "$1"))"; fi
 }
 expect_kept(){ # NAME LABEL
   if has_wt "$1" && has_local "$1" && has_remote "$1"; then ok "$2: kept untouched"
-  else no "$2: expected to keep everything (wt=$(has_wt "$1" && echo y || echo n) local=$(has_local "$1" && echo y || echo n) remote=$(has_remote "$1" && echo y || echo n))"; fi
+  else no "$2: expected to keep everything (wt=$(yn has_wt "$1") local=$(yn has_local "$1") remote=$(yn has_remote "$1"))"; fi
 }
 
-run_prune(){ AUTODREAM_PRUNE_ROOTS="$T/roots-$NAME" AUTODREAM_PRUNE_GRACE_MIN=60 "$BIN" "$@" "$OUT" >"$OUT.stdout" 2>&1; }
+run_prune(){
+  # PRUNE_TEST_DEBUG=<repo name> traces the script for that repo and shows what it reported.
+  local sh=""; [ "${PRUNE_TEST_DEBUG:-}" = "$NAME" ] && sh="bash -x"
+  AUTODREAM_PRUNE_ROOTS="$T/roots-$NAME" AUTODREAM_PRUNE_GRACE_MIN=60 $sh "$BIN" "$@" "$OUT" >"$OUT.stdout" 2>&1
+  [ "${PRUNE_TEST_DEBUG:-}" != "$NAME" ] || { echo "--- $NAME"; cat "$OUT.stdout" "$OUT/worktree-prune.tsv"; }
+}
 
 echo "== script exists"
-[ -x "$BIN" ] && ok "bin/prune-worktrees.sh is executable" || { no "bin/prune-worktrees.sh is missing or not executable"; echo; echo "$pass passed, $fail failed"; exit 1; }
+[ -x "$BIN" ] && ok "bin/prune-worktrees.sh is executable" || { no "bin/prune-worktrees.sh is missing or not executable"; echo; echo "passed: $pass   failed: $fail"; exit 1; }
 
 # ==== pass 1: one repo, every state =============================================================
 make_repo main1
 OUT="$T/out1"; mkdir -p "$OUT"
 
-worktree sq;       commit_in sq;       push sq;       pr sq MERGED "$(tip sq)"
+worktree sq;        commit_in sq;        push sq;        pr sq MERGED "$(tip sq)"
 echo junk > "$(wt sq)/ignored.out"
-worktree dirty;    commit_in dirty;    push dirty;    pr dirty MERGED "$(tip dirty)"; echo x > "$(wt dirty)/untracked"
-worktree unpushed; commit_in unpushed
-worktree openpr;   commit_in openpr;   push openpr;   pr openpr OPEN "$(tip openpr)"
-worktree newer;    commit_in newer;    push newer;    pr newer MERGED "$(tip newer)"; echo y > "$(wt newer)/more"; g -C "$(wt newer)" add -A; g -C "$(wt newer)" commit -qm more
-worktree fresh;    commit_in fresh;    push fresh;    pr fresh MERGED "$(tip fresh)"
-worktree moved;    commit_in moved;    push moved;    pr moved MERGED "$(tip moved)"
+worktree dirty;     commit_in dirty;     push dirty;     pr dirty MERGED "$(tip dirty)"; echo x > "$(wt dirty)/untracked"
+worktree unpushed;  commit_in unpushed
+worktree openpr;    commit_in openpr;    push openpr;    pr openpr OPEN "$(tip openpr)"
+worktree newer;     commit_in newer;     push newer;     pr newer MERGED "$(tip newer)"; echo y > "$(wt newer)/more"; g -C "$(wt newer)" add -A; g -C "$(wt newer)" commit -qm more
+worktree fresh;     commit_in fresh;     push fresh;     pr fresh MERGED "$(tip fresh)"
+worktree moved;     commit_in moved;     push moved;     pr moved MERGED "$(tip moved)"
 worktree closedold; commit_in closedold; push closedold; pr closedold CLOSED "$(tip closedold)" 2020-01-01T00:00:00Z
 worktree closednew; commit_in closednew; push closednew; pr closednew CLOSED "$(tip closednew)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-worktree develop;  commit_in develop;  push develop;  pr develop MERGED "$(tip develop)"
-worktree locked;   commit_in locked;   push locked;   pr locked MERGED "$(tip locked)"; g -C "$R" worktree lock "$(wt locked)"
-worktree stale;    commit_in stale;    push stale;    pr stale MERGED "$(tip stale)"; g -C "$R" worktree remove "$(wt stale)"
+worktree develop;   commit_in develop;   push develop;   pr develop MERGED "$(tip develop)"
+worktree staging;   commit_in staging;   push staging;   pr staging MERGED "$(tip staging)"
+worktree locked;    commit_in locked;    push locked;    pr locked MERGED "$(tip locked)"; g -C "$R" worktree lock "$(wt locked)"
+worktree stale;     commit_in stale;     push stale;     pr stale MERGED "$(tip stale)"; g -C "$R" worktree remove "$(wt stale)"
 g -C "$R" worktree add -q --detach "$(wt detached)" "$FIRST"
-worktree gone;     commit_in gone;     push gone;     pr gone MERGED "$(tip gone)"
+worktree gone;      commit_in gone;      push gone;      pr gone MERGED "$(tip gone)"
+# F1: a closed PR whose head is not the tip (commits pushed after it closed), and a fork PR.
+worktree closedlater; commit_in closedlater; push closedlater; OLD=$(tip closedlater)
+echo more > "$(wt closedlater)/more"; g -C "$(wt closedlater)" add -A; g -C "$(wt closedlater)" commit -qm later; push closedlater
+pr closedlater CLOSED "$OLD" 2020-01-01T00:00:00Z
+worktree fork;      commit_in fork;      push fork;      pr fork CLOSED "$(tip fork)" 2020-01-01T00:00:00Z main true
+# F2: '#' in a branch name must not reach a sibling branch.
+worktree 'fix#42';  commit_in 'fix#42';  push 'fix#42';  pr 'fix#42' MERGED "$(tip 'fix#42')"
+g -C "$R" branch fix origin/main; push fix
+# F3/F6: a merged PR into a non-default base, and a branch that is the base of an open PR.
+worktree nonmain;   commit_in nonmain;   push nonmain;   pr nonmain MERGED "$(tip nonmain)" 2020-01-01T00:00:00Z release-x
+worktree parent;    commit_in parent;    push parent;    pr parent MERGED "$(tip parent)"
+open_prs openpr:main child:parent
+# F8: submodules. F11: a rebase in progress.
+worktree submod;    commit_in submod;    echo '[submodule "x"]' > "$(wt submod)/.gitmodules"; g -C "$(wt submod)" add -A; g -C "$(wt submod)" commit -qm gm; push submod; pr submod MERGED "$(tip submod)"
+worktree rebasing;  commit_in rebasing;  push rebasing;  pr rebasing MERGED "$(tip rebasing)"
+mkdir -p "$R/.git/worktrees/rebasing/rebase-merge"; echo refs/heads/rebasing > "$R/.git/worktrees/rebasing/rebase-merge/head-name"
+# F4: a push lands between the fetch and the delete.
+worktree racy;      commit_in racy;      push racy;      pr racy MERGED "$(tip racy)"
+g clone -q "$BARE" "$T/other-racy"; g -C "$T/other-racy" checkout -q racy
+# Outside the managed directories.
 mkdir -p "$T/elsewhere"; g -C "$R" worktree add -q -b outside "$T/elsewhere/outside" origin/main
 echo o > "$T/elsewhere/outside/f"; g -C "$T/elsewhere/outside" add -A; g -C "$T/elsewhere/outside" commit -qm o
 push outside; pr outside MERGED "$(g -C "$R" rev-parse refs/heads/outside)"
@@ -155,11 +196,11 @@ g clone -q "$BARE" "$T/other-moved"; g -C "$T/other-moved" checkout -q moved; ec
 g -C "$T/other-moved" add -A; g -C "$T/other-moved" commit -qm later; g -C "$T/other-moved" push -q origin moved
 
 # Everything gets old except `fresh`, which a session touched a minute ago.
-for n in sq dirty unpushed openpr newer moved closedold closednew develop locked gone; do age "$(wt "$n")"; done
+for n in sq dirty unpushed openpr newer moved closedold closednew develop staging locked gone closedlater fork 'fix#42' nonmain parent submod rebasing racy; do age "$(wt "$n")"; done
 age "$T/elsewhere/outside"; age "$(wt detached)"
 rm -rf "$(wt gone)"
 
-run_prune
+RACE_BRANCH=racy FAKE_RACE_DIR="$T/other-racy" run_prune
 echo "== pass 1: every state"
 expect_removed sq "squash-merged PR at the branch tip (with an ignored build file)"
 expect_kept dirty "untracked file in the worktree"
@@ -168,23 +209,36 @@ expect_kept openpr "open PR"
 expect_kept newer "local commits after the merged PR head"
 expect_kept fresh "file modified inside the grace window"
 { ! has_wt moved && ! has_local moved && has_remote moved; } && ok "remote branch moved after merge: local removed, remote branch kept" || no "remote branch moved after merge: local removed, remote branch kept"
-expect_removed closedold "PR closed unmerged long ago"
+expect_removed closedold "PR closed unmerged long ago at this tip"
 expect_kept closednew "PR closed unmerged today"
+expect_kept closedlater "closed PR whose head is not the tip (commits pushed after it closed)"
+expect_kept fork "closed fork PR with the same branch name"
 expect_kept develop "protected branch name"
+expect_kept staging "long-lived branch name (staging)"
 expect_kept locked "locked worktree"
+expect_kept nonmain "merged PR into a base that is not the default branch"
+expect_kept parent "branch that is the base of an open PR"
+expect_kept submod "worktree with submodules"
+expect_kept rebasing "rebase in progress"
+{ ! has_wt 'fix#42' && ! has_local 'fix#42' && ! has_remote 'fix#42'; } && ok "branch with # in its name: removed" || no "branch with # in its name: removed"
+{ has_local fix && has_remote fix; } && ok "branch with # in its name: the sibling branch is untouched" || no "branch with # in its name: the sibling branch is untouched"
+{ ! has_wt racy && ! has_local racy && has_remote racy; } && ok "push after the fetch: the lease refuses the remote delete" || no "push after the fetch: the lease refuses the remote delete"
 { ! has_local stale && ! has_remote stale; } && ok "merged branch with no worktree: local and remote deleted" || no "merged branch with no worktree: local and remote deleted"
 [ ! -d "$(wt detached)" ] && ok "detached worktree at an old ancestor of main: removed" || no "detached worktree at an old ancestor of main: removed"
 g -C "$R" worktree list --porcelain | grep -q "worktrees/gone" && no "manually deleted worktree: record pruned" || ok "manually deleted worktree: record pruned"
+{ ! has_local gone && ! has_remote gone; } && ok "worktree deleted by hand: its merged branch goes with it" || no "worktree deleted by hand: its merged branch goes with it"
 { [ -d "$T/elsewhere/outside" ] && has_local outside && has_remote outside; } && ok "worktree outside .claude/worktrees: not touched" || no "worktree outside .claude/worktrees: not touched"
 has_local main && ok "default branch survives" || no "default branch survives"
 ls "$T/trashed" 2>/dev/null | grep -q '^sq-' && ok "removed worktree went to the Trash, not deleted" || no "removed worktree went to the Trash, not deleted"
 assert_grep "$OUT/worktree-prune.tsv" "^kept.*dirty" "report names the dirty tree"
 assert_grep "$OUT/worktree-prune.tsv" "^kept.*open-pr" "report names the open PR"
+assert_grep "$OUT/worktree-prune.tsv" "^kept.*base-of-open-pr" "report names the open-PR base"
 assert_grep "$OUT/worktree-prune.tsv" "^kept.*recent" "report names the recent edit"
+assert_grep "$OUT/worktree-prune.tsv" "^kept.*submodules" "report names the submodules"
+assert_grep "$OUT/worktree-prune.tsv" "^kept.*rebase-or-bisect" "report names the rebase"
 assert_grep "$OUT/worktree-prune.tsv" "^removed.*moved.*remote kept" "report says the remote branch was kept"
+assert_grep "$OUT/worktree-prune.tsv" "^removed.*racy.*remote kept" "report says the lease refused"
 assert_grep "$OUT/worktree-prune.md" "removed" "markdown summary written"
-{ ! has_local gone && ! has_remote gone; } && ok "worktree deleted by hand: its merged branch goes with it" || no "worktree deleted by hand: its merged branch goes with it"
-[ "$(wc -l < "$FAKE_GH_DIR/deletes.log")" -eq 4 ] && ok "exactly four remote refs deleted (sq, closedold, stale, gone)" || no "exactly four remote refs deleted (got $(wc -l < "$FAKE_GH_DIR/deletes.log"))"
 
 # ==== pass 2: dry run changes nothing ===========================================================
 make_repo dry; OUT="$T/out2"; mkdir -p "$OUT"
@@ -216,11 +270,13 @@ make_repo local1 noremote; OUT="$T/out5"; mkdir -p "$OUT"
 g -C "$R" worktree add -q -b done1 "$(wt done1)"; commit_in done1
 g -C "$R" merge -q --no-ff -m merge done1
 g -C "$R" worktree add -q -b todo1 "$(wt todo1)"; commit_in todo1
-age "$(wt done1)"; age "$(wt todo1)"
+g -C "$R" worktree add -q -b empty1 "$(wt empty1)" HEAD~2
+age "$(wt done1)"; age "$(wt todo1)"; age "$(wt empty1)"
 AUTODREAM_PRUNE_TRASH=0 run_prune
 echo "== pass 5: no remote"
 { ! has_wt done1 && ! has_local done1; } && ok "no remote: branch merged into main is removed" || no "no remote: branch merged into main is removed"
 { has_wt todo1 && has_local todo1; } && ok "no remote: unmerged branch kept" || no "no remote: unmerged branch kept"
+{ has_wt empty1 && has_local empty1; } && ok "no remote: a branch with no commits of its own is kept" || no "no remote: a branch with no commits of its own is kept"
 
 # ==== pass 6: the nightly entry point never fails the caller ====================================
 OUT="$T/out6"; mkdir -p "$OUT"
@@ -230,12 +286,51 @@ echo "== pass 6: bad root"
 AUTODREAM_PRUNE_ROOTS="" "$BIN" "$OUT" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && ok "unset roots exits 0 and does nothing" || no "unset roots exits 0 (rc=$rc)"
 
-# ==== pass 7: a trash that fails falls back to git, and one that works leaves the dir gone ======
+# ==== pass 7: a failing trash never falls back to deleting for good =============================
 make_repo trashfail; OUT="$T/out7"; mkdir -p "$OUT"
 worktree t1; commit_in t1; push t1; pr t1 MERGED "$(tip t1)"; age "$(wt t1)"
 TRASH_FAIL=1 run_prune
 echo "== pass 7: trash fails"
-expect_removed t1 "trash failing falls back to git worktree remove"
+expect_kept t1 "trash failing"
+assert_grep "$OUT/worktree-prune.tsv" "trash-failed" "report names the trash failure"
+
+# ==== pass 8: ignored files with no Trash ======================================================
+make_repo ign; OUT="$T/out8"; mkdir -p "$OUT"
+worktree i1; commit_in i1; push i1; pr i1 MERGED "$(tip i1)"; echo secret > "$(wt i1)/ignored.out"; age "$(wt i1)"
+AUTODREAM_PRUNE_TRASH=0 run_prune
+echo "== pass 8: ignored files, no Trash"
+expect_kept i1 "ignored file that git would delete for good"
+assert_grep "$OUT/worktree-prune.tsv" "ignored-files" "report names the ignored files"
+
+# ==== pass 9: an origin that is not on GitHub has no proof source ==============================
+make_repo nongh; OUT="$T/out9"; mkdir -p "$OUT"
+worktree n1; commit_in n1; push n1; pr n1 MERGED "$(tip n1)"; age "$(wt n1)"
+g -C "$R" config remote.origin.url "$BARE"
+run_prune
+echo "== pass 9: non-GitHub origin"
+expect_kept n1 "origin that is not github.com"
+assert_grep "$OUT/worktree-prune.tsv" "non-github-remote" "report names the non-GitHub remote"
+
+# ==== pass 10: the time budget and the open-PR limit ============================================
+make_repo budget; OUT="$T/out10"; mkdir -p "$OUT"
+worktree b1; commit_in b1; push b1; pr b1 MERGED "$(tip b1)"; age "$(wt b1)"
+AUTODREAM_PRUNE_BUDGET_SEC=0 run_prune
+echo "== pass 10: budget and limit"
+expect_kept b1 "time budget spent"
+assert_grep "$OUT/worktree-prune.tsv" "time-budget" "report names the time budget"
+open_prs other:main
+AUTODREAM_PRUNE_OPEN_LIMIT=1 run_prune
+expect_kept b1 "open-PR list at its limit"
+assert_grep "$OUT/worktree-prune.tsv" "gh-unavailable" "report treats a full open-PR list as no proof"
+
+# ==== pass 11: a stale record on a missing volume is left alone =================================
+make_repo vol; OUT="$T/out11"; mkdir -p "$OUT"
+worktree vm1; commit_in vm1; push vm1
+rm -rf "$R/.claude/worktrees"
+run_prune
+echo "== pass 11: missing volume"
+g -C "$R" worktree list --porcelain | grep -q "worktrees/vm1" && ok "worktree record whose parent directory is missing: not pruned" || no "worktree record whose parent directory is missing: not pruned"
+assert_grep "$OUT/worktree-prune.tsv" "volume-missing" "report names the missing volume"
 
 echo
 echo "passed: $pass   failed: $fail"
