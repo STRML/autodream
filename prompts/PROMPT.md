@@ -141,8 +141,8 @@ Rules that keep this honest:
 ## Repos to triage
 Read `<findings-dir>/triage-candidates.md`. The runner wrote it, and it already did the counting and the cooldown, so you add no judgement and no count of your own. Three cases:
 
-- **File absent, or its first line is `# triage-candidates: 0`** — skip this section entirely. Do not mention it.
 - **First line says `gh unavailable`** — write one line: `Triage list skipped: gh was not usable tonight.` Then move on.
+- **File absent, or its first line is exactly `# triage-candidates: 0`** — skip this section entirely. Do not mention it.
 - **One or more repos listed** — copy the table verbatim under the heading, then one sentence: start a session in the checkout and run `/triage`. If the file ends with a `> Note:` line, copy it too.
 
 A suggestion here is never an open question. It does not go in the Open-questions section and it does not count toward the `<!-- autodream:open-questions=N -->` marker, because that marker decides whether a morning triage session opens at all.

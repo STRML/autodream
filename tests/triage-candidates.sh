@@ -236,6 +236,46 @@ assert_eq "$RC" 0 "exit 0 when switched off"
 [ ! -e "$F/triage-candidates.md" ] && ok "switched off: no artifact" || no "switched off wrote an artifact"
 assert_grep <(printf '%s\n' "$OUT") 'disabled' "switched off: summary says disabled"
 
+echo "== a stale list never survives a rerun =="
+make_repo xi; issues xi 4 1; XI=$R
+run_t 2026-10-22 "$XI"
+assert_grep "$(md)" 'test/xi' "setup: the list names xi"
+OUT=$(printf 'h\tp\t%s\n' "$XI" | AUTODREAM_TRIAGE_SUGGEST=0 "$BIN" "$F" 2>/dev/null)
+[ ! -e "$F/triage-candidates.md" ] && [ ! -e "$F/triage-candidates.tsv" ] && ok "switched off: the earlier list is removed" || no "switched off left a stale list"
+run_t 2026-10-22 "$XI"
+OUT=$(printf 'h\tp\t%s\n' "$XI" | AUTODREAM_TRIAGE_MIN=x "$BIN" "$F" 2>/dev/null); RC=$?
+assert_eq "$RC" 0 "a bad integer config exits 0"
+[ ! -e "$F/triage-candidates.md" ] && ok "bad config: the earlier list is removed" || no "bad config left a stale list"
+
+echo "== cooldown edge cases =="
+S2="$T/state-edge.tsv"; export AUTODREAM_TRIAGE_STATE="$S2"
+make_repo omi; issues omi 4 1; OMI=$R
+printf 'test/omi\t2026-10-14\t4\n' > "$S2"
+run_t 2026-10-12 "$OMI"
+row test/omi | grep -q '^candidate' && ok "a retry of an older night than the record is not held back" || no "omi older: $(cat "$(tsv)")"
+printf 'test/omi\t2026-10-10\t4\ngarbage line\ntest/omi\tnot-a-date\tx\ntest/omi\t2026-10-11\t\n' > "$S2"
+run_t 2026-10-12 "$OMI"
+row test/omi | grep -q '^cooldown' && ok "garbage rows do not cancel the valid 10-10 row" || no "omi garbage: $(cat "$(tsv)")"
+printf 'TEST/OMI\t2026-10-11\t4\n' > "$S2"
+run_t 2026-10-12 "$OMI"
+row test/omi | grep -q '^cooldown' && ok "the record matches a slug in any case" || no "omi case: $(cat "$(tsv)")"
+export AUTODREAM_TRIAGE_STATE="$T/state-default.tsv"
+
+echo "== label edge cases =="
+make_repo pi
+printf '[{"number":1,"createdAt":"2020-01-01T00:00:00Z","labels":[{"name":"needs-triage"},{"name":"ready-for-agent"}]},{"number":2,"createdAt":"2020-01-01T00:00:00Z","labels":null},{"number":3,"createdAt":"2020-01-01T00:00:00Z","labels":[]},{"number":4,"createdAt":"2020-01-01T00:00:00Z","labels":[{"name":"ready-for-human"}]}]\n' > "$FAKE_GH_DIR/issues-pi.json"
+run_t 2026-10-01 "$R"
+assert_eq "$(row test/pi | cut -f4)" 3 "needs-triage beside a state label, null labels and empty labels all count"
+
+echo "== slug case and a pipe in the path =="
+make_repo rho "https://github.com/Test/rho.git"; issues rho 4 1; RHO=$R
+make_repo "rho|pipe" "https://github.com/test/rho.git"
+run_t 2026-10-01 "$RHO" "$R"
+assert_eq "$(grep -ci 'test/rho' "$(tsv)")" 1 "owner/repo in different case is one repo"
+make_repo "sig|ma"; issues "sig|ma" 4 1
+run_t 2026-10-01 "$R"
+assert_grep "$(md)" 'sig\\|ma' "a pipe in the checkout path is escaped in the table"
+
 echo "== no findings dir =="
 OUT=$(printf 'h\tp\t%s\n' "$R" | "$BIN" "$T/not/a/dir" 2>/dev/null); RC=$?
 assert_eq "$RC" 0 "an unusable findings dir still exits 0"
