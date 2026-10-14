@@ -17,6 +17,8 @@
 # WHEN A REPO IS SUGGESTED
 #
 #   * untriaged >= AUTODREAM_TRIAGE_MIN (default 3);
+#   * the viewer can triage there (admin, maintain, write or triage permission) and the repo is
+#     not archived, so an upstream project whose tracker is not yours is never suggested;
 #   * and it was not suggested within AUTODREAM_TRIAGE_COOLDOWN_DAYS (default 7), unless the
 #     count has grown by AUTODREAM_TRIAGE_GROW (default 3) since that suggestion.
 # The last suggestion per repo is kept in AUTODREAM_TRIAGE_STATE (default
@@ -194,6 +196,19 @@ read_issues() {
   I_ERR="unreadable JSON"; return 1
 }
 
+# can_triage SLUG -> 0 when the viewer may label issues there and the repo is not archived.
+# Sets A_WHY to not-maintainer, archived or gh-failed: <error> otherwise. Only repos that already
+# cleared the threshold get here, so the extra call is spent where it matters.
+can_triage() {
+  local out rc perm arch
+  out=$(tmo "$CALL_SEC" gh repo view "$1" --json viewerPermission,isArchived --jq '[.viewerPermission, (.isArchived|tostring)] | @tsv' 2>&1 </dev/null); rc=$?
+  if [ "$rc" -ne 0 ]; then A_WHY="gh-failed: $(printf '%s' "$out" | head -c 300 | tr '\n\t' '  ')"; return 1; fi
+  perm=${out%%$'\t'*}; arch=${out#*$'\t'}
+  case $perm in ADMIN|MAINTAIN|WRITE|TRIAGE) ;; *) A_WHY=not-maintainer; return 1 ;; esac
+  if [ "$arch" = true ]; then A_WHY=archived; return 1; fi
+  return 0
+}
+
 age_days() { # ISO timestamp -> whole days since, empty when it does not parse
   local ts=${1:-} ep
   [ -n "$ts" ] || return 0
@@ -232,6 +247,9 @@ while IFS= read -r cwd; do
   age=$(age_days "$I_OLDEST")
   if [ "$I_UNTRIAGED" -lt "$MIN" ]; then
     tsvrow below "$slug" "$repo" "$u$mark" "$t$mark" "$age" "fewer than $MIN untriaged"; N_BELOW=$((N_BELOW + 1)); continue
+  fi
+  if ! can_triage "$slug"; then
+    tsvrow skipped "$slug" "$repo" "$u$mark" "$t$mark" "$age" "$A_WHY"; N_SKIP=$((N_SKIP + 1)); continue
   fi
   if held_back "$slug" "$I_UNTRIAGED"; then
     tsvrow cooldown "$slug" "$repo" "$u$mark" "$t$mark" "$age" "suggested on $(last_suggestion "$slug" | cut -f1)"; N_COOL=$((N_COOL + 1)); continue

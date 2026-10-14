@@ -34,11 +34,17 @@ export AUTODREAM_TRIAGE_STATE="$T/state-default.tsv"
 # auth status        -> exit 0 (FAKE_GH_AUTH_FAIL=1 makes it exit 1)
 # issue list -R X    -> $FAKE_GH_DIR/issues-<name>.json (default [])
 #                       $FAKE_GH_DIR/disabled-<name> present: "has disabled issues" on stderr, exit 1
-# FAKE_GH_FAIL=1 fails every issue list; FAKE_GH_SLEEP=N delays it.
+# repo view X        -> $FAKE_GH_DIR/perm-<name> ("PERMISSION<TAB>isArchived"), default ADMIN/false
+# FAKE_GH_FAIL=1 fails every issue list; FAKE_GH_SLEEP=N delays it; FAKE_GH_REPO_FAIL=1 fails repo view.
 cat > "$T/bin/gh" <<'SH'
 #!/bin/bash
 case "$1 $2" in
   "auth status") [ -n "${FAKE_GH_AUTH_FAIL:-}" ] && exit 1; exit 0 ;;
+  "repo view")
+    [ -n "${FAKE_GH_REPO_FAIL:-}" ] && { echo "gh: repo view failed" >&2; exit 1; }
+    name=${3#test/}; name=${name#Test/}
+    f="$FAKE_GH_DIR/perm-$name"
+    [ -f "$f" ] && cat "$f" || printf 'ADMIN\tfalse\n' ;;
   "issue list")
     [ -n "${FAKE_GH_FAIL:-}" ] && { echo "gh: simulated failure" >&2; exit 1; }
     [ -z "${FAKE_GH_SLEEP:-}" ] || sleep "$FAKE_GH_SLEEP"
@@ -276,6 +282,22 @@ assert_eq "$(grep -ci 'test/rho' "$(tsv)")" 1 "owner/repo in different case is o
 make_repo "sig|ma"; issues "sig|ma" 4 1
 run_t 2026-10-01 "$R"
 assert_grep "$(md)" 'sig\\|ma' "a pipe in the checkout path is escaped in the table"
+
+echo "== only repos you can triage =="
+make_repo sigma2; issues sigma2 4 1; SG=$R
+printf 'READ\tfalse\n' > "$FAKE_GH_DIR/perm-sigma2"
+run_t 2026-10-01 "$SG"
+row test/sigma2 | grep -q 'not-maintainer' && ok "READ permission is skipped as not-maintainer" || no "sigma2 read: $(cat "$(tsv)")"
+assert_nogrep "$(md)" 'test/sigma2' "an upstream repo is not suggested"
+printf 'TRIAGE\tfalse\n' > "$FAKE_GH_DIR/perm-sigma2"
+run_t 2026-10-01 "$SG"
+row test/sigma2 | grep -q '^candidate' && ok "TRIAGE permission is enough" || no "sigma2 triage: $(cat "$(tsv)")"
+printf 'ADMIN\ttrue\n' > "$FAKE_GH_DIR/perm-sigma2"
+run_t 2026-10-01 "$SG"
+row test/sigma2 | grep -q 'archived' && ok "an archived repo is skipped" || no "sigma2 archived: $(cat "$(tsv)")"
+FAKE_GH_REPO_FAIL=1 run_t 2026-10-01 "$SG"
+row test/sigma2 | grep -q 'gh-failed' && ok "a failing repo view is gh-failed" || no "sigma2 failing: $(cat "$(tsv)")"
+assert_eq "$RC" 0 "and still exits 0"
 
 echo "== no findings dir =="
 OUT=$(printf 'h\tp\t%s\n' "$R" | "$BIN" "$T/not/a/dir" 2>/dev/null); RC=$?
