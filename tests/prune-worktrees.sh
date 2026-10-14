@@ -193,6 +193,8 @@ mkdir -p "$R/.git/worktrees/rebasing/rebase-merge"; echo refs/heads/rebasing > "
 # only the head lookup shows.
 worktree qa;        commit_in qa;        push qa;        pr qa MERGED "$(tip qa)"
 printf '[{"number":1}]\n' > "$FAKE_GH_DIR/base-main1-qa.json"
+worktree qa2;       commit_in qa2;       push qa2;       pr qa2 CLOSED "$(tip qa2)" 2020-01-01T00:00:00Z
+printf '[{"number":1}]\n' > "$FAKE_GH_DIR/base-main1-qa2.json"
 worktree hiddenopen; commit_in hiddenopen; push hiddenopen
 printf '[{"number":1,"state":"MERGED","closedAt":"2020-01-01T00:00:00Z","headRefOid":"%s","baseRefName":"main","isCrossRepository":false},{"number":2,"state":"OPEN","closedAt":null,"headRefOid":"%s","baseRefName":"main","isCrossRepository":false}]\n' "$(tip hiddenopen)" "$(tip hiddenopen)" > "$FAKE_GH_DIR/pr-main1-hiddenopen.json"
 # F4: a push lands between the fetch and the delete.
@@ -208,7 +210,7 @@ g clone -q "$BARE" "$T/other-moved"; g -C "$T/other-moved" checkout -q moved; ec
 g -C "$T/other-moved" add -A; g -C "$T/other-moved" commit -qm later; g -C "$T/other-moved" push -q origin moved
 
 # Everything gets old except `fresh`, which a session touched a minute ago.
-for n in sq dirty unpushed openpr newer moved closedold closednew develop staging locked gone closedlater fork 'fix#42' nonmain parent submod rebasing racy qa hiddenopen; do age "$(wt "$n")"; done
+for n in sq dirty unpushed openpr newer moved closedold closednew develop staging locked gone closedlater fork 'fix#42' nonmain parent submod rebasing racy qa qa2 hiddenopen; do age "$(wt "$n")"; done
 age "$T/elsewhere/outside"; age "$(wt detached)"
 rm -rf "$(wt gone)"
 
@@ -233,6 +235,7 @@ expect_kept parent "branch that is the base of an open PR"
 expect_kept submod "worktree with submodules"
 expect_kept rebasing "rebase in progress"
 expect_kept qa "branch that an earlier PR targeted as its base"
+expect_kept qa2 "closed-PR proof, but an earlier PR targeted the branch as its base"
 expect_kept hiddenopen "OPEN row in the head lookup that the repo-wide list missed"
 { ! has_wt 'fix#42' && ! has_local 'fix#42' && ! has_remote 'fix#42'; } && ok "branch with # in its name: removed" || no "branch with # in its name: removed"
 { has_local fix && has_remote fix; } && ok "branch with # in its name: the sibling branch is untouched" || no "branch with # in its name: the sibling branch is untouched"
@@ -355,8 +358,14 @@ g -C "$(wt detrb)" checkout -q --detach
 mkdir -p "$R/.git/worktrees/detrb/rebase-merge"; echo refs/heads/detrb > "$R/.git/worktrees/detrb/rebase-merge/head-name"
 age "$(wt detrb)"
 mkdir -p "$R/.git/rebase-merge"; echo refs/heads/mainrb > "$R/.git/rebase-merge/head-name"
+worktree bisb;   commit_in bisb;   push bisb;   pr bisb MERGED "$(tip bisb)"; g -C "$R" worktree remove "$(wt bisb)"
+g -C "$R" worktree add -q --detach "$(wt bis)" "$FIRST"
+echo "refs/heads/bisb" > "$R/.git/worktrees/bis/BISECT_START"; : > "$R/.git/worktrees/bis/BISECT_LOG"
+age "$(wt bis)"
 run_prune
-echo "== pass 12: rebases"
+echo "== pass 12: rebases and bisects"
+{ has_local bisb && has_remote bisb; } && ok "branch a bisect started from: kept" || no "branch a bisect started from: kept"
+has_wt bis && ok "worktree mid-bisect: kept" || no "worktree mid-bisect: kept"
 { has_local mainrb && has_remote mainrb; } && ok "branch being rebased in the main checkout: kept" || no "branch being rebased in the main checkout: kept"
 { has_wt detrb && has_local detrb && has_remote detrb; } && ok "detached worktree mid-rebase: its worktree and branch kept" || no "detached worktree mid-rebase: its worktree and branch kept"
 

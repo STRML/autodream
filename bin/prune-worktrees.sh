@@ -255,16 +255,19 @@ judge() {
   if [ "$(printf '%s' "$json" | jq 'any(.[]; .state == "OPEN")')" = true ]; then WHY="open-pr"; return 0; fi
   if [ "$(printf '%s' "$json" | jq --arg t "$tip" --arg d "$DEF_NAME" \
         'any(.[]; .state == "MERGED" and .headRefOid == $t and .baseRefName == $d and .isCrossRepository == false)')" = true ]; then
-    based=$(tmo "$CALL_SEC" gh pr list -R "$slug" --base "$br" --state all --limit 1 --json number 2>/dev/null) \
-      && [ "$(printf '%s' "$based" | jq length 2>/dev/null)" = 0 ] || { WHY="base-of-pr: a PR has targeted this branch"; return 0; }
-    VERDICT=finished; WHY="PR merged into $DEF_NAME at this tip"; return 0
+    VERDICT=finished; WHY="PR merged into $DEF_NAME at this tip"
   fi
   rsha=$(git -C "$repo" rev-parse -q --verify "refs/remotes/origin/$br" 2>/dev/null) || rsha=""
   closed=$(printf '%s' "$json" | jq -r --arg t "$tip" \
         '[.[] | select(.state == "CLOSED" and .headRefOid == $t and .isCrossRepository == false) | .closedAt] | max // empty')
-  if [ -n "$closed" ] && [ "$rsha" = "$tip" ] && [[ "$closed" < "$CUTOFF" ]]; then
-    VERDICT=finished; WHY="PR closed unmerged on $closed at this tip, branch fully on the remote"; return 0
+  if [ "$VERDICT" != finished ] && [ -n "$closed" ] && [ "$rsha" = "$tip" ] && [[ "$closed" < "$CUTOFF" ]]; then
+    VERDICT=finished; WHY="PR closed unmerged on $closed at this tip, branch fully on the remote"
   fi
+  [ "$VERDICT" = finished ] || return 0
+  # Either proof: a branch that other PRs have targeted is a long-lived branch, and deleting it
+  # on the remote would close those PRs. An error in the lookup keeps the branch.
+  based=$(tmo "$CALL_SEC" gh pr list -R "$slug" --base "$br" --state all --limit 1 --json number 2>/dev/null) \
+    && [ "$(printf '%s' "$based" | jq length 2>/dev/null)" = 0 ] || { VERDICT=keep; WHY="base-of-pr: a PR has targeted this branch"; }
   return 0
 }
 
@@ -289,7 +292,7 @@ drop_worktree() { # repo path -> 0 when the directory is gone and git forgot it
   local repo=$1 path=$2 err
   DROP_ERR=""
   if [ "$USE_TRASH" = 1 ]; then
-    if tmo "$CALL_SEC" trash "$path" >/dev/null 2>&1 && [ ! -e "$path" ]; then git -C "$repo" worktree prune; return 0; fi
+    if tmo "$CALL_SEC" trash "$path" >/dev/null 2>&1 && [ ! -e "$path" ]; then prune_stale_worktrees "$repo"; return 0; fi
     DROP_ERR="trash-failed"; return 1
   fi
   if err=$(git -C "$repo" worktree remove "$path" 2>&1); then return 0; fi
@@ -307,8 +310,8 @@ remove_item() {
     row kept "$repo" "$br" "$path" "${DROP_ERR:-remove-failed}"; return 0
   fi
   if [ -n "$br" ]; then
-    git -C "$repo" branch -D "$br" >/dev/null 2>&1 || note="; local branch delete failed"
     delete_remote "$repo" "$slug" "$br" "$tip"
+    git -C "$repo" branch -D "$br" >/dev/null 2>&1 || note="; local branch delete failed"
     note="$note$REMOTE_NOTE"
   fi
   row removed "$repo" "$br" "$path" "$why$note"
@@ -332,7 +335,11 @@ rebase_branch() { # worktree path -> prints the branch being rebased, returns 0 
     head=$(cat "$gd/rebase-merge/head-name" "$gd/rebase-apply/head-name" 2>/dev/null | head -1)
     printf '%s' "${head#refs/heads/}"; return 0
   fi
-  [ -e "$gd/BISECT_LOG" ]
+  if [ -e "$gd/BISECT_LOG" ]; then
+    head=$(head -1 "$gd/BISECT_START" 2>/dev/null)
+    printf '%s' "${head#refs/heads/}"; return 0
+  fi
+  return 1
 }
 
 ignored_beyond_build() { # worktree path -> 0 when it holds ignored files other than build output
