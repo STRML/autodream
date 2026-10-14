@@ -314,7 +314,9 @@ and a failed pin also means nothing is removed. To undo a removal, run the `reco
 git -C <repo> branch <branch> <tip> ; git -C <repo> push origin <tip>:refs/heads/<branch>
 ```
 
-The push half is there only when the branch existed on the remote.
+The push half is there only when the branch existed on the remote. Pins cost a few bytes each. When
+you no longer need to undo anything, delete them with
+`git for-each-ref --format='%(refname)' refs/prune-ledger | xargs -n1 git update-ref -d`.
 
 The remote branch is deleted by a push that names the proven commit as the lease, so a push
 that landed after the fetch makes GitHub refuse the delete. The worktree directory goes to

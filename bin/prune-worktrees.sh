@@ -159,7 +159,7 @@ ledger() {
 }
 
 # shq STRING -> STRING in single quotes. Unlike printf %q this never prints $'..', which fish cannot read.
-shq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+shq() { printf "'%s'" "$(printf '%s' "$1" | LC_ALL=C sed "s/'/'\\\\''/g")"; }
 
 # recover_cmds REPO BRANCH TIP REMOTE_TIP -> the commands that restore the local branch, and the
 # remote branch when it existed. They work in bash, zsh and fish.
@@ -372,7 +372,8 @@ remove_item() {
   else rec="detached worktree: no branch; the commit is $tip"; pin="refs/prune-ledger/$RUN_ID/detached-$(basename "$path")"; fi
   # Pin first. After the branch and the worktree are gone, nothing else keeps a squash-merged tip
   # reachable, and git gc would prune it and break the recover commands. The pin is never removed.
-  if ! git -C "$repo" update-ref "$pin" "$tip" 2>/dev/null; then
+  # The empty old value makes the pin create-only: an existing pin of the same name is never overwritten.
+  if ! git -C "$repo" update-ref "$pin" "$tip" "" 2>/dev/null; then
     ledger pin-failed "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "could not create $pin; nothing was changed" ""
     row kept "$repo" "$br" "$path" "pin-failed: no safe undo, no delete"; return 0
   fi
