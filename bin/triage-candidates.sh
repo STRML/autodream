@@ -10,9 +10,9 @@
 #
 # The triage skill gives every handled issue one state label: needs-info, ready-for-agent,
 # ready-for-human or wontfix. An open issue is untriaged when it has none of those, or when it
-# carries needs-triage. A repo that uses the scheme has at least one open issue with a state
-# label (or needs-triage); a repo with none is skipped as no-scheme, because its labels mean
-# something else and counting every issue would be noise.
+# carries needs-triage. A repo that has never been triaged has no state labels at all, so every
+# open issue in it counts: its first triage is exactly what this list is for. The threshold and
+# the cooldown keep a long backlog from being suggested every night.
 #
 # WHEN A REPO IS SUGGESTED
 #
@@ -168,7 +168,7 @@ record_suggestion() { # SLUG UNTRIAGED - appends unless the last row already say
   printf '%s\t%s\t%s\n' "$1" "$DATE" "$2" >> "$STATE" 2>/dev/null
 }
 
-# Reads one repo's issues. Sets I_TOTAL I_UNTRIAGED I_SCHEME I_OLDEST (created date of the oldest
+# Reads one repo's issues. Sets I_TOTAL I_UNTRIAGED I_OLDEST (created date of the oldest
 # untriaged issue). Returns 1 when gh or the JSON failed, with I_ERR set.
 read_issues() {
   local slug=$1 errf json
@@ -186,11 +186,10 @@ read_issues() {
     | map(. + {u: ((.n | index("needs-triage") != null) or .st == 0)})
     | [ length,
         (map(select(.u)) | length),
-        (if any(.[]; .st > 0) then 1 else 0 end),
         ([.[] | select(.u) | .createdAt] | min // "") ]
     | @tsv' 2>/dev/null) || { I_ERR="unreadable JSON"; return 1; }
   [ -n "$fields" ] || { I_ERR="unreadable JSON"; return 1; }
-  IFS=$'\t' read -r I_TOTAL I_UNTRIAGED I_SCHEME I_OLDEST <<< "$fields"
+  IFS=$'\t' read -r I_TOTAL I_UNTRIAGED I_OLDEST <<< "$fields"
   if _p_is_int "$I_TOTAL" && _p_is_int "$I_UNTRIAGED"; then return 0; fi
   I_ERR="unreadable JSON"; return 1
 }
@@ -225,9 +224,6 @@ while IFS= read -r cwd; do
     N_SKIP=$((N_SKIP + 1)); continue
   fi
   if [ "$I_TOTAL" -eq 0 ]; then tsvrow skipped "$slug" "$repo" 0 0 "" none-open; N_SKIP=$((N_SKIP + 1)); continue; fi
-  if [ "$I_SCHEME" -ne 1 ]; then
-    tsvrow skipped "$slug" "$repo" "" "$I_TOTAL" "" no-scheme; N_SKIP=$((N_SKIP + 1)); continue
-  fi
 
   u=$I_UNTRIAGED; t=$I_TOTAL; mark=""
   if [ "$I_TOTAL" -ge "$LIMIT" ]; then
