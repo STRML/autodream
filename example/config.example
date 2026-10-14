@@ -64,3 +64,13 @@ AUTODREAM_TRIAGE_SURFACE=cmux
 # AUTODREAM_PRUNE_PROTECT="live:legacy-*"   # extra branch globs to never prune, colon-separated
 # AUTODREAM_PRUNE_TRASH=1
 # AUTODREAM_PRUNE_LEDGER=$HOME/.claude/autodream/prune-ledger.tsv   # append-only record of every removal, with undo commands
+
+# Repos worth triaging (on by default; it only reads issues). The nightly report lists touched
+# repos with a pile of open issues that carry no triage state label, and suggests /triage there.
+# AUTODREAM_TRIAGE_SUGGEST=0              # 0 turns the list off
+# AUTODREAM_TRIAGE_MIN=3                  # untriaged issues needed to suggest a repo
+# AUTODREAM_TRIAGE_COOLDOWN_DAYS=7        # days before the same repo is suggested again
+# AUTODREAM_TRIAGE_GROW=3                 # growth that overrides the cooldown
+# AUTODREAM_TRIAGE_LIMIT=200              # open issues read per repo; at the limit counts show as N+
+# AUTODREAM_TRIAGE_CALL_SEC=30            # timeout for one gh call
+# AUTODREAM_TRIAGE_STATE=$HOME/.claude/autodream/triage-suggested.tsv   # cooldown record
