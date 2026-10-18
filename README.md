@@ -152,7 +152,7 @@ Variants: `/autodream today` runs today so far, and `/autodream force` rebuilds 
 
 Triage runs the fixes you approve, so permission prompts interrupt it. The skill recommends a `claude --dangerously-skip-permissions` session to avoid them.
 
-Only the last `AUTODREAM_PENDING_DAYS` days (default 14) count, so a report nobody triaged stops nagging after two weeks. To skip the link, pass `install.sh --no-skill`. An install into a directory other than `~/.claude` does not link the skill, because the skill looks for the scripts in `~/.claude/autodream`; set `AUTODREAM_SKILLS_DIR` to link it anyway, and export `AUTODREAM_DIR` in the shell that runs Claude Code.
+Only the last `AUTODREAM_PENDING_DAYS` days (default 14) count, so a report nobody triaged stops nagging after two weeks. To skip the link, pass `install.sh --no-skill`. An install into a directory other than `~/.claude` does not link the skill, because the skill looks for the scripts in `~/.claude/autodream`; set `AUTODREAM_SKILLS_DIR` to link it anyway, and export `AUTODREAM_DIR` (and `DREAMS_DIR`, if the reports are not in its sibling `dreams/`) in the shell that runs Claude Code.
 
 ### Which sessions belong to a day
 

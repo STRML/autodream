@@ -87,7 +87,9 @@ echo "# a report part way through triage stays pending"
 r=$(new_env)
 report "$r/dreams" "$(ago 1)" 3
 printf '\n## Triage in progress\n\n- question 1: approved\n' >> "$r/dreams/$(ago 1).md"
-assert_eq "$(run "$r" --summary)" "now triaging 3 issues from $(ago 1)" "the in-progress heading does not retire it"
+assert_eq "$(run "$r" --summary)" "now triaging 2 issues from $(ago 1)" "the in-progress heading keeps it pending and counts what is left"
+printf -- '- question 2: skipped\n- question 3: approved\n' >> "$r/dreams/$(ago 1).md"
+assert_eq "$(run "$r" --summary)" "now triaging 1 issue from $(ago 1)" "one question always stays until the heading is renamed"
 rm -rf "$r"
 
 echo "# a date in the future is outside the window"

@@ -68,6 +68,10 @@ pending() {
     n=$(report_open_questions "$f")
     case "$n" in ''|*[!0-9]*) continue ;; esac
     [ "$n" -gt 0 ] || continue
+    # A half-triaged report keeps its marker, so subtract what is already logged. One question
+    # always stays: the heading is renamed only when the last one is resolved.
+    n=$((n - $(report_progress_count "$f")))
+    [ "$n" -ge 1 ] || n=1
     printf '%s\t%s\t%s\n' "$d" "$n" "$f"
   done
 }
