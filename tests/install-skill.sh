@@ -42,6 +42,12 @@ assert_eq "$(sed -n '2p' "$SANDBOX/home/.claude/skills/autodream/SKILL.md")" "na
 assert_eq "$(readlink "$SANDBOX/home/.claude/autodream/pending-triage.sh")" "$REPO/bin/pending-triage.sh" "pending-triage.sh is linked"
 assert_eq "$(readlink "$SANDBOX/home/.claude/autodream/report-format.sh")" "$REPO/bin/report-format.sh" "and so is the library it sources"
 
+echo "# a trailing slash on the default dir is still the default"
+new_sandbox
+install -- "$SANDBOX/home/.claude/"; rc=$?
+assert_eq "$rc" "0" "the install succeeds"
+assert_eq "$(readlink "$SANDBOX/home/.claude/skills/autodream")" "$REPO/skills/autodream" "the skill is linked"
+
 echo "# a custom install dir is not linked, because the skill would not find the scripts"
 new_sandbox
 install -- "$SANDBOX/target"; rc=$?

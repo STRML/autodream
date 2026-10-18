@@ -32,3 +32,9 @@ report_open_questions(){
 }
 
 report_is_triaged(){ grep -q '^## Triage decisions' "$1"; }
+
+# How many decisions a session has logged so far under "## Triage in progress". Bullets or
+# numbered lines, as review.sh counts "## Triage decisions".
+report_progress_count(){
+  awk '/^## Triage in progress/{f=1;next} /^## /{f=0} f' "$1" | grep -cE '^([-*]|[0-9]+\.) ' || true
+}
