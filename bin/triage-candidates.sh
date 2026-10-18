@@ -78,18 +78,6 @@ DATE=$(basename "$OUT")
 _p_is_date "$DATE" || DATE=$(date +%Y-%m-%d)
 : > "$TSV" 2>/dev/null || { echo "triage: findings dir unusable"; exit 0; }
 
-tmo() { # tmo SECONDS cmd... - always bounded: timeout, gtimeout, or a watchdog that kills the child
-  local s=$1 pid wd rc; shift
-  if command -v timeout >/dev/null 2>&1; then timeout "$s" "$@"; return $?
-  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$s" "$@"; return $?; fi
-  "$@" & pid=$!
-  ( sleep "$s"; pkill -P "$pid" 2>/dev/null; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 & wd=$!
-  wait "$pid"; rc=$?
-  kill "$wd" 2>/dev/null
-  wait "$wd" 2>/dev/null
-  return $rc
-}
-
 # tsvrow STATUS SLUG REPO UNTRIAGED OPEN OLDEST DETAIL - a tab or newline in a field becomes a space.
 tsvrow() {
   local f out="" sep=""
@@ -127,14 +115,6 @@ NOW=$(date +%s)
 # The cooldown counts from the report date, so a late rerun of an old night judges it as that night did.
 DATE_EPOCH=$(pdate_epoch "$DATE") || DATE_EPOCH=$NOW
 SEEN_SLUGS=""
-
-repo_slug() { # owner/repo from a github.com origin URL, empty otherwise
-  local url
-  url=$(git -C "$1" config --get remote.origin.url 2>/dev/null) || return 0
-  case "$url" in
-    *github.com[:/]*) url=${url#*github.com[:/]}; url=${url%.git}; printf '%s' "$url" ;;
-  esac
-}
 
 # last_suggestion SLUG -> "DATE<TAB>COUNT" of its most recent state row, empty when none
 last_suggestion() {
