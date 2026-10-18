@@ -132,18 +132,6 @@ CUTOFF=$(TZ=UTC pdate_fmt_epoch $((NOW - CLOSED_DAYS * 86400)) +%Y-%m-%dT%H:%M:%
 PROTECT_DEFAULT="main:master:develop:dev:development:trunk:staging:stage:production:prod:next:canary:gh-pages:release:release-*:release/*:v[0-9]*"
 IFS=: read -r -a PROTECT <<< "$PROTECT_DEFAULT:${AUTODREAM_PRUNE_PROTECT:-}"
 
-tmo() { # tmo SECONDS cmd... - always bounded: timeout, gtimeout, or a watchdog that kills the child
-  local s=$1 pid wd rc; shift
-  if command -v timeout >/dev/null 2>&1; then timeout "$s" "$@"; return $?
-  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$s" "$@"; return $?; fi
-  "$@" & pid=$!
-  ( sleep "$s"; pkill -P "$pid" 2>/dev/null; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 & wd=$!
-  wait "$pid"; rc=$?
-  kill "$wd" 2>/dev/null
-  wait "$wd" 2>/dev/null
-  return $rc
-}
-
 budget_ok() { [ "$SECONDS" -lt "$BUDGET" ]; }
 
 # ledger EVENT REPO SLUG BRANCH TIP REMOTE_TIP WORKTREE DETAIL RECOVER - one append, a failure returns 1.
@@ -228,14 +216,6 @@ if [ "${AUTODREAM_PRUNE_TRASH:-1}" = 1 ] && command -v trash >/dev/null 2>&1; th
 
 
 # ---- per-repo facts ------------------------------------------------------------------------
-
-repo_slug() { # owner/repo from a github.com origin URL, empty otherwise
-  local url
-  url=$(git -C "$1" config --get remote.origin.url 2>/dev/null) || return 0
-  case "$url" in
-    *github.com[:/]*) url=${url#*github.com[:/]}; url=${url%.git}; printf '%s' "$url" ;;
-  esac
-}
 
 default_facts() { # sets DEF_NAME DEF_REF DEF_TIP for repo $1; DEF_NAME is empty when unknown
   local repo=$1 b

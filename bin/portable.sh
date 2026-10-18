@@ -64,3 +64,25 @@ pstat_mtime() {
 pstat_mode() {
   if [ "$_P_GNU_STAT" = 1 ]; then stat -c %a "$1" 2>/dev/null; else stat -f %Lp "$1" 2>/dev/null; fi
 }
+
+# $1=seconds, rest=command -> runs it bounded: timeout, gtimeout, or a watchdog that kills the child
+tmo() {
+  local s=$1 pid wd rc; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$s" "$@"; return $?
+  elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$s" "$@"; return $?; fi
+  "$@" & pid=$!
+  ( sleep "$s"; pkill -P "$pid" 2>/dev/null; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 & wd=$!
+  wait "$pid"; rc=$?
+  kill "$wd" 2>/dev/null
+  wait "$wd" 2>/dev/null
+  return $rc
+}
+
+# $1=repo dir -> owner/repo from a github.com origin URL, empty otherwise
+repo_slug() {
+  local url
+  url=$(git -C "$1" config --get remote.origin.url 2>/dev/null) || return 0
+  case "$url" in
+    *github.com[:/]*) url=${url#*github.com[:/]}; url=${url%.git}; printf '%s' "$url" ;;
+  esac
+}

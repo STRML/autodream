@@ -60,5 +60,21 @@ chmod 640 "$t/f"; eq "$(pstat_mode "$t/f")" 640 "mode 640"
 refuses "a missing file has no mtime" pstat_mtime "$t/none"
 rm -rf "$t"
 
+echo "# tmo and repo_slug"
+tmo 5 true; eq "$?" 0 "tmo passes a zero status through"
+tmo 5 sh -c 'exit 7'; eq "$?" 7 "tmo passes a nonzero status through"
+start=$SECONDS; tmo 1 sleep 5 && slow_rc=0 || slow_rc=$?
+[ "$slow_rc" -ne 0 ] && [ $((SECONDS - start)) -lt 4 ] && eq ok ok "tmo kills a command past its bound" || eq "rc=$slow_rc" ok "tmo kills a command past its bound"
+g=$(mktemp -d "${TMPDIR:-/tmp}/portable.XXXXXX")
+git init -q "$g" 2>/dev/null
+eq "$(repo_slug "$g")" "" "no remote has no slug"
+git -C "$g" config remote.origin.url https://github.com/STRML/cc-autodream.git
+eq "$(repo_slug "$g")" STRML/cc-autodream "https origin"
+git -C "$g" config remote.origin.url git@github.com:STRML/cc-autodream.git
+eq "$(repo_slug "$g")" STRML/cc-autodream "ssh origin"
+git -C "$g" config remote.origin.url https://gitlab.com/STRML/cc-autodream.git
+eq "$(repo_slug "$g")" "" "a non-github origin has no slug"
+rm -rf "$g"
+
 printf '\npassed: %s   failed: %s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
