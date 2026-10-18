@@ -83,6 +83,32 @@ printf '# Autodream\n\nno marker here\n' > "$r/dreams/$(ago 1).md"
 assert_eq "$(run "$r" --summary)" "no issues to address!" "no marker and no recognisable section is not counted"
 rm -rf "$r"
 
+echo "# a report part way through triage stays pending"
+r=$(new_env)
+report "$r/dreams" "$(ago 1)" 3
+printf '\n## Triage in progress\n\n- question 1: approved\n' >> "$r/dreams/$(ago 1).md"
+assert_eq "$(run "$r" --summary)" "now triaging 3 issues from $(ago 1)" "the in-progress heading does not retire it"
+rm -rf "$r"
+
+echo "# a date in the future is outside the window"
+r=$(new_env)
+report "$r/dreams" "$(pdate_shift "$TODAY" 3 d)" 2
+report "$r/dreams" "$(ago 1)" 1
+assert_eq "$(run "$r" --summary)" "now triaging 1 issue from $(ago 1)" "a future-dated report is left out"
+rm -rf "$r"
+
+echo "# the config"
+r=$(new_env)
+report "$r/dreams" "$(ago 20)" 2
+report "$r/dreams" "$(ago 1)" 1
+# shellcheck disable=SC2016 # the dollar sign is the point: the config must reach an unset variable
+printf 'BROKEN=$NO_SUCH_VARIABLE_ANYWHERE\nAUTODREAM_PENDING_DAYS=30\n' > "$r/autodream/config"
+out=$(AUTODREAM_DIR="$r/autodream" DREAMS_DIR="$r/dreams" AUTODREAM_CONFIG="$r/autodream/config" "$PENDING" --summary 2>&1)
+assert_eq "$out" "now triaging 3 issues from dates $(ago 20) to $(ago 1)" "an unset variable in the config does not kill the script, and the config applies"
+out=$(AUTODREAM_PENDING_DAYS=5 AUTODREAM_DIR="$r/autodream" DREAMS_DIR="$r/dreams" AUTODREAM_CONFIG="$r/autodream/config" "$PENDING" --summary 2>&1)
+assert_eq "$out" "now triaging 1 issue from $(ago 1)" "the environment beats the config"
+rm -rf "$r"
+
 echo "# arguments"
 r=$(new_env)
 run "$r" --bogus >/dev/null 2>&1; assert_eq "$?" "2" "an unknown option is refused"

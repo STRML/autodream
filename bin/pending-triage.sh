@@ -7,10 +7,12 @@
 #                                      DATE<TAB>OPEN_QUESTIONS<TAB>REPORT_PATH
 #
 # A report is pending when its open-questions marker says more than zero and it has no
-# "## Triage decisions" heading. A report whose count cannot be read ("unknown": no
-# marker, a shape review.sh does not recognise) is not counted, the same way the band
-# mod reads a missing marker as zero. Only the last AUTODREAM_PENDING_DAYS days are
-# looked at (default 14), so a report nobody ever triaged does not nag forever.
+# "## Triage decisions" heading. That heading means the report is finished, so a session
+# that is part way through one logs under "## Triage in progress" and renames the heading
+# after the last question. A report whose count cannot be read ("unknown": no marker, a
+# shape review.sh does not recognise) is not counted, the same way the band mod reads a
+# missing marker as zero. Only the last AUTODREAM_PENDING_DAYS days are looked at (default
+# 14, and never a future date), so a report nobody ever triaged does not nag forever.
 # Always exits 0; a missing reports directory is an empty queue.
 
 set -u
@@ -29,11 +31,16 @@ _lib() { # $1=file name -> path of the sibling, following the symlink if needed
 . "$(_lib report-format.sh)"
 resolve_install_dir "${BASH_SOURCE[0]}" pending-triage.sh
 
-__env_dreams="${DREAMS_DIR:-}"
+# The config is user-edited. A bare source under set -u kills this shell on one misspelled
+# variable, before the summary prints, so source it with nounset off. The environment wins.
+__env_dreams="${DREAMS_DIR:-}"; __env_days="${AUTODREAM_PENDING_DAYS:-}"
 CONFIG_FILE="${AUTODREAM_CONFIG:-$AUTODREAM_DIR/config}"
+set +u
 # shellcheck disable=SC1090
 [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+set -u
 [ -n "$__env_dreams" ] && DREAMS_DIR="$__env_dreams"
+[ -n "$__env_days" ] && AUTODREAM_PENDING_DAYS="$__env_days"
 DREAMS_DIR="${DREAMS_DIR:-$(dirname "$AUTODREAM_DIR")/dreams}"
 
 DAYS="${AUTODREAM_PENDING_DAYS:-14}"
@@ -47,7 +54,8 @@ case "${1:-}" in
   *) echo "pending-triage.sh: unknown option: $1" >&2; exit 2 ;;
 esac
 
-CUTOFF=$(pdate_shift "$(date +%Y-%m-%d)" "-$DAYS" d)
+TODAY=$(date +%Y-%m-%d)
+CUTOFF=$(pdate_shift "$TODAY" "-$DAYS" d)
 
 # DATE<TAB>COUNT<TAB>PATH for every pending report in the window, oldest first.
 pending() {
@@ -55,7 +63,7 @@ pending() {
   for f in "$DREAMS_DIR"/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].md; do
     [ -f "$f" ] || continue
     d=$(basename "$f" .md)
-    [[ "$d" < "$CUTOFF" ]] && continue
+    [[ "$d" < "$CUTOFF" || "$d" > "$TODAY" ]] && continue
     report_is_triaged "$f" && continue
     n=$(report_open_questions "$f")
     case "$n" in ''|*[!0-9]*) continue ;; esac

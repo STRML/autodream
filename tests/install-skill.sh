@@ -35,43 +35,60 @@ install() {
 
 echo "# the default install links the skill and the scripts it calls"
 new_sandbox
+install -- "$SANDBOX/home/.claude"; rc=$?
+assert_eq "$rc" "0" "the install succeeds"
+assert_eq "$(readlink "$SANDBOX/home/.claude/skills/autodream")" "$REPO/skills/autodream" "the skill is linked under HOME/.claude/skills"
+assert_eq "$(sed -n '2p' "$SANDBOX/home/.claude/skills/autodream/SKILL.md")" "name: autodream" "and its SKILL.md is readable through the link"
+assert_eq "$(readlink "$SANDBOX/home/.claude/autodream/pending-triage.sh")" "$REPO/bin/pending-triage.sh" "pending-triage.sh is linked"
+assert_eq "$(readlink "$SANDBOX/home/.claude/autodream/report-format.sh")" "$REPO/bin/report-format.sh" "and so is the library it sources"
+
+echo "# a custom install dir is not linked, because the skill would not find the scripts"
+new_sandbox
 install -- "$SANDBOX/target"; rc=$?
 assert_eq "$rc" "0" "the install succeeds"
-assert_eq "$(readlink "$SANDBOX/target/skills/autodream")" "$REPO/skills/autodream" "the skill is linked under the target's skills dir"
-assert_eq "$(sed -n '2p' "$SANDBOX/target/skills/autodream/SKILL.md")" "name: autodream" "and its SKILL.md is readable through the link"
-assert_eq "$(readlink "$SANDBOX/target/autodream/pending-triage.sh")" "$REPO/bin/pending-triage.sh" "pending-triage.sh is linked"
-assert_eq "$(readlink "$SANDBOX/target/autodream/report-format.sh")" "$REPO/bin/report-format.sh" "and so is the library it sources"
+absent "$SANDBOX/home/.claude/skills" "no skill is linked under HOME"
+absent "$SANDBOX/target/skills" "and none under the custom dir"
+assert_grep "$SANDBOX/install.out" "AUTODREAM_SKILLS_DIR" "the install says how to link it"
 
 echo "# --no-skill leaves the skills dir alone"
 new_sandbox
-install -- --no-skill "$SANDBOX/target"; rc=$?
+install -- --no-skill "$SANDBOX/home/.claude"; rc=$?
 assert_eq "$rc" "0" "the install succeeds"
-absent "$SANDBOX/target/skills" "no skills dir is created"
+absent "$SANDBOX/home/.claude/skills" "no skills dir is created"
 
-echo "# AUTODREAM_SKILLS_DIR moves the link"
+echo "# AUTODREAM_SKILLS_DIR links there, for a custom install too"
 new_sandbox
 install AUTODREAM_SKILLS_DIR="$SANDBOX/elsewhere" -- "$SANDBOX/target"; rc=$?
 assert_eq "$rc" "0" "the install succeeds"
 assert_eq "$(readlink "$SANDBOX/elsewhere/autodream")" "$REPO/skills/autodream" "the skill is linked there"
-absent "$SANDBOX/target/skills" "and not under the target"
+absent "$SANDBOX/home/.claude/skills" "and not under HOME"
 
 echo "# a skill the user already has is left alone, and the install still finishes"
 new_sandbox
-mkdir -p "$SANDBOX/target/skills/autodream"
-printf 'mine\n' > "$SANDBOX/target/skills/autodream/SKILL.md"
-install -- "$SANDBOX/target"; rc=$?
+mkdir -p "$SANDBOX/home/.claude/skills/autodream"
+printf 'mine\n' > "$SANDBOX/home/.claude/skills/autodream/SKILL.md"
+install -- "$SANDBOX/home/.claude"; rc=$?
 assert_eq "$rc" "0" "the install succeeds"
-assert_eq "$(cat "$SANDBOX/target/skills/autodream/SKILL.md")" "mine" "the user's skill is untouched"
+assert_eq "$(cat "$SANDBOX/home/.claude/skills/autodream/SKILL.md")" "mine" "the user's skill is untouched"
 assert_grep "$SANDBOX/install.out" "refusing to install over it" "the install says why"
 assert_grep "$SANDBOX/install.out" "/autodream skill not linked" "and that the skill is missing"
-linked "$SANDBOX/target/autodream/run.sh" "the scripts are still linked"
+linked "$SANDBOX/home/.claude/autodream/run.sh" "the scripts are still linked"
+
+echo "# a link that cannot be made is reported, not announced as done"
+new_sandbox
+mkdir -p "$SANDBOX/ro"; chmod 555 "$SANDBOX/ro"
+install AUTODREAM_SKILLS_DIR="$SANDBOX/ro" -- "$SANDBOX/target"; rc=$?
+chmod 755 "$SANDBOX/ro"
+assert_eq "$rc" "0" "the install still finishes"
+assert_grep "$SANDBOX/install.out" "/autodream skill not linked" "and says the skill is missing"
+if grep -qF -- "$SANDBOX/ro/autodream -> " "$SANDBOX/install.out"; then no "and does not print a link line"; else ok "and does not print a link line"; fi
 
 echo "# a dry run links nothing"
 new_sandbox
-install -- --dry-run "$SANDBOX/target"; rc=$?
+install -- --dry-run "$SANDBOX/home/.claude"; rc=$?
 assert_eq "$rc" "0" "the dry run succeeds"
-assert_grep "$SANDBOX/install.out" "[dry-run] link $SANDBOX/target/skills/autodream -> $REPO/skills/autodream" "it says what it would link"
-absent "$SANDBOX/target/skills" "and creates no skills dir"
+assert_grep "$SANDBOX/install.out" "[dry-run] link $SANDBOX/home/.claude/skills/autodream -> $REPO/skills/autodream" "it says what it would link"
+absent "$SANDBOX/home/.claude/skills" "and creates no skills dir"
 
 printf '\npassed: %s   failed: %s\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
