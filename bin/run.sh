@@ -216,6 +216,13 @@ case "$AUTODREAM_L1_MAX_CHUNKS" in
 esac
 AUTODREAM_L1_MAX_CHUNKS=$((10#$AUTODREAM_L1_MAX_CHUNKS))
 [ "$AUTODREAM_L1_MAX_CHUNKS" -ge 1 ] || { echo "FATAL: AUTODREAM_L1_MAX_CHUNKS must be at least 1" >&2; exit 1; }
+# The noise gate hands these to jq --argjson with stderr discarded. A non-number makes jq
+# fail, the gate comes back empty, and every session goes to a model call with no message.
+for _knob in AUTODREAM_MIN_USER_TURNS AUTODREAM_MIN_MINUTES; do
+  case "${!_knob:-0}" in
+    ''|*[!0-9]*) echo "FATAL: $_knob must be a non-negative integer (got '${!_knob}')" >&2; exit 1 ;;
+  esac
+done
 
 # Isolated cwd for every `claude --print` worker (see "AI-title stubs" below). The
 # workers all read/write by ABSOLUTE path, so their cwd is functionally irrelevant —
@@ -932,10 +939,10 @@ enumerate_for() { # $1=adapter $2=root -> NUL-delimited paths
   # Gated on the adapter having been ACCEPTED, not merely on adapter.sh being
   # executable: an executable check alone would run a directory that failed
   # containment.
-  # ACCEPTED_ADAPTERS is assigned directly in scan_roots. This used to call
-  # adapters_list per root, and that walk does two realpaths plus a jq for every
-  # adapter directory — repeated work whose answer cannot change mid-run, since
-  # nothing writes to adapters/ while the scan is in flight.
+  # ACCEPTED_ADAPTERS is assigned directly in scan_roots, not rebuilt through
+  # adapters_list per root: that walk costs two realpaths and a jq for every adapter
+  # directory, and its answer cannot change mid-run because nothing writes to
+  # adapters/ while the scan is in flight.
   if declare -F adapter_run >/dev/null 2>&1 \
      && printf '%s\n' ${ACCEPTED_ADAPTERS:-} | grep -qxF "$1" \
      && [ -x "$(adapters_root 2>/dev/null)/$1/adapter.sh" ]; then
@@ -2728,8 +2735,8 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       rm -f "$slimfile" "$normfile" "$dayfile"
       # On the FINAL retry round, fall back to a metadata-only findings stub so
       # the session is visible to L1_ERRORED and the L2 aggregator instead of
-      # disappearing into a silent .err file (the old behavior, which the
-      # 2026-06-11 self-audit flagged: 12 .err with l1_findings_with_error=0).
+      # disappearing into a silent .err file (2026-06-11 self-audit: 12 .err
+      # files with l1_findings_with_error=0).
       # Earlier rounds leave $output absent so the next round can retry; only
       # the last round writes the stub. AUTODREAM_L1_ROUNDS comes through the
       # environment (exported below).
@@ -3064,9 +3071,9 @@ run() {
     log "no sessions to triage; writing stub report and exiting"
     # A zero-session night is not always an empty night. Every session can be
     # rejected for an unrepresentable path or dropped by collision handling, and
-    # this path used to return before run-stats.txt was written — so the report
-    # said "no sessions were modified" while the counters that would have
-    # contradicted it were never recorded anywhere. Say what was refused.
+    # run-stats.txt is written on this path too. Without it the report said "no
+    # sessions were modified" while the counters that would have contradicted it
+    # were never recorded anywhere. Say what was refused.
     # HASH_COLLISIONS counts collision EVENTS and each drops at least two paths,
     # so adding it to a path total understates the loss. Report the two
     # separately rather than inventing a combined figure that is wrong.
@@ -3083,9 +3090,9 @@ run() {
       printf 'runner_dirty: %s\n' "$RUNNER_DIRTY"
       printf 'sessions_found_raw: %s\n' "$RAW"
       printf 'sessions_triaged: 0\n'
-      # Already computed above and previously omitted here. Without them a night
-      # where every session was a worker transcript or an empty shell looks
-      # identical to a night with no files at all.
+      # Emitted on the zero-triage path too: without them a night where every
+      # session was a worker transcript or an empty shell looks identical to a
+      # night with no files at all.
       printf 'self_sessions_excluded: %s\n' "$EXCLUDED"
       printf 'sessions_skipped_empty: %s\n' "$SKIPPED_EMPTY"
       printf 'sessions_rejected_path: %s\n' "$REJECTED_PATHS"
@@ -3998,15 +4005,10 @@ PY
   # so upgrading the account upgrades the nightly report and nothing here has to
   # be edited.
   #
-  # This used to carry a date cutoff that picked "claude-fable-5[1m]" before
-  # 2026-06-21 and "claude-opus-4-7" from that day on, because Fable 5 left the
-  # subscription then. The cutoff has been in the past for months, so the branch
-  # was unreachable and the pin was simply "opus-4-7 forever" — a model two
-  # generations behind by 2026-09, quietly chosen by a comment about billing.
-  # A pin is a decision that has to be re-made every time the roster moves, and
-  # nothing here was ever going to remind anyone.
+  # No model is pinned here: a pin is a decision to re-make every time the roster
+  # moves, and a date-gated branch hid that and left an unreachable default.
   #
-  # AUTODREAM_L2_MODEL still overrides, for pinning a specific model deliberately.
+  # AUTODREAM_L2_MODEL overrides, for pinning a specific model deliberately.
   # If you set it, pin an EXACT string: the CLI silently falls back on an
   # unrecognized --model rather than failing (verified 2026-06-09 on 2.1.170;
   # bare "claude-fable-5" was one of those, where "fable" and the [1m]-suffixed

@@ -1015,9 +1015,9 @@ test_self_audit_stats_failure_denominator(){
   assert_file  "$stats" "run-stats.txt written"
   # After the fix, even a stubbed final-round failure is counted: the stub
   # carries an "error" key so it lands in l1_findings_with_error, AND the
-  # vs.-raw denominator stays accurate. Old behavior reported zero across
-  # the board even though the session never produced real findings.
-  assert_grep  "$stats" 'l1_findings_with_error: 1' "stats now surface the failed session via the error key"
+  # vs.-raw denominator stays accurate. Reporting zero would hide a session that
+  # never produced real findings.
+  assert_grep  "$stats" 'l1_findings_with_error: 1' "stats surface the failed session via the error key"
   rm -rf "$root"
 }
 
@@ -3808,13 +3808,11 @@ test_failing_enumerator_aborts_the_run(){
     /bin/bash "$RUN" "$DATE" > "$root/run.out" 2>&1
   local rc=$?
   cat "$root/autodream/logs/run-$DATE.log" >> "$root/run.out" 2>/dev/null || true
-  # This used to assert the run ABORTS. It no longer does, and the change was
-  # deliberate: on a single-root host — the default install — "enumerator exited
-  # nonzero and returned nothing" is also the shape of a quiet date plus a
-  # transient find error, so aborting cost a night whose honest answer was the
-  # empty-night stub. What replaced the abort is a refusal to LIE: the run
-  # completes, roots_failed counts it, and the stub says the store was not fully
-  # read rather than claiming no files were modified.
+  # The run completes rather than aborting: on a single-root host — the default
+  # install — "enumerator exited nonzero and returned nothing" is also the shape of
+  # a quiet date plus a transient find error, so aborting would cost a night whose
+  # honest answer is the empty-night stub. roots_failed counts it, and the stub
+  # says the store was not fully read rather than claiming no files were modified.
   assert_eq "$rc" "0" "the run completes rather than losing the night"
   assert_grep "$root/run.out" 'contributes NO sessions' "the log names the enumeration failure"
   assert_grep "$root/autodream/findings/$DATE/run-stats.txt" '^roots_failed: 1$' \
@@ -5971,6 +5969,19 @@ test_chunking_is_off_when_the_knob_is_unset(){
   rm -rf "$root0" "$rootu"
 }
 
+test_noise_gate_knobs_are_validated(){
+  echo "# noise gate: a non-numeric floor refuses to start instead of gating nothing"
+  local root; root=$(setup_env); mk_session "$root" s1
+  AUTODREAM_MIN_USER_TURNS=two run_dream "$root"
+  assert_eq "$(cat "$root/run.exit")" "1" "a non-numeric AUTODREAM_MIN_USER_TURNS refuses to start"
+  assert_grep "$root/run.out" 'AUTODREAM_MIN_USER_TURNS must be a non-negative integer' "and says why"
+  AUTODREAM_MIN_MINUTES=1m run_dream "$root"
+  assert_eq "$(cat "$root/run.exit")" "1" "and so does a non-numeric AUTODREAM_MIN_MINUTES"
+  AUTODREAM_MIN_USER_TURNS=0 AUTODREAM_MIN_MINUTES=0 run_dream "$root"
+  assert_eq "$(cat "$root/run.exit")" "0" "0 is valid for both"
+  rm -rf "$root"
+}
+
 test_chunk_knobs_are_validated(){
   echo "# chunking: its knobs are validated at startup, in the house style"
   local root; root=$(setup_env); mk_session "$root" s1
@@ -6289,6 +6300,7 @@ test_chunk_cap_of_one_reads_one_chunk_never_the_whole_transcript
 test_chunking_off_is_the_old_behaviour
 test_chunking_is_off_when_the_knob_is_unset
 test_chunk_knobs_are_validated
+test_noise_gate_knobs_are_validated
 test_chunking_degrades_when_the_helpers_are_absent
 test_a_failed_chunker_never_hands_a_worker_the_whole_slim
 test_a_failed_chunker_on_a_transcript_that_was_never_slimmed_is_still_bounded
