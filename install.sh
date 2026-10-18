@@ -10,6 +10,7 @@
 #   ./install.sh /path/to        # symlink into /path/to/autodream/ instead
 #   ./install.sh --no-schedule   # symlink only; don't touch launchd
 #   ./install.sh --no-review     # schedule the nightly but not the review triage popup agent
+#   ./install.sh --no-skill      # don't link the global /autodream skill into ~/.claude/skills
 #   ./install.sh --adapters claude,omp   # harnesses a run scans (names or `all`); written to config
 #   ./install.sh --l2-engine omp         # adapter whose engine runs L2; written to config
 #   ./install.sh --dry-run       # show every change, make none (no links, config, plist, launchctl)
@@ -22,6 +23,7 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 # ----------------------------------------------------------------- arg parsing --
 SCHEDULE=1
 REVIEW=1
+SKILL=1
 DRY=0
 ADAPTERS_ARG=""
 L2_ENGINE_ARG=""
@@ -31,12 +33,13 @@ while [ "$#" -gt 0 ]; do
   case "$a" in
     --no-schedule) SCHEDULE=0 ;;
     --no-review) REVIEW=0 ;;
+    --no-skill) SKILL=0 ;;
     --dry-run) DRY=1 ;;
     --adapters|--l2-engine)
       [ "$#" -gt 0 ] && [ -n "$1" ] || { echo "install: $a needs a value" >&2; exit 64; }
       case "$a" in --adapters) ADAPTERS_ARG="$1" ;; *) L2_ENGINE_ARG="$1" ;; esac
       shift ;;
-    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
     -*) echo "install: unknown flag '$a'" >&2; exit 64 ;;
     *) TARGET_PARENT="$a" ;;
   esac
@@ -158,6 +161,8 @@ link "$REPO_DIR/bin/lib-project.sh"           "$TARGET/lib-project.sh"
 link "$REPO_DIR/bin/lib-install-dir.sh"       "$TARGET/lib-install-dir.sh"
 link "$REPO_DIR/bin/adapters.sh"              "$TARGET/adapters.sh"
 link "$REPO_DIR/bin/preflight.sh"             "$TARGET/preflight.sh"
+link "$REPO_DIR/bin/report-format.sh"          "$TARGET/report-format.sh"
+link "$REPO_DIR/bin/pending-triage.sh"        "$TARGET/pending-triage.sh"
 # The adapters TREE, not individual files: run.sh resolves adapters/<name>/adapter.sh
 # relative to the script dir, so the whole directory has to be reachable from the
 # install target. Without this the installed runner silently takes the legacy inline
@@ -166,6 +171,14 @@ link "$REPO_DIR/adapters"                     "$TARGET/adapters"
 link "$REPO_DIR/prompts/PROMPT.md"      "$TARGET/PROMPT.md"
 link "$REPO_DIR/prompts/SESSION_TRIAGE.md" "$TARGET/SESSION_TRIAGE.md"
 link "$REPO_DIR/prompts/TRIAGE_DREAM.md"   "$TARGET/TRIAGE_DREAM.md"
+
+# The global /autodream skill. A skill nobody asked for must not fail the install, so a
+# directory already sitting at the link's place (the user's own /autodream) is reported and left.
+if [ "$SKILL" = 1 ]; then
+  SKILLS_DIR="${AUTODREAM_SKILLS_DIR:-$TARGET_PARENT/skills}"
+  if [ "$DRY" = 1 ]; then dry "mkdir -p $SKILLS_DIR"; else mkdir -p "$SKILLS_DIR"; fi
+  link "$REPO_DIR/skills/autodream" "$SKILLS_DIR/autodream" || echo "  WARNING: /autodream skill not linked (see above); re-run after moving $SKILLS_DIR/autodream" >&2
+fi
 
 if [ "$DRY" = 1 ]; then dry "chmod +x bin/*.sh adapters/*/adapter.sh"; else
 chmod +x "$REPO_DIR/bin/"*.sh

@@ -137,7 +137,22 @@ AUTODREAM_FORCE=1 ~/.claude/autodream/run.sh 2026-05-29  # rebuild a date
 ~/.claude/autodream/review.sh                            # solve the latest report's questions
 ~/.claude/autodream/review.sh 2026-05-29                 # triage a specific report
 ~/.claude/autodream/review.sh --force 2026-05-29         # open it even if there's nothing to triage
+~/.claude/autodream/pending-triage.sh                    # how many questions are still unanswered, and from which dates
 ```
+
+### `/autodream` in any Claude Code session
+
+`install.sh` links `skills/autodream` into `~/.claude/skills/`, so `/autodream` works in every project. It does three things:
+
+1. Prints what is waiting: `now triaging 5 issues from dates 2026-10-12 to 2026-10-17`, or `no issues to address!`.
+2. Starts yesterday's dream in the background through `autodream-now.sh`.
+3. Walks the open questions of every report that has no `## Triage decisions` heading, oldest first.
+
+Variants: `/autodream today` runs today so far, and `/autodream force` rebuilds yesterday.
+
+Triage runs the fixes you approve, so permission prompts interrupt it. The skill recommends a `claude --dangerously-skip-permissions` session to avoid them.
+
+Only the last `AUTODREAM_PENDING_DAYS` days (default 14) count, so a report nobody triaged stops nagging after two weeks. To skip the link, pass `install.sh --no-skill`. To link somewhere else, set `AUTODREAM_SKILLS_DIR` (default `~/.claude/skills`).
 
 ### Which sessions belong to a day
 

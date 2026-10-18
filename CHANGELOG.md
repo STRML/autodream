@@ -2,6 +2,15 @@
 
 All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
+## 2026-10-18
+
+### Added
+- **A global `/autodream` skill.** `install.sh` links `skills/autodream` into `~/.claude/skills/`; `--no-skill` skips it and `AUTODREAM_SKILLS_DIR` moves it. The skill prints `now triaging N issues from dates A to B` or `no issues to address!`, starts a dream through `autodream-now.sh`, recommends a yolo session, and walks the open questions of every report that has no `## Triage decisions` heading, oldest first. The count comes from the new `bin/pending-triage.sh` (`--summary`, `--list`), which looks back `AUTODREAM_PENDING_DAYS` (14) days. `review.sh` and `pending-triage.sh` now read the open-questions marker and the triaged heading through the new `bin/report-format.sh`. `tests/pending-triage.sh` has 14 assertions.
+
+### Changed
+- **`AUTODREAM_MIN_USER_TURNS` and `AUTODREAM_MIN_MINUTES` are checked at startup.** A non-number used to make the noise gate's `jq` fail with its error discarded, so every session went to a model call and nothing said why. The run now refuses to start, like the timeout knobs.
+- `tmo` and `repo_slug` moved into `bin/portable.sh`. They were byte-identical copies in `prune-worktrees.sh` and `triage-candidates.sh`, and `tests/portable.sh` now pins them.
+
 ## 2026-10-14
 
 ### Added
