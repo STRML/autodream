@@ -124,7 +124,7 @@ link() {
       return 1
     }
   fi
-  ln -s "$src" "$dst"
+  ln -s "$src" "$dst" || return 1
   echo "  $dst -> $src"
 }
 
@@ -174,8 +174,13 @@ link "$REPO_DIR/prompts/TRIAGE_DREAM.md"   "$TARGET/TRIAGE_DREAM.md"
 
 # The global /autodream skill. A skill nobody asked for must not fail the install, so a
 # directory already sitting at the link's place (the user's own /autodream) is reported and left.
-if [ "$SKILL" = 1 ]; then
-  SKILLS_DIR="${AUTODREAM_SKILLS_DIR:-$TARGET_PARENT/skills}"
+# Claude Code reads ~/.claude/skills, and the skill calls the scripts at ~/.claude/autodream unless
+# AUTODREAM_DIR says otherwise. A custom install dir would leave a skill that cannot find them,
+# so it is linked only when AUTODREAM_SKILLS_DIR says where the user wants it.
+if [ "$SKILL" = 1 ] && [ -z "${AUTODREAM_SKILLS_DIR:-}" ] && [ "$TARGET_PARENT" != "$HOME/.claude" ]; then
+  echo "  /autodream skill not linked: $TARGET_PARENT is not ~/.claude. Set AUTODREAM_SKILLS_DIR to link it, and export AUTODREAM_DIR=$TARGET."
+elif [ "$SKILL" = 1 ]; then
+  SKILLS_DIR="${AUTODREAM_SKILLS_DIR:-$HOME/.claude/skills}"
   if [ "$DRY" = 1 ]; then dry "mkdir -p $SKILLS_DIR"; else mkdir -p "$SKILLS_DIR"; fi
   link "$REPO_DIR/skills/autodream" "$SKILLS_DIR/autodream" || echo "  WARNING: /autodream skill not linked (see above); re-run after moving $SKILLS_DIR/autodream" >&2
 fi

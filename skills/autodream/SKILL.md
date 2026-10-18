@@ -31,6 +31,8 @@ Start a dream, then work through the open questions that earlier dreams raised a
 
    Do not wait for it. Say in one line that a dream is running and where its report will land (`dreams/<date>.md`).
 
+   `autodream-now.sh` hands the run to launchd, so it only works on macOS. Elsewhere, skip this step and say so. When you passed `force` or `today`, the report for that date is being rebuilt: leave that date out of the walk below and say it will show up on the next `/autodream`.
+
 3. If step 1 said `no issues to address!`, stop here.
 
 4. Otherwise recommend a yolo session in one sentence, then carry on without waiting for an answer. Triage executes the fixes you approve, so permission prompts interrupt every question. A session started with `claude --dangerously-skip-permissions` walks the queue without them. Skip the recommendation when this session already runs in bypass mode.
@@ -50,12 +52,13 @@ Start a dream, then work through the open questions that earlier dreams raised a
    3. Recommend one concrete action from (c). Be opinionated.
    4. Wait for approve, modify, skip or discuss.
    5. If approved, execute it. If modified, incorporate the change, confirm, then execute. If skipped or discussed, log the decision as one line.
-   6. Log every decision as one line under a `## Triage decisions` heading at the bottom of that report (create it if absent). That heading is what marks a report as addressed.
+   6. Log every decision as one line under a `## Triage in progress` heading at the bottom of that report (create it if absent). Questions already logged there are done: skip them when you resume a report.
 
-7. When a report's questions are resolved, write a short summary under `## Triage decisions` and move to the next date. When the last one is done, say `all caught up`.
+7. When the last question of a report is resolved, rename its heading to `## Triage decisions` and add a short summary under it. That heading is what marks a report as addressed, so never write it earlier: a session that stops half way would hide the questions still open. Then move to the next date. When the last one is done, say `all caught up`.
 
 ## Rules
 
+- A fix belongs to the repository or file the question is about, which is often not the project this session is in. Work out the target from the question, run the fix there, and do not change the current project for another project's question. When you cannot reach the target, show the fix and say where to apply it.
 - Edits to `~/.claude/CLAUDE.md`, `~/.claude/rules/*`, `~/.claude/docs/guardrails/*` and any other global file need the user's explicit per-edit approval.
 - Be terse everywhere except the question restatement, which is always complete.
 - The newest dream may finish while you triage. Run `--summary` again at the end and say so if it added questions.
