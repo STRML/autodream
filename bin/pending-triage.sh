@@ -5,13 +5,15 @@
 #                                      or "no issues to address!"
 #        pending-triage.sh --list      one line per report, oldest first:
 #                                      DATE<TAB>OPEN_QUESTIONS<TAB>REPORT_PATH
+#                                      (OPEN_QUESTIONS is ? when the report does not say)
 #
 # A report is pending when its open-questions marker says more than zero and it has no
 # "## Triage decisions" heading. That heading means the report is finished, so a session
 # that is part way through one logs under "## Triage in progress" and renames the heading
 # after the last question. A report whose count cannot be read ("unknown": no marker, a
-# shape review.sh does not recognise) is not counted, the same way the band mod reads a
-# missing marker as zero. Only the last AUTODREAM_PENDING_DAYS days are looked at (default
+# shape review.sh does not recognise) is listed with a "?" count and reported on its own,
+# because review.sh opens a session for it too; calling it an empty queue would hide it.
+# Only the last AUTODREAM_PENDING_DAYS days are looked at (default
 # 14, and never a future date), so a report nobody ever triaged does not nag forever.
 # Always exits 0; a missing reports directory is an empty queue.
 
@@ -66,7 +68,9 @@ pending() {
     [[ "$d" < "$CUTOFF" || "$d" > "$TODAY" ]] && continue
     report_is_triaged "$f" && continue
     n=$(report_open_questions "$f")
-    case "$n" in ''|*[!0-9]*) continue ;; esac
+    case "$n" in
+      ''|*[!0-9]*) printf '%s\t?\t%s\n' "$d" "$f"; continue ;;
+    esac
     [ "$((10#$n))" -gt 0 ] || continue
     # A half-triaged report keeps its marker, so subtract what is already logged. One question
     # always stays: the heading is renamed only when the last one is resolved.
@@ -85,9 +89,13 @@ fi
 
 if [ -z "$ROWS" ]; then echo "no issues to address!"; exit 0; fi
 
-TOTAL=$(printf '%s\n' "$ROWS" | awk -F'\t' '{s += $2} END {print s}')
+TOTAL=$(printf '%s\n' "$ROWS" | awk -F'\t' '$2 ~ /^[0-9]+$/ {s += $2} END {print s + 0}')
+UNKNOWN=$(printf '%s\n' "$ROWS" | awk -F'\t' '$2 == "?"' | wc -l | tr -d ' ')
 FIRST=$(printf '%s\n' "$ROWS" | head -1 | cut -f1)
 LAST=$(printf '%s\n' "$ROWS" | tail -1 | cut -f1)
+if [ "$FIRST" = "$LAST" ]; then SPAN="from $FIRST"; else SPAN="from dates $FIRST to $LAST"; fi
 NOUN=issues; [ "$TOTAL" -eq 1 ] && NOUN=issue
-if [ "$FIRST" = "$LAST" ]; then echo "now triaging $TOTAL $NOUN from $FIRST"
-else echo "now triaging $TOTAL $NOUN from dates $FIRST to $LAST"; fi
+RNOUN=reports; [ "$UNKNOWN" -eq 1 ] && RNOUN=report
+if [ "$UNKNOWN" -eq 0 ]; then echo "now triaging $TOTAL $NOUN $SPAN"
+elif [ "$TOTAL" -eq 0 ]; then echo "now triaging $UNKNOWN $RNOUN with an unreadable question count $SPAN"
+else echo "now triaging $TOTAL $NOUN $SPAN, plus $UNKNOWN $RNOUN with an unreadable question count"; fi

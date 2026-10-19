@@ -43,7 +43,7 @@ Start a dream, then work through the open questions that earlier dreams raised a
    "${AUTODREAM_DIR:-$HOME/.claude/autodream}/pending-triage.sh" --list
    ```
 
-   Each line is `date`, tab, open-question count, tab, report path. Read one report at a time and keep it out of the reply.
+   Each line is `date`, tab, open-question count, tab, report path. A count of `?` means the report does not say how many questions it holds: read its Open questions section and count them yourself. Read one report at a time and keep it out of the reply.
 
 6. Walk its open questions, one per turn:
 
@@ -52,7 +52,7 @@ Start a dream, then work through the open questions that earlier dreams raised a
    3. Recommend one concrete action from (c). Be opinionated.
    4. Wait for approve, modify, skip or discuss.
    5. If approved, execute it. If modified, incorporate the change, confirm, then execute. If skipped or discussed, log the decision as one line.
-   6. Log every decision as one line under a `## Triage in progress` heading at the bottom of that report (create it if absent). Questions already logged there are done: skip them when you resume a report.
+   6. Log every decision as one bullet line (starting with `- `) under a `## Triage in progress` heading at the bottom of that report (create it if absent). Questions already logged there are done: skip them when you resume a report.
 
 7. When the last question of a report is resolved, rename its heading to `## Triage decisions` and add a short summary under it. That heading is what marks a report as addressed, so never write it earlier: a session that stops half way would hide the questions still open. Then move to the next date. When the last one is done, say `all caught up`.
 

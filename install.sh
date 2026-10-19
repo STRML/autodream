@@ -182,7 +182,14 @@ if [ "$SKILL" = 1 ] && [ -z "${AUTODREAM_SKILLS_DIR:-}" ] && [ "$(printf '%s' "$
 elif [ "$SKILL" = 1 ]; then
   SKILLS_DIR="${AUTODREAM_SKILLS_DIR:-$HOME/.claude/skills}"
   if [ "$DRY" = 1 ]; then dry "mkdir -p $SKILLS_DIR"; else mkdir -p "$SKILLS_DIR"; fi
-  link "$REPO_DIR/skills/autodream" "$SKILLS_DIR/autodream" || echo "  WARNING: /autodream skill not linked (see above); re-run after moving $SKILLS_DIR/autodream" >&2
+  # A skill the user already has at this name (their own link or directory) is theirs: only an
+  # earlier link to this repo's skill is replaced.
+  if { [ -e "$SKILLS_DIR/autodream" ] || [ -L "$SKILLS_DIR/autodream" ]; } \
+     && [ "$(readlink "$SKILLS_DIR/autodream" 2>/dev/null)" != "$REPO_DIR/skills/autodream" ]; then
+    echo "  /autodream skill not linked: $SKILLS_DIR/autodream already exists and is not this repo's. Move it, then re-run install.sh." >&2
+  else
+    link "$REPO_DIR/skills/autodream" "$SKILLS_DIR/autodream" || echo "  WARNING: /autodream skill not linked (see above); re-run after moving $SKILLS_DIR/autodream" >&2
+  fi
 fi
 
 if [ "$DRY" = 1 ]; then dry "chmod +x bin/*.sh adapters/*/adapter.sh"; else

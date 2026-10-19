@@ -80,7 +80,10 @@ rm -rf "$r"
 echo "# a report whose count cannot be read"
 r=$(new_env)
 printf '# Autodream\n\nno marker here\n' > "$r/dreams/$(ago 1).md"
-assert_eq "$(run "$r" --summary)" "no issues to address!" "no marker and no recognisable section is not counted"
+assert_eq "$(run "$r" --summary)" "now triaging 1 report with an unreadable question count from $(ago 1)" "an unreadable count is named, never called an empty queue"
+assert_eq "$(run "$r" --list | cut -f2)" "?" "and --list shows a ? count"
+report "$r/dreams" "$(ago 2)" 2
+assert_eq "$(run "$r" --summary)" "now triaging 2 issues from dates $(ago 2) to $(ago 1), plus 1 report with an unreadable question count" "readable and unreadable reports are reported together"
 rm -rf "$r"
 
 echo "# a report part way through triage stays pending"
