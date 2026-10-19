@@ -2,6 +2,11 @@
 
 All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
+## 2026-10-19
+
+### Changed
+- **The report's two contracts are read in `bin/report-format.sh` and nowhere else.** The open-questions marker sed was copied in `report-format.sh`, `notify.sh` and `question-streaks.sh`, the marker presence grep in three places in `run.sh`, and the sentinel grep and awk in `run.sh` (four times) and `triage-dream.sh`. They are now `report_marker_count`, `report_has_marker`, `report_has_sentinel`, `report_body`, `report_after_sentinel` and `report_pin_lines`. The marker count stays strict (a well-formed comment) and the presence check stays loose (any line with the key), so `question-streaks.sh` still refuses to clear a streak on a malformed marker while `run.sh` still accepts a truncated report that carries the key. `run.sh` stops at startup with `FATAL` if the lib is missing, instead of failing on the first report read. `tests/report-format.sh` compares each helper with the code it replaced over 16 fixtures, a missing file among them (119 assertions).
+
 ## 2026-10-18
 
 ### Added
