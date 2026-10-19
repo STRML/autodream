@@ -143,6 +143,9 @@ case "$cmd" in
     [ "$#" -ge 1 ] && [ -n "$1" ] || exit 2
     # The L1 overlay applies here too (advisor off, no local provider probes, no first-turn
     # recall). Glob and Read only: the report and the pins come back on stdout.
+    # The system prompt is prompts/L2_SYSTEM.txt, read through the loader. No file means no argv.
+    # shellcheck source=/dev/null
+    sysprompt=$(. "$BIN/l2-prompt.sh" && l2_system_prompt) || exit 2
     printf '%s\0' "$(omp_bin)" \
       --allow-home \
       -p \
@@ -151,7 +154,7 @@ case "$cmd" in
       --config "${NO_ADVISOR_CFG:-$ADIR/l1-no-advisor.yml}" \
       --model "$1" \
       --tools=Glob,Read \
-      --append-system-prompt 'Headless aggregator. Read the per-session findings JSONs from the findings directory given on line 1 of the prompt, then produce the COMPLETE report only on standard output, ending with a line containing exactly AUTODREAM_REPORT_END. After that line, if you propose memory pins, print them between a line AUTODREAM_PINS_BEGIN and a line AUTODREAM_PINS_END, one JSON object per line. Do not use Write or Edit anywhere. Those paths are literal strings, not shell variables — never $-expand them. After the pin block print one line: report: <literal path from line 2 of the prompt> then a 3-line summary (sessions reviewed, findings, pins proposed), then exit.'
+      --append-system-prompt "$sysprompt"
     ;;
 
   skills-inventory)

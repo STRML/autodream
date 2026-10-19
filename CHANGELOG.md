@@ -2,6 +2,11 @@
 
 All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
+## 2026-10-19
+
+### Changed
+- **The L2 system prompt is one file, `prompts/L2_SYSTEM.txt`.** The same 657 characters sat inline in the claude adapter, the omp adapter and `run.sh`'s built-in claude fallback. They state the stdout grammar that `bin/report-format.sh` parses (the report, `AUTODREAM_REPORT_END`, the optional pin block, the summary), so a drift between a copy and the parser would show up only as an L2 run whose output the runner cannot split. `bin/l2-prompt.sh` reads the file and returns 2 with a message when it cannot, and both adapters' `l2-argv` then exit 2 and print no argv, where an engine without the prompt would otherwise run with no word on where the report goes. `run.sh`'s fallback builds no argv without it and logs why. `install.sh` links the prompt and the loader. `tests/l2-prompt.sh` (25 assertions) pins the text, the missing-file failures and that no script keeps an inline copy.
+
 ## 2026-10-18
 
 ### Added

@@ -4042,10 +4042,19 @@ PY
     # supports, see enumerate_for) still has to deliver the night. The fallback is claude-only,
     # for the same reason enumerate_for's is: it hardcodes one engine's invocation.
     log "  the claude adapter has no l2-argv here; using the built-in claude invocation"
-    L2_ARGV=("$CLAUDE_BIN" --print --permission-mode bypassPermissions ${L2_MODEL:+--model "$L2_MODEL"} \
-      --no-session-persistence --tools Glob Read --disable-slash-commands --strict-mcp-config \
-      --settings '{"disableAllHooks":true}' \
-      --append-system-prompt "Headless aggregator. Read the per-session findings JSONs from the findings directory given on line 1 of the prompt, then produce the COMPLETE report only on standard output, ending with a line containing exactly AUTODREAM_REPORT_END. After that line, if you propose memory pins, print them between a line AUTODREAM_PINS_BEGIN and a line AUTODREAM_PINS_END, one JSON object per line. Do not use Write or Edit anywhere. Those paths are literal strings, not shell variables — never \$-expand them. After the pin block print one line: report: <literal path from line 2 of the prompt> then a 3-line summary (sessions reviewed, findings, pins proposed), then exit.")
+    # The system prompt is prompts/L2_SYSTEM.txt, the same text the adapters read. Without it no
+    # argv is built at all (the warning below fires), because an L2 run with no word on where the
+    # report goes only looks like a night's work.
+    # shellcheck source=/dev/null
+    L2_SYS=$(_l=$(find_lib l2-prompt.sh) && . "$_l" && l2_system_prompt) || L2_SYS=""
+    if [ -n "$L2_SYS" ]; then
+      L2_ARGV=("$CLAUDE_BIN" --print --permission-mode bypassPermissions ${L2_MODEL:+--model "$L2_MODEL"} \
+        --no-session-persistence --tools Glob Read --disable-slash-commands --strict-mcp-config \
+        --settings '{"disableAllHooks":true}' \
+        --append-system-prompt "$L2_SYS")
+    else
+      log "WARNING: the built-in claude invocation needs prompts/L2_SYSTEM.txt through bin/l2-prompt.sh, and neither could be read"
+    fi
   fi
   if [ "${#L2_ARGV[@]}" -eq 0 ]; then
     log "WARNING: the $L2_ENGINE adapter produced no L2 command; every L2 attempt will fail"
