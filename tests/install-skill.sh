@@ -81,9 +81,27 @@ printf 'mine\n' > "$SANDBOX/home/.claude/skills/autodream/SKILL.md"
 install -- "$SANDBOX/home/.claude"; rc=$?
 assert_eq "$rc" "0" "the install succeeds"
 assert_eq "$(cat "$SANDBOX/home/.claude/skills/autodream/SKILL.md")" "mine" "the user's skill is untouched"
-assert_grep "$SANDBOX/install.out" "refusing to install over it" "the install says why"
+assert_grep "$SANDBOX/install.out" "already exists and is not this repo's" "the install says why"
 assert_grep "$SANDBOX/install.out" "/autodream skill not linked" "and that the skill is missing"
 linked "$SANDBOX/home/.claude/autodream/run.sh" "the scripts are still linked"
+
+echo "# a symlink the user already has at that name is not replaced"
+new_sandbox
+mkdir -p "$SANDBOX/home/.claude/skills" "$SANDBOX/mine"
+printf 'mine\n' > "$SANDBOX/mine/SKILL.md"
+ln -s "$SANDBOX/mine" "$SANDBOX/home/.claude/skills/autodream"
+install -- "$SANDBOX/home/.claude"; rc=$?
+assert_eq "$rc" "0" "the install succeeds"
+assert_eq "$(readlink "$SANDBOX/home/.claude/skills/autodream")" "$SANDBOX/mine" "the user's link still points at their skill"
+assert_grep "$SANDBOX/install.out" "already exists and is not this repo's" "and the install says so"
+
+echo "# a link to this repo's skill is refreshed"
+new_sandbox
+mkdir -p "$SANDBOX/home/.claude/skills"
+ln -s "$REPO/skills/autodream" "$SANDBOX/home/.claude/skills/autodream"
+install -- "$SANDBOX/home/.claude"; rc=$?
+assert_eq "$rc" "0" "a re-install succeeds"
+assert_eq "$(readlink "$SANDBOX/home/.claude/skills/autodream")" "$REPO/skills/autodream" "and the link is still ours"
 
 echo "# a link that cannot be made is reported, not announced as done"
 new_sandbox
