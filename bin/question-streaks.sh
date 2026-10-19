@@ -83,6 +83,13 @@ _src="${BASH_SOURCE[0]}"; _lib="$(dirname "$_src")/lib-install-dir.sh"
 resolve_install_dir "$_src"
 _rf="$(dirname "$_src")/report-format.sh"
 [ -r "$_rf" ] || _rf="$(dirname "$(readlink "$_src" 2>/dev/null || echo "$_src")")/report-format.sh"
+if [ ! -r "$_rf" ]; then
+  # Without the lib every report reads as "no marker", which would freeze every streak behind a
+  # message about the report. Say what is wrong. `update` still exits 0, as the header promises.
+  echo "question-streaks: report-format.sh not found beside $_src or its link target; streaks not touched" >&2
+  [ "${1:-}" = update ] && exit 0
+  exit 1
+fi
 # shellcheck source=/dev/null
 . "$_rf"
 STATE="${AUTODREAM_QUESTION_STATE:-$AUTODREAM_DIR/question-streaks.tsv}"
