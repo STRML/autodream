@@ -48,6 +48,11 @@ install -- "$SANDBOX/home/.claude/"; rc=$?
 assert_eq "$rc" "0" "the install succeeds"
 assert_eq "$(readlink "$SANDBOX/home/.claude/skills/autodream")" "$REPO/skills/autodream" "the skill is linked"
 
+new_sandbox
+install -- "$SANDBOX/home/.claude//"; rc=$?
+assert_eq "$rc" "0" "a doubled trailing slash installs"
+assert_eq "$(readlink "$SANDBOX/home/.claude/skills/autodream")" "$REPO/skills/autodream" "and still links the skill"
+
 echo "# a custom install dir is not linked, because the skill would not find the scripts"
 new_sandbox
 install -- "$SANDBOX/target"; rc=$?

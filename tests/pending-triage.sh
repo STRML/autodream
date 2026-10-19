@@ -92,6 +92,13 @@ printf -- '- question 2: skipped\n- question 3: approved\n' >> "$r/dreams/$(ago 
 assert_eq "$(run "$r" --summary)" "now triaging 1 issue from $(ago 1)" "one question always stays until the heading is renamed"
 rm -rf "$r"
 
+echo "# a zero-padded marker is a decimal"
+r=$(new_env)
+report "$r/dreams" "$(ago 1)" 3
+sed -i.bak 's/open-questions=3/open-questions=08/' "$r/dreams/$(ago 1).md"
+assert_eq "$(run "$r" --summary)" "now triaging 8 issues from $(ago 1)" "08 reads as eight, not as an invalid octal"
+rm -rf "$r"
+
 echo "# a date in the future is outside the window"
 r=$(new_env)
 report "$r/dreams" "$(pdate_shift "$TODAY" 3 d)" 2
