@@ -43,8 +43,8 @@ old_pins(){
     }' "$1" 2>/dev/null
 }
 
+# Inside the suite's own temp root, which suite_tmp removes on every way out.
 D=$(mktemp -d "${TMPDIR:-/tmp}/ccrf.XXXXXX")
-trap 'rm -rf "$D"' EXIT
 
 fx(){ printf '%b' "$2" > "$D/$1"; }
 fx normal   '# R\n\nbody\n<!-- autodream:open-questions=3 -->\nAUTODREAM_REPORT_END\nAUTODREAM_PINS_BEGIN\n{"a":1}\nnot json\n{"b":2}\nAUTODREAM_PINS_END\nreport: /x\nsummary\n'
@@ -116,11 +116,39 @@ assert_eq "$(report_open_questions "$D/normal")" "3" "report_open_questions read
 assert_eq "$(report_open_questions "$D/empty")" "unknown" "and stays unknown when it cannot tell"
 
 echo "# the callers use the lib and not their own copy"
+# Each caller must call the helper it replaced (a mention of the file name proves nothing: an error
+# message would do), and must load the lib on a line of its own.
+uses(){ # $1=script $2=helper
+  if grep -qE "^[^#]*\\b$2\\b" "$REPO/bin/$1"; then ok "bin/$1 calls $2"; else no "bin/$1 does not call $2"; fi
+}
+uses notify.sh report_marker_count
+uses question-streaks.sh report_marker_count
+uses triage-dream.sh report_has_sentinel
+uses triage-dream.sh report_body
+uses run.sh report_has_marker
+uses run.sh report_has_sentinel
+uses run.sh report_body
+uses run.sh report_after_sentinel
+uses run.sh report_pin_lines
 for f in notify.sh question-streaks.sh triage-dream.sh run.sh; do
-  if grep -qE "report-format\\.sh" "$REPO/bin/$f"; then ok "bin/$f sources report-format.sh"; else no "bin/$f does not source report-format.sh"; fi
+  # shellcheck disable=SC2016 # the dollar signs are literal: the regex matches the script's own source line
+  if grep -qE '^[[:space:]]*\. "\$(_rf|_lib)"' "$REPO/bin/$f" && grep -q 'report-format\.sh' "$REPO/bin/$f"; then ok "bin/$f sources report-format.sh"; else no "bin/$f does not source report-format.sh"; fi
 done
-inline=$(grep -nE "sed -n 's/\\.\\*<!-- \\*autodream:open-questions=|awk '/\\^AUTODREAM_REPORT_END" "$REPO"/bin/*.sh | grep -v 'bin/report-format.sh' || true)
-assert_eq "$inline" "" "no other script keeps an inline copy of the marker sed or the sentinel awk"
+# Any spelling of the marker or sentinel read, strict or loose, belongs in the lib. Comments are skipped.
+inline=$(grep -nE "autodream:open-questions=|\\^AUTODREAM_REPORT_END" "$REPO"/bin/*.sh | grep -v 'bin/report-format.sh' | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' | grep -E "grep|sed|awk" || true)
+assert_eq "$inline" "" "no other script reads the marker or the sentinel with its own grep, sed or awk"
+
+echo "# a missing lib is loud, and costs the documented exit codes nothing"
+BARE="$D/bare"; mkdir -p "$BARE"
+cp "$REPO/bin/question-streaks.sh" "$REPO/bin/notify.sh" "$REPO/bin/portable.sh" "$REPO/bin/lib-install-dir.sh" "$BARE/"
+printf '# R\n<!-- autodream:open-questions=1 -->\n' > "$D/r.md"
+out=$(AUTODREAM_DIR="$D/ad" bash "$BARE/question-streaks.sh" update "$D/r.md" 2>&1); rc=$?
+assert_eq "$rc" "0" "question-streaks.sh update still exits 0 without the lib"
+case "$out" in *"report-format.sh not found"*) ok "and says the lib is missing" ;; *) no "update said nothing about the missing lib ($out)" ;; esac
+AUTODREAM_DIR="$D/ad" bash "$BARE/question-streaks.sh" status >/dev/null 2>&1; assert_eq "$?" "1" "any other command fails"
+out=$(AUTODREAM_DIR="$D/ad" bash "$BARE/notify.sh" "$D/r.md" 2>&1); rc=$?
+assert_eq "$rc" "1" "notify.sh fails without the lib"
+case "$out" in *"report-format.sh not found"*) ok "and says why" ;; *) no "notify.sh said nothing about the missing lib ($out)" ;; esac
 
 printf '\npassed: %s   failed: %s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

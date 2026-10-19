@@ -47,6 +47,7 @@ _src="${BASH_SOURCE[0]}"; _lib="$(dirname "$_src")/lib-install-dir.sh"
 resolve_install_dir "$_src"
 _rf="$(dirname "$_src")/report-format.sh"
 [ -r "$_rf" ] || _rf="$(dirname "$(readlink "$_src" 2>/dev/null || echo "$_src")")/report-format.sh"
+[ -r "$_rf" ] || { echo "notify: report-format.sh not found beside $_src or its link target" >&2; exit 1; }
 # shellcheck source=/dev/null
 . "$_rf"
 INBOX_DIR="$AUTODREAM_DIR/inbox"
