@@ -204,41 +204,9 @@ if [ "$AUTODREAM_TRIAGE_SURFACE" = "cmux" ]; then
     # fails on a non-empty dir. Kept separate, the claim dir stays empty and
     # both names still match the review-launched-* prune glob.
     LAUNCH_CONFIRMED="$LAUNCH_MARKER.confirmed"
-    # Users upgrading from the round-1 code carry a touch-created FILE
-    # review-launched-$DATE (date-bound, no content key). Honor it as a real
-    # launch and migrate it to the confirmed token so the new key owns state
-    # from here on — otherwise the same report opens a second workspace
-    # post-upgrade on the very day it was already triaged.
-    #
     if [ ! -f "$CLAUDE_BIN" ] || [ ! -x "$CLAUDE_BIN" ]; then
       echo "review.sh: claude binary not found or not executable ($CLAUDE_BIN); not launching triage workspace" >&2
       exit 1
-    fi
-    # Legacy round-1 marker migration, gated on the SAME preflight as a real
-    # launch: stamping a confirmed token for a workspace whose claude cannot run
-    # would make every later trigger dedupe a report that was never triaged
-    # (deepseek 7.4). The mv PRESERVES the legacy marker's mtime, which on a
-    # late upgrade (>14 days) would be pruned immediately by the reap below —
-    # touch rebinds the token's mtime to now so the just-created migration
-    # survives (deepseek 7.3).
-    #
-    # But only when the marker is strictly NEWER than the current report: a
-    # date was triaged, then the report rebuilt for that date (new content, new
-    # digest), the legacy date-only marker must NOT be migrated onto the new
-    # report's key — that would mark unreviewed content as confirmed and
-    # swallow its triage. Compare mtimes; same-second ties (a rebuild landing in
-    # the same wall-clock second as the legacy touch) are treated as
-    # not-newer — migrate only when the legacy launch is unambiguously after the
-    # current report, letting a tied/older report open for triage (executor 6.1).
-    LEGACY_MARKER="$LOGS_DIR/review-launched-$DATE"
-    if [ -f "$LEGACY_MARKER" ]; then
-      LEGACY_MTIME=$(pstat_mtime "$LEGACY_MARKER" || echo 0)
-      if [ "$LEGACY_MTIME" -gt "$(pstat_mtime "$REPORT" || echo 0)" ]; then
-        echo "review.sh: migrating legacy marker $LEGACY_MARKER -> $LAUNCH_CONFIRMED"
-        mv "$LEGACY_MARKER" "$LAUNCH_CONFIRMED" 2>/dev/null && touch "$LAUNCH_CONFIRMED"
-      else
-        echo "review.sh: legacy marker $LEGACY_MARKER not newer than the current report; not migrated (may be rebuilt content)"
-      fi
     fi
     CLAIM_GRACE=900
     CLAIMED_OWN=0
