@@ -3023,7 +3023,17 @@ run() {
     fatal_exit; return 1
   fi
   # And an engine that cannot print a command at all (omp with no model resolved, an adapter
-  # without l2-argv) is refused for the same reason. claude is exempt: it has a built-in fallback.
+  # without l2-argv) is refused for the same reason. The argv probe skips claude, whose built-in
+  # fallback builds the command itself.
+  #
+  # The system prompt is checked for every engine, claude included: its fallback reads the same file,
+  # and an engine started without it runs L2 with no word on where the report goes. Found here, the
+  # night stops before L1 is paid for; found later, every L2 attempt fails after it.
+  # shellcheck source=/dev/null
+  if ! (_l=$(find_lib l2-prompt.sh) && . "$_l" && l2_system_prompt >/dev/null 2>&1); then
+    log_fatal "prompts/L2_SYSTEM.txt (read through bin/l2-prompt.sh) was not found beside run.sh, its link target or in AUTODREAM_DIR. Refusing to start."
+    fatal_exit; return 1
+  fi
   _l2e="${AUTODREAM_L2_ENGINE:-${ENABLED_ADAPTERS%% *}}"
   if [ "$_l2e" != "claude" ] && [ -n "$_l2e" ]; then
     _l2m=$(adapter_l2_model "$_l2e" 2>/dev/null) || _l2m=""
