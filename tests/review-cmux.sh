@@ -12,8 +12,6 @@
 #   confirmed    $LOGS_DIR/review-launched-$DATE-$DIGEST.confirmed (written
 #                only after cmux returns success — dedup keys on THIS, so an
 #                unconfirmed claim can age out and be reclaimed)
-#   legacy file  $LOGS_DIR/review-launched-$DATE   (round-1 touch-marker,
-#                migrated into a confirmed token on first run)
 #
 # The mock cmux (like the mock claude in review-skip.sh) records that it was
 # invoked and can be told to fail. review.sh runs cmux as
@@ -281,31 +279,6 @@ test_in_progress_claim_suppresses(){
   assert_grep "$root/out" 'already in progress' "in-progress notice is emitted"
 }
 
-# Users upgrading from the round-1 code have a touch-created FILE
-# review-launched-$DATE (date-only key). It must be honored as a real launch
-# AND migrated into a confirmed token, so the same report doesn't pop up a
-# second workspace right after upgrade.
-test_legacy_marker_is_migrated(){
-  local root; root=$(setup_env)
-  mk_report "$root" 2020-01-02 "$REPORT_OPEN"
-  mkdir -p "$root/autodream/logs"
-  # The migration base is the report mtime; force the report to an OLD stamp so
-  # the legacy marker (touched after) is unambiguously STRICTLY newer — BSD
-  # seconds-resolution would otherwise tie them and (correctly) refuse to
-  # migrate, which is not what this test is about.
-  touch -t 202006010000 "$root/dreams/2020-01-02.md"
-  touch "$root/autodream/logs/review-launched-2020-01-02"
-  run_review "$root" 2020-01-02
-  assert_eq "$(cmux_calls "$root")" 0 "legacy marker suppresses a duplicate launch"
-  assert_grep "$root/out" 'migrating legacy marker' "migration is reported"
-  [ -f "$(marker_confirmed "$root" 2020-01-02)" ] \
-    && ok "legacy marker becomes a confirmed token" \
-    || no "legacy marker was not migrated"
-  [ ! -e "$root/autodream/logs/review-launched-2020-01-02" ] \
-    && ok "legacy marker file no longer lingers" \
-    || no "legacy marker file still present"
-}
-
 # The scheduled review job forces AUTODREAM_TRIAGE_SURFACE=cmux. If cmux is
 # missing, review.sh must fail non-zero (no headless inline claude from a
 # launchd job) when stdin is not a TTY — a manual terminal still gets the
@@ -383,43 +356,6 @@ test_unwritable_claim_dir_fails(){
   assert_eq "$rc" 1 "unwritable claim dir exits non-zero (not 'in progress')"
   assert_grep "$root/out" 'cannot create claim' "claim I/O error is named"
   assert_eq "$(cmux_calls "$root")" 0 "no cmux launch when the claim could not be written"
-}
-
-# A legacy date-only marker that predates the current report (the date was
-# triaged, then the report rebuilt with new content before upgrade) must NOT be
-# migrated onto the new digest — that would mark unreviewed content confirmed
-# and swallow its triage. The report must open again.
-test_legacy_marker_stale_is_not_migrated(){
-  local root; root=$(setup_env)
-  mkdir -p "$root/autodream/logs"
-  # Legacy marker OLDER than the report: touch a stale marker at an ancient
-  # mtime, then write the report after it.
-  touch -t 202006010000 "$root/autodream/logs/review-launched-2020-01-02"
-  mk_report "$root" 2020-01-02 "$REPORT_OPEN"
-  run_review "$root" 2020-01-02
-  assert_eq "$(cmux_calls "$root")" 1 "stale legacy marker does not suppress a rebuilt report"
-  assert_grep "$root/out" 'not newer than the current report' "stale legacy marker is reported as not migrated"
-  [ -f "$(marker_confirmed "$root" 2020-01-02)" ] \
-    && ok "rebuilt report gets its own confirmed token" \
-    || no "rebuilt report has no confirmed token"
-}
-
-# A legacy marker and a rebuilt report sharing the same wall-clock second (BSD
-# seconds-resolution mtime) must NOT migrate: the legacy launch is not
-# unambiguously newer, so the rebuilt report opens for triage instead of being
-# marked confirmed (executor 6.1).
-test_legacy_marker_same_second_tie_not_migrated(){
-  local root; root=$(setup_env)
-  mkdir -p "$root/autodream/logs"
-  mk_report "$root" 2020-01-02 "$REPORT_OPEN"
-  touch -t 202006011200 "$root/dreams/2020-01-02.md"
-  touch -t 202006011200 "$root/autodream/logs/review-launched-2020-01-02"   # tie
-  run_review "$root" 2020-01-02
-  assert_eq "$(cmux_calls "$root")" 1 "same-second legacy tie opens the report (no migration)"
-  assert_grep "$root/out" 'not newer than the current report' "tie is reported as not migrated"
-  [ -f "$(marker_confirmed "$root" 2020-01-02)" ] \
-    && ok "tied report gets its own confirmed token" \
-    || no "tied report has no confirmed token"
 }
 
 # A workspace whose embedded claude cannot start is a confirmed dead end: the
@@ -507,26 +443,6 @@ MOCK
   assert_grep "$root/out2" 'already launched for this report' "dedup notice fired"
 }
 
-# A late upgrade (>14 days after round-1's launch) still migrates: the legacy
-# marker carries an old mtime, and mv would preserve it into the confirmed
-# token — which the unconditional 14-day reap would then delete immediately,
-# reopening the workspace (deepseek 7.3). The post-migration touch must rebind
-# the token's mtime to now so it survives the prune.
-test_legacy_marker_late_upgrade_survives_prune(){
-  local root; root=$(setup_env)
-  mkdir -p "$root/autodream/logs"
-  # Report older still: legacy launch is AFTER the report (migrates) but both
-  # are >14 days old (would be pruned).
-  touch -t 202001011200 "$root/dreams/2020-01-02.md"
-  touch -t 202001021200 "$root/autodream/logs/review-launched-2020-01-02"
-  run_review "$root" 2020-01-02
-  assert_eq "$(cmux_calls "$root")" 0 "late-upgrade legacy marker suppresses a duplicate launch"
-  assert_grep "$root/out" 'migrating legacy marker' "late-upgrade migration is reported"
-  [ -f "$(marker_confirmed "$root" 2020-01-02)" ] \
-    && ok "late-upgrade migrated token survives the 14-day reap" \
-    || no "late-upgrade migrated token was pruned (duplicate popup)"
-}
-
 # ---------------------------------------------------------------------------
 
 [ -x "$REVIEW" ] || { echo "FATAL: $REVIEW not executable"; exit 1; }
@@ -542,10 +458,6 @@ test_stale_markers_are_pruned
 test_confirmed_marker_survives_grace
 test_abandoned_claim_is_reclaimed
 test_in_progress_claim_suppresses
-test_legacy_marker_is_migrated
-test_legacy_marker_stale_is_not_migrated
-test_legacy_marker_same_second_tie_not_migrated
-test_legacy_marker_late_upgrade_survives_prune
 test_headless_missing_cmux_fails
 test_interactive_missing_cmux_falls_back_inline
 test_logs_dir_failure_exits_nonzero
