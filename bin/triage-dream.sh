@@ -51,6 +51,9 @@ find_file() { # $1=basename -> first readable copy
   done
   return 1
 }
+_rf=$(find_file report-format.sh) || { log "ERROR: report-format.sh not found beside $SRC"; exit 2; }
+# shellcheck source=/dev/null
+. "$_rf"
 
 # The config, with the caller's environment winning over it (run.sh's rule).
 CONFIG_FILE="${AUTODREAM_CONFIG:-$AUTODREAM_DIR/config}"
@@ -167,12 +170,11 @@ RC=$?
 clean_work_bucket
 
 # ---- The runner writes the file, from the text before the last sentinel ----
-if ! grep -q '^AUTODREAM_REPORT_END$' "$STDOUT_FILE" 2>/dev/null; then
+if ! report_has_sentinel "$STDOUT_FILE"; then
   log "no AUTODREAM_REPORT_END sentinel in the engine's output (exit $RC); wrote nothing"
   exit 1
 fi
-awk '/^AUTODREAM_REPORT_END$/ { last=NR } { line[NR]=$0 } END { for (i=1; i<last; i++) print line[i] }' \
-  "$STDOUT_FILE" > "$TRIAGE_PATH.tmp"
+report_body "$STDOUT_FILE" > "$TRIAGE_PATH.tmp"
 if [ ! -s "$TRIAGE_PATH.tmp" ]; then
   rm -f "$TRIAGE_PATH.tmp"
   log "the engine delivered an empty worklist (exit $RC); wrote nothing"

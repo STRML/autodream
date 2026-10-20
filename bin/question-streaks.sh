@@ -81,6 +81,17 @@ _src="${BASH_SOURCE[0]}"; _lib="$(dirname "$_src")/lib-install-dir.sh"
 # shellcheck source=/dev/null
 . "$_lib"
 resolve_install_dir "$_src"
+_rf="$(dirname "$_src")/report-format.sh"
+[ -r "$_rf" ] || _rf="$(dirname "$(readlink "$_src" 2>/dev/null || echo "$_src")")/report-format.sh"
+if [ ! -r "$_rf" ]; then
+  # Without the lib every report reads as "no marker", which would freeze every streak behind a
+  # message about the report. Say what is wrong. `update` still exits 0, as the header promises.
+  echo "question-streaks: report-format.sh not found beside $_src or its link target; streaks not touched" >&2
+  [ "${1:-}" = update ] && exit 0
+  exit 1
+fi
+# shellcheck source=/dev/null
+. "$_rf"
 STATE="${AUTODREAM_QUESTION_STATE:-$AUTODREAM_DIR/question-streaks.tsv}"
 ESCALATE_AT="${AUTODREAM_QUESTION_ESCALATE_AT:-3}"
 
@@ -175,10 +186,6 @@ acquire_lock() {
 }
 release_lock() { rmdir "$LOCK" 2>/dev/null || true; }
 
-marker_of() { # $1=report -> the report's own question count, or empty
-  sed -n 's/.*<!-- *autodream:open-questions=\([0-9][0-9]*\) *-->.*/\1/p' "$1" 2>/dev/null | head -1
-}
-
 cmd_update() {
   local report="${1:?usage: question-streaks.sh update <report.md> [findings-dir]}"
   local findings="${2:-}"
@@ -219,7 +226,7 @@ cmd_update() {
   tmp="$(mktemp -d)" || return 0
 
   titles_of "$report" > "$tmp/titles" 2>/dev/null || : > "$tmp/titles"
-  local n marker; n=$(nlines "$tmp/titles"); marker=$(marker_of "$report")
+  local n marker; n=$(nlines "$tmp/titles"); marker=$(report_marker_count "$report")
 
   # No marker means the report is incomplete. This is stricter than run.sh's report_complete,
   # which accepts any line containing `autodream:open-questions=`. An L2 run truncated

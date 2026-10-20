@@ -45,6 +45,11 @@ _src="${BASH_SOURCE[0]}"; _lib="$(dirname "$_src")/lib-install-dir.sh"
 # shellcheck source=/dev/null
 . "$_lib"
 resolve_install_dir "$_src"
+_rf="$(dirname "$_src")/report-format.sh"
+[ -r "$_rf" ] || _rf="$(dirname "$(readlink "$_src" 2>/dev/null || echo "$_src")")/report-format.sh"
+[ -r "$_rf" ] || { echo "notify: report-format.sh not found beside $_src or its link target" >&2; exit 1; }
+# shellcheck source=/dev/null
+. "$_rf"
 INBOX_DIR="$AUTODREAM_DIR/inbox"
 # How the inbox file gets opened. This is a shell snippet, not a binary path, so an
 # editor that needs flags ("code -g") works without a wrapper. The default is plain
@@ -133,7 +138,7 @@ QUESTIONS=$(printf "%s" "$QUESTIONS" | awk 'NF{p=1} p')
 # prose, and counting every tier at once double-counts the sub-bullets under an item.
 # A "None ..." lead-in is the shape review.sh already recognises as zero and must stay
 # silent; without that case the prose tier turns every quiet night into a false pop.
-MARKER=$(sed -n 's/.*<!-- *autodream:open-questions=\([0-9][0-9]*\) *-->.*/\1/p' "$REPORT" | head -1)
+MARKER=$(report_marker_count "$REPORT")
 count_matching(){ printf "%s\n" "$QUESTIONS" | grep -cE "$1" || true; }
 if [ -n "$MARKER" ]; then
   COUNT="$MARKER"

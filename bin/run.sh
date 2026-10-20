@@ -296,6 +296,11 @@ _lib=$(find_lib lib-project.sh) && { # shellcheck source=/dev/null
   . "$_lib"; }
 _lib=$(find_lib adapters.sh) && { # shellcheck source=/dev/null
   . "$_lib"; }
+# The report contract (marker and sentinel). Not optional: an unfound lib would turn every read of
+# a report into "command not found", so stop before any work instead of after L1.
+_lib=$(find_lib report-format.sh) || { echo "FATAL: report-format.sh not found beside run.sh or its link target" >&2; exit 1; }
+# shellcheck source=/dev/null
+. "$_lib"
 PREFLIGHT=$(find_lib preflight.sh) || PREFLIGHT="$SCRIPT_DIR/preflight.sh"
 
 PRUNE="$SCRIPT_DIR/prune-self-sessions.sh"
@@ -1473,7 +1478,7 @@ changelog_window() {
 #
 # Deliberately not `L2_RC -eq 0`: the CLI can exit non-zero after a perfectly good write.
 report_complete() {
-  [ -s "$REPORT_PATH" ] && grep -q 'autodream:open-questions=' "$REPORT_PATH" 2>/dev/null
+  [ -s "$REPORT_PATH" ] && report_has_marker "$REPORT_PATH"
 }
 
 # ---- L2 attempt diagnostics (issue 42) ----
@@ -1652,7 +1657,7 @@ sweep_stranded_pins() {
     # A forced rebuild of the target date replaces its pins; the rebuild owns them.
     [ "$label" = "$TARGET_DATE" ] && [ "${AUTODREAM_FORCE:-0}" = "1" ] && continue
     report="$DREAMS_DIR/$label.md"
-    [ -s "$report" ] && grep -q 'autodream:open-questions=' "$report" 2>/dev/null || continue
+    [ -s "$report" ] && report_has_marker "$report" || continue
     [ ! "$d/pins.jsonl" -nt "$report" ] || continue
     # Another date's own run may be in its pin step right now (autodream-now.sh runs under a
     # different launchd label). Two apply-pins on one date both read the ledger before either
@@ -2877,7 +2882,7 @@ unassembled_dates() {
     fi
     report="$DREAMS_DIR/$date_label.md"
     if [ -s "$report" ]; then
-      grep -q 'autodream:open-questions=' "$report" 2>/dev/null && continue
+      report_has_marker "$report" && continue
       # Non-empty and unmarked. Before the epoch that is a legacy report; on or after it,
       # it is a truncated capture and stays on the abandoned list. ISO dates compare
       # lexicographically, so this is chronological.
@@ -4178,7 +4183,7 @@ PY
     # lands at $REPORT_PATH. Lines after the sentinel (the pin block, the report path, the
     # summary) are appended to the run log so a stripped capture never loses them.
     L2_SENTINEL=0
-    grep -q '^AUTODREAM_REPORT_END$' "$L2_STDOUT" 2>/dev/null && L2_SENTINEL=1
+    report_has_sentinel "$L2_STDOUT" && L2_SENTINEL=1
     # ---- Pins: the block after the sentinel becomes pins.jsonl, written by the runner ----
     # Only a delivered report carries pins, and only the block that follows the LAST sentinel
     # counts, so a report that quotes the markers in its body cannot inject one. The block needs
@@ -4191,17 +4196,7 @@ PY
     # leave a complete report whose pins were never proposed (issue 72); a kill before it leaves
     # no complete report, and the rerun moves these aside and asks L2 again.
     if [ "$L2_SENTINEL" = "1" ] && [ "$PINS_SAFE" = "1" ]; then
-      if awk '
-            /^AUTODREAM_REPORT_END$/ { last = NR }
-            { line[NR] = $0 }
-            END {
-              for (i = last + 1; i <= NR; i++) {
-                if (!inb && line[i] == "AUTODREAM_PINS_BEGIN") { inb = 1; continue }
-                if (inb && line[i] == "AUTODREAM_PINS_END") { closed = 1; break }
-                if (inb) buf[++n] = line[i]
-              }
-              if (closed) for (j = 1; j <= n; j++) if (buf[j] ~ /^\{/) print buf[j]
-            }' "$L2_STDOUT" > "$FINDINGS_DIR/pins.jsonl.tmp" 2>/dev/null \
+      if report_pin_lines "$L2_STDOUT" > "$FINDINGS_DIR/pins.jsonl.tmp" \
          && [ -s "$FINDINGS_DIR/pins.jsonl.tmp" ] && mv -f "$FINDINGS_DIR/pins.jsonl.tmp" "$FINDINGS_DIR/pins.jsonl"; then
         log "wrote $(wc -l < "$FINDINGS_DIR/pins.jsonl" | tr -d ' ') proposed pin(s) from the L2 pin block"
         # The authorization list goes to disk with the pins, so a later run can still apply them
@@ -4212,8 +4207,8 @@ PY
       fi
     fi
     L2_COMPLETE=0
-    if grep -q '^AUTODREAM_REPORT_END$' "$L2_STDOUT" 2>/dev/null; then
-      if awk '/^AUTODREAM_REPORT_END$/ { last=NR } { line[NR]=$0 } END { for (i=1; i<last; i++) print line[i] }' "$L2_STDOUT" > "$REPORT_PATH.tmp" && mv "$REPORT_PATH.tmp" "$REPORT_PATH"; then
+    if report_has_sentinel "$L2_STDOUT"; then
+      if report_body "$L2_STDOUT" > "$REPORT_PATH.tmp" && mv "$REPORT_PATH.tmp" "$REPORT_PATH"; then
         L2_COMPLETE=1
       else
         log "WARNING: could not stage the sentinel-stripped report at $REPORT_PATH"
@@ -4222,7 +4217,7 @@ PY
       log "WARNING: L2 stdout carried no AUTODREAM_REPORT_END sentinel; keeping the whole capture as a degraded report (incomplete, will retry)"
       cat "$L2_STDOUT" > "$REPORT_PATH.tmp" && mv "$REPORT_PATH.tmp" "$REPORT_PATH" 2>/dev/null || true
     fi
-    awk '/^AUTODREAM_REPORT_END$/ { f=1; next } f { print }' "$L2_STDOUT" >> "$RUN_LOG" 2>/dev/null || true
+    report_after_sentinel "$L2_STDOUT" >> "$RUN_LOG" 2>/dev/null || true
     L2_DELIVERED=$L2_COMPLETE
     # Break only on a sentinel-validated capture that also carries the open-questions marker;
     # a degraded capture (sentinel absent) never satisfies the loop.
