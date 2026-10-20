@@ -2,6 +2,14 @@
 
 All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
+## 2026-10-20
+
+### Changed
+- **CI runs the test suite as four parallel shards.** One job ran every test one after another in 6 to 7 minutes of a run that took 9. `tests/run-all.sh` now takes `RUNALL_SHARD=i/n` (every n-th test and unit suite, in file order) and `RUNALL_LIST=1` (print what a shard would run), and `tests.yml` runs four shard jobs plus a `test` job that waits on them, so the check keeps its name. The separate "unit suites" step is gone: `run-all.sh` already ran every one of those suites, so it repeated 47 seconds of work. In CI each shard finishes in about 1.5 minutes where the single job needed 6 to 7. `tests/run-parallel.sh [n]` does the same on one machine (about 6 minutes against 15 to 19 sequentially). `tests/shard.sh` proves the shards partition the suite exactly for n = 2, 3, 4, 6 and 8, refuses a malformed spec, and fails if a test is called directly instead of through the gate or the workflow's matrix and `/4` disagree. The `test` job uses `!cancelled()` so a superseded, cancelled run is not painted red, and `run-parallel.sh` stops its shards on Ctrl-C.
+- **`AUTODREAM_QUESTION_LOCK_WAIT` (default 15) is how many one-second tries `question-streaks.sh` makes for a held lock.** The default is unchanged and a non-number keeps it. The streak tests hold a lock on purpose twice, to show that `clear` refuses to run while an update owns it, and waited out all 15 tries each time: 32 of the 46 seconds the slowest test in the suite took in CI, a floor no sharding can go below. They set it to 1 now.
+- **`x-bookmarks.sh` no longer waits two seconds after the last page it will fetch.** It paced pages with `sleep 2` after every fetch, including the one that ended the loop, so each run paid for a wait that gated nothing. It now sleeps only when another page follows, and `tests/x-bookmarks.sh` shims `sleep` (recording the request) so the suite stops waiting too: 24 of CI's 123 seconds in one shard, and a new test pins both the two-second pacing and the absence of the trailing wait.
+- One omp chunking assertion no longer depends on `TMPDIR` length. It parsed the first chunk's header line, which is 391 characters under a 9-character `TMPDIR` and is cut at the slimmer's 400-character cap, so a longer one made `jq` print nothing. It now checks the line's fixed prefix.
+
 ## 2026-10-19
 
 ### Changed
