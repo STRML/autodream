@@ -19,7 +19,8 @@ l2_system_prompt() {
   fi
   dir=$(cd -P "$(dirname "$self")" 2>/dev/null && pwd) || dir=""
   for f in "$dir/../prompts/L2_SYSTEM.txt" "${AUTODREAM_DIR:-}/L2_SYSTEM.txt"; do
-    if [ -r "$f" ] && [ -s "$f" ]; then cat "$f"; return 0; fi
+    # Not just non-empty: a file of blank lines would start an engine with an empty instruction.
+    if [ -r "$f" ] && grep -q '[^[:space:]]' "$f" 2>/dev/null; then cat "$f"; return 0; fi
   done
   echo "l2-prompt: prompts/L2_SYSTEM.txt not found or empty (looked beside ${dir:-the lib} and in AUTODREAM_DIR=${AUTODREAM_DIR:-unset})" >&2
   return 2

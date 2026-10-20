@@ -64,6 +64,14 @@ assert_eq "$(AUTODREAM_DIR="$T/ad" bash -c '. "$1/bin/l2-prompt.sh"; l2_system_p
 mkdir -p "$T/farm"; ln -s "$REPO/bin/l2-prompt.sh" "$T/farm/l2-prompt.sh"
 assert_eq "$(env -u AUTODREAM_DIR bash -c '. "$1/farm/l2-prompt.sh"; l2_system_prompt' _ "$T" 2>/dev/null)" "$WANT" "a symlinked lib resolves into its checkout, like an installed copy"
 
+r=$(mk_tree wsonly 0); printf '  \n\n\t\n' > "$r/prompts/L2_SYSTEM.txt"
+env -u AUTODREAM_DIR bash -c '. "$1/bin/l2-prompt.sh"; l2_system_prompt' _ "$r" >/dev/null 2>&1; assert_eq "$?" "2" "a prompt file of only whitespace is refused too"
+# a symlink whose target is RELATIVE, as a hand-made link might be (install.sh writes absolute ones)
+mkdir -p "$T/rel/real/bin" "$T/rel/real/prompts" "$T/rel/farm"
+cp "$REPO/bin/l2-prompt.sh" "$T/rel/real/bin/"; cp "$PROMPT_FILE" "$T/rel/real/prompts/"
+ln -s ../real/bin/l2-prompt.sh "$T/rel/farm/l2-prompt.sh"
+assert_eq "$(env -u AUTODREAM_DIR bash -c '. "$1/rel/farm/l2-prompt.sh"; l2_system_prompt' _ "$T" 2>/dev/null)" "$WANT" "a relative symlink target resolves against the link's own directory"
+
 echo "# the claude adapter"
 r=$(mk_tree withprompt 1)
 got=$(CLAUDE_BIN=/opt/test/claude bash "$r/adapters/claude/adapter.sh" l2-argv | sys_prompt_of)

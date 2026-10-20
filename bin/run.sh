@@ -4051,7 +4051,7 @@ PY
     # An install whose adapters/ tree predates l2-argv (the per-file symlink installs this script
     # supports, see enumerate_for) still has to deliver the night. The fallback is claude-only,
     # for the same reason enumerate_for's is: it hardcodes one engine's invocation.
-    log "  the claude adapter has no l2-argv here; using the built-in claude invocation"
+    log "  the claude adapter printed no L2 command here (an adapters/ tree that predates l2-argv); using the built-in claude invocation"
     # The system prompt is prompts/L2_SYSTEM.txt, the same text the adapters read. Without it no
     # argv is built at all (the warning below fires), because an L2 run with no word on where the
     # report goes only looks like a night's work.
