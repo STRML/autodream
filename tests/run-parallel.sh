@@ -20,18 +20,26 @@ case "$N" in ''|*[!0-9]*) echo "usage: tests/run-parallel.sh [shards]" >&2; exit
 # Short on purpose: the suite's sandbox paths sit under TMPDIR, and some fixtures embed them in lines
 # that are cut at a fixed length, so every character here is a character those lines lose.
 OUT=$(mktemp -d "${TMPDIR:-/tmp}/rp.XXXXXX")
+pids=()
+# Each shard runs in a process group of its own (set -m), and Ctrl-C or TERM sends TERM to every
+# group. Without that the shards keep running: they inherit an ignored SIGINT from the background,
+# and the EXIT trap would remove their temp dirs from under them.
+stop_shards() { local p; for p in "${pids[@]+"${pids[@]}"}"; do kill -TERM -- "-$p" 2>/dev/null; done; wait 2>/dev/null; }
 trap 'rm -rf "$OUT"' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'stop_shards; exit 130' INT
+trap 'stop_shards; exit 143' TERM
 
 start=$SECONDS
+set -m
 for ((i = 0; i < N; i++)); do
   mkdir -p "$OUT/$i"
   (
     TMPDIR="$OUT/$i" RUNALL_SHARD="$i/$N" bash "$HERE/run-all.sh" > "$OUT/shard$i.txt" 2>&1
     echo $? > "$OUT/rc$i"
   ) &
+  pids+=($!)
 done
+set +m
 wait
 
 pass=0; fail=0; bad=0

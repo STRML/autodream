@@ -46,7 +46,16 @@ if [ -n "${RUNALL_SHARD:-}" ]; then
 fi
 _idx=0
 _owns(){ _idx=$((_idx + 1)); [ $((_idx % _shard_n)) -eq "$_shard_i" ]; }
-_run(){ _owns || return 0; if [ -n "$_list" ]; then printf '%s\n' "$1"; else "$@"; fi; }
+# RUNALL_TIMES=<file> appends "<seconds> <name>" for every test and unit suite it runs, so a CI job
+# can show which entries are slow and where a better split would come from.
+_timed(){ [ -n "${RUNALL_TIMES:-}" ] && printf '%s %s\n' "$((SECONDS - $2))" "$1" >> "$RUNALL_TIMES"; return 0; }
+_run(){
+  _owns || return 0
+  if [ -n "$_list" ]; then printf '%s\n' "$1"; return 0; fi
+  local _t0=$SECONDS
+  "$@"
+  _timed "$1" "$_t0"
+}
 ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
 no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
 assert_file(){     [ -f "$1" ] && ok "$2" || no "$2 (missing: $1)"; }
@@ -6388,8 +6397,10 @@ _suites="portable lib-project preflight adapters adapter-claude adapter-omp adap
 for _suite in $_suites; do
   _owns || continue
   if [ -n "$_list" ]; then printf 'suite:%s\n' "$_suite"; continue; fi
+  _t0=$SECONDS
   _out=$(bash "$HERE/$_suite.sh" 2>&1)
   _rc=$?
+  _timed "suite:$_suite" "$_t0"
   _p=$(printf '%s\n' "$_out" | sed -n 's/^passed: *\([0-9][0-9]*\).*/\1/p' | tail -1)
   _f=$(printf '%s\n' "$_out" | sed -n 's/.*failed: *\([0-9][0-9]*\).*/\1/p' | tail -1)
   pass=$((pass + ${_p:-0}))

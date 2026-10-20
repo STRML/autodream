@@ -71,13 +71,29 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: run-all, shard ${{ matrix.shard }} of 4
+        env:
+          RUNALL_TIMES: ${{ runner.temp }}/times.txt
         run: RUNALL_SHARD=${{ matrix.shard }}/4 bash tests/run-all.sh
+
+      # What this shard spent its time on, slowest first. Run on failure too: a slow shard is
+      # exactly when this is wanted. The split is round-robin by position; if one shard keeps
+      # finishing well behind the others, these numbers are what a weighted split needs.
+      - name: slowest entries in this shard
+        if: always()
+        env:
+          RUNALL_TIMES: ${{ runner.temp }}/times.txt
+        run: |
+          test -f "$RUNALL_TIMES" || { echo "no timings written"; exit 0; }
+          awk '{ t += $1 } END { print "total seconds in tests and suites: " t }' "$RUNALL_TIMES"
+          sort -rn "$RUNALL_TIMES" | head -12
 
   # One check that stands for the four shards, under the name the single job always had, so
   # anything that waits on `test` keeps working. A draft PR skips the shards and so skips this.
   test:
     needs: shards
-    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    # !cancelled(), not always(): a newer push cancels this run, and the shards then read as cancelled.
+    # always() would run this job anyway and fail it, painting the superseded commit red.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

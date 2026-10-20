@@ -73,9 +73,17 @@ if [ "$out" = "$total" ]; then ok "an empty RUNALL_SHARD means unsharded"; else 
 assert_eq "$(list 07/08 | wc -l | tr -d ' ')" "$(list 7/8 | wc -l | tr -d ' ')" "07/08 is shard 7 of 8, not a bad octal"
 
 echo "# every test invocation is gated, and listing runs nothing"
-if grep -qE '^test_[a-z_0-9]+$' "$RUNALL"; then
-  no "bare, ungated test invocations remain: $(grep -nE '^test_[a-z_0-9]+$' "$RUNALL" | head -3 | tr '\n' ' ')"
-else ok "no bare test_ line is left; each goes through _run"; fi
+# A direct call to a test_ function, in any form: a bare line, an indented one, or one after && || ; or
+# then/do. Every such call must go through _run, or that test runs in EVERY shard. The function
+# definitions (`test_x(){`) and the `_run test_x` lines are not calls.
+direct_calls(){ grep -nE '(^|[;&|][[:space:]]*|(then|do)[[:space:]]+)[[:space:]]*test_[a-z_0-9]+([[:space:]]|;|\|\||&&|$)' "$1" | grep -v '_run test_' | grep -vE '^[0-9]+:[[:space:]]*#'; }
+printf '%s\n' 'test_bare' '  test_indented' 'test_or || true' '[ -n x ] && test_after_and' 'for t in a; do test_in_loop; done' > "$D/gate-bad.txt"
+printf '%s\n' 'test_def(){' '_run test_gated' '# test_commented' 'echo "see test_in_a_string"' 'assert_eq "$x" "y" "test_named"' > "$D/gate-ok.txt"
+assert_eq "$(direct_calls "$D/gate-bad.txt" | wc -l | tr -d ' ')" "5" "the detector flags a bare, indented, ||, && and loop call"
+assert_eq "$(direct_calls "$D/gate-ok.txt" | wc -l | tr -d ' ')" "0" "and ignores a definition, a gated call, a comment and a mention in a string"
+found=$(direct_calls "$RUNALL" || true)
+if [ -z "$found" ]; then ok "run-all.sh makes no direct test_ call; each goes through _run"
+else no "ungated test_ calls remain: $(printf '%s' "$found" | head -3 | tr '\n' ' ')"; fi
 t0=$(date +%s); list 1/4 >/dev/null; t1=$(date +%s)
 [ $((t1 - t0)) -lt 20 ] && ok "listing a shard is quick ($((t1 - t0))s), so it ran no test" || no "listing a shard took $((t1 - t0))s"
 before=$(ls "${TMPDIR:-/tmp}" | grep -c '^ccad\.' || true)
