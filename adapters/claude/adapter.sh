@@ -218,6 +218,10 @@ case "$cmd" in
     # writer. The model is optional, and absent means the CLI's own default, so an upgrade of the
     # account upgrades the nightly report with nothing edited here.
     set -- ${1:+--model "$1"}
+    # The system prompt is prompts/L2_SYSTEM.txt, read through the loader. No file means no argv:
+    # an engine started without it would run L2 with no word on where the report goes.
+    # shellcheck source=/dev/null
+    sysprompt=$(. "$BIN/l2-prompt.sh" && l2_system_prompt) || exit 2
     printf '%s\0' "${CLAUDE_BIN:-$HOME/.local/bin/claude}" \
       --print \
       --permission-mode bypassPermissions \
@@ -227,7 +231,7 @@ case "$cmd" in
       --disable-slash-commands \
       --strict-mcp-config \
       --settings '{"disableAllHooks":true}' \
-      --append-system-prompt 'Headless aggregator. Read the per-session findings JSONs from the findings directory given on line 1 of the prompt, then produce the COMPLETE report only on standard output, ending with a line containing exactly AUTODREAM_REPORT_END. After that line, if you propose memory pins, print them between a line AUTODREAM_PINS_BEGIN and a line AUTODREAM_PINS_END, one JSON object per line. Do not use Write or Edit anywhere. Those paths are literal strings, not shell variables — never $-expand them. After the pin block print one line: report: <literal path from line 2 of the prompt> then a 3-line summary (sessions reviewed, findings, pins proposed), then exit.'
+      --append-system-prompt "$sysprompt"
     ;;
 
   skills-inventory)

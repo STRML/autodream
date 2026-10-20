@@ -3028,7 +3028,17 @@ run() {
     fatal_exit; return 1
   fi
   # And an engine that cannot print a command at all (omp with no model resolved, an adapter
-  # without l2-argv) is refused for the same reason. claude is exempt: it has a built-in fallback.
+  # without l2-argv) is refused for the same reason. The argv probe skips claude, whose built-in
+  # fallback builds the command itself.
+  #
+  # The system prompt is checked for every engine, claude included: its fallback reads the same file,
+  # and an engine started without it runs L2 with no word on where the report goes. Found here, the
+  # night stops before L1 is paid for; found later, every L2 attempt fails after it.
+  # shellcheck source=/dev/null
+  if ! (_l=$(find_lib l2-prompt.sh) && . "$_l" && l2_system_prompt >/dev/null 2>&1); then
+    log_fatal "prompts/L2_SYSTEM.txt (read through bin/l2-prompt.sh) was not found beside run.sh, its link target or in AUTODREAM_DIR. Refusing to start."
+    fatal_exit; return 1
+  fi
   _l2e="${AUTODREAM_L2_ENGINE:-${ENABLED_ADAPTERS%% *}}"
   if [ "$_l2e" != "claude" ] && [ -n "$_l2e" ]; then
     _l2m=$(adapter_l2_model "$_l2e" 2>/dev/null) || _l2m=""
@@ -4046,11 +4056,20 @@ PY
     # An install whose adapters/ tree predates l2-argv (the per-file symlink installs this script
     # supports, see enumerate_for) still has to deliver the night. The fallback is claude-only,
     # for the same reason enumerate_for's is: it hardcodes one engine's invocation.
-    log "  the claude adapter has no l2-argv here; using the built-in claude invocation"
-    L2_ARGV=("$CLAUDE_BIN" --print --permission-mode bypassPermissions ${L2_MODEL:+--model "$L2_MODEL"} \
-      --no-session-persistence --tools Glob Read --disable-slash-commands --strict-mcp-config \
-      --settings '{"disableAllHooks":true}' \
-      --append-system-prompt "Headless aggregator. Read the per-session findings JSONs from the findings directory given on line 1 of the prompt, then produce the COMPLETE report only on standard output, ending with a line containing exactly AUTODREAM_REPORT_END. After that line, if you propose memory pins, print them between a line AUTODREAM_PINS_BEGIN and a line AUTODREAM_PINS_END, one JSON object per line. Do not use Write or Edit anywhere. Those paths are literal strings, not shell variables — never \$-expand them. After the pin block print one line: report: <literal path from line 2 of the prompt> then a 3-line summary (sessions reviewed, findings, pins proposed), then exit.")
+    log "  the claude adapter printed no L2 command here (an adapters/ tree that predates l2-argv); using the built-in claude invocation"
+    # The system prompt is prompts/L2_SYSTEM.txt, the same text the adapters read. Without it no
+    # argv is built at all (the warning below fires), because an L2 run with no word on where the
+    # report goes only looks like a night's work.
+    # shellcheck source=/dev/null
+    L2_SYS=$(_l=$(find_lib l2-prompt.sh) && . "$_l" && l2_system_prompt) || L2_SYS=""
+    if [ -n "$L2_SYS" ]; then
+      L2_ARGV=("$CLAUDE_BIN" --print --permission-mode bypassPermissions ${L2_MODEL:+--model "$L2_MODEL"} \
+        --no-session-persistence --tools Glob Read --disable-slash-commands --strict-mcp-config \
+        --settings '{"disableAllHooks":true}' \
+        --append-system-prompt "$L2_SYS")
+    else
+      log "WARNING: the built-in claude invocation needs prompts/L2_SYSTEM.txt through bin/l2-prompt.sh, and neither could be read"
+    fi
   fi
   if [ "${#L2_ARGV[@]}" -eq 0 ]; then
     log "WARNING: the $L2_ENGINE adapter produced no L2 command; every L2 attempt will fail"

@@ -162,6 +162,7 @@ link "$REPO_DIR/bin/lib-install-dir.sh"       "$TARGET/lib-install-dir.sh"
 link "$REPO_DIR/bin/adapters.sh"              "$TARGET/adapters.sh"
 link "$REPO_DIR/bin/preflight.sh"             "$TARGET/preflight.sh"
 link "$REPO_DIR/bin/report-format.sh"          "$TARGET/report-format.sh"
+link "$REPO_DIR/bin/l2-prompt.sh"              "$TARGET/l2-prompt.sh"
 link "$REPO_DIR/bin/pending-triage.sh"        "$TARGET/pending-triage.sh"
 # The adapters TREE, not individual files: run.sh resolves adapters/<name>/adapter.sh
 # relative to the script dir, so the whole directory has to be reachable from the
@@ -171,6 +172,7 @@ link "$REPO_DIR/adapters"                     "$TARGET/adapters"
 link "$REPO_DIR/prompts/PROMPT.md"      "$TARGET/PROMPT.md"
 link "$REPO_DIR/prompts/SESSION_TRIAGE.md" "$TARGET/SESSION_TRIAGE.md"
 link "$REPO_DIR/prompts/TRIAGE_DREAM.md"   "$TARGET/TRIAGE_DREAM.md"
+link "$REPO_DIR/prompts/L2_SYSTEM.txt"      "$TARGET/L2_SYSTEM.txt"
 
 # The global /autodream skill. A skill nobody asked for must not fail the install, so a
 # directory already sitting at the link's place (the user's own /autodream) is reported and left.

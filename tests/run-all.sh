@@ -171,6 +171,7 @@ setup_env(){
   mkdir -p "$root/projects/proj-a" "$root/autodream" "$root/dreams" "$root/cap"
   cp "$REPO/prompts/SESSION_TRIAGE.md" "$root/autodream/SESSION_TRIAGE.md"
   cp "$REPO/prompts/PROMPT.md"         "$root/autodream/PROMPT.md"
+  cp "$REPO/prompts/L2_SYSTEM.txt"     "$root/autodream/L2_SYSTEM.txt"  # install.sh links it too
   printf '%s' "$root"
 }
 mk_session(){ # $1=root $2=name
@@ -3464,6 +3465,7 @@ setup_env_altroot(){ # like setup_env, but with HOME inside the sandbox (no $1/p
            "$root/autodream" "$root/dreams" "$root/cap"
   cp "$REPO/prompts/SESSION_TRIAGE.md" "$root/autodream/SESSION_TRIAGE.md"
   cp "$REPO/prompts/PROMPT.md"         "$root/autodream/PROMPT.md"
+  cp "$REPO/prompts/L2_SYSTEM.txt"     "$root/autodream/L2_SYSTEM.txt"  # install.sh links it too
   printf '%s' "$root"
 }
 mk_session_in(){ # $1=dir $2=name
@@ -3959,6 +3961,7 @@ test_fresh_host_with_no_store_is_not_a_failure(){
   mkdir -p "$T/home" "$T/autodream" "$T/dreams"
   cp "$REPO/prompts/SESSION_TRIAGE.md" "$T/autodream/SESSION_TRIAGE.md"
   cp "$REPO/prompts/PROMPT.md"         "$T/autodream/PROMPT.md"
+  cp "$REPO/prompts/L2_SYSTEM.txt"     "$T/autodream/L2_SYSTEM.txt"  # install.sh links it too
   # No SESSION_ROOTS, no PROJECTS_DIR, and a HOME with no .claude at all.
   HOME="$T/home" AUTODREAM_CHANGELOG=0 CLAUDE_BIN="$MOCK" \
     AUTODREAM_CONFIG="$T/autodream/config" AUTODREAM_CONSUME_DATE="$DATE" \
@@ -4583,6 +4586,7 @@ test_upgrade_lag_install_still_produces_a_report(){
   mkdir -p "$T/home/.claude/projects/proj-a" "$T/autodream" "$T/dreams"
   cp "$REPO/prompts/SESSION_TRIAGE.md" "$T/autodream/SESSION_TRIAGE.md"
   cp "$REPO/prompts/PROMPT.md"         "$T/autodream/PROMPT.md"
+  cp "$REPO/prompts/L2_SYSTEM.txt"     "$T/autodream/L2_SYSTEM.txt"  # install.sh links it too
   # Exactly what a pre-adapter install left behind: the helper scripts, and
   # run.sh as a symlink into the repo. Deliberately NOT lib-project.sh,
   # adapters.sh, preflight.sh or adapters/.
@@ -5559,6 +5563,29 @@ test_window_degrades_when_the_helper_is_absent(){
   rm -rf "$root"
 }
 
+test_a_missing_l2_prompt_stops_the_run_before_l1(){
+  echo "# L2 prompt: an install with no prompts/L2_SYSTEM.txt anywhere refuses to start, claude engine included"
+  local root; root=$(setup_env)
+  local inst="$root/inst"; mkdir -p "$inst/bin"
+  cp -R "$REPO/adapters" "$inst/adapters"
+  cp "$REPO"/bin/*.sh "$inst/bin/"
+  rm -f "$root/autodream/L2_SYSTEM.txt"   # no AUTODREAM_DIR copy, and the copied tree has no prompts/ beside bin/
+  mk_session "$root" s1
+  mkdir -p "$root/shim-default"; printf '#!/bin/bash\nprintf %s "200"\n' "'%s'" > "$root/shim-default/curl"; chmod +x "$root/shim-default/curl"
+  PATH="$root/shim-default:$PATH" AUTODREAM_CHANGELOG=0 CLAUDE_BIN="$MOCK" AUTODREAM_CONFIG="$root/autodream/config" \
+    AUTODREAM_CONSUME_DATE="$DATE" AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1 \
+    PROJECTS_DIR="$root/projects" AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
+    /bin/bash "$inst/bin/run.sh" "$DATE" > "$root/run.out" 2>&1
+  local rc=$?
+  cat "$root/autodream/logs/run-$DATE.log" >> "$root/run.out" 2>/dev/null || true
+  [ "$rc" -ne 0 ] && ok "the run exits non-zero" || no "the run exits non-zero (got $rc)"
+  assert_grep "$root/run.out" 'L2_SYSTEM.txt' "the log names the missing prompt"
+  assert_grep "$root/run.out" 'Refusing to start' "and says it refused to start"
+  assert_nogrep "$root/run.out" 'L1 triage round' "no L1 round started, so nothing was paid for"
+  assert_no_file "$root/dreams/$DATE.md" "and no report was written"
+  rm -rf "$root"
+}
+
 test_window_is_dst_correct_end_to_end(){
   echo "# window: the report day is local midnight to local midnight on a 23-hour DST day (America/New_York 2020-03-08)"
   local DATE=2020-03-08 root; root=$(setup_env)
@@ -5780,6 +5807,7 @@ test_window_places_a_session_by_its_records_not_its_mtime
 test_window_cuts_a_multi_day_session_to_the_report_day
 test_window_off_restores_mtime_enumeration
 test_window_degrades_when_the_helper_is_absent
+test_a_missing_l2_prompt_stops_the_run_before_l1
 test_window_is_dst_correct_end_to_end
 test_rebuild_keeps_a_session_touched_after_its_day_and_retries_its_stale_err
 test_rebuild_of_an_omp_parent_touched_after_its_day_keeps_it_beside_its_advisor
@@ -6327,7 +6355,7 @@ echo
 echo "===== unit suites ====="
 # The suites that drive launchd need plutil and launchctl, so they run on macOS only (CI runs
 # them in launchd.yml, when a launchd file changes).
-_suites="portable lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format"
+_suites="portable lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt"
 [ "$(uname -s)" = Darwin ] && _suites="$_suites scheduler-label autodream-now install-review-agent install-dry-run install-dir install-skill"
 for _suite in $_suites; do
   _out=$(bash "$HERE/$_suite.sh" 2>&1)
