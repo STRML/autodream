@@ -3180,11 +3180,14 @@ mk_fanout_fixture(){ # $1=root
     touch -t "$STAMP" "$f"
   done
   # A fanout whose parent file is gone still groups, under the path that file would have had.
+  # 09:05Z is still 2020-01-02 in local time from UTC-5 to UTC+11, which a report day needs: the day
+  # is local midnight to local midnight, and 18:05Z was already the next day in Hong Kong, Tokyo and
+  # Sydney, so the window dropped these workers there. It stays hours away from the other sessions.
   mkdir -p "$b/orphan1/subagents"
   for f in "$b/orphan1/subagents/agent-x.jsonl" "$b/orphan1/subagents/agent-y.jsonl"; do
     printf '%s\n' \
-      '{"type":"user","isSidechain":true,"timestamp":"2020-01-02T18:05:00Z","message":{"content":"worker task"}}' \
-      '{"type":"assistant","isSidechain":true,"timestamp":"2020-01-02T18:05:05Z","message":{"content":[{"type":"tool_use","name":"Read"}]}}' > "$f"
+      '{"type":"user","isSidechain":true,"timestamp":"2020-01-02T09:05:00Z","message":{"content":"worker task"}}' \
+      '{"type":"assistant","isSidechain":true,"timestamp":"2020-01-02T09:05:05Z","message":{"content":[{"type":"tool_use","name":"Read"}]}}' > "$f"
     touch -t "$STAMP" "$f"
   done
 }
