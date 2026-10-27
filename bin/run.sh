@@ -1478,7 +1478,17 @@ changelog_window() {
 #
 # Deliberately not `L2_RC -eq 0`: the CLI can exit non-zero after a perfectly good write.
 report_complete() {
-  [ -s "$REPORT_PATH" ] && report_has_marker "$REPORT_PATH"
+  [ -s "$REPORT_PATH" ] || return 1
+  report_has_marker "$REPORT_PATH" || return 1
+  # Reports from QUESTIONS_EPOCH on must also carry the questions block. Both
+  # gates matter: the marker says the write reached the end, the block says the
+  # section four consumers read is where they think it is. A report without it
+  # is rebuilt rather than handed to a consumer that would fall back to guessing.
+  local epoch="${AUTODREAM_QUESTIONS_EPOCH:-${QUESTIONS_EPOCH_DEFAULT:-2026-10-27}}"
+  if [[ ! "$TARGET_DATE" < "$epoch" ]]; then
+    report_has_questions_block "$REPORT_PATH" || return 1
+  fi
+  return 0
 }
 
 # ---- L2 attempt diagnostics (issue 42) ----
@@ -3222,7 +3232,13 @@ $( if [ "${ROOTS_FAILED:-0}" -gt 0 ] || [ "${ROOTS_UNAVAILABLE:-0}" -gt 0 ]; the
 
 (Generated $(date -u +%Y-%m-%dT%H:%M:%SZ))
 
+AUTODREAM_QUESTIONS_BEGIN
+## Open questions for the user
+
+None; no sessions were triaged on this date.
+
 <!-- autodream:open-questions=0 -->
+AUTODREAM_QUESTIONS_END
 EOF
     # A question-free report still counts as a report. Without this the streak
     # store would keep yesterday's questions alive across an empty night, and a

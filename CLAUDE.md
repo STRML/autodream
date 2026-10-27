@@ -401,15 +401,20 @@ L2 is an adapter too. `AUTODREAM_L2_ENGINE=<adapter name>` picks it (default: th
 
 ### The triage prompt is questions-only, and that is load-bearing
 
-`review.sh` used to pass the whole report through `--append-system-prompt` and launch with the literal prompt `go`. On 2026-10-27 that refused every launch: the 2026-10-26 report narrated a night of TV-firmware work (`sdb`, root status, `dlopen`, W^X by mount), and Opus 5.5 answered `Opus 5.5's safeguards flagged this session ... Details: [cyber]` before the first reply. Replaying the same request headlessly with `claude -p` reproduced it, and the same report's `## Open questions for the user` section (~2KB of decision text) passed — so the trigger was the findings body, not the triage task, the memory hook, or the mnemopi store.
+`review.sh` used to pass the whole report through `--append-system-prompt` and launch with the literal prompt `go`. On 2026-10-27 that refused every launch: the 2026-10-26 report narrated a night of TV-firmware work (`sdb`, root status, `dlopen`, W^X by mount), and Opus 5.5 answered `Opus 5.5's safeguards flagged this session ... Details: [cyber]` before the first reply. Replaying the same request headlessly with `claude -p` reproduced it, and the same report's questions section (~2KB of decision text) passed — so the trigger was the findings body, not the triage task, the memory hook, or the mnemopi store.
 
-Two rules came out of it, and `tests/review-prompt.sh` pins both:
+Two rules came out of it:
 
-- **Never inline a long document into a system prompt.** Inline only the section the task acts on, cap it (12KB here) and point at the file for detail. A report body can read like a security incident even when nothing in it is wrong.
-- **Never launch intent-carrying work with a one-word prompt.** `go` gives the model nothing to anchor on, so the context it was handed becomes the whole picture of what this session is about.
+- **Never inline a long document into a system prompt.** Inline only the section the task acts on and point at the file for detail. A report body can read like a security incident even when nothing in it is wrong.
+- **Never launch intent-carrying work with a one-word prompt.** `go` gives the model nothing to anchor on, so whatever context it was handed becomes the whole picture of what the session is about.
 
-The skip check is unaffected: a section-less report still launches with an empty, well-formed `<open-questions>` block rather than failing, because a report that names the section differently should degrade to "nothing inlined", not to no session.
+**The section is found by sentinel, not by heading.** `AUTODREAM_QUESTIONS_BEGIN` and `AUTODREAM_QUESTIONS_END` bracket it, `PROMPT.md` makes L2 emit them, and `report-questions` in `bin/report-format.sh` is the only reader. This was not the first design: the four consumers each parsed the markdown heading their own way, and five review rounds on `review.sh` alone found a new disagreement every time (a heading inside a fence, `~~~` fences, fence length, a fence's info string). Hand-rolled markdown parsing in four scripts is a losing shape; a producer-written sentinel is one line on each side and no grammar.
 
+The cap on the inlined section is all-or-nothing. A section that does not fit is not inlined, and the prompt sends the session to the report. Cutting a section at a line, an item or a fence and calling the rest "the questions" is what asks a session to recommend on half a question.
+
+A report from `AUTODREAM_QUESTIONS_EPOCH` (default 2026-10-27) on is truncated unless its block is closed, so a bad block costs one rebuild instead of a silent wrong read. `tests/review-prompt.sh` pins the launch contract; `tests/report-format.sh` pins the reader against the same fixtures the old inline code read.
+
+### What goes in the plist PATH
 ### What goes in the plist PATH
 
 launchd has no login shell and the job runs with only the PATH install writes, so a CLI the job needs has to be reachable from it. `install.sh` resolves `claude`, `git`, `bash`, the `engine_bin` of every enabled adapter (`--adapters`, else `AUTODREAM_ADAPTERS` from the config) and the L2 engine's (`--l2-engine`, else `AUTODREAM_L2_ENGINE`; a host can scan claude and run L2 on omp) and puts their directories first. The config is read by sourcing it, as `run.sh` does, so `export KEY=value` and quotes read the same. An adapter's `<NAME>_BIN` from the config wins over the PATH lookup, so `omp` under `~/.bun/bin` is reachable without being on the installer's PATH; one only in the installer's environment does not count, because launchd will not carry it and the adapter would then look for the bare engine name on PATH. Two things here were learned on a real host:

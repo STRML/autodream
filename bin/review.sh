@@ -370,86 +370,37 @@ REPORT_BYTES=$(wc -c < "$REPORT" | tr -d ' ')
 # [cyber]", including a bare "go". The same report's open-questions section is
 # ~2KB of decision text, and passes. So inline the questions and point at the
 # file for anything deeper.
+# Triage needs the questions, not the report. Last night's findings can run to
+# 25KB of session narrative, and a body that reads like exploit development (a
+# night spent on TV firmware, sdb, root status, dlopen) makes the session read as
+# an offensive-security engagement to model providers' content classifiers: on
+# 2026-10-27 every launch of this script with the whole report inlined was
+# refused with "Opus 5.5's safeguards flagged this session ... [cyber]",
+# including a bare "go". The same report's questions section is ~2KB of decision
+# text and passes.
+#
+# Which text is "the questions section" is report-format.sh's contract, not this
+# script's: the section sits between AUTODREAM_QUESTIONS_BEGIN and
+# AUTODREAM_QUESTIONS_END, and report_questions() falls back to the old markdown
+# heading only for reports written before that block existed. Nothing here parses
+# markdown, so nothing here can disagree with notify.sh or question-streaks.sh
+# about where the section ends.
+#
+# The cap is all-or-nothing: a section that does not fit is not inlined at all
+# and the prompt points at the file. Splitting a section at a line, an item or a
+# fence and calling the remainder "the questions" is what asked the session to
+# recommend on half a question.
 QUESTIONS_CAP=12000
 QUESTIONS_TMP=$(mktemp -t autodream-questions.XXXXXX) || { echo "review.sh: mktemp failed; not launching triage" >&2; exit 1; }
-FLAG_TMP=$(mktemp -t autodream-questions-flag.XXXXXX) || { echo "review.sh: mktemp failed; not launching triage" >&2; exit 1; }
-trap 'rm -f "$QUESTIONS_TMP" "$FLAG_TMP"' EXIT
-# One scanner does extraction and the cap, because both are the same question
-# ("where does a question start and end?") and two approximations kept
-# disagreeing. Rules it encodes:
-#
-#   fence   opens on a run of >=3 backticks or tildes, and closes only on the
-#           same character at >= the opening length, so a 3-backtick line
-#           inside a 4-backtick block is content, not a close.
-#   heading the section heading must be the whole line and outside a fence:
-#           `## Open questions for the user's agents` is a different section,
-#           and the same text quoted in an example fence is not the section.
-#   block   a question starts at a top-level list item outside a fence and runs
-#           until the next one, so text inside a fenced example cannot start or
-#           end one.
-#   cap     questions are kept or dropped whole. A heading kept while the
-#           decision context under it was cut asks the session to recommend on
-#           half a question. `length()` counts characters; the cap bounds a
-#           prompt, it is not a byte-exact budget.
-awk -v cap="$QUESTIONS_CAP" -v flagfile="$FLAG_TMP" '
-  function flush(   total) {
-    if (blk == "") return
-    total = used + length(pre) + length(blk)
-    if (total <= cap) {
-      printf "%s", pre
-      printf "%s", blk
-      used += length(pre) + length(blk)
-      pre = ""
-      blk = ""
-    } else {
-      stop = 1
-    }
-  }
-  function finish() {
-    if (done) return
-    done = 1
-    flush()
-    if (stop || blk != "") print "1" > flagfile
-  }
-  {
-    isfence = 0
-    # A fence line may carry an info string (```bash, ~~~json). Only the leading
-    # run counts, and the info string of an opener must not itself contain a
-    # fence character or the line would be ambiguous.
-    if ($0 ~ /^[ \t]*(```+|~~~+)[^`~]*$/) {
-      isfence = 1
-      tmp = $0
-      sub(/^[ \t]*/, "", tmp)
-      ch = substr(tmp, 1, 1)
-      n = 0
-      while (substr(tmp, n + 1, 1) == ch) n++
-      # Only a bare run (nothing but whitespace after it) closes a fence; a
-      # ```bash line inside an open fence is another example, not the end.
-      blank = (substr(tmp, n + 1) ~ /^[ \t\r]*$/)
-      if (fence == "") { fence = ch; flen = n }
-      else if (ch == fence && n >= flen && blank) { fence = ""; flen = 0 }
-    }
-
-    if (!on) {
-      if (!isfence && fence == "" && $0 ~ /^## Open questions for the user[ \t\r]*$/) { on = 1; pre = $0 "\n" }
-      next
-    }
-    if (fence == "" && $0 ~ /^## /) { finish(); exit }
-    if (fence == "" && !isfence && $0 ~ /^([0-9]+[.)]|[-*]) /) {
-      flush()
-      if (stop) { finish(); exit }
-      blk = $0 "\n"
-      inblk = 1
-      next
-    }
-    if (inblk) blk = blk $0 "\n"
-    else pre = pre $0 "\n"
-  }
-  END { finish() }' "$REPORT" > "$QUESTIONS_TMP" || { echo "review.sh: could not read the open questions from $REPORT; not launching triage" >&2; exit 1; }
+trap 'rm -f "$QUESTIONS_TMP"' EXIT
+report_questions "$REPORT" > "$QUESTIONS_TMP" || { echo "review.sh: could not read the open questions from $REPORT; not launching triage" >&2; exit 1; }
 
 TRUNCATED=0
-[ -s "$FLAG_TMP" ] && TRUNCATED=1
-rm -f "$FLAG_TMP"
+QUESTIONS_BYTES=$(wc -c < "$QUESTIONS_TMP" | tr -d ' ')
+if [ "${QUESTIONS_BYTES:-0}" -gt "$QUESTIONS_CAP" ]; then
+  TRUNCATED=1
+  : > "$QUESTIONS_TMP"
+fi
 
 # Build system prompt via tmpfile — heredocs inside $(...) get confused by
 # apostrophes in the body (parser treats them as quote pairs and a literal
@@ -457,7 +408,7 @@ rm -f "$FLAG_TMP"
 SYSTEM_TMP=$(mktemp -t autodream-review.XXXXXX) || { echo "review.sh: mktemp failed; not launching triage" >&2; exit 1; }
 trap 'rm -f "$QUESTIONS_TMP" "$SYSTEM_TMP"' EXIT
 if [ "$TRUNCATED" -eq 1 ]; then
-  QUESTIONS_INTRO="The open questions from the $DATE report ($REPORT, $REPORT_BYTES bytes) follow. They did not all fit, so the first ones are quoted and the rest are in that file; before saying the list is done, read the rest from $REPORT's \"## Open questions for the user\" section."
+  QUESTIONS_INTRO="The open questions from the $DATE report are too long to quote here (${QUESTIONS_BYTES} bytes). Read them from $REPORT, between the $QUESTIONS_BEGIN and $QUESTIONS_END lines, before your first reply; nothing from that section is in this prompt."
 else
   QUESTIONS_INTRO="The open questions from the $DATE report ($REPORT, $REPORT_BYTES bytes) are quoted in full below. Work from these. Do not read the whole report into context and never dump it back to the user; the wider report is on disk at that path if a question needs one specific number from it."
 fi

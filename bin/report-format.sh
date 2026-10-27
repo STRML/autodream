@@ -1,8 +1,15 @@
 #!/bin/bash
-# Sourced, never executed. The two contracts a report carries, read in one place.
+# Sourced, never executed. The contracts a report and L2's capture carry, read in one place.
 #
 #   The marker   `<!-- autodream:open-questions=N -->`, which says how many questions need a human
 #                call and, by being the last thing PROMPT.md emits, that the write reached its end.
+#   The block    `AUTODREAM_QUESTIONS_BEGIN` / `AUTODREAM_QUESTIONS_END`, which bracket the open
+#                questions section. The section is read by four consumers (notify.sh, review.sh,
+#                question-streaks.sh, triage-dream.sh) and used to be found by matching a markdown
+#                heading, which each of them approximated differently. A heading can appear in a
+#                code fence, in prose, or inside another heading, and every approximation meant a
+#                consumer disagreed with the others about where the section ended. Two sentinel
+#                lines cannot be anything else.
 #   The sentinel `AUTODREAM_REPORT_END` on a line of its own, which L2 prints after the report. What
 #                comes before the LAST one is the report; what follows is the pin block and the
 #                summary. The runner and the triage worklist both split L2's stdout on it.
@@ -11,6 +18,13 @@
 # these, so they read them here. Every function takes the report (or L2's captured stdout) as $1 and
 # hands the status of its last command to the caller, so `report_body f > f.tmp && mv f.tmp f` stops
 # when the read fails.
+
+QUESTIONS_BEGIN='AUTODREAM_QUESTIONS_BEGIN'
+QUESTIONS_END='AUTODREAM_QUESTIONS_END'
+# Reports written before the block existed are read the old way: heading to the next `## ` or a
+# horizontal rule. Newer reports must carry the block (run.sh checks report_has_questions_block
+# against this epoch) so the fallback only ever serves legacy dates.
+QUESTIONS_EPOCH_DEFAULT='2026-10-27'
 
 # The question count inside the marker, as digits, or nothing. Strict: the comment has to be well
 # formed, and the first one wins. question-streaks.sh and notify.sh trust this and nothing looser.
@@ -27,6 +41,35 @@ report_has_marker(){ grep -q 'autodream:open-questions=' "$1" 2>/dev/null; }
 # Whether L2 delivered its sentinel. The line must be exactly the sentinel: indented, CRLF or quoted
 # in prose it is not one.
 report_has_sentinel(){ grep -q '^AUTODREAM_REPORT_END$' "$1" 2>/dev/null; }
+
+# Whether the report carries a closed questions block: BEGIN before END, both on lines of their
+# own. A capture cut off inside the block is not a block — that is the case the completeness gate
+# in run.sh needs to catch.
+report_has_questions_block(){
+  awk -v b="$QUESTIONS_BEGIN" -v e="$QUESTIONS_END" '
+    $0 == b { open = 1; next }
+    $0 == e { if (open) { closed = 1; exit } }
+    END { exit closed ? 0 : 1 }' "$1" 2>/dev/null
+}
+
+# The open questions section: the text between the block sentinels when the report carries them,
+# otherwise the legacy markdown section (heading to the next `## ` or horizontal rule). Prints
+# nothing when the report has neither.
+report_questions(){
+  local report="$1"
+  if report_has_questions_block "$report"; then
+    awk -v b="$QUESTIONS_BEGIN" -v e="$QUESTIONS_END" '
+      $0 == b { inb = 1; next }
+      inb && $0 == e { exit }
+      inb { print }' "$report" 2>/dev/null
+    return 0
+  fi
+  awk '
+    /^## Open questions/ { capture = 1; next }
+    capture && /^## / { exit }
+    capture && /^---[[:space:]]*$/ { exit }
+    capture { print }' "$report" 2>/dev/null
+}
 
 # Everything before the LAST sentinel: the report itself. Prints nothing when there is none.
 report_body(){

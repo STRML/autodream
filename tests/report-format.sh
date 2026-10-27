@@ -91,6 +91,27 @@ same report_has_sentinel old_has_sentinel
 report_has_sentinel "$D/indented"; assert_eq "$?" "1" "an indented sentinel is not one"
 report_has_sentinel "$D/crlf"; assert_eq "$?" "1" "a CRLF sentinel is not one"
 
+echo "# the questions block: BEGIN before END, both on lines of their own"
+fx qblock    '# R\nAUTODREAM_QUESTIONS_BEGIN\n## Open questions for the user\n1. **Q** — a?\n<!-- autodream:open-questions=1 -->\nAUTODREAM_QUESTIONS_END\n## Triage decisions\n'
+fx qunclosed '# R\nAUTODREAM_QUESTIONS_BEGIN\n## Open questions for the user\n1. **Q** — a?\n'
+fx qreversed '# R\nAUTODREAM_QUESTIONS_END\n## Open questions for the user\n1. **Q** — a?\nAUTODREAM_QUESTIONS_BEGIN\n'
+fx qabsent   '# R\n## Open questions for the user\n1. **Q** — a?\n'
+fx qindented '# R\n  AUTODREAM_QUESTIONS_BEGIN\n## Open questions for the user\n1. **Q** — a?\n  AUTODREAM_QUESTIONS_END\n'
+report_has_questions_block "$D/qblock";    assert_eq "$?" "0" "a closed block is a block"
+report_has_questions_block "$D/qunclosed"; assert_eq "$?" "1" "a block cut off before its END is not one"
+report_has_questions_block "$D/qreversed"; assert_eq "$?" "1" "END before BEGIN is not a block"
+report_has_questions_block "$D/qabsent";   assert_eq "$?" "1" "no block reads as none"
+report_has_questions_block "$D/qindented"; assert_eq "$?" "1" "an indented sentinel is not one"
+
+echo "# report_questions: the block when there is one, the legacy heading otherwise"
+assert_eq "$(report_questions "$D/qblock")" "$(printf '## Open questions for the user\n1. **Q** — a?\n<!-- autodream:open-questions=1 -->')" "a block is returned without its sentinels"
+assert_eq "$(report_questions "$D/qreversed" | head -1)" "1. **Q** — a?" "an unusable block falls back to the heading read"
+assert_eq "$(report_questions "$D/qabsent" | head -1)" "1. **Q** — a?" "a pre-block report is read the old way"
+assert_eq "$(report_questions "$D/empty")" "" "a report with neither yields nothing"
+# The block wins over anything the body happens to say, which is the whole point.
+fx qboth    '# R\n## Open questions for the user\nLEGACY-BODY\n\nAUTODREAM_QUESTIONS_BEGIN\nBLOCK-BODY\nAUTODREAM_QUESTIONS_END\n'
+assert_eq "$(report_questions "$D/qboth")" "BLOCK-BODY" "the block wins over a heading-shaped body"
+
 echo "# the body: everything before the LAST sentinel"
 same report_body old_body
 assert_eq "$(report_body "$D/twosent" | tail -1)" "<!-- autodream:open-questions=1 -->" "the last sentinel ends the body"
