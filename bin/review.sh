@@ -413,15 +413,21 @@ awk -v cap="$QUESTIONS_CAP" -v flagfile="$FLAG_TMP" '
   }
   {
     isfence = 0
-    if ($0 ~ /^[ \t]*(```+|~~~+)[ \t\r]*$/) {
+    # A fence line may carry an info string (```bash, ~~~json). Only the leading
+    # run counts, and the info string of an opener must not itself contain a
+    # fence character or the line would be ambiguous.
+    if ($0 ~ /^[ \t]*(```+|~~~+)[^`~]*$/) {
       isfence = 1
       tmp = $0
       sub(/^[ \t]*/, "", tmp)
       ch = substr(tmp, 1, 1)
       n = 0
       while (substr(tmp, n + 1, 1) == ch) n++
+      # Only a bare run (nothing but whitespace after it) closes a fence; a
+      # ```bash line inside an open fence is another example, not the end.
+      blank = (substr(tmp, n + 1) ~ /^[ \t\r]*$/)
       if (fence == "") { fence = ch; flen = n }
-      else if (ch == fence && n >= flen) { fence = ""; flen = 0 }
+      else if (ch == fence && n >= flen && blank) { fence = ""; flen = 0 }
     }
 
     if (!on) {

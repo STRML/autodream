@@ -293,6 +293,35 @@ test_cap_does_not_split_on_a_list_item_inside_a_fence(){
   assert_grep "$root/sp" 'truncated="1"' "the block says it was truncated"
 }
 
+test_labelled_fence_is_a_fence(){
+  local root; root=$(setup_env)
+  {
+    printf '# Autodream — 2020-01-02\n\n## Open questions for the user\n\n'
+    printf '1. **Labelled** — which label wins?\n\n'
+    printf '```bash\n## not a heading\n- not a question\n```\n\n'
+    printf '   - AFTER-LABELLED the rest of question 1.\n\n'
+    printf '2. **Second** — still here?\n\n<!-- autodream:open-questions=2 -->\n'
+  } > "$root/dreams/2020-01-02.md"
+  run_review "$root" --force 2020-01-02
+  system_prompt "$root" > "$root/sp"
+  assert_grep "$root/sp" 'AFTER-LABELLED' "a \`\`\`bash fence does not end the question"
+  assert_grep "$root/sp" 'still here' "the next question survives a labelled fence"
+  assert_grep "$root/sp" 'truncated="0"' "a labelled fence is not mistaken for truncation"
+}
+
+test_labelled_fence_before_the_section_is_an_example(){
+  local root; root=$(setup_env)
+  {
+    printf '# Autodream — 2020-01-02\n\n## Top patterns\n\n'
+    printf '```markdown\n## Open questions for the user\nLABELLED-EXAMPLE\n```\n\n'
+    printf '## Open questions for the user\n\n%s\n\n<!-- autodream:open-questions=1 -->\n' "$Q_BODY"
+  } > "$root/dreams/2020-01-02.md"
+  run_review "$root" --force 2020-01-02
+  system_prompt "$root" > "$root/sp"
+  assert_nogrep "$root/sp" 'LABELLED-EXAMPLE' "a labelled example fence does not start the section"
+  assert_grep "$root/sp" 'Hook tightening' "the real section is still found"
+}
+
 test_temps_are_removed(){
   local root; root=$(setup_env); mk_report "$root" 2020-01-02 "$Q_BODY"
   local before; before=$(ls "${TMPDIR:-/tmp}" | grep -c '^autodream-questions' || true)
@@ -315,6 +344,8 @@ test_tilde_fence_inside_a_question_does_not_end_it
 test_cap_never_keeps_a_heading_without_its_context
 test_longer_fence_containing_a_shorter_is_content
 test_cap_does_not_split_on_a_list_item_inside_a_fence
+test_labelled_fence_is_a_fence
+test_labelled_fence_before_the_section_is_an_example
 test_temps_are_removed
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
