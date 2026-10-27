@@ -14,7 +14,10 @@ set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 N="${1:-4}"
-case "$N" in ''|*[!0-9]*) echo "usage: tests/run-parallel.sh [shards]" >&2; exit 2 ;; esac
+# Digits only and at most three of them, then read as decimal: bash arithmetic takes "08" as a bad
+# octal (no loop runs, so the run passed with zero tests) and "010" as eight.
+case "$N" in ''|*[!0-9]*|????*) echo "usage: tests/run-parallel.sh [shards]" >&2; exit 2 ;; esac
+N=$((10#$N))
 [ "$N" -ge 1 ] || { echo "usage: tests/run-parallel.sh [shards]" >&2; exit 2; }
 
 # Short on purpose: the suite's sandbox paths sit under TMPDIR, and some fixtures embed them in lines

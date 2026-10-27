@@ -178,7 +178,10 @@ write_state() { # $1=rows file  $2=watermark date, or empty for none
 }
 acquire_lock() {
   local i=0 max="${AUTODREAM_QUESTION_LOCK_WAIT:-15}"
-  case "$max" in ''|*[!0-9]*) max=15 ;; esac   # a bad value keeps the default rather than failing the night
+  # A bad value keeps the default rather than failing the night. More than four digits overflows
+  # the -gt test below, which then never succeeds and the loop waits forever; 10# keeps 08 decimal.
+  case "$max" in ''|*[!0-9]*|?????*) max=15 ;; esac
+  max=$((10#$max))
   while ! mkdir "$LOCK" 2>/dev/null; do
     if [ -d "$LOCK" ]; then
       local age; age=$(( $(date +%s) - $(pstat_mtime "$LOCK" || date +%s) ))
