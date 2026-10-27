@@ -124,7 +124,11 @@ key_of() {
 # a format change is the parsed-vs-marker check in cmd_update, not the breadth of this
 # pattern — a regex loose enough to match anything would start matching sub-bullets.
 titles_of() { # $1=report
-  sed -n '/^## Open questions/,/^<!-- *autodream:open-questions/p' "$1" 2>/dev/null \
+  # report_questions(), not a heading match: the section's boundaries are the
+  # questions block sentinels (report-format.sh), so this agrees with review.sh
+  # and notify.sh about which lines are questions.
+  report_questions "$1" 2>/dev/null \
+    | sed -n '/^<!-- *autodream:open-questions/q;p' \
     | grep -oE '^[[:space:]]*[0-9]+[.)][[:space:]]*\*\*[^*]+\*\*' \
     | sed 's/^[[:space:]]*[0-9]*[.)][[:space:]]*\*\*//; s/\*\*$//'
 }

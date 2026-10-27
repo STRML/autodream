@@ -2,6 +2,13 @@
 
 All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
+## 2026-10-27
+
+### Fixed
+- **The triage session carries the questions, not the report.** `bin/review.sh` passed the entire report through `--append-system-prompt` (~25KB on 2026-10-26) and launched with the literal prompt `go`. A report body narrating a night of firmware work — `sdb`, root status, `dlopen`, W^X — reads as an offensive-security engagement to model providers' content classifiers: every launch of the 2026-10-26 report was refused with `Opus 5.5's safeguards flagged this session ... Details: [cyber]`, and replaying the same request headlessly with `claude -p` reproduced it. The session now gets the report's questions section and a real one-line instruction.
+- **The questions section has a machine-readable contract instead of a markdown heading.** Four consumers read it (`notify.sh`, `review.sh`, `question-streaks.sh`, `triage-dream.sh`) and each had its own approximation of "where does the section end": a heading match, a heading-to-next-`##` scan, a heading-to-marker scan. Gate review on `review.sh` alone spent five rounds on that difference — a heading inside a code fence, `~~~` fences, fence length, fence info strings — because every fix moved one parser and left the others. `PROMPT.md` now has L2 wrap the section in `AUTODREAM_QUESTIONS_BEGIN` / `AUTODREAM_QUESTIONS_END`, and `bin/report-format.sh` gains `report_questions` and `report_has_questions_block` as the single reader. `run.sh` treats a report from `AUTODREAM_QUESTIONS_EPOCH` (default 2026-10-27) onward as truncated when its block is missing or unclosed, so a bad block is rebuilt rather than handed to a consumer that would guess. Reports written before the block still read through the old heading fallback, which now lives in exactly one place.
+- **The triage prompt never carries a partial question.** The inline cap (12KB) is all-or-nothing: a section that does not fit is not inlined and the prompt points at the report instead. Splitting a section at a line, an item or a fence and calling the remainder "the questions" had the session recommending on half a question.
+
 ## 2026-10-20
 
 ### Changed
