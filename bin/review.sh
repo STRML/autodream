@@ -379,20 +379,40 @@ trap 'rm -f "$QUESTIONS_TMP" ${CUT_TMP:+"$CUT_TMP"}' EXIT
 # a fenced `## ` heading inside a question does not end it. The heading must be
 # the whole line, so `## Open questions for the user's agents` is a different
 # section.
-awk '/^```/ { fence = !fence }
-     !on && !fence && /^## Open questions for the user[ \t\r]*$/ { on = 1; print; next }
-     on && !fence && /^## / { exit }
-     on { print }' "$REPORT" > "$QUESTIONS_TMP" || { echo "review.sh: could not read the open questions from $REPORT; not launching triage" >&2; exit 1; }
+awk '
+  {
+    is_fence = ($0 ~ /^[ \t]*(```|~~~)/)
+    if (is_fence) {
+      ch = ($0 ~ /^[ \t]*```/) ? "`" : "~"
+      if (fence == "") fence = ch
+      else if (fence == ch) fence = ""
+      if (on) print
+      next
+    }
+    if (!on && fence == "" && $0 ~ /^## Open questions for the user[ \t\r]*$/) { on = 1; print; next }
+    if (on && fence == "" && /^## /) exit
+    if (on) print
+  }' "$REPORT" > "$QUESTIONS_TMP" || { echo "review.sh: could not read the open questions from $REPORT; not launching triage" >&2; exit 1; }
 
 # Bound the section on a whole-question boundary. A cap applied with `head -c`
 # in a shell redirect would also create the file 0644 under a default umask,
-# and would cut a question in half while the prompt called them complete.
+# and a line-boundary cap would keep a question's heading while cutting the
+# decision context under it. A question is a top-level list item plus every
+# line under it, so a block is kept whole or not at all.
 TRUNCATED=0
 if [ "$(wc -c < "$QUESTIONS_TMP" | tr -d ' ')" -gt "$QUESTIONS_CAP" ]; then
   CUT_TMP=$(mktemp -t autodream-questions-cut.XXXXXX) || { echo "review.sh: mktemp failed; not launching triage" >&2; exit 1; }
   awk -v cap="$QUESTIONS_CAP" '
-    /^([0-9]+[.)]|[-*]) / && n >= cap { exit }
-    { n += length($0) + 1; if (n > cap) exit; print }' "$QUESTIONS_TMP" > "$CUT_TMP" \
+    function fits() { return n + length(buf) <= cap }
+    /^([0-9]+[.)]|[-*]) / {
+      if (started) { if (fits()) { printf "%s", buf; n += length(buf) } else { stop = 1; exit } }
+      started = 1; buf = $0 "\n"; next
+    }
+    {
+      if (started) buf = buf $0 "\n"
+      else if (n + length($0) + 1 <= cap) { print; n += length($0) + 1 }
+    }
+    END { if (started && !stop && fits()) printf "%s", buf }' "$QUESTIONS_TMP" > "$CUT_TMP" \
     || { echo "review.sh: could not cap the open questions; not launching triage" >&2; exit 1; }
   # mktemp's 0600 carries through the rename; never widen it.
   mv "$CUT_TMP" "$QUESTIONS_TMP" || { echo "review.sh: could not cap the open questions; not launching triage" >&2; exit 1; }

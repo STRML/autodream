@@ -205,6 +205,52 @@ test_heading_must_match_the_whole_line(){
   assert_grep "$root/sp" 'Hook tightening' "the exact heading is still found"
 }
 
+test_tilde_fence_example_is_not_the_section(){
+  local root; root=$(setup_env)
+  {
+    printf '# Autodream — 2020-01-02\n\n## Top patterns\n\nExample:\n\n'
+    printf '~~~\n## Open questions for the user\nTILDE-FENCED-BODY\n~~~\n\n'
+    printf '## Open questions for the user\n\n%s\n\n<!-- autodream:open-questions=1 -->\n' "$Q_BODY"
+  } > "$root/dreams/2020-01-02.md"
+  run_review "$root" --force 2020-01-02
+  system_prompt "$root" > "$root/sp"
+  assert_nogrep "$root/sp" 'TILDE-FENCED-BODY' "a tilde-fenced example does not start the section"
+  assert_grep "$root/sp" 'Hook tightening' "the real section is still inlined"
+}
+
+test_tilde_fence_inside_a_question_does_not_end_it(){
+  local root; root=$(setup_env)
+  {
+    printf '# Autodream — 2020-01-02\n\n## Open questions for the user\n\n'
+    printf '1. **Tilde** — which heading wins?\n\n~~~\n## Example heading in a tilde fence\n~~~\n\n'
+    printf '   - AFTER-TILDE the rest of question 1.\n\n'
+    printf '2. **Second** — still here?\n\n<!-- autodream:open-questions=2 -->\n'
+  } > "$root/dreams/2020-01-02.md"
+  run_review "$root" --force 2020-01-02
+  system_prompt "$root" > "$root/sp"
+  assert_grep "$root/sp" 'AFTER-TILDE' "text after a tilde-fenced heading is kept"
+  assert_grep "$root/sp" 'still here' "the next question is kept"
+}
+
+test_cap_never_keeps_a_heading_without_its_context(){
+  local root; root=$(setup_env)
+  # Question 1 fits; question 2 is a heading whose own context overflows the
+  # remaining room. Keeping the heading alone would ask for a decision on a
+  # question whose evidence was cut off.
+  {
+    printf '# Autodream — 2020-01-02\n\n## Open questions for the user\n\n'
+    printf '1. **Small** — a question that fits.\n   - context that fits.\n\n'
+    printf '2. **Huge** — a question whose context does not fit.\n'
+    printf '   - %s\n\n' "$(head -c 13000 /dev/zero | tr '\0' 'z')"
+    printf '3. **Third** — never reached.\n\n<!-- autodream:open-questions=3 -->\n'
+  } > "$root/dreams/2020-01-02.md"
+  run_review "$root" --force 2020-01-02
+  system_prompt "$root" > "$root/sp"
+  assert_grep "$root/sp" 'a question that fits' "the question that fits is shown"
+  assert_nogrep "$root/sp" 'whose context does not fit' "a heading is not kept without its context"
+  assert_grep "$root/sp" 'truncated="1"' "the block says it was truncated"
+}
+
 test_temps_are_removed(){
   local root; root=$(setup_env); mk_report "$root" 2020-01-02 "$Q_BODY"
   local before; before=$(ls "${TMPDIR:-/tmp}" | grep -c '^autodream-questions' || true)
@@ -222,6 +268,9 @@ test_section_is_capped
 test_fenced_example_is_not_the_section
 test_fenced_heading_inside_a_question_does_not_end_it
 test_heading_must_match_the_whole_line
+test_tilde_fence_example_is_not_the_section
+test_tilde_fence_inside_a_question_does_not_end_it
+test_cap_never_keeps_a_heading_without_its_context
 test_temps_are_removed
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
