@@ -27,6 +27,35 @@ DATE=2020-01-02          # fixed target date; sessions are touched into this day
 STAMP=202001021200       # touch -t form of DATE at noon
 
 pass=0; fail=0
+
+# Sharding. RUNALL_SHARD=i/n runs every n-th test and unit suite, counted in the order they appear
+# below, so n jobs run the whole suite exactly once between them (tests/shard.sh proves it).
+# Round-robin balances well here: the slow tests are spread across the file, and with four shards
+# the longest holds 26% of the run time against an ideal 25%. RUNALL_LIST=1 prints what this shard
+# would run, one entry per line, and runs nothing. Unset, it is the whole suite, as it always was.
+_shard_i=0; _shard_n=1; _list="${RUNALL_LIST:-}"
+if [ -n "${RUNALL_SHARD:-}" ]; then
+  # Strict: digits, one slash, digits. Anything else is refused, never read as the whole suite.
+  _bad(){ echo "run-all: RUNALL_SHARD must be i/n with 0 <= i < n (got '$RUNALL_SHARD')" >&2; exit 2; }
+  case "$RUNALL_SHARD" in */*) ;; *) _bad ;; esac
+  _si=${RUNALL_SHARD%%/*}; _sn=${RUNALL_SHARD#*/}
+  case "$_si$_sn" in ''|*[!0-9]*) _bad ;; esac
+  [ -n "$_si" ] && [ -n "$_sn" ] || _bad
+  _shard_i=$((10#$_si)); _shard_n=$((10#$_sn))   # 10#: "08" is eight, not a bad octal
+  if [ "$_shard_n" -lt 1 ] || [ "$_shard_i" -ge "$_shard_n" ]; then _bad; fi
+fi
+_idx=0
+_owns(){ _idx=$((_idx + 1)); [ $((_idx % _shard_n)) -eq "$_shard_i" ]; }
+# RUNALL_TIMES=<file> appends "<seconds> <name>" for every test and unit suite it runs, so a CI job
+# can show which entries are slow and where a better split would come from.
+_timed(){ [ -n "${RUNALL_TIMES:-}" ] && printf '%s %s\n' "$((SECONDS - $2))" "$1" >> "$RUNALL_TIMES"; return 0; }
+_run(){
+  _owns || return 0
+  if [ -n "$_list" ]; then printf '%s\n' "$1"; return 0; fi
+  local _t0=$SECONDS
+  "$@"
+  _timed "$1" "$_t0"
+}
 ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
 no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
 assert_file(){     [ -f "$1" ] && ok "$2" || no "$2 (missing: $1)"; }
@@ -3283,166 +3312,168 @@ test_overlap_not_measured_malformed_output(){
 [ -x "$RUN" ]  || { echo "FATAL: $RUN not executable"; exit 1; }
 [ -x "$MOCK" ] || { echo "FATAL: $MOCK not executable"; exit 1; }
 
-echo "cc-autodream integration tests (mock claude)"
-echo
-test_happy
-test_session_stats
-test_unreadable
-test_incomplete
-test_idempotent
-test_revalidates_garbage
-test_no_sessions
-test_l2_uses_the_default_model
-test_l2_model_pin_is_honoured
-test_framing
-test_l1_engine_comes_from_the_adapter
-test_l1_engine_cannot_be_redirected_by_a_worker
-test_l1_session_with_no_resolvable_engine_is_an_error_record
-test_worker_failure_records_exit_code_and_stdout
-test_malformed_worker_output_is_a_failure_with_its_evidence
-test_findings_must_be_an_array_not_merely_present
-test_stale_wrongtype_findings_is_redispatched
-test_failure_class_found_through_an_old_install
-test_failure_class_provider_matrix
-test_oversized_gate_context_overflow
-test_oversized_gate_errored_noisy
-test_oversized_gate_errored_silent
-test_oversized_gate_script_context_overflow
-test_oversized_gate_script_err_without_exit_code
-test_oversized_gate_script_missing_err
-test_oversized_gate_script_mixed_size_and_provider
-test_oversized_gate_script_silent
-test_oversized_gate_script_stdout_section_boundary
-test_oversized_gate_script_unmeasurable_only
-test_a_nested_error_key_is_not_a_failed_triage
-test_l1_hang_is_bounded
-test_intrinsic_124_is_not_a_timeout
-test_l1_timeout_must_be_positive
-test_l1_warmup_timeout_must_be_positive
-test_warmup_can_be_disabled
-test_warmup_diagnostic_stdout_is_a_failure_not_ok
-test_warmup_empty_stdout_is_a_failure_not_ok
-test_warmup_runs_before_the_fanout
-test_breaker_needs_two_barren_rounds_not_one
-test_a_deterministic_failure_trips_the_breaker
-test_a_flaky_worker_does_not_trip_the_breaker
-test_warmup_works_for_an_adapter_with_no_environment
-test_net_up_survives_a_curl_that_stalls_after_the_reply
-test_net_up_probes_the_host_it_is_given
-test_wait_for_network_cap_bounds_the_probe
-test_network_down_defers_the_date
-test_oversized_gate_script_deferred
-test_route_lost_after_the_precheck_still_defers
-test_missing_curl_is_not_read_as_an_outage
-test_a_transient_outage_is_ridden_out_not_deferred
-test_no_curl_does_not_defer_a_healthy_run
-test_unexecutable_curl_is_not_read_as_an_outage
-test_provider_refusal_defers_without_a_stub
-test_provider_402_and_missing_curl_still_defer
-test_rounds_used_counts_rounds_that_dispatched
-test_changelog
-test_changelog_multi_source
-test_changelog_refuses_foreign_cache_dir
-test_changelog_single_remote_suppresses_defaults
-test_changelog_dedupe_is_scoped_to_the_release
-test_changelog_survives_a_force_pushed_remote
-test_prune_helper
-test_autodream_now_from_a_checkout_uses_the_default_install
-test_self_session_excluded
-test_skip_empty_sessions
-test_skip_empty_disabled
-test_l1_retry
-test_idempotency_guard
-test_idempotency_guard_needs_a_complete_report
-test_run_lock_is_per_date_and_live_holders_win
-test_run_lock_is_reclaimed_from_a_dead_holder
-test_killed_run_temps_are_swept_at_the_start_of_the_next_run
-test_self_audit_stats
-test_self_audit_stats_failure_denominator
-test_self_audit_stats_precached_disambiguation
-test_normalize_project
-test_citation_check_resolves
-test_citation_check_flags_gated_and_missing
-test_citation_counters_in_run_stats
-test_citation_check_counts_bare_hashes
-test_citation_check_resolves_session_id_tail
-test_slim_transcript
-test_facet_fields_plumbed
-test_noise_gate_trivial
-test_noise_gate_short_duration
-test_noise_gate_subagent_carveout
-test_noise_gate_stats
-test_noise_gate_env_override
-test_oversized_gate_zero
-test_oversized_gate_total
-test_oversized_gate_errored
-test_stats_sidecar_ok
-test_stats_sidecar_missing_counted
-test_stats_sidecar_missing_keeps_oversized_count
-test_stats_sidecar_malformed_counted
-test_stats_sidecar_non_numeric_counted
-test_runner_provenance
-test_runner_provenance_no_git
-test_runner_provenance_through_symlink
-test_runner_provenance_relative_symlink
-test_runner_provenance_unresolvable_chain
-test_oversized_gate_script
-test_oversized_gate_script_open
-test_oversized_gate_script_empty
-test_oversized_gate_script_args
-test_notify_count
-test_notify_open_command
-test_notify_dryrun
-test_runner_dirty_ignores_untracked
-test_overlap_pair
-test_overlap_triple
-test_overlap_none
-test_overlap_drops_advisor_sidecars
-test_overlap_drops_nested_sidecars
-test_fanout_stats
-test_overlap_not_measured_missing_bin
-test_overlap_not_measured_empty_output
-test_overlap_not_measured_malformed_output
-test_notes_no_surfaces
-test_notes_from_notes_file
-test_notes_from_vault_inbox
-test_notes_vault_expired_dropped
-test_notes_vault_archived_after_report
-test_notes_vault_not_archived_without_report
-test_notes_vault_report_published
-test_notes_vault_unreadable_note_stays
-test_config_file_sourced
-test_config_env_wins_over_config
-test_notes_header_only_file_does_not_abort
-test_notes_icloud_placeholder_is_counted
-test_notes_placeholder_and_real_file_counted_once
-test_notes_expiry_uses_report_date
-test_focus_tag_reaches_the_report_and_is_consumed
-test_focus_tag_is_held_for_its_day
-test_focus_tag_day_is_the_local_day
-test_focus_tag_not_consumed_without_report
-test_focus_tag_pending_set
-test_focus_tag_retag_after_consume_is_offered_again
-test_focus_tag_forced_rebuild_keeps_its_tags
-test_focus_tag_unreadable_file_is_reported
-test_focus_tag_unparseable_time_is_dated_by_the_report
-test_focus_tag_text_cannot_forge_a_note
-test_focus_tag_archive_is_idempotent
-test_focus_tag_without_jq_is_reported
-test_force_rebuild_failed_l2_does_not_consume
-test_unmovable_stale_report_disarms_consuming
-test_partial_report_does_not_consume
-test_partial_report_keeps_previous
-test_partial_report_does_not_block_retry
-test_complete_report_retires_partials
-test_dead_stdout_does_not_kill_the_run
-test_unassembled_dates_are_surfaced
-test_unassembled_ignores_a_finished_date
-test_pre_marker_report_is_not_abandoned
-test_missing_report_still_abandoned_before_epoch
-test_no_sessions_stub_carries_marker
-test_old_date_reprocess_does_not_consume
-test_config_unbound_var_does_not_kill_run
+if [ -z "$_list" ]; then
+  echo "cc-autodream integration tests (mock claude)"
+  echo
+fi
+_run test_happy
+_run test_session_stats
+_run test_unreadable
+_run test_incomplete
+_run test_idempotent
+_run test_revalidates_garbage
+_run test_no_sessions
+_run test_l2_uses_the_default_model
+_run test_l2_model_pin_is_honoured
+_run test_framing
+_run test_l1_engine_comes_from_the_adapter
+_run test_l1_engine_cannot_be_redirected_by_a_worker
+_run test_l1_session_with_no_resolvable_engine_is_an_error_record
+_run test_worker_failure_records_exit_code_and_stdout
+_run test_malformed_worker_output_is_a_failure_with_its_evidence
+_run test_findings_must_be_an_array_not_merely_present
+_run test_stale_wrongtype_findings_is_redispatched
+_run test_failure_class_found_through_an_old_install
+_run test_failure_class_provider_matrix
+_run test_oversized_gate_context_overflow
+_run test_oversized_gate_errored_noisy
+_run test_oversized_gate_errored_silent
+_run test_oversized_gate_script_context_overflow
+_run test_oversized_gate_script_err_without_exit_code
+_run test_oversized_gate_script_missing_err
+_run test_oversized_gate_script_mixed_size_and_provider
+_run test_oversized_gate_script_silent
+_run test_oversized_gate_script_stdout_section_boundary
+_run test_oversized_gate_script_unmeasurable_only
+_run test_a_nested_error_key_is_not_a_failed_triage
+_run test_l1_hang_is_bounded
+_run test_intrinsic_124_is_not_a_timeout
+_run test_l1_timeout_must_be_positive
+_run test_l1_warmup_timeout_must_be_positive
+_run test_warmup_can_be_disabled
+_run test_warmup_diagnostic_stdout_is_a_failure_not_ok
+_run test_warmup_empty_stdout_is_a_failure_not_ok
+_run test_warmup_runs_before_the_fanout
+_run test_breaker_needs_two_barren_rounds_not_one
+_run test_a_deterministic_failure_trips_the_breaker
+_run test_a_flaky_worker_does_not_trip_the_breaker
+_run test_warmup_works_for_an_adapter_with_no_environment
+_run test_net_up_survives_a_curl_that_stalls_after_the_reply
+_run test_net_up_probes_the_host_it_is_given
+_run test_wait_for_network_cap_bounds_the_probe
+_run test_network_down_defers_the_date
+_run test_oversized_gate_script_deferred
+_run test_route_lost_after_the_precheck_still_defers
+_run test_missing_curl_is_not_read_as_an_outage
+_run test_a_transient_outage_is_ridden_out_not_deferred
+_run test_no_curl_does_not_defer_a_healthy_run
+_run test_unexecutable_curl_is_not_read_as_an_outage
+_run test_provider_refusal_defers_without_a_stub
+_run test_provider_402_and_missing_curl_still_defer
+_run test_rounds_used_counts_rounds_that_dispatched
+_run test_changelog
+_run test_changelog_multi_source
+_run test_changelog_refuses_foreign_cache_dir
+_run test_changelog_single_remote_suppresses_defaults
+_run test_changelog_dedupe_is_scoped_to_the_release
+_run test_changelog_survives_a_force_pushed_remote
+_run test_prune_helper
+_run test_autodream_now_from_a_checkout_uses_the_default_install
+_run test_self_session_excluded
+_run test_skip_empty_sessions
+_run test_skip_empty_disabled
+_run test_l1_retry
+_run test_idempotency_guard
+_run test_idempotency_guard_needs_a_complete_report
+_run test_run_lock_is_per_date_and_live_holders_win
+_run test_run_lock_is_reclaimed_from_a_dead_holder
+_run test_killed_run_temps_are_swept_at_the_start_of_the_next_run
+_run test_self_audit_stats
+_run test_self_audit_stats_failure_denominator
+_run test_self_audit_stats_precached_disambiguation
+_run test_normalize_project
+_run test_citation_check_resolves
+_run test_citation_check_flags_gated_and_missing
+_run test_citation_counters_in_run_stats
+_run test_citation_check_counts_bare_hashes
+_run test_citation_check_resolves_session_id_tail
+_run test_slim_transcript
+_run test_facet_fields_plumbed
+_run test_noise_gate_trivial
+_run test_noise_gate_short_duration
+_run test_noise_gate_subagent_carveout
+_run test_noise_gate_stats
+_run test_noise_gate_env_override
+_run test_oversized_gate_zero
+_run test_oversized_gate_total
+_run test_oversized_gate_errored
+_run test_stats_sidecar_ok
+_run test_stats_sidecar_missing_counted
+_run test_stats_sidecar_missing_keeps_oversized_count
+_run test_stats_sidecar_malformed_counted
+_run test_stats_sidecar_non_numeric_counted
+_run test_runner_provenance
+_run test_runner_provenance_no_git
+_run test_runner_provenance_through_symlink
+_run test_runner_provenance_relative_symlink
+_run test_runner_provenance_unresolvable_chain
+_run test_oversized_gate_script
+_run test_oversized_gate_script_open
+_run test_oversized_gate_script_empty
+_run test_oversized_gate_script_args
+_run test_notify_count
+_run test_notify_open_command
+_run test_notify_dryrun
+_run test_runner_dirty_ignores_untracked
+_run test_overlap_pair
+_run test_overlap_triple
+_run test_overlap_none
+_run test_overlap_drops_advisor_sidecars
+_run test_overlap_drops_nested_sidecars
+_run test_fanout_stats
+_run test_overlap_not_measured_missing_bin
+_run test_overlap_not_measured_empty_output
+_run test_overlap_not_measured_malformed_output
+_run test_notes_no_surfaces
+_run test_notes_from_notes_file
+_run test_notes_from_vault_inbox
+_run test_notes_vault_expired_dropped
+_run test_notes_vault_archived_after_report
+_run test_notes_vault_not_archived_without_report
+_run test_notes_vault_report_published
+_run test_notes_vault_unreadable_note_stays
+_run test_config_file_sourced
+_run test_config_env_wins_over_config
+_run test_notes_header_only_file_does_not_abort
+_run test_notes_icloud_placeholder_is_counted
+_run test_notes_placeholder_and_real_file_counted_once
+_run test_notes_expiry_uses_report_date
+_run test_focus_tag_reaches_the_report_and_is_consumed
+_run test_focus_tag_is_held_for_its_day
+_run test_focus_tag_day_is_the_local_day
+_run test_focus_tag_not_consumed_without_report
+_run test_focus_tag_pending_set
+_run test_focus_tag_retag_after_consume_is_offered_again
+_run test_focus_tag_forced_rebuild_keeps_its_tags
+_run test_focus_tag_unreadable_file_is_reported
+_run test_focus_tag_unparseable_time_is_dated_by_the_report
+_run test_focus_tag_text_cannot_forge_a_note
+_run test_focus_tag_archive_is_idempotent
+_run test_focus_tag_without_jq_is_reported
+_run test_force_rebuild_failed_l2_does_not_consume
+_run test_unmovable_stale_report_disarms_consuming
+_run test_partial_report_does_not_consume
+_run test_partial_report_keeps_previous
+_run test_partial_report_does_not_block_retry
+_run test_complete_report_retires_partials
+_run test_dead_stdout_does_not_kill_the_run
+_run test_unassembled_dates_are_surfaced
+_run test_unassembled_ignores_a_finished_date
+_run test_pre_marker_report_is_not_abandoned
+_run test_missing_report_still_abandoned_before_epoch
+_run test_no_sessions_stub_carries_marker
+_run test_old_date_reprocess_does_not_consume
+_run test_config_unbound_var_does_not_kill_run
 # ---- Multi-root session scanning (SESSION_ROOTS) + root-probe ----
 
 # A run that scans more than one projects dir: primary + one alt, both holding sessions
@@ -5340,85 +5371,85 @@ test_no_markdown_memory_writer_remains(){
 }
 
 # ---- run the new tests ----
-test_pins_applied_after_complete_report
-test_normalize_project_survives_non_object_findings
-test_nested_session_roots_name_the_inner_bucket
-test_pins_not_applied_after_truncated_report
-test_pins_stale_file_is_moved_aside
-test_pins_tab_in_cwd_never_splits_the_row
-test_pins_failed_authorization_rebuild_stores_nothing
-test_pins_forged_session_path_authorizes_nothing
-test_pins_subagent_sessions_keep_their_project
-test_pins_cwd_outside_its_bucket_authorizes_nothing
-test_pins_colliding_cwds_authorize_nothing
-test_pins_custom_slug_bucket_keeps_its_cwd
-test_pins_invalid_cwd_still_counts_toward_a_collision
-test_pins_unresolvable_cwd_still_counts_toward_a_collision
-test_pins_applied_before_notify
-test_pins_sweep_applies_pins_a_killed_run_never_reached
-test_pins_sweep_retries_failed_pins_on_an_earlier_date
-test_pins_sweep_leaves_what_it_must
-test_pins_sweep_respects_a_live_run_and_a_stale_result
-test_streak_update_runs_before_steps_that_can_hang
-test_pins_ledger_wiped_by_a_worker_stores_nothing_twice
-test_pins_bucket_named_subagents_is_a_project
-test_pins_failed_move_aside_leaves_no_temp_file
-test_pins_l2_cannot_widen_the_worklist
-test_pins_l1_cannot_widen_the_worklist
-test_no_markdown_memory_writer_remains
-test_multiroot_triages_alt_root
-test_multiroot_heldout_and_dedup
-test_multiroot_flags_unindexed
-test_rootprobe_remembers_choice
-test_rootprobe_no_write_mode_flags_but_does_not_write
-test_rootprobe_empty_home
-test_newline_path_is_rejected_not_split
-test_source_sidecar_is_written
-test_artifact_hash_contract_is_unchanged
-test_preflight_stops_a_run_missing_a_dependency
-test_install_deploys_the_adapter_runtime
-test_unusual_session_paths_are_triaged_or_refused
-test_failure_stub_for_a_quoted_path_is_valid_json
-test_failing_enumerator_aborts_the_run
-test_one_failed_root_does_not_kill_the_night
-test_enabled_adapters_resolves_once
-test_l2_gets_the_skills_inventory_and_per_source_facts
-test_unavailable_skills_inventory_says_so
-test_harness_addendum_reaches_only_that_harnesss_workers
-test_l2_is_read_only_and_the_runner_writes_the_report
-test_l2_report_with_a_marker_but_no_sentinel_is_not_delivered
-test_pin_block_must_follow_the_sentinel_and_be_closed
-test_dream_triage_is_opt_in_and_leaves_l2_alone
-test_l2_engine_comes_from_an_adapter
-test_config_written_by_install_enables_adapters_and_l2_engine
-test_replay_harness_works_on_synthetic_data
-test_skill_fields_dropped_without_a_sidecar
-test_skill_fields_dropped_with_a_partial_sidecar
-test_skill_fields_are_enforced_from_the_sidecar
-test_builtin_slash_commands_are_not_skill_invocations
-test_omp_adapter_is_opt_in
-test_l1_precheck_probes_the_l1_provider
-test_worker_failure_probe_names_the_l1_provider
-test_one_dead_provider_does_not_hold_back_the_others
-test_omp_session_is_linearized_for_the_worker
-test_omp_nested_child_is_a_sidechain_of_its_bucket
-test_omp_session_that_cannot_be_linearized_is_an_error_record
-test_omp_stats_describe_the_live_branch_only
-test_no_usable_adapter_leaves_a_trace
-test_fatal_does_not_clobber_a_complete_date
-test_partial_enumeration_keeps_what_it_read
-test_all_roots_unavailable_fails
-test_fresh_host_with_no_store_is_not_a_failure
-test_upgrade_lag_install_still_produces_a_report
-test_forced_hash_collision_drops_both
-test_collision_worklist_failure_aborts
-test_collision_membership_probe_failure_aborts
-test_three_way_collision_counts_paths_not_lines
-test_mixed_collision_run_attributes_correctly
-test_persistent_sidecar_failure_counts_rows_not_attempts
-test_unwritable_collision_index_fails_closed
-test_broken_shasum_never_collapses_sessions
-test_all_excluded_corpus_says_so
+_run test_pins_applied_after_complete_report
+_run test_normalize_project_survives_non_object_findings
+_run test_nested_session_roots_name_the_inner_bucket
+_run test_pins_not_applied_after_truncated_report
+_run test_pins_stale_file_is_moved_aside
+_run test_pins_tab_in_cwd_never_splits_the_row
+_run test_pins_failed_authorization_rebuild_stores_nothing
+_run test_pins_forged_session_path_authorizes_nothing
+_run test_pins_subagent_sessions_keep_their_project
+_run test_pins_cwd_outside_its_bucket_authorizes_nothing
+_run test_pins_colliding_cwds_authorize_nothing
+_run test_pins_custom_slug_bucket_keeps_its_cwd
+_run test_pins_invalid_cwd_still_counts_toward_a_collision
+_run test_pins_unresolvable_cwd_still_counts_toward_a_collision
+_run test_pins_applied_before_notify
+_run test_pins_sweep_applies_pins_a_killed_run_never_reached
+_run test_pins_sweep_retries_failed_pins_on_an_earlier_date
+_run test_pins_sweep_leaves_what_it_must
+_run test_pins_sweep_respects_a_live_run_and_a_stale_result
+_run test_streak_update_runs_before_steps_that_can_hang
+_run test_pins_ledger_wiped_by_a_worker_stores_nothing_twice
+_run test_pins_bucket_named_subagents_is_a_project
+_run test_pins_failed_move_aside_leaves_no_temp_file
+_run test_pins_l2_cannot_widen_the_worklist
+_run test_pins_l1_cannot_widen_the_worklist
+_run test_no_markdown_memory_writer_remains
+_run test_multiroot_triages_alt_root
+_run test_multiroot_heldout_and_dedup
+_run test_multiroot_flags_unindexed
+_run test_rootprobe_remembers_choice
+_run test_rootprobe_no_write_mode_flags_but_does_not_write
+_run test_rootprobe_empty_home
+_run test_newline_path_is_rejected_not_split
+_run test_source_sidecar_is_written
+_run test_artifact_hash_contract_is_unchanged
+_run test_preflight_stops_a_run_missing_a_dependency
+_run test_install_deploys_the_adapter_runtime
+_run test_unusual_session_paths_are_triaged_or_refused
+_run test_failure_stub_for_a_quoted_path_is_valid_json
+_run test_failing_enumerator_aborts_the_run
+_run test_one_failed_root_does_not_kill_the_night
+_run test_enabled_adapters_resolves_once
+_run test_l2_gets_the_skills_inventory_and_per_source_facts
+_run test_unavailable_skills_inventory_says_so
+_run test_harness_addendum_reaches_only_that_harnesss_workers
+_run test_l2_is_read_only_and_the_runner_writes_the_report
+_run test_l2_report_with_a_marker_but_no_sentinel_is_not_delivered
+_run test_pin_block_must_follow_the_sentinel_and_be_closed
+_run test_dream_triage_is_opt_in_and_leaves_l2_alone
+_run test_l2_engine_comes_from_an_adapter
+_run test_config_written_by_install_enables_adapters_and_l2_engine
+_run test_replay_harness_works_on_synthetic_data
+_run test_skill_fields_dropped_without_a_sidecar
+_run test_skill_fields_dropped_with_a_partial_sidecar
+_run test_skill_fields_are_enforced_from_the_sidecar
+_run test_builtin_slash_commands_are_not_skill_invocations
+_run test_omp_adapter_is_opt_in
+_run test_l1_precheck_probes_the_l1_provider
+_run test_worker_failure_probe_names_the_l1_provider
+_run test_one_dead_provider_does_not_hold_back_the_others
+_run test_omp_session_is_linearized_for_the_worker
+_run test_omp_nested_child_is_a_sidechain_of_its_bucket
+_run test_omp_session_that_cannot_be_linearized_is_an_error_record
+_run test_omp_stats_describe_the_live_branch_only
+_run test_no_usable_adapter_leaves_a_trace
+_run test_fatal_does_not_clobber_a_complete_date
+_run test_partial_enumeration_keeps_what_it_read
+_run test_all_roots_unavailable_fails
+_run test_fresh_host_with_no_store_is_not_a_failure
+_run test_upgrade_lag_install_still_produces_a_report
+_run test_forced_hash_collision_drops_both
+_run test_collision_worklist_failure_aborts
+_run test_collision_membership_probe_failure_aborts
+_run test_three_way_collision_counts_paths_not_lines
+_run test_mixed_collision_run_attributes_correctly
+_run test_persistent_sidecar_failure_counts_rows_not_attempts
+_run test_unwritable_collision_index_fails_closed
+_run test_broken_shasum_never_collapses_sessions
+_run test_all_excluded_corpus_says_so
 
 # ---- Report-day window: a session is placed by what is IN it, not by its file mtime -----
 # Issue #113. Enumeration used to be `-newermt DAY ! -newermt NEXT`, so a session written to
@@ -5803,20 +5834,20 @@ test_window_omp_session_active_only_on_an_abandoned_branch_is_gated_not_refused(
   rm -rf "$root"
 }
 
-test_window_places_a_session_by_its_records_not_its_mtime
-test_window_cuts_a_multi_day_session_to_the_report_day
-test_window_off_restores_mtime_enumeration
-test_window_degrades_when_the_helper_is_absent
-test_a_missing_l2_prompt_stops_the_run_before_l1
-test_window_is_dst_correct_end_to_end
-test_rebuild_keeps_a_session_touched_after_its_day_and_retries_its_stale_err
-test_rebuild_of_an_omp_parent_touched_after_its_day_keeps_it_beside_its_advisor
-test_stale_err_with_no_session_in_the_worklist_is_reported_not_silent
-test_stale_err_is_counted_on_a_night_with_no_session_too
-test_findings_outside_the_worklist_are_set_aside_not_deleted
-test_a_night_of_only_out_of_window_files_says_so
-test_window_omp_cuts_the_live_chain_after_linearizing
-test_window_omp_session_active_only_on_an_abandoned_branch_is_gated_not_refused
+_run test_window_places_a_session_by_its_records_not_its_mtime
+_run test_window_cuts_a_multi_day_session_to_the_report_day
+_run test_window_off_restores_mtime_enumeration
+_run test_window_degrades_when_the_helper_is_absent
+_run test_a_missing_l2_prompt_stops_the_run_before_l1
+_run test_window_is_dst_correct_end_to_end
+_run test_rebuild_keeps_a_session_touched_after_its_day_and_retries_its_stale_err
+_run test_rebuild_of_an_omp_parent_touched_after_its_day_keeps_it_beside_its_advisor
+_run test_stale_err_with_no_session_in_the_worklist_is_reported_not_silent
+_run test_stale_err_is_counted_on_a_night_with_no_session_too
+_run test_findings_outside_the_worklist_are_set_aside_not_deleted
+_run test_a_night_of_only_out_of_window_files_says_so
+_run test_window_omp_cuts_the_live_chain_after_linearizing
+_run test_window_omp_session_active_only_on_an_abandoned_branch_is_gated_not_refused
 
 test_leftover_counts_hold_with_several_sessions_in_the_worklist(){
   echo "# leftovers: the worklist hashes are one per line, so a findings JSON the worklist owns is never counted as foreign"
@@ -5834,7 +5865,7 @@ test_leftover_counts_hold_with_several_sessions_in_the_worklist(){
   rm -rf "$root"
 }
 
-test_leftover_counts_hold_with_several_sessions_in_the_worklist
+_run test_leftover_counts_hold_with_several_sessions_in_the_worklist
 
 # ---- Chunked triage: a transcript too big for one worker is read in chunks ---------------
 # One worker per chunk, then a mechanical merge into the one findings JSON per session that L2
@@ -6316,7 +6347,11 @@ test_chunking_an_omp_session_cuts_the_day_then_chunks_the_live_chain(){
   assert_nogrep "$fd/$h.json" 'could not be normalized' "it was not refused by the linearizer"
   assert_eq "$(chunk_reads "$root" | xargs cat | grep -c 'DAY1_ENTRY\|DAY3_ENTRY')" "0" "no chunk holds an entry from another day"
   assert_eq "$(turn_stats "$root")" "40/1" "the 40 turns of the day are in exactly one chunk each"
-  assert_eq "$(head -n 1 "$(chunk_reads "$root" | sort | head -1)" | jq -r .type)" "autodream_meta" "the first chunk opens with the session header"
+  # The prefix, not the parsed line: the header embeds the session's absolute path and is cut at the
+  # slimmer's 400-character line cap. It is 391 characters under a 9-character TMPDIR, so a TMPDIR
+  # 9 characters longer (a Mac's default, or one shard's nested temp dir) cut it mid-JSON, and jq on
+  # the cut line printed nothing.
+  assert_eq "$(head -n 1 "$(chunk_reads "$root" | sort | head -1)" | cut -c1-24)" '{"type":"autodream_meta"' "the first chunk opens with the session header"
   assert_eq "$(jq -r .meta.chunks "$fd/$h.json")" "$n" "the merged findings record the chunk count"
   assert_eq "$(jq -r .session_path "$fd/$h.json")" "$o" "and name the real session"
   assert_grep "$fd/sessions-source.txt" "^$h	omp$" "it is an omp session"
@@ -6324,26 +6359,26 @@ test_chunking_an_omp_session_cuts_the_day_then_chunks_the_live_chain(){
   rm -rf "$root"
 }
 
-test_chunking_reads_the_whole_conversation_in_chunks
-test_chunking_leaves_a_transcript_that_fits_alone
-test_chunk_cap_drops_the_middle_and_counts_it
-test_chunk_cap_of_one_reads_one_chunk_never_the_whole_transcript
-test_chunking_off_is_the_old_behaviour
-test_chunking_is_off_when_the_knob_is_unset
-test_chunk_knobs_are_validated
-test_noise_gate_knobs_are_validated
-test_chunking_degrades_when_the_helpers_are_absent
-test_a_failed_chunker_never_hands_a_worker_the_whole_slim
-test_a_failed_chunker_on_a_transcript_that_was_never_slimmed_is_still_bounded
-test_a_chunk_that_fails_is_retried_alone_and_finished_chunks_are_reused
-test_a_cached_chunk_answer_is_not_reused_after_the_instructions_or_the_session_change
-test_a_bad_chunk_answer_is_never_merged_around
-test_a_chunk_failure_is_classified_like_any_worker_failure
-test_a_provider_refusal_on_a_chunk_defers_the_date_and_stops_the_other_chunks
-test_chunk_files_are_never_mistaken_for_findings
-test_the_circuit_breaker_counts_finished_chunks_as_progress
-test_chunk_inputs_are_private_and_removed
-test_chunking_an_omp_session_cuts_the_day_then_chunks_the_live_chain
+_run test_chunking_reads_the_whole_conversation_in_chunks
+_run test_chunking_leaves_a_transcript_that_fits_alone
+_run test_chunk_cap_drops_the_middle_and_counts_it
+_run test_chunk_cap_of_one_reads_one_chunk_never_the_whole_transcript
+_run test_chunking_off_is_the_old_behaviour
+_run test_chunking_is_off_when_the_knob_is_unset
+_run test_chunk_knobs_are_validated
+_run test_noise_gate_knobs_are_validated
+_run test_chunking_degrades_when_the_helpers_are_absent
+_run test_a_failed_chunker_never_hands_a_worker_the_whole_slim
+_run test_a_failed_chunker_on_a_transcript_that_was_never_slimmed_is_still_bounded
+_run test_a_chunk_that_fails_is_retried_alone_and_finished_chunks_are_reused
+_run test_a_cached_chunk_answer_is_not_reused_after_the_instructions_or_the_session_change
+_run test_a_bad_chunk_answer_is_never_merged_around
+_run test_a_chunk_failure_is_classified_like_any_worker_failure
+_run test_a_provider_refusal_on_a_chunk_defers_the_date_and_stops_the_other_chunks
+_run test_chunk_files_are_never_mistaken_for_findings
+_run test_the_circuit_breaker_counts_finished_chunks_as_progress
+_run test_chunk_inputs_are_private_and_removed
+_run test_chunking_an_omp_session_cuts_the_day_then_chunks_the_live_chain
 
 # ---- The unit suites, run here and not only in CI ---------------------------
 # CLAUDE.md tells contributors "run tests/run-all.sh after any run.sh/prompt
@@ -6351,15 +6386,21 @@ test_chunking_an_omp_session_cuts_the_day_then_chunks_the_live_chain
 # run skipped adapter containment, the manifest-name check and the entire
 # contract suite, which is the gap the CI step's own comment says it closes.
 # Their counts fold into the totals below, so a red unit suite fails this script.
-echo
-echo "===== unit suites ====="
+if [ -z "$_list" ]; then
+  echo
+  echo "===== unit suites ====="
+fi
 # The suites that drive launchd need plutil and launchctl, so they run on macOS only (CI runs
 # them in launchd.yml, when a launchd file changes).
-_suites="portable lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux review-prompt notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt"
+_suites="portable lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux review-prompt notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt shard"
 [ "$(uname -s)" = Darwin ] && _suites="$_suites scheduler-label autodream-now install-review-agent install-dry-run install-dir install-skill"
 for _suite in $_suites; do
+  _owns || continue
+  if [ -n "$_list" ]; then printf 'suite:%s\n' "$_suite"; continue; fi
+  _t0=$SECONDS
   _out=$(bash "$HERE/$_suite.sh" 2>&1)
   _rc=$?
+  _timed "suite:$_suite" "$_t0"
   _p=$(printf '%s\n' "$_out" | sed -n 's/^passed: *\([0-9][0-9]*\).*/\1/p' | tail -1)
   _f=$(printf '%s\n' "$_out" | sed -n 's/.*failed: *\([0-9][0-9]*\).*/\1/p' | tail -1)
   pass=$((pass + ${_p:-0}))
@@ -6426,16 +6467,21 @@ test_question_streaks_state_lives_with_the_install(){
   # the cleared streak back when it writes.
   printf 'k\t1\t2026-03-03\t2026-03-03\tHeld?\n' > "$st"
   mkdir "$st.lock"
-  AUTODREAM_QUESTION_STATE="$st" bash "$QS" clear all >/dev/null 2>&1; local rc=$?
+  # AUTODREAM_QUESTION_LOCK_WAIT=1: the default is 15 one-second tries, and this case and the next
+  # each held a lock on purpose for all of them (32 of the suite's seconds, one test in 46).
+  local t0=$SECONDS
+  AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" bash "$QS" clear all >/dev/null 2>&1; local rc=$?
+  local waited=$((SECONDS - t0))
   rmdir "$st.lock" 2>/dev/null
   assert_eq "$rc" "1" "clear fails while an update holds the lock"
+  [ "$waited" -le 6 ] && ok "and gives up after the configured wait, not the default 15 tries (${waited}s)" || no "and gives up after the configured wait, not the default 15 tries (took ${waited}s)"
   assert_eq "$(streak_rows "$st")" "1" "and leaves the state for that update"
 
   # An EMPTY board is not a reason to skip the lock: an update holding it may be about to
   # write the first streak, which clear would then report as cleared (Codex review of 4eea84d).
   : > "$st"
   mkdir "$st.lock"
-  AUTODREAM_QUESTION_STATE="$st" bash "$QS" clear all >/dev/null 2>&1; rc=$?
+  AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" bash "$QS" clear all >/dev/null 2>&1; rc=$?
   rmdir "$st.lock" 2>/dev/null
   assert_eq "$rc" "1" "clear on an empty board still waits for the lock and fails while it is held"
 
@@ -6645,9 +6691,9 @@ test_question_streaks_reruns_and_mismatch(){
   rm -rf "$root"
 }
 
-test_question_streaks
-test_question_streaks_reruns_and_mismatch
-test_question_streaks_state_lives_with_the_install
+_run test_question_streaks
+_run test_question_streaks_reruns_and_mismatch
+_run test_question_streaks_state_lives_with_the_install
 
 # ---- L2 attempt diagnostics (issue 42): a signal-shaped L2 death leaves evidence ----
 # Exit 143 on the aggregator was seen on 2026-08-01, 08-31, 09-02, 09-04, 09-19 and 10-02 with
@@ -6783,13 +6829,14 @@ test_prune_worktrees_wiring(){
   rm -rf "$root" "$keep"
 }
 
-test_prune_worktrees_wiring
-test_l2_diag_written_on_exit_143
-test_l2_diag_written_on_exit_137
-test_l2_diag_long_command_lines_keep_the_sections_intact
-test_l2_diag_absent_on_other_outcomes
-test_l2_diag_probes_never_fail_or_stall_the_run
+_run test_prune_worktrees_wiring
+_run test_l2_diag_written_on_exit_143
+_run test_l2_diag_written_on_exit_137
+_run test_l2_diag_long_command_lines_keep_the_sections_intact
+_run test_l2_diag_absent_on_other_outcomes
+_run test_l2_diag_probes_never_fail_or_stall_the_run
 
+[ -z "$_list" ] || exit 0
 echo
 echo "----------------------------------------"
 echo "passed: $pass   failed: $fail"
