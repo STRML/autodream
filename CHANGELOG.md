@@ -2,6 +2,11 @@
 
 All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
+## 2026-10-27
+
+### Fixed
+- **The triage session no longer carries the whole report in its system prompt.** `bin/review.sh` passed the entire report through `--append-system-prompt` (~25KB on 2026-10-26) and then sent the literal prompt `go`. A report body narrating a night of firmware work — `sdb`, root status, `dlopen`, W^X — makes the session read as an offensive-security engagement to model providers' content classifiers: every launch of the 2026-10-26 report was refused with `Opus 5.5's safeguards flagged this session ... Details: [cyber]`, and the same request replayed headlessly with `-p` reproduced it exactly. The fix inlines only the `## Open questions for the user` section (capped at 12KB, ~2KB in practice), tells the model to stay out of the wider report unless a question needs one number from it, and replaces `go` with a real one-line instruction. A section-less report still launches with an empty, well-formed block, so a report that names the section differently degrades to "no questions inlined" instead of failing. `tests/review-prompt.sh` pins all of it: questions inlined, findings body and other sections absent, no `Read the report` instruction, a real launch prompt, the section-less fallback, and the cap. Note the general rule this came from: a launcher must never inline a long document into a system prompt, and never launch intent-carrying work with a one-word prompt.
+
 ## 2026-10-19
 
 ### Changed
