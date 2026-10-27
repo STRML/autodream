@@ -372,59 +372,84 @@ REPORT_BYTES=$(wc -c < "$REPORT" | tr -d ' ')
 # file for anything deeper.
 QUESTIONS_CAP=12000
 QUESTIONS_TMP=$(mktemp -t autodream-questions.XXXXXX) || { echo "review.sh: mktemp failed; not launching triage" >&2; exit 1; }
-CUT_TMP=""
-trap 'rm -f "$QUESTIONS_TMP" ${CUT_TMP:+"$CUT_TMP"}' EXIT
-# Fence-aware and exact-heading: a `## Open questions for the user` line quoted
-# inside a code fence in an earlier section is an example, not the section, and
-# a fenced `## ` heading inside a question does not end it. The heading must be
-# the whole line, so `## Open questions for the user's agents` is a different
-# section.
-awk '
+FLAG_TMP=$(mktemp -t autodream-questions-flag.XXXXXX) || { echo "review.sh: mktemp failed; not launching triage" >&2; exit 1; }
+trap 'rm -f "$QUESTIONS_TMP" "$FLAG_TMP"' EXIT
+# One scanner does extraction and the cap, because both are the same question
+# ("where does a question start and end?") and two approximations kept
+# disagreeing. Rules it encodes:
+#
+#   fence   opens on a run of >=3 backticks or tildes, and closes only on the
+#           same character at >= the opening length, so a 3-backtick line
+#           inside a 4-backtick block is content, not a close.
+#   heading the section heading must be the whole line and outside a fence:
+#           `## Open questions for the user's agents` is a different section,
+#           and the same text quoted in an example fence is not the section.
+#   block   a question starts at a top-level list item outside a fence and runs
+#           until the next one, so text inside a fenced example cannot start or
+#           end one.
+#   cap     questions are kept or dropped whole. A heading kept while the
+#           decision context under it was cut asks the session to recommend on
+#           half a question. `length()` counts characters; the cap bounds a
+#           prompt, it is not a byte-exact budget.
+awk -v cap="$QUESTIONS_CAP" -v flagfile="$FLAG_TMP" '
+  function flush(   total) {
+    if (blk == "") return
+    total = used + length(pre) + length(blk)
+    if (total <= cap) {
+      printf "%s", pre
+      printf "%s", blk
+      used += length(pre) + length(blk)
+      pre = ""
+      blk = ""
+    } else {
+      stop = 1
+    }
+  }
+  function finish() {
+    if (done) return
+    done = 1
+    flush()
+    if (stop || blk != "") print "1" > flagfile
+  }
   {
-    is_fence = ($0 ~ /^[ \t]*(```|~~~)/)
-    if (is_fence) {
-      ch = ($0 ~ /^[ \t]*```/) ? "`" : "~"
-      if (fence == "") fence = ch
-      else if (fence == ch) fence = ""
-      if (on) print
+    isfence = 0
+    if ($0 ~ /^[ \t]*(```+|~~~+)[ \t\r]*$/) {
+      isfence = 1
+      tmp = $0
+      sub(/^[ \t]*/, "", tmp)
+      ch = substr(tmp, 1, 1)
+      n = 0
+      while (substr(tmp, n + 1, 1) == ch) n++
+      if (fence == "") { fence = ch; flen = n }
+      else if (ch == fence && n >= flen) { fence = ""; flen = 0 }
+    }
+
+    if (!on) {
+      if (!isfence && fence == "" && $0 ~ /^## Open questions for the user[ \t\r]*$/) { on = 1; pre = $0 "\n" }
       next
     }
-    if (!on && fence == "" && $0 ~ /^## Open questions for the user[ \t\r]*$/) { on = 1; print; next }
-    if (on && fence == "" && /^## /) exit
-    if (on) print
-  }' "$REPORT" > "$QUESTIONS_TMP" || { echo "review.sh: could not read the open questions from $REPORT; not launching triage" >&2; exit 1; }
+    if (fence == "" && $0 ~ /^## /) { finish(); exit }
+    if (fence == "" && !isfence && $0 ~ /^([0-9]+[.)]|[-*]) /) {
+      flush()
+      if (stop) { finish(); exit }
+      blk = $0 "\n"
+      inblk = 1
+      next
+    }
+    if (inblk) blk = blk $0 "\n"
+    else pre = pre $0 "\n"
+  }
+  END { finish() }' "$REPORT" > "$QUESTIONS_TMP" || { echo "review.sh: could not read the open questions from $REPORT; not launching triage" >&2; exit 1; }
 
-# Bound the section on a whole-question boundary. A cap applied with `head -c`
-# in a shell redirect would also create the file 0644 under a default umask,
-# and a line-boundary cap would keep a question's heading while cutting the
-# decision context under it. A question is a top-level list item plus every
-# line under it, so a block is kept whole or not at all.
 TRUNCATED=0
-if [ "$(wc -c < "$QUESTIONS_TMP" | tr -d ' ')" -gt "$QUESTIONS_CAP" ]; then
-  CUT_TMP=$(mktemp -t autodream-questions-cut.XXXXXX) || { echo "review.sh: mktemp failed; not launching triage" >&2; exit 1; }
-  awk -v cap="$QUESTIONS_CAP" '
-    function fits() { return n + length(buf) <= cap }
-    /^([0-9]+[.)]|[-*]) / {
-      if (started) { if (fits()) { printf "%s", buf; n += length(buf) } else { stop = 1; exit } }
-      started = 1; buf = $0 "\n"; next
-    }
-    {
-      if (started) buf = buf $0 "\n"
-      else if (n + length($0) + 1 <= cap) { print; n += length($0) + 1 }
-    }
-    END { if (started && !stop && fits()) printf "%s", buf }' "$QUESTIONS_TMP" > "$CUT_TMP" \
-    || { echo "review.sh: could not cap the open questions; not launching triage" >&2; exit 1; }
-  # mktemp's 0600 carries through the rename; never widen it.
-  mv "$CUT_TMP" "$QUESTIONS_TMP" || { echo "review.sh: could not cap the open questions; not launching triage" >&2; exit 1; }
-  CUT_TMP=""
-  TRUNCATED=1
-fi
+[ -s "$FLAG_TMP" ] && TRUNCATED=1
+rm -f "$FLAG_TMP"
 
 # Build system prompt via tmpfile — heredocs inside $(...) get confused by
 # apostrophes in the body (parser treats them as quote pairs and a literal
 # `)` in the text prematurely closes the command substitution).
 SYSTEM_TMP=$(mktemp -t autodream-review.XXXXXX) || { echo "review.sh: mktemp failed; not launching triage" >&2; exit 1; }
-trap 'rm -f "$QUESTIONS_TMP" ${CUT_TMP:+"$CUT_TMP"} "$SYSTEM_TMP"' EXIT
+trap 'rm -f "$QUESTIONS_TMP" "$SYSTEM_TMP"' EXIT
 if [ "$TRUNCATED" -eq 1 ]; then
   QUESTIONS_INTRO="The open questions from the $DATE report ($REPORT, $REPORT_BYTES bytes) follow. They did not all fit, so the first ones are quoted and the rest are in that file; before saying the list is done, read the rest from $REPORT's \"## Open questions for the user\" section."
 else

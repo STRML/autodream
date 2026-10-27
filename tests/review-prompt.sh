@@ -251,6 +251,48 @@ test_cap_never_keeps_a_heading_without_its_context(){
   assert_grep "$root/sp" 'truncated="1"' "the block says it was truncated"
 }
 
+test_longer_fence_containing_a_shorter_is_content(){
+  local root; root=$(setup_env)
+  {
+    printf '# Autodream — 2020-01-02\n\n## Open questions for the user\n\n'
+    printf '1. **Nested** — which fence wins?\n\n'
+    printf '````\n```\n## Example heading inside the inner fence\n```\nAFTER-NESTED still inside the outer fence.\n````\n\n'
+    printf '2. **Second** — still here?\n\n<!-- autodream:open-questions=2 -->\n'
+  } > "$root/dreams/2020-01-02.md"
+  run_review "$root" --force 2020-01-02
+  system_prompt "$root" > "$root/sp"
+  assert_grep "$root/sp" 'AFTER-NESTED' "a shorter fence inside a longer one does not close it"
+  assert_grep "$root/sp" 'still here' "the next question survives a nested fence"
+  assert_grep "$root/sp" 'truncated="0"' "a section that fits is not marked truncated"
+}
+
+test_cap_does_not_split_on_a_list_item_inside_a_fence(){
+  local root; root=$(setup_env)
+  # A fenced example inside the question holds a `- option` line. If the cap
+  # treats that as a new question it keeps the heading and the opening fence,
+  # then starts counting a fresh block, and the question loses its context.
+  {
+    printf '# Autodream — 2020-01-02\n\n## Open questions for the user\n\n'
+    printf '1. **Small** — a question that fits.\n   - context that fits.\n\n'
+    printf '2. **Fenced** — which option wins?\n   - context before the fence.\n\n'
+    printf '```\n- option a\n- option b\n```\n\n'
+    printf '   - %s\n\n' "$(head -c 13000 /dev/zero | tr '\0' 'w')"
+    printf '3. **Third** — never reached.\n\n<!-- autodream:open-questions=3 -->\n'
+  } > "$root/dreams/2020-01-02.md"
+  run_review "$root" --force 2020-01-02
+  system_prompt "$root" > "$root/sp"
+  assert_grep "$root/sp" 'a question that fits' "the question that fits is shown"
+  # Either the whole fenced question is shown or none of it; a heading plus its
+  # opening fence with the context cut is the failure.
+  if grep -q 'which option wins' "$root/sp"; then
+    grep -q 'context before the fence' "$root/sp" && ok "a fenced question is kept whole" \
+      || no "a fenced question is kept whole (heading kept, context dropped)"
+  else
+    ok "a fenced question is kept whole (dropped entirely)"
+  fi
+  assert_grep "$root/sp" 'truncated="1"' "the block says it was truncated"
+}
+
 test_temps_are_removed(){
   local root; root=$(setup_env); mk_report "$root" 2020-01-02 "$Q_BODY"
   local before; before=$(ls "${TMPDIR:-/tmp}" | grep -c '^autodream-questions' || true)
@@ -271,6 +313,8 @@ test_heading_must_match_the_whole_line
 test_tilde_fence_example_is_not_the_section
 test_tilde_fence_inside_a_question_does_not_end_it
 test_cap_never_keeps_a_heading_without_its_context
+test_longer_fence_containing_a_shorter_is_content
+test_cap_does_not_split_on_a_list_item_inside_a_fence
 test_temps_are_removed
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
