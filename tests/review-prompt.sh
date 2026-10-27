@@ -137,14 +137,80 @@ test_missing_section_still_launches(){
 
 test_section_is_capped(){
   local root; root=$(setup_env)
-  # 30KB of question text: the cap is 12000 bytes.
-  local big; big=$(head -c 30000 /dev/zero | tr '\0' 'q')
-  mk_report "$root" 2020-01-02 "1. **Huge** — $big"
+  # 30KB of question text across several questions: the cap is 12000 bytes and
+  # must cut between questions, never inside one.
+  local big; big=$(head -c 6000 /dev/zero | tr '\0' 'q')
+  mk_report "$root" 2020-01-02 "1. **Q1** — $big
+2. **Q2** — $big
+3. **Q3** — $big
+4. **Q4** — $big"
   run_review "$root" --force 2020-01-02
   system_prompt "$root" > "$root/sp"
   local bytes; bytes=$(wc -c < "$root/sp" | tr -d ' ')
   [ "$bytes" -lt 16000 ] && ok "system prompt stays bounded (${bytes} bytes)" \
     || no "system prompt stays bounded (got ${bytes} bytes)"
+  assert_grep "$root/sp" 'truncated="1"' "the block is marked truncated"
+  assert_grep "$root/sp" 'did not all fit' "the prompt says the list was cut"
+  assert_nogrep "$root/sp" 'quoted in full' "the prompt does not claim completeness"
+  # Every question that appears is whole: it starts with its own number and
+  # carries the full body, and the count of numbers shown is a prefix of 1..4.
+  local shown; shown=$(grep -cE '^[0-9]+\. \*\*Q' "$root/sp")
+  [ "$shown" -ge 1 ] && ok "at least one whole question survived the cap (${shown})" \
+    || no "at least one whole question survived the cap (got ${shown})"
+  # No question may be cut: every 6000-byte body in the fixture is either shown
+  # whole or not shown at all, so a run of q's shorter than 6000 means a cut.
+  local cut; cut=$(grep -oE 'q{100,}' "$root/sp" | awk 'length($0) != 6000' | wc -l | tr -d ' ')
+  assert_eq "$cut" "0" "the cap never cuts a question in half"
+}
+
+test_fenced_example_is_not_the_section(){
+  local root; root=$(setup_env)
+  # An example fence earlier in the report quotes the heading and a body. The
+  # extraction must not start there.
+  {
+    printf '# Autodream — 2020-01-02\n\n## Top patterns\n\nExample of the section format:\n\n'
+    printf '```\n## Open questions for the user\nFENCED-EXAMPLE-BODY\n```\n\n'
+    printf '## Open questions for the user\n\n%s\n\n<!-- autodream:open-questions=1 -->\n' "$Q_BODY"
+  } > "$root/dreams/2020-01-02.md"
+  run_review "$root" --force 2020-01-02
+  system_prompt "$root" > "$root/sp"
+  assert_nogrep "$root/sp" 'FENCED-EXAMPLE-BODY' "a fenced example heading does not start the section"
+  assert_grep "$root/sp" 'Hook tightening' "the real section is still inlined"
+}
+
+test_fenced_heading_inside_a_question_does_not_end_it(){
+  local root; root=$(setup_env)
+  {
+    printf '# Autodream — 2020-01-02\n\n## Open questions for the user\n\n'
+    printf '1. **Fenced** — which heading wins?\n\n```\n## Example heading inside a fence\n```\n\n'
+    printf '   - AFTER-THE-FENCE the rest of question 1.\n\n'
+    printf '2. **Second** — still here?\n\n<!-- autodream:open-questions=2 -->\n'
+  } > "$root/dreams/2020-01-02.md"
+  run_review "$root" --force 2020-01-02
+  system_prompt "$root" > "$root/sp"
+  assert_grep "$root/sp" 'AFTER-THE-FENCE' "text after a fenced heading is kept"
+  assert_grep "$root/sp" 'still here' "the next question is kept"
+}
+
+test_heading_must_match_the_whole_line(){
+  local root; root=$(setup_env)
+  # A different heading that merely starts with the text is not the section.
+  {
+    printf '# Autodream — 2020-01-02\n\n## Open questions for the user agents\n\nNOT-THE-SECTION\n\n'
+    printf '## Open questions for the user\n\n%s\n\n<!-- autodream:open-questions=1 -->\n' "$Q_BODY"
+  } > "$root/dreams/2020-01-02.md"
+  run_review "$root" --force 2020-01-02
+  system_prompt "$root" > "$root/sp"
+  assert_nogrep "$root/sp" 'NOT-THE-SECTION' "a longer heading is a different section"
+  assert_grep "$root/sp" 'Hook tightening' "the exact heading is still found"
+}
+
+test_temps_are_removed(){
+  local root; root=$(setup_env); mk_report "$root" 2020-01-02 "$Q_BODY"
+  local before; before=$(ls "${TMPDIR:-/tmp}" | grep -c '^autodream-questions' || true)
+  run_review "$root" --force 2020-01-02
+  local after; after=$(ls "${TMPDIR:-/tmp}" | grep -c '^autodream-questions' || true)
+  assert_eq "$after" "$before" "no question temp file survives the launch"
 }
 
 echo "tests/review-prompt.sh"
@@ -153,6 +219,10 @@ test_launch_prompt_is_an_instruction
 test_prompt_does_not_ask_for_the_whole_report
 test_missing_section_still_launches
 test_section_is_capped
+test_fenced_example_is_not_the_section
+test_fenced_heading_inside_a_question_does_not_end_it
+test_heading_must_match_the_whole_line
+test_temps_are_removed
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

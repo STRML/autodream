@@ -370,25 +370,52 @@ REPORT_BYTES=$(wc -c < "$REPORT" | tr -d ' ')
 # [cyber]", including a bare "go". The same report's open-questions section is
 # ~2KB of decision text, and passes. So inline the questions and point at the
 # file for anything deeper.
-QUESTIONS_TMP=$(mktemp -t autodream-questions.XXXXXX)
-trap 'rm -f "$QUESTIONS_TMP"' EXIT
-awk '/^## Open questions for the user/ { on = 1 }
-     on && /^## / && !/^## Open questions for the user/ { exit }
-     on { print }' "$REPORT" > "$QUESTIONS_TMP"
-# Bound the section: a pathological night must not rebuild the problem.
-head -c 12000 "$QUESTIONS_TMP" > "$QUESTIONS_TMP.cut" && mv "$QUESTIONS_TMP.cut" "$QUESTIONS_TMP"
+QUESTIONS_CAP=12000
+QUESTIONS_TMP=$(mktemp -t autodream-questions.XXXXXX) || { echo "review.sh: mktemp failed; not launching triage" >&2; exit 1; }
+CUT_TMP=""
+trap 'rm -f "$QUESTIONS_TMP" ${CUT_TMP:+"$CUT_TMP"}' EXIT
+# Fence-aware and exact-heading: a `## Open questions for the user` line quoted
+# inside a code fence in an earlier section is an example, not the section, and
+# a fenced `## ` heading inside a question does not end it. The heading must be
+# the whole line, so `## Open questions for the user's agents` is a different
+# section.
+awk '/^```/ { fence = !fence }
+     !on && !fence && /^## Open questions for the user[ \t\r]*$/ { on = 1; print; next }
+     on && !fence && /^## / { exit }
+     on { print }' "$REPORT" > "$QUESTIONS_TMP" || { echo "review.sh: could not read the open questions from $REPORT; not launching triage" >&2; exit 1; }
+
+# Bound the section on a whole-question boundary. A cap applied with `head -c`
+# in a shell redirect would also create the file 0644 under a default umask,
+# and would cut a question in half while the prompt called them complete.
+TRUNCATED=0
+if [ "$(wc -c < "$QUESTIONS_TMP" | tr -d ' ')" -gt "$QUESTIONS_CAP" ]; then
+  CUT_TMP=$(mktemp -t autodream-questions-cut.XXXXXX) || { echo "review.sh: mktemp failed; not launching triage" >&2; exit 1; }
+  awk -v cap="$QUESTIONS_CAP" '
+    /^([0-9]+[.)]|[-*]) / && n >= cap { exit }
+    { n += length($0) + 1; if (n > cap) exit; print }' "$QUESTIONS_TMP" > "$CUT_TMP" \
+    || { echo "review.sh: could not cap the open questions; not launching triage" >&2; exit 1; }
+  # mktemp's 0600 carries through the rename; never widen it.
+  mv "$CUT_TMP" "$QUESTIONS_TMP" || { echo "review.sh: could not cap the open questions; not launching triage" >&2; exit 1; }
+  CUT_TMP=""
+  TRUNCATED=1
+fi
 
 # Build system prompt via tmpfile — heredocs inside $(...) get confused by
 # apostrophes in the body (parser treats them as quote pairs and a literal
 # `)` in the text prematurely closes the command substitution).
-SYSTEM_TMP=$(mktemp -t autodream-review.XXXXXX)
-trap 'rm -f "$SYSTEM_TMP" "$QUESTIONS_TMP"' EXIT
+SYSTEM_TMP=$(mktemp -t autodream-review.XXXXXX) || { echo "review.sh: mktemp failed; not launching triage" >&2; exit 1; }
+trap 'rm -f "$QUESTIONS_TMP" ${CUT_TMP:+"$CUT_TMP"} "$SYSTEM_TMP"' EXIT
+if [ "$TRUNCATED" -eq 1 ]; then
+  QUESTIONS_INTRO="The open questions from the $DATE report ($REPORT, $REPORT_BYTES bytes) follow. They did not all fit, so the first ones are quoted and the rest are in that file; before saying the list is done, read the rest from $REPORT's \"## Open questions for the user\" section."
+else
+  QUESTIONS_INTRO="The open questions from the $DATE report ($REPORT, $REPORT_BYTES bytes) are quoted in full below. Work from these. Do not read the whole report into context and never dump it back to the user; the wider report is on disk at that path if a question needs one specific number from it."
+fi
 cat > "$SYSTEM_TMP" <<EOF
 You are the morning autodream review partner. The user has opened this terminal session to triage open questions from last night's autodream run.
 
-The open questions from the $DATE report ($REPORT, $REPORT_BYTES bytes) are quoted in full below. Work from these. Do not read the whole report into context and never dump it back to the user; the wider report is on disk at that path if a question needs one specific number from it.
+$QUESTIONS_INTRO
 
-<open-questions date="$DATE" path="$REPORT">
+<open-questions date="$DATE" path="$REPORT" truncated="$TRUNCATED">
 $(cat "$QUESTIONS_TMP")
 </open-questions>
 
@@ -409,7 +436,7 @@ Other rules:
 - Be terse everywhere except the question restatement in step 1, which is always complete. One question, one decision, one action, then next.
 EOF
 SYSTEM=$(cat "$SYSTEM_TMP")
-rm -f "$SYSTEM_TMP"
+rm -f "$SYSTEM_TMP" "$QUESTIONS_TMP"
 trap - EXIT
 
 echo "─── autodream review: $DATE ($REPORT_BYTES bytes) ───"
