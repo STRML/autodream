@@ -407,8 +407,12 @@ fi
 # `)` in the text prematurely closes the command substitution).
 SYSTEM_TMP=$(mktemp -t autodream-review.XXXXXX) || { echo "review.sh: mktemp failed; not launching triage" >&2; exit 1; }
 trap 'rm -f "$QUESTIONS_TMP" "$SYSTEM_TMP"' EXIT
-if [ "$TRUNCATED" -eq 1 ]; then
+if [ "$TRUNCATED" -eq 1 ] && report_has_questions_block "$REPORT"; then
   QUESTIONS_INTRO="The open questions from the $DATE report are too long to quote here (${QUESTIONS_BYTES} bytes). Read them from $REPORT, between the $QUESTIONS_BEGIN and $QUESTIONS_END lines, before your first reply; nothing from that section is in this prompt."
+elif [ "$TRUNCATED" -eq 1 ]; then
+  # A pre-block report: point at the heading, because the sentinels it would be
+  # told to look for do not exist in it.
+  QUESTIONS_INTRO="The open questions from the $DATE report are too long to quote here (${QUESTIONS_BYTES} bytes). Read them from $REPORT's \"## Open questions for the user\" section before your first reply; nothing from that section is in this prompt."
 else
   QUESTIONS_INTRO="The open questions from the $DATE report ($REPORT, $REPORT_BYTES bytes) are quoted in full below. Work from these. Do not read the whole report into context and never dump it back to the user; the wider report is on disk at that path if a question needs one specific number from it."
 fi

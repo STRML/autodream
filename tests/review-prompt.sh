@@ -199,6 +199,22 @@ test_unclosed_block_is_not_a_block(){
   assert_eq "$(cat "$root/argv/count" 2>/dev/null)" "5" "an unclosed block does not stop the launch"
 }
 
+test_oversized_legacy_report_points_at_the_heading(){
+  local root; root=$(setup_env)
+  # No block, and too big to inline: the prompt must send the session to the
+  # heading section, not to sentinels this report does not contain.
+  local big; big=$(head -c 13000 /dev/zero | tr '\0' 'q')
+  {
+    printf '# Autodream — 2020-01-02\n\n## Open questions for the user\n\n1. **Huge** — %s\n\n' "$big"
+    printf '<!-- autodream:open-questions=1 -->\n'
+  } > "$root/dreams/2020-01-02.md"
+  run_review "$root" --force 2020-01-02
+  system_prompt "$root" > "$root/sp"
+  assert_grep "$root/sp" 'truncated="1"' "an oversized legacy section is marked truncated"
+  assert_grep "$root/sp" '## Open questions for the user' "the prompt points at the heading it actually has"
+  assert_nogrep "$root/sp" 'between the AUTODREAM_QUESTIONS_BEGIN' "and not at sentinels the report does not contain"
+}
+
 test_temps_are_removed(){
   local root; root=$(setup_env); mk_report "$root" 2020-01-02 "$Q_BLOCK"
   local before; before=$(ls "${TMPDIR:-/tmp}" 2>/dev/null | grep -c '^autodream-questions' || true)
@@ -215,6 +231,7 @@ test_launch_prompt_is_an_instruction
 test_prompt_does_not_ask_for_the_whole_report
 test_missing_section_still_launches
 test_cap_is_all_or_nothing
+test_oversized_legacy_report_points_at_the_heading
 test_unclosed_block_is_not_a_block
 test_temps_are_removed
 

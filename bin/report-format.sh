@@ -42,33 +42,62 @@ report_has_marker(){ grep -q 'autodream:open-questions=' "$1" 2>/dev/null; }
 # in prose it is not one.
 report_has_sentinel(){ grep -q '^AUTODREAM_REPORT_END$' "$1" 2>/dev/null; }
 
-# Whether the report carries a closed questions block: BEGIN before END, both on lines of their
-# own. A capture cut off inside the block is not a block — that is the case the completeness gate
-# in run.sh needs to catch.
+# Whether the report carries a closed questions block: a BEGIN line with an END line after it,
+# both on lines of their own. The LAST END wins, so a question that quotes the sentinel inside a
+# code example does not end the block early — the producer emits one block and its END is the one
+# at the end.
 report_has_questions_block(){
   awk -v b="$QUESTIONS_BEGIN" -v e="$QUESTIONS_END" '
     $0 == b { open = 1; next }
-    $0 == e { if (open) { closed = 1; exit } }
+    $0 == e { if (open) { closed = 1 } }
     END { exit closed ? 0 : 1 }' "$1" 2>/dev/null
 }
 
-# The open questions section: the text between the block sentinels when the report carries them,
-# otherwise the legacy markdown section (heading to the next `## ` or horizontal rule). Prints
-# nothing when the report has neither.
+# The open questions section: the text between the FIRST begin sentinel and the LAST end sentinel
+# when the report carries them, otherwise the legacy markdown section. Prints nothing when the
+# report has neither.
 report_questions(){
   local report="$1"
   if report_has_questions_block "$report"; then
     awk -v b="$QUESTIONS_BEGIN" -v e="$QUESTIONS_END" '
-      $0 == b { inb = 1; next }
-      inb && $0 == e { exit }
-      inb { print }' "$report" 2>/dev/null
+      $0 == b { if (!open) { open = 1 }; next }
+      open { line[++n] = $0; if ($0 == e) last = n }
+      END { for (i = 1; i < last; i++) print line[i] }' "$report" 2>/dev/null
     return 0
   fi
+  # Legacy reports predate the block, so this path only ever serves history. It keeps the fence
+  # tracking the block made unnecessary: a heading quoted inside a code example is not the end of
+  # the section, and dropping that was a review finding when the fallback was written.
   awk '
-    /^## Open questions/ { capture = 1; next }
-    capture && /^## / { exit }
-    capture && /^---[[:space:]]*$/ { exit }
-    capture { print }' "$report" 2>/dev/null
+    {
+      if ($0 ~ /^[ \t]*(```+|~~~+)/) {
+        tmp = $0; sub(/^[ \t]*/, "", tmp); ch = substr(tmp, 1, 1); n = 0
+        while (substr(tmp, n + 1, 1) == ch) n++
+        blank = (substr(tmp, n + 1) ~ /^[ \t\r]*$/)
+        if (fence == "") { fence = ch; flen = n }
+        else if (ch == fence && n >= flen && blank) { fence = ""; flen = 0 }
+      }
+      if (!capture) { if (fence == "" && $0 ~ /^## Open questions/) { capture = 1 }; next }
+      if (fence == "" && $0 ~ /^## /) exit
+      if (fence == "" && $0 ~ /^---[[:space:]]*$/) exit
+      print
+    }' "$report" 2>/dev/null
+}
+
+# The completeness predicate for ONE report file and its date, in one place so the run's live gate,
+# the abandoned-date sweep and the pin sweep cannot disagree about whether a date is finished.
+# $1=report file $2=date label ("" skips the block check, for callers that have only a file).
+report_finishes(){
+  local report="$1" date_label="${2:-}" epoch
+  [ -s "$report" ] || return 1
+  report_has_marker "$report" || return 1
+  [ -n "$date_label" ] || return 0
+  epoch="${AUTODREAM_QUESTIONS_EPOCH:-$QUESTIONS_EPOCH_DEFAULT}"
+  # ISO dates compare lexicographically, so this is chronological.
+  if [[ ! "$date_label" < "$epoch" ]]; then
+    report_has_questions_block "$report" || return 1
+  fi
+  return 0
 }
 
 # Everything before the LAST sentinel: the report itself. Prints nothing when there is none.

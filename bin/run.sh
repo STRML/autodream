@@ -1478,17 +1478,11 @@ changelog_window() {
 #
 # Deliberately not `L2_RC -eq 0`: the CLI can exit non-zero after a perfectly good write.
 report_complete() {
-  [ -s "$REPORT_PATH" ] || return 1
-  report_has_marker "$REPORT_PATH" || return 1
-  # Reports from QUESTIONS_EPOCH on must also carry the questions block. Both
-  # gates matter: the marker says the write reached the end, the block says the
-  # section four consumers read is where they think it is. A report without it
-  # is rebuilt rather than handed to a consumer that would fall back to guessing.
-  local epoch="${AUTODREAM_QUESTIONS_EPOCH:-${QUESTIONS_EPOCH_DEFAULT:-2026-10-27}}"
-  if [[ ! "$TARGET_DATE" < "$epoch" ]]; then
-    report_has_questions_block "$REPORT_PATH" || return 1
-  fi
-  return 0
+  # Both gates live in report_finishes(): the marker says the write reached the
+  # end, the questions block says the section four consumers read is where they
+  # think it is. The live gate, the abandoned-date sweep and the pin sweep call
+  # the same function so they cannot disagree about whether a date is finished.
+  report_finishes "$REPORT_PATH" "${TARGET_DATE:-}"
 }
 
 # ---- L2 attempt diagnostics (issue 42) ----
@@ -1667,7 +1661,7 @@ sweep_stranded_pins() {
     # A forced rebuild of the target date replaces its pins; the rebuild owns them.
     [ "$label" = "$TARGET_DATE" ] && [ "${AUTODREAM_FORCE:-0}" = "1" ] && continue
     report="$DREAMS_DIR/$label.md"
-    [ -s "$report" ] && report_has_marker "$report" || continue
+    report_finishes "$report" "$label" || continue
     [ ! "$d/pins.jsonl" -nt "$report" ] || continue
     # Another date's own run may be in its pin step right now (autodream-now.sh runs under a
     # different launchd label). Two apply-pins on one date both read the ledger before either
@@ -2892,7 +2886,7 @@ unassembled_dates() {
     fi
     report="$DREAMS_DIR/$date_label.md"
     if [ -s "$report" ]; then
-      report_has_marker "$report" && continue
+      report_finishes "$report" "$date_label" && continue
       # Non-empty and unmarked. Before the epoch that is a legacy report; on or after it,
       # it is a truncated capture and stays on the abandoned list. ISO dates compare
       # lexicographically, so this is chronological.
