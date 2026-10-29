@@ -2766,11 +2766,12 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       # triage prompt, the harness addendum, the engine and model, the chunk count and omitted count the
       # chunk note states, and the stats block the worker
       # copies from (merge-chunks.sh takes the stats fields from chunk 1). All of it is in the
-      # cache name, so a retry after the prompt, the model or the session changed redoes the chunk
-      # instead of merging a stale answer with fresh ones.
+      # cache name, so a retry after the prompt, the engine, the model or the session changed redoes
+      # the chunk instead of merging a stale answer with fresh ones. The engine is there in its own
+      # right: one model id can be served by two engines, through different system prompts and tools.
       ccfg=$( { cat "$AUTODREAM_DIR/SESSION_TRIAGE.md" 2>/dev/null
                 if [ -n "$src" ] && [ -r "$ADAPTERS_DIR/$src/triage.md" ]; then cat "$ADAPTERS_DIR/$src/triage.md"; fi
-                printf "%s %s %s %s\n" "$src" "$model" "$nchunks" "$elided"
+                printf "%s %s %s %s %s\n" "$src" "$engine" "$model" "$nchunks" "$elided"
                 cat "$FINDINGS_DIR/$hash.stats.json" 2>/dev/null; } | shasum -a 1 2>/dev/null | cut -c1-8 )
       while [ "$ci" -le "$nchunks" ]; do
         cin=$(printf "%s/in/chunk-%02d.jsonl" "$chunkroot" "$ci")

@@ -6370,6 +6370,28 @@ test_a_cached_chunk_answer_is_not_reused_after_the_instructions_or_the_session_c
   done
 }
 
+test_a_cached_chunk_answer_is_not_reused_on_another_engine(){
+  echo "# chunking: a finished chunk answer is reused only on the engine that wrote it, even under the same model id"
+  local root; root=$(setup_env)
+  local f; f=$(mk_chunky "$root" big 60); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
+  mkdir -p "$root/home"
+  # Run 1, on the claude engine: a permanent refusal on chunk 2 defers the date and leaves chunk 1.
+  export MOCK_MODE=chunked MOCK_CALL_LOG="$root/calls1.log" MOCK_FAIL_CHUNK=2 MOCK_FAIL_KIND=refusal AUTODREAM_L1_ROUNDS=1 AUTODREAM_L1_MODEL=shared/model
+  run_chunked "$root"; unset MOCK_MODE MOCK_CALL_LOG MOCK_FAIL_CHUNK MOCK_FAIL_KIND AUTODREAM_L1_ROUNDS
+  assert_eq "$(ls "$fd/.chunks/$h"/01-*.chunkout 2>/dev/null | wc -l | tr -d ' ')" "1" "run 1 on the claude engine left chunk 1's answer behind"
+  # Run 2: the same model id, the same prompt and stats, but the session moves to the omp engine.
+  # A subshell, so the sandbox HOME (the omp adapter enumerates ~/.omp) cannot outlive the run.
+  ( export MOCK_MODE=chunked MOCK_CALL_LOG="$root/calls2.log" AUTODREAM_L1_ROUNDS=1 HOME="$root/home" \
+      AUTODREAM_ADAPTERS=claude,omp OMP_BIN="$MOCK" AUTODREAM_L1_ENGINE_CLAUDE=omp
+    run_chunked "$root" )
+  unset AUTODREAM_L1_MODEL
+  assert_grep "$fd/run-stats.txt" '^l1_engine_claude: omp$' "run 2 put the session on the omp engine"
+  assert_eq "$(grep -c '^01-' <(sed 's#.*/##' "$root/calls2.log"))" "1" "chunk 1 was called again on the new engine, not served from the old answer"
+  assert_nogrep "$root/run.out" "reuse: chunk 1/" "and the log does not say it reused it"
+  assert_eq "$(jq -r 'has("error")' "$fd/$h.json" 2>/dev/null)" "false" "the session finished"
+  rm -rf "$root"
+}
+
 test_a_bad_chunk_answer_is_never_merged_around(){
   echo "# chunking: an error, partial or malformed chunk answer blocks the merge and is redone alone"
   local kind
@@ -6554,6 +6576,7 @@ _run test_a_failed_chunker_never_hands_a_worker_the_whole_slim
 _run test_a_failed_chunker_on_a_transcript_that_was_never_slimmed_is_still_bounded
 _run test_a_chunk_that_fails_is_retried_alone_and_finished_chunks_are_reused
 _run test_a_cached_chunk_answer_is_not_reused_after_the_instructions_or_the_session_change
+_run test_a_cached_chunk_answer_is_not_reused_on_another_engine
 _run test_a_bad_chunk_answer_is_never_merged_around
 _run test_a_chunk_failure_is_classified_like_any_worker_failure
 _run test_a_provider_refusal_on_a_chunk_defers_the_date_and_stops_the_other_chunks
