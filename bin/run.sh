@@ -2157,37 +2157,71 @@ reconcile_findings_with_worklist() {
     log "WARNING: $FINDINGS_OUTSIDE_WORKLIST findings JSON(s) belong to no session in this run's worklist; moved to $_q so L2 does not read them: $OUTSIDE_FINDINGS_NAMES"
   fi
 }
-# A cached L1 result is reused only if this run would accept it now. With
-# AUTODREAM_L1_REQUIRE_SERVED=1, a findings JSON or chunk answer a model wrote is held to the
+# A cached L1 result is reused only if this run would accept it now, for two reasons.
+#
+# A no-engine record (no_engine, written by dispatch_l1 when a source had no usable engine) is
+# final only for the config that wrote it: an engine choice naming no accepted adapter, a missing
+# model, a login failing AUTODREAM_REQUIRE_LOGIN. Once this run resolves an engine and a model for
+# the session's source, the record is dropped and the session triaged. The source comes from
+# AUTODREAM_SOURCE_MAP, never from the record, which a worker could have written.
+#
+# With AUTODREAM_L1_REQUIRE_SERVED=1, a findings JSON or chunk answer a model wrote is held to the
 # verdict the runner stored beside it (<answer>.served, written in dispatch_l1): one with no
 # verdict, or any verdict but match, came from a run that did not require it, or from before the
 # verdict existed, and is dropped so this run triages it again. A record carrying error or skipped
 # is kept: the runner writes those itself with no model behind it (a noise-gate skip, an unreadable
 # session, a final-round stub), and the post-L1 passes add fields to them, so their shape cannot
-# be told from a worker's. Runs once, after reconcile_findings_with_worklist and before the pre-L1
-# cache snapshot, so the dispatcher, l1_missing_count and L1_PRECACHED all see the same set.
-# Counted in run-stats as l1_cache_dropped and named in the log.
+# be told from a worker's.
+#
+# Runs once, after reconcile_findings_with_worklist and before the pre-L1 cache snapshot, so the
+# dispatcher, l1_missing_count and L1_PRECACHED all see the same set. Counted in run-stats as
+# l1_cache_dropped and named in the log.
 L1_CACHE_DROPPED=0
 drop_unacceptable_l1_cache() {
   L1_CACHE_DROPPED=0
-  [ "${AUTODREAM_L1_REQUIRE_SERVED:-0}" = 1 ] || return 0
-  local _h _f _names="" _chunks=0
+  local _h _f _src _unrouted="" _unverified="" _chunks=0 _served=0
+  [ "${AUTODREAM_L1_REQUIRE_SERVED:-0}" = 1 ] && _served=1
   while IFS= read -r _h; do
     [ -n "$_h" ] || continue
     _f="$FINDINGS_DIR/$_h.json"
     [ -f "$_f" ] || continue
+    if l1_record_has_no_engine "$_f"; then
+      _src=$(printf '%s\n' "$AUTODREAM_SOURCE_MAP" | awk -F'\t' -v h="$_h" '$1 == h { print $2; exit }')
+      l1_source_has_engine "$_src" || continue
+      rm -f "$_f" "$_f.served"
+      L1_CACHE_DROPPED=$((L1_CACHE_DROPPED + 1)); _unrouted="${_unrouted:+$_unrouted }$_h"
+      continue
+    fi
+    [ "$_served" = 1 ] || continue
     l1_record_is_runner_only "$_f" && continue
     [ "$(served_verdict "$_f")" = match ] && continue
     rm -f "$_f" "$_f.served"
-    L1_CACHE_DROPPED=$((L1_CACHE_DROPPED + 1)); _names="${_names:+$_names }$_h"
+    L1_CACHE_DROPPED=$((L1_CACHE_DROPPED + 1)); _unverified="${_unverified:+$_unverified }$_h"
   done < <(worklist_hashes)
-  for _f in "$FINDINGS_DIR"/.chunks/*/*.chunkout; do
-    [ -f "$_f" ] || continue
-    [ "$(served_verdict "$_f")" = match ] && continue
-    rm -f "$_f" "$_f.served"
-    L1_CACHE_DROPPED=$((L1_CACHE_DROPPED + 1)); _chunks=$((_chunks + 1))
-  done
-  [ "$L1_CACHE_DROPPED" -eq 0 ] || log "AUTODREAM_L1_REQUIRE_SERVED=1: dropped $L1_CACHE_DROPPED cached L1 result(s) no served verdict vouches for, to triage again (sessions: ${_names:-none}; chunk answers: $_chunks)"
+  if [ "$_served" = 1 ]; then
+    for _f in "$FINDINGS_DIR"/.chunks/*/*.chunkout; do
+      [ -f "$_f" ] || continue
+      [ "$(served_verdict "$_f")" = match ] && continue
+      rm -f "$_f" "$_f.served"
+      L1_CACHE_DROPPED=$((L1_CACHE_DROPPED + 1)); _chunks=$((_chunks + 1))
+    done
+  fi
+  [ -z "$_unrouted" ] || log "dropped no-engine record(s) whose source now has an L1 engine, to triage again: $_unrouted"
+  [ -z "$_unverified" ] && [ "$_chunks" -eq 0 ] \
+    || log "AUTODREAM_L1_REQUIRE_SERVED=1: dropped cached L1 result(s) no served verdict vouches for, to triage again (sessions: ${_unverified:-none}; chunk answers: $_chunks)"
+}
+# 0 for a no-engine record, by its marker or, for one written before the marker, by its error.
+l1_record_has_no_engine() { # $1=findings JSON
+  jq -e '.no_engine == true or ((.error // "") | tostring | startswith("no L1 engine for this session"))' "$1" >/dev/null 2>&1
+}
+# 0 when this run resolved an engine and a model for the source, as dispatch_l1 will read them.
+l1_source_has_engine() { # $1=source adapter
+  local _e _m
+  case "$1" in ""|*[!abcdefghijklmnopqrstuvwxyz0123456789_-]*) return 1 ;; esac
+  _e=$(printf '%s\n' "$AUTODREAM_L1_ENGINES" | awk -F'\t' -v s="$1" '$1 == s { print $2; exit }')
+  _m=$(printf '%s\n' "$AUTODREAM_L1_MODELS" | awk -F'\t' -v s="$1" '$1 == s { print $2; exit }')
+  case "$_e" in ""|*[!abcdefghijklmnopqrstuvwxyz0123456789_-]*) return 1 ;; esac
+  [ -n "$_m" ] && [ -x "$ADAPTERS_DIR/$_e/adapter.sh" ]
 }
 # 0 for a record that says the session was not triaged (error) or was not sent to a model (skipped).
 l1_record_is_runner_only() { # $1=findings JSON
@@ -2539,10 +2573,14 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       while IFS= read -r line; do [ -n "$line" ] && envs+=("$line"); done < <("$ADAPTERS_DIR/$engine/adapter.sh" l1-env 2>/dev/null)
     fi
     if [ "${#argv[@]}" -eq 0 ]; then
-      # Deterministic, so a structured error record that is left in place and skipped on re-run
-      # (retrying would not change the answer) and counted by l1_findings_with_error.
+      # Deterministic for this run: retrying in a later round would not change the answer, so a
+      # structured error record is left in place, skipped by the rounds that follow and counted by
+      # l1_findings_with_error. It is not deterministic across runs. The engine choice, the model
+      # pin and the login check all come from the config, so no_engine marks the record and a later
+      # run whose config resolves an engine for this source drops it and triages the session
+      # (drop_unacceptable_l1_cache in the parent).
       rm -f "$slimfile" "$normfile" "$dayfile"
-      jq -cn --arg p "$session" --arg s "$src" --arg m "$model" "{session_path: \$p, error: (\"no L1 engine for this session (source [\" + \$s + \"], model [\" + \$m + \"])\"), findings: []}" > "$output"
+      jq -cn --arg p "$session" --arg s "$src" --arg m "$model" "{session_path: \$p, no_engine: true, error: (\"no L1 engine for this session (source [\" + \$s + \"], model [\" + \$m + \"])\"), findings: []}" > "$output"
       rm -f "$errlog"
       echo "skip (no engine): $session ($hash)" >&2
       exit 0

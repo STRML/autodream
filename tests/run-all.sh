@@ -4341,7 +4341,7 @@ test_require_served_holds_cached_findings_to_their_verdict(){
   assert_grep "$fd/$h.json.served" '	claude-other-model	mismatch$' "and stored the mismatch beside them"
   AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls2.log" run_dream "$root"
   assert_eq "$(grep -c . "$root/calls2.log" 2>/dev/null)" "1" "run 2, requiring it, called the engine for the session again"
-  assert_grep "$root/run.out" 'dropped 1 cached L1 result(s) no served verdict vouches for' "the log says why"
+  assert_grep "$root/run.out" "dropped cached L1 result(s) no served verdict vouches for, to triage again (sessions: $h;" "the log says why"
   assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 1$' "run-stats counts it"
   assert_grep "$fd/run-stats.txt" '^l1_sessions_already_done_at_start: 0$' "and it is not counted as already done"
   assert_grep "$fd/$h.json.served" '	claude-haiku-5-5	match$' "the new findings carry a match"
@@ -4364,6 +4364,38 @@ test_require_served_holds_cached_findings_to_their_verdict(){
   AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls2.log" run_dream "$root"
   assert_no_file "$root/calls2.log" "run 2 kept it and called nothing"
   assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 0$' "and dropped nothing"
+  rm -rf "$root"
+}
+test_a_no_engine_record_is_retried_once_an_engine_resolves(){
+  echo "# a no-engine record left by a bad engine choice is triaged by a later run whose config resolves one"
+  local root o h fd; root=$(setup_env); o=$(mk_omp_session "$root" xxxx); h=$(hash_of "$o")
+  AUTODREAM_L1_ENGINE_OMP=nonesuch run_dream_omp "$root"
+  fd=$(fdir "$root")
+  assert_eq "$(jq -r '.no_engine' "$fd/$h.json" 2>/dev/null)" "true" "run 1 wrote the no-engine record, marked"
+  AUTODREAM_FORCE=1 AUTODREAM_L1_ENGINE_OMP=nonesuch MOCK_CALL_LOG="$root/calls2.log" run_dream_omp "$root"
+  assert_no_file "$root/calls2.log" "a run with the same bad choice keeps it and calls nothing"
+  assert_eq "$(jq -r '.no_engine' "$fd/$h.json" 2>/dev/null)" "true" "and the record stays"
+  AUTODREAM_FORCE=1 MOCK_CALL_LOG="$root/calls3.log" run_dream_omp "$root"
+  assert_eq "$(grep -c . "$root/calls3.log" 2>/dev/null)" "1" "a run whose config resolves the engine triages the session"
+  assert_grep "$root/run.out" "dropped no-engine record(s) whose source now has an L1 engine, to triage again: $h" "the log says why"
+  assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 1$' "run-stats counts it"
+  assert_nogrep "$fd/$h.json" 'no L1 engine' "and the record is replaced by findings"
+  rm -rf "$root"
+  echo "# so is one left by an engine that failed AUTODREAM_REQUIRE_LOGIN, once its login passes"
+  root=$(setup_env); o=$(mk_omp_session "$root" yyyy); h=$(hash_of "$o")
+  AUTODREAM_ADAPTERS=claude,omp AUTODREAM_REQUIRE_LOGIN="provider=firstParty" run_dream_omp "$root"
+  fd=$(fdir "$root")
+  assert_eq "$(jq -r '.no_engine' "$fd/$h.json" 2>/dev/null)" "true" "run 1 handed the omp engine nothing"
+  AUTODREAM_FORCE=1 MOCK_CALL_LOG="$root/calls2.log" run_dream_omp "$root"
+  assert_eq "$(grep -c . "$root/calls2.log" 2>/dev/null)" "1" "run 2, with no login requirement, triages it"
+  rm -rf "$root"
+  echo "# a no-engine record written before the marker existed is recognised by its error"
+  root=$(setup_env); o=$(mk_omp_session "$root" zzzz); h=$(hash_of "$o")
+  AUTODREAM_L1_ENGINE_OMP=nonesuch run_dream_omp "$root"
+  fd=$(fdir "$root")
+  jq -c 'del(.no_engine)' "$fd/$h.json" > "$fd/$h.json.tmp" && mv "$fd/$h.json.tmp" "$fd/$h.json"
+  AUTODREAM_FORCE=1 MOCK_CALL_LOG="$root/calls2.log" run_dream_omp "$root"
+  assert_eq "$(grep -c . "$root/calls2.log" 2>/dev/null)" "1" "it is triaged once the engine resolves"
   rm -rf "$root"
 }
 test_an_unusable_l1_engine_override_fails_closed(){
@@ -5669,6 +5701,7 @@ _run test_omp_session_is_linearized_for_the_worker
 _run test_omp_sessions_run_on_another_adapters_engine
 _run test_the_runs_reviewer_reviews_every_source_by_default
 _run test_an_unusable_l1_engine_override_fails_closed
+_run test_a_no_engine_record_is_retried_once_an_engine_resolves
 _run test_omp_session_roots_come_from_the_host_setting
 _run test_l1_provenance_and_served_models_are_recorded
 _run test_an_engine_failing_its_login_requirement_is_handed_nothing
