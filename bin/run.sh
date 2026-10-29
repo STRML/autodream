@@ -99,7 +99,10 @@
 #                        stops the run before it starts      default: record only
 #                        (e.g. "provider=firstParty auth=claude.ai plan=max")
 #   AUTODREAM_L1_REQUIRE_SERVED  1 discards the findings of any L1 call answered by a model other
-#                        than the requested one (the engine's served verb)   default: 0, record only
+#                        than the requested one, as the engine's served verb judges it (claude: an
+#                        alias such as haiku matches the claude-haiku-... id it answers as). An
+#                        engine with no served verb (omp) cannot be vouched for, so its calls are
+#                        discarded too                                  default: 0, record only
 #   AUTODREAM_MARKER_EPOCH    first date whose report is REQUIRED to carry the
 #                             open-questions marker; earlier unmarked reports are treated
 #                             as complete (legacy) rather than abandoned
@@ -2651,15 +2654,24 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       fi
 
       # Which model answered, from the engine result record (adapter verb served), for every call
-      # whatever it produced, so a night accounts for each one. Engines that report nothing are
-      # recorded as unknown. With AUTODREAM_L1_REQUIRE_SERVED=1 a call answered by anything other
-      # than the requested model loses its findings, so nothing a substituted model wrote reaches L2.
-      l1served=$("$ADAPTERS_DIR/$engine/adapter.sh" served "$4" 2>/dev/null) || l1served=""
+      # whatever it produced, so a night accounts for each one. Whether that is the requested model
+      # is the adapter verdict, not a string compare here: the CLI answers with a canonical id
+      # (claude-haiku-5-5) for a model asked for by alias (haiku), and only the adapter knows its
+      # naming. An engine that reports nothing is recorded as unknown and unmeasured, never as a
+      # match or a mismatch. With AUTODREAM_L1_REQUIRE_SERVED=1 a call whose verdict is not match
+      # loses its findings, so nothing a substituted or unverifiable model wrote reaches L2.
+      l1served=$("$ADAPTERS_DIR/$engine/adapter.sh" served "$4" "$model" 2>/dev/null) || l1served=""
       l1smodels=$(printf "%s" "$l1served" | cut -f1)
       l1scost=$(printf "%s" "$l1served" | cut -s -f2)
-      printf "%s\t%s\t%s\t%s\t%s\n" "$hash" "$engine" "$model" "${l1smodels:-unknown}" "$l1scost" >> "$FINDINGS_DIR/l1-served.tsv"
-      if [ "${AUTODREAM_L1_REQUIRE_SERVED:-0}" = 1 ] && [ -s "$2" ] && [ "$l1smodels" != "$model" ]; then
-        printf "the call was answered by [%s], not the requested model [%s]; its findings are discarded (AUTODREAM_L1_REQUIRE_SERVED=1)\n" "${l1smodels:-unknown}" "$model" >> "$3"
+      l1sverdict=$(printf "%s" "$l1served" | cut -s -f3)
+      case "$l1sverdict" in match|mismatch) ;; *) l1sverdict=unmeasured ;; esac
+      printf "%s\t%s\t%s\t%s\t%s\t%s\n" "$hash" "$engine" "$model" "${l1smodels:-unknown}" "$l1scost" "$l1sverdict" >> "$FINDINGS_DIR/l1-served.tsv"
+      if [ "${AUTODREAM_L1_REQUIRE_SERVED:-0}" = 1 ] && [ -s "$2" ] && [ "$l1sverdict" != match ]; then
+        if [ "$l1sverdict" = mismatch ]; then
+          printf "the call was answered by [%s], not the requested model [%s]; its findings are discarded (AUTODREAM_L1_REQUIRE_SERVED=1)\n" "$l1smodels" "$model" >> "$3"
+        else
+          printf "the %s engine did not report which model answered, so the call cannot be held to the requested model [%s]; its findings are discarded (AUTODREAM_L1_REQUIRE_SERVED=1)\n" "$engine" "$model" >> "$3"
+        fi
         rm -f "$2"
         return 1
       fi
@@ -3964,12 +3976,16 @@ PY
       [ -n "$_msrc" ] || continue
       printf 'login_%s: provider=%s auth=%s plan=%s account=%s\n' "$(printf '%s' "$_msrc" | tr '-' '_')" "$_pprov" "$_pauth" "$_pplan" "$_pacct"
     done <<< "${ENGINE_LOGINS:-}"
+    # Mismatch is the adapter verdict (column 6), the same one AUTODREAM_L1_REQUIRE_SERVED acts on.
+    # A call the engine reported no model for (omp has no served verb), or a row written before the
+    # verdict existed, is unmeasured: counted on its own line, never as a match or a mismatch.
     if [ -s "$FINDINGS_DIR/l1-served.tsv" ]; then
       printf 'l1_served_models: %s\n' "$(cut -f4 "$FINDINGS_DIR/l1-served.tsv" | sort | uniq -c | awk '{ printf "%s%s=%s", (NR > 1 ? " " : ""), $2, $1 }')"
-      printf 'l1_served_mismatch: %s\n' "$(awk -F'\t' '$4 != $3' "$FINDINGS_DIR/l1-served.tsv" | wc -l | tr -d ' ')"
+      printf 'l1_served_mismatch: %s\n' "$(awk -F'\t' '$6 == "mismatch"' "$FINDINGS_DIR/l1-served.tsv" | wc -l | tr -d ' ')"
+      printf 'l1_served_unmeasured: %s\n' "$(awk -F'\t' '$6 != "match" && $6 != "mismatch"' "$FINDINGS_DIR/l1-served.tsv" | wc -l | tr -d ' ')"
       printf 'l1_cost_usd_estimate: %s\n' "$(awk -F'\t' '$5 != "" { s += $5 } END { printf "%.4f", s }' "$FINDINGS_DIR/l1-served.tsv")"
     else
-      printf 'l1_served_models: none\nl1_served_mismatch: 0\nl1_cost_usd_estimate: 0.0000\n'
+      printf 'l1_served_models: none\nl1_served_mismatch: 0\nl1_served_unmeasured: 0\nl1_cost_usd_estimate: 0.0000\n'
     fi
     # yes when the circuit breaker cut the retry budget, so a short l1_rounds_used is not
     # mistaken for a run that finished early and cleanly.

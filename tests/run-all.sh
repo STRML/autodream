@@ -4370,7 +4370,32 @@ test_l1_provenance_and_served_models_are_recorded(){
   assert_grep "$fd/run-stats.txt" '^login_claude: provider=firstParty auth=claude.ai plan=max account=test@example.com$' "and so does run-stats"
   assert_grep "$fd/run-stats.txt" '^l1_served_models: claude-haiku-5-5=2$' "each call is counted under the model that answered it"
   assert_grep "$fd/run-stats.txt" '^l1_served_mismatch: 0$' "none was answered by another model"
+  assert_grep "$fd/run-stats.txt" '^l1_served_unmeasured: 0$' "and every call reported its model"
   assert_grep "$fd/run-stats.txt" '^l1_cost_usd_estimate: 0.0250$' "and the engine's cost estimates are summed"
+  rm -rf "$root"
+  echo "# a model asked for by alias matches the canonical id the CLI answers as (the adapter verdict)"
+  local h; root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  AUTODREAM_L1_MODEL=haiku MOCK_SERVED_MODEL=claude-haiku-5-5 AUTODREAM_L1_REQUIRE_SERVED=1 run_dream "$root"
+  fd=$(fdir "$root")
+  assert_grep "$fd/l1-served.tsv" "^$h	claude	haiku	claude-haiku-5-5	[0-9.]*	match$" "haiku answered as claude-haiku-5-5 is recorded as a match"
+  assert_grep "$fd/run-stats.txt" '^l1_served_mismatch: 0$' "not counted as a mismatch"
+  assert_grep "$fd/$h.json" 'always run tests after edits' "and AUTODREAM_L1_REQUIRE_SERVED=1 keeps its findings"
+  rm -rf "$root"
+  echo "# an engine that reports no model is unmeasured, never a mismatch, and REQUIRE_SERVED cannot vouch for it"
+  local o; root=$(setup_env); o=$(mk_omp_session "$root" vvvv); h=$(hash_of "$o")
+  AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+  fd=$(fdir "$root")
+  assert_grep "$fd/l1-served.tsv" "^$h	omp	omp/test-model	unknown		unmeasured$" "the omp call is recorded with no model and no verdict"
+  assert_grep "$fd/run-stats.txt" '^l1_served_mismatch: 0$' "it is not a mismatch"
+  assert_grep "$fd/run-stats.txt" '^l1_served_unmeasured: 1$' "it is counted as unmeasured"
+  rm -rf "$root"
+  root=$(setup_env); o=$(mk_omp_session "$root" wwww); h=$(hash_of "$o")
+  AUTODREAM_ADAPTERS=omp AUTODREAM_L1_REQUIRE_SERVED=1 run_dream_omp "$root"
+  fd=$(fdir "$root")
+  assert_nogrep "$fd/$h.json" 'always run tests after edits' "with AUTODREAM_L1_REQUIRE_SERVED=1 its findings are discarded"
+  if grep -qs 'the omp engine did not report which model answered' "$fd/$h.json" "$fd/$h.json.err"; then
+    ok "and the failure says the engine reported no model"
+  else no "and the failure says the engine reported no model"; fi
   rm -rf "$root"
 }
 
