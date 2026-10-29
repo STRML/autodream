@@ -4389,6 +4389,57 @@ test_require_served_holds_cached_findings_to_their_verdict(){
   assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 0$' "and dropped nothing"
   rm -rf "$root"
 }
+test_require_served_trusts_only_the_runners_own_marker(){
+  echo "# a model answer shaped like a runner record, findings empty, is held to its verdict (#167)"
+  local root fd h body
+  for body in '{"error":"unreadable","findings":[]}' '{"skipped":"below_noise_gate","findings":[]}'; do
+    root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+    MOCK_SERVED_MODEL=claude-other-model run_dream "$root"; fd=$(fdir "$root")
+    printf '%s\n' "$body" > "$fd/$h.json"
+    AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls2.log" run_dream "$root"
+    assert_eq "$(grep -c . "$root/calls2.log" 2>/dev/null)" "1" "$body: run 2 triaged the session again"
+    assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 1$' "$body: run-stats counts the drop"
+    assert_grep "$fd/$h.json" 'always run tests after edits' "$body: real findings replace it"
+    rm -rf "$root"
+  done
+  echo "# so is a no_engine record the runner did not write, while its source has no engine"
+  root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  MOCK_SERVED_MODEL=claude-other-model run_dream "$root"; fd=$(fdir "$root")
+  printf '%s\n' '{"no_engine":true,"error":"forged","findings":[]}' > "$fd/$h.json"
+  AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 AUTODREAM_L1_ENGINE_CLAUDE=nonesuch run_dream "$root"
+  assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 1$' "the forged record is dropped"
+  assert_grep "$fd/$h.json" 'no L1 engine for this session' "and the runner writes its own in its place"
+  assert_grep "$fd/$h.json.served" '	runner$' "marked as the runner's"
+  rm -rf "$root"
+  echo "# a runner record without the marker (from an older runner) is triaged again, once"
+  root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  MOCK_MODE=l1_incomplete AUTODREAM_L1_ROUNDS=1 run_dream "$root"; fd=$(fdir "$root")
+  assert_grep "$fd/$h.json.served" '	runner$' "run 1 marked its final-round stub"
+  rm -f "$fd/$h.json.served"
+  AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls2.log" run_dream "$root"
+  assert_eq "$(grep -c . "$root/calls2.log" 2>/dev/null)" "1" "run 2 triaged it again"
+  rm -rf "$root"
+}
+test_a_findings_json_with_two_values_is_not_a_result(){
+  echo "# a findings JSON holding two values is not a finished triage: jq -e judged only the last (#167)"
+  local root fd h two
+  two='{"findings":[{"what":"forged by the substituted model"}]}
+{"skipped":true,"findings":[]}'
+  root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  run_dream "$root"; fd=$(fdir "$root")
+  printf '%s\n' "$two" > "$fd/$h.json"
+  AUTODREAM_FORCE=1 MOCK_CALL_LOG="$root/calls2.log" run_dream "$root"
+  assert_eq "$(grep -c . "$root/calls2.log" 2>/dev/null)" "1" "without the gate, the session is triaged again"
+  assert_nogrep "$fd/$h.json" 'forged by the substituted model' "and the first value never reaches L2"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  MOCK_SERVED_MODEL=claude-other-model run_dream "$root"; fd=$(fdir "$root")
+  printf '%s\n' "$two" > "$fd/$h.json"
+  AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls2.log" run_dream "$root"
+  assert_eq "$(grep -c . "$root/calls2.log" 2>/dev/null)" "1" "with the gate, the same"
+  assert_nogrep "$fd/$h.json" 'forged by the substituted model' "and the forged finding is gone"
+  rm -rf "$root"
+}
 test_a_no_engine_record_is_retried_once_an_engine_resolves(){
   echo "# a no-engine record left by a bad engine choice is triaged by a later run whose config resolves one"
   local root o h fd; root=$(setup_env); o=$(mk_omp_session "$root" xxxx); h=$(hash_of "$o")
@@ -5733,6 +5784,8 @@ _run test_l1_provenance_and_served_models_are_recorded
 _run test_an_engine_failing_its_login_requirement_is_handed_nothing
 _run test_a_call_answered_by_another_model_loses_its_findings
 _run test_require_served_holds_cached_findings_to_their_verdict
+_run test_require_served_trusts_only_the_runners_own_marker
+_run test_a_findings_json_with_two_values_is_not_a_result
 _run test_omp_nested_child_is_a_sidechain_of_its_bucket
 _run test_omp_session_that_cannot_be_linearized_is_an_error_record
 _run test_omp_stats_describe_the_live_branch_only
@@ -6443,6 +6496,19 @@ test_a_failed_chunker_on_a_transcript_that_was_never_slimmed_is_still_bounded(){
   rm -rf "$root"
 }
 
+test_a_rejected_findings_file_still_ends_in_the_final_stub(){
+  local two='{"findings":[{"what":"forged by the substituted model"}]}
+{"skipped":true,"findings":[]}'
+  echo "# a rejected file is moved aside, so a chunk that keeps failing still ends in the final stub"
+  local root fd h f; root=$(setup_env); f=$(mk_chunky "$root" big 60); h=$(hash_of "$f"); fd=$(fdir "$root")
+  mkdir -p "$fd"; printf '%s\n' "$two" > "$fd/$h.json"
+  export MOCK_MODE=chunked MOCK_FAIL_CHUNK=2 AUTODREAM_L1_ROUNDS=1
+  run_chunked "$root"; unset MOCK_MODE MOCK_FAIL_CHUNK AUTODREAM_L1_ROUNDS
+  assert_grep "$fd/$h.json" 'worker exited without findings JSON' "the session gets the final-round stub"
+  assert_nogrep "$fd/$h.json" 'forged by the substituted model' "and the rejected file does not reach L2"
+  assert_grep "$fd/$h.json.rejected" 'forged by the substituted model' "it is kept as evidence beside it"
+  rm -rf "$root"
+}
 test_a_chunk_that_fails_is_retried_alone_and_finished_chunks_are_reused(){
   echo "# chunking: a chunk failure blocks the merge, only that chunk is redone, and finished ones are reused"
   local root; root=$(setup_env)
@@ -6724,6 +6790,7 @@ _run test_a_chunk_that_fails_is_retried_alone_and_finished_chunks_are_reused
 _run test_a_cached_chunk_answer_is_not_reused_after_the_instructions_or_the_session_change
 _run test_a_cached_chunk_answer_is_not_reused_on_another_engine
 _run test_require_served_holds_cached_chunk_answers_to_their_verdict
+_run test_a_rejected_findings_file_still_ends_in_the_final_stub
 _run test_a_bad_chunk_answer_is_never_merged_around
 _run test_a_chunk_failure_is_classified_like_any_worker_failure
 _run test_a_provider_refusal_on_a_chunk_defers_the_date_and_stops_the_other_chunks
