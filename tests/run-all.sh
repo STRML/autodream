@@ -4267,19 +4267,30 @@ test_omp_sessions_run_on_another_adapters_engine(){
   echo "# AUTODREAM_L1_ENGINE_OMP=claude: the claude engine reads omp sessions, and omp never runs"
   local root o h fd trip; root=$(setup_env); mk_session "$root" sess1
   o=$(mk_omp_session "$root" ffff); h=$(hash_of "$o"); trip=$(mk_omp_tripwire "$root")
-  export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_ENGINE_OMP=claude
-  TEST_OMP_BIN="$trip" TEST_OMP_L1_MODEL=claude-test-model run_dream_omp "$root"
-  unset FANOUT MOCK_CAPTURE_DIR AUTODREAM_L1_ENGINE_OMP
+  # An omp pin is set too, and must not follow the omp sessions onto the claude CLI.
+  export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_ENGINE_OMP=claude AUTODREAM_L1_MODEL_CLAUDE=claude-test-model
+  TEST_OMP_BIN="$trip" TEST_OMP_L1_MODEL=deepseek/deepseek-flash run_dream_omp "$root"
+  unset FANOUT MOCK_CAPTURE_DIR AUTODREAM_L1_ENGINE_OMP AUTODREAM_L1_MODEL_CLAUDE
   fd=$(fdir "$root")
   assert_grep    "$fd/sessions-source.txt" "^$h	omp$" "the session is still the omp adapter's"
   assert_grep    "$root/cap/l1-read-$h.txt" 'LIVE_BRANCH_MARKER' "the omp adapter still linearized it"
-  assert_grep    "$root/cap/l1-args-$h.txt" '^claude-test-model$' "the worker ran the configured model"
+  assert_grep    "$root/cap/l1-args-$h.txt" '^claude-test-model$' "the worker ran the claude engine's pinned model"
+  assert_nogrep  "$root/cap/l1-args-$h.txt" 'deepseek' "not the omp pin: a model id belongs to the engine, not the source"
   assert_grep    "$root/cap/l1-args-$h.txt" '^--no-session-persistence$' "with the claude engine's flags"
   assert_nogrep  "$root/cap/l1-args-$h.txt" '^--allow-home$' "and not the omp engine's"
   assert_nogrep  "$fd/$h.json" '"error"' "the session was triaged"
   assert_grep    "$fd/run-stats.txt" '^l1_engine_omp: claude$' "run-stats names the engine"
   assert_grep    "$root/run.out" 'L1 model for omp: claude-test-model (on the claude engine)' "and so does the log"
   assert_no_file "$root/omp-calls.log" "the omp binary was never called"
+  rm -rf "$root"
+  echo "# the other way round: claude sessions on the omp engine take the omp pin, never a claude one"
+  local c hc; root=$(setup_env); mk_session "$root" sess1; c="$root/projects/proj-a/sess1.jsonl"; hc=$(hash_of "$c")
+  export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_ENGINE_CLAUDE=omp AUTODREAM_L1_MODEL_CLAUDE=claude-test-model
+  TEST_OMP_L1_MODEL=omp/pinned run_dream_omp "$root"
+  unset FANOUT MOCK_CAPTURE_DIR AUTODREAM_L1_ENGINE_CLAUDE AUTODREAM_L1_MODEL_CLAUDE
+  assert_grep    "$root/cap/l1-args-$hc.txt" '^omp/pinned$' "the omp engine ran its own pin for the claude session"
+  assert_nogrep  "$root/cap/l1-args-$hc.txt" 'claude-test-model' "and the claude pin stayed with the claude engine"
+  assert_grep    "$root/run.out" 'L1 model for claude: omp/pinned (on the omp engine)' "the log says so"
   rm -rf "$root"
 }
 

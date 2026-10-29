@@ -78,7 +78,10 @@
 #                        One extra read-only call on the L2 engine and model, after everything
 #                        else (bin/triage-dream.sh; never fatal). Off, nothing changes.
 #   AUTODREAM_L2_MODEL   pin the L2 aggregator model (every engine)   default: the adapter's own (claude: the CLI default)
-#   AUTODREAM_L2_MODEL_<NAME> / AUTODREAM_L1_MODEL_<NAME>  the same for one adapter only
+#   AUTODREAM_L2_MODEL_<NAME> / AUTODREAM_L1_MODEL_<NAME>  the same for one engine only. Keyed by
+#                        the engine that makes the call, not the source: AUTODREAM_L1_MODEL_OMP is
+#                        the model of every L1 call on the omp engine, whichever harness holds the
+#                        session, and never reaches the claude CLI
 #   AUTODREAM_L1_ENGINE  accepted adapter whose engine reviews every source's sessions in L1
 #                                                                     default: the L2 engine
 #   AUTODREAM_L1_ENGINE_<NAME>  the same for one source only, e.g. AUTODREAM_L1_ENGINE_OMP=omp
