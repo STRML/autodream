@@ -4170,9 +4170,13 @@ mk_omp_session(){ # $1=root $2=name [$3=cwd]  -> path on stdout; abandoned branc
   printf '%s' "$f"
 }
 run_dream_omp(){ # $1=root ; claude + omp enabled, a sandbox HOME, both engines are the mock
+  # omp sessions are pinned to the omp engine, so the omp tests below exercise that engine. With
+  # claude enabled first the run's reviewer would be claude; a test about the reviewer exports
+  # AUTODREAM_L1_ENGINE_OMP= (empty) to clear the pin.
   mkdir -p "$1/home"
-  HOME="$1/home" AUTODREAM_ADAPTERS="${AUTODREAM_ADAPTERS:-claude,omp}" AUTODREAM_L1_MODEL_OMP="${TEST_OMP_L1_MODEL:-omp/test-model}" \
-    AUTODREAM_CHANGELOG=0 CLAUDE_BIN="$MOCK" OMP_BIN="$MOCK" \
+  HOME="$1/home" AUTODREAM_ADAPTERS="${AUTODREAM_ADAPTERS:-claude,omp}" AUTODREAM_L1_MODEL_OMP="${TEST_OMP_L1_MODEL-omp/test-model}" \
+    AUTODREAM_L1_ENGINE_OMP="${AUTODREAM_L1_ENGINE_OMP-omp}" \
+    AUTODREAM_CHANGELOG=0 CLAUDE_BIN="$MOCK" OMP_BIN="${TEST_OMP_BIN:-$MOCK}" \
     AUTODREAM_CONFIG="$1/autodream/config" AUTODREAM_CONSUME_DATE="$DATE" \
     AUTODREAM_NETCHECK="${AUTODREAM_NETCHECK:-0}" AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=1 \
     PROJECTS_DIR="$1/projects" AUTODREAM_DIR="$1/autodream" DREAMS_DIR="$1/dreams" \
@@ -4249,6 +4253,294 @@ test_omp_session_is_linearized_for_the_worker(){
   assert_no_file "$fd/$h.norm.jsonl" "the normalized copy is removed"
   assert_grep   "$root/cap/l1-args-$h.txt" '^omp/test-model$' "the omp worker ran the omp adapter's model"
   assert_grep   "$root/cap/l1-args-$h.txt" '^--allow-home$' "and the omp adapter's own flags"
+  rm -rf "$root"
+}
+
+# An omp binary that records every call and fails, so a test can prove the omp engine never ran.
+mk_omp_tripwire(){ # $1=root -> path on stdout; calls land in $1/omp-calls.log
+  printf '%s\n' '#!/bin/bash' "printf '%s\n' \"\$*\" >> '$1/omp-calls.log'" 'exit 7' > "$1/omp-tripwire"
+  chmod +x "$1/omp-tripwire"
+  printf '%s' "$1/omp-tripwire"
+}
+
+test_omp_sessions_run_on_another_adapters_engine(){
+  echo "# AUTODREAM_L1_ENGINE_OMP=claude: the claude engine reads omp sessions, and omp never runs"
+  local root o h fd trip; root=$(setup_env); mk_session "$root" sess1
+  o=$(mk_omp_session "$root" ffff); h=$(hash_of "$o"); trip=$(mk_omp_tripwire "$root")
+  # An omp pin is set too, and must not follow the omp sessions onto the claude CLI.
+  export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_ENGINE_OMP=claude AUTODREAM_L1_MODEL_CLAUDE=claude-test-model
+  TEST_OMP_BIN="$trip" TEST_OMP_L1_MODEL=deepseek/deepseek-flash run_dream_omp "$root"
+  unset FANOUT MOCK_CAPTURE_DIR AUTODREAM_L1_ENGINE_OMP AUTODREAM_L1_MODEL_CLAUDE
+  fd=$(fdir "$root")
+  assert_grep    "$fd/sessions-source.txt" "^$h	omp$" "the session is still the omp adapter's"
+  assert_grep    "$root/cap/l1-read-$h.txt" 'LIVE_BRANCH_MARKER' "the omp adapter still linearized it"
+  assert_grep    "$root/cap/l1-args-$h.txt" '^claude-test-model$' "the worker ran the claude engine's pinned model"
+  assert_nogrep  "$root/cap/l1-args-$h.txt" 'deepseek' "not the omp pin: a model id belongs to the engine, not the source"
+  assert_grep    "$root/cap/l1-args-$h.txt" '^--no-session-persistence$' "with the claude engine's flags"
+  assert_nogrep  "$root/cap/l1-args-$h.txt" '^--allow-home$' "and not the omp engine's"
+  assert_nogrep  "$fd/$h.json" '"error"' "the session was triaged"
+  assert_grep    "$fd/run-stats.txt" '^l1_engine_omp: claude$' "run-stats names the engine"
+  assert_grep    "$root/run.out" 'L1 model for omp: claude-test-model (on the claude engine)' "and so does the log"
+  assert_no_file "$root/omp-calls.log" "the omp binary was never called"
+  rm -rf "$root"
+  echo "# the other way round: claude sessions on the omp engine take the omp pin, never a claude one"
+  local c hc; root=$(setup_env); mk_session "$root" sess1; c="$root/projects/proj-a/sess1.jsonl"; hc=$(hash_of "$c")
+  export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_ENGINE_CLAUDE=omp AUTODREAM_L1_MODEL_CLAUDE=claude-test-model
+  TEST_OMP_L1_MODEL=omp/pinned run_dream_omp "$root"
+  unset FANOUT MOCK_CAPTURE_DIR AUTODREAM_L1_ENGINE_CLAUDE AUTODREAM_L1_MODEL_CLAUDE
+  assert_grep    "$root/cap/l1-args-$hc.txt" '^omp/pinned$' "the omp engine ran its own pin for the claude session"
+  assert_nogrep  "$root/cap/l1-args-$hc.txt" 'claude-test-model' "and the claude pin stayed with the claude engine"
+  assert_grep    "$root/run.out" 'L1 model for claude: omp/pinned (on the omp engine)' "the log says so"
+  rm -rf "$root"
+}
+
+test_the_runs_reviewer_reviews_every_source_by_default(){
+  echo "# no L1 engine chosen: the L2 engine reviews every source's sessions, and omp never runs"
+  local root o h fd trip; root=$(setup_env); mk_session "$root" sess1
+  o=$(mk_omp_session "$root" rrrr); h=$(hash_of "$o"); trip=$(mk_omp_tripwire "$root")
+  export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_ENGINE_OMP=
+  TEST_OMP_BIN="$trip" TEST_OMP_L1_MODEL= run_dream_omp "$root"
+  unset FANOUT MOCK_CAPTURE_DIR AUTODREAM_L1_ENGINE_OMP
+  fd=$(fdir "$root")
+  assert_grep    "$fd/run-stats.txt" '^l2_engine: claude$' "claude, the first enabled adapter, is the run's reviewer"
+  assert_grep    "$fd/run-stats.txt" '^l1_engine_omp: claude$' "and reviews the omp sessions"
+  assert_grep    "$root/cap/l1-args-$h.txt" '^claude-haiku-5-5$' "with the reviewer's default model, not omp's"
+  assert_grep    "$root/cap/l1-read-$h.txt" 'LIVE_BRANCH_MARKER' "while the omp adapter still linearized the session"
+  assert_no_file "$root/omp-calls.log" "the omp binary was never called"
+  rm -rf "$root"
+  echo "# AUTODREAM_L2_ENGINE picks the reviewer for both passes, whatever the adapter order"
+  root=$(setup_env); mk_session "$root" sess1
+  o=$(mk_omp_session "$root" ssss); h=$(hash_of "$o"); trip=$(mk_omp_tripwire "$root")
+  export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_ENGINE_OMP= AUTODREAM_ADAPTERS=omp,claude AUTODREAM_L2_ENGINE=claude
+  TEST_OMP_BIN="$trip" TEST_OMP_L1_MODEL= run_dream_omp "$root"
+  unset FANOUT MOCK_CAPTURE_DIR AUTODREAM_L1_ENGINE_OMP AUTODREAM_ADAPTERS AUTODREAM_L2_ENGINE
+  fd=$(fdir "$root")
+  assert_grep    "$fd/run-stats.txt" '^l1_engine_omp: claude$' "omp, though enabled first, is reviewed by the L2 engine"
+  assert_no_file "$root/omp-calls.log" "and the omp binary was never called"
+  rm -rf "$root"
+  echo "# AUTODREAM_L1_ENGINE picks one L1 engine for every source, claude sessions included"
+  local c hc; root=$(setup_env); mk_session "$root" sess1; c="$root/projects/proj-a/sess1.jsonl"; hc=$(hash_of "$c")
+  o=$(mk_omp_session "$root" tttt); h=$(hash_of "$o")
+  export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_ENGINE_OMP= AUTODREAM_L1_ENGINE=omp
+  TEST_OMP_L1_MODEL= AUTODREAM_L1_MODEL=omp/test-model run_dream_omp "$root"
+  unset FANOUT MOCK_CAPTURE_DIR AUTODREAM_L1_ENGINE_OMP AUTODREAM_L1_ENGINE
+  fd=$(fdir "$root")
+  assert_grep "$fd/run-stats.txt" '^l1_engine_claude: omp$' "the claude sessions are reviewed by omp"
+  assert_grep "$fd/run-stats.txt" '^l1_engine_omp: omp$' "and so are the omp sessions"
+  assert_grep "$root/cap/l1-args-$hc.txt" '^--allow-home$' "with the omp engine's flags"
+  assert_grep "$fd/run-stats.txt" '^l2_engine: claude$' "while the summary stays on the L2 engine"
+  rm -rf "$root"
+}
+
+test_require_served_holds_cached_findings_to_their_verdict(){
+  echo "# AUTODREAM_L1_REQUIRE_SERVED=1 also holds cached findings: one another model wrote is triaged again"
+  local root fd h; root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  MOCK_SERVED_MODEL=claude-other-model run_dream "$root"
+  fd=$(fdir "$root")
+  assert_grep "$fd/$h.json" 'always run tests after edits' "run 1, not requiring it, kept the substituted model's findings"
+  assert_grep "$fd/$h.json.served" '	claude-other-model	mismatch$' "and stored the mismatch beside them"
+  AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls2.log" run_dream "$root"
+  assert_eq "$(grep -c . "$root/calls2.log" 2>/dev/null)" "1" "run 2, requiring it, called the engine for the session again"
+  assert_grep "$root/run.out" "dropped cached L1 result(s) no served verdict vouches for, to triage again (sessions: $h;" "the log says why"
+  assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 1$' "run-stats counts it"
+  assert_grep "$fd/run-stats.txt" '^l1_sessions_already_done_at_start: 0$' "and it is not counted as already done"
+  assert_grep "$fd/$h.json.served" '	claude-haiku-5-5	match$' "the new findings carry a match"
+  assert_grep "$fd/$h.json" 'always run tests after edits' "and are kept"
+  rm -rf "$root"
+  echo "# findings with no stored verdict (written before it existed) are triaged again; a match is reused"
+  root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  run_dream "$root"; fd=$(fdir "$root")
+  AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls2.log" run_dream "$root"
+  assert_no_file "$root/calls2.log" "findings whose verdict is match are reused, with no call"
+  assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 0$' "and nothing is dropped"
+  rm -f "$fd/$h.json.served"
+  AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls3.log" run_dream "$root"
+  assert_eq "$(grep -c . "$root/calls3.log" 2>/dev/null)" "1" "findings with no verdict are triaged again"
+  rm -rf "$root"
+  echo "# a model answer with findings is held to its verdict even when it carries the runner's skipped or error key"
+  local key
+  for key in skipped error; do
+    root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+    MOCK_SERVED_MODEL=claude-other-model run_dream "$root"; fd=$(fdir "$root")
+    jq -c --arg k "$key" '{session_path} + {($k): true, findings: [{what: "forged by the substituted model"}]}' \
+      "$fd/$h.json" > "$fd/$h.json.tmp" && mv "$fd/$h.json.tmp" "$fd/$h.json"
+    AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls2.log" run_dream "$root"
+    assert_eq "$(grep -c . "$root/calls2.log" 2>/dev/null)" "1" "$key: run 2 triaged the session again"
+    assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 1$' "$key: run-stats counts the drop"
+    assert_nogrep "$fd/$h.json" 'forged by the substituted model' "$key: the forged findings are gone"
+    rm -rf "$root"
+  done
+  echo "# so is one carrying no_engine, while its source has no engine to triage it again"
+  root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  MOCK_SERVED_MODEL=claude-other-model run_dream "$root"; fd=$(fdir "$root")
+  jq -c '{session_path, no_engine: true, findings: [{what: "forged by the substituted model"}]}' \
+    "$fd/$h.json" > "$fd/$h.json.tmp" && mv "$fd/$h.json.tmp" "$fd/$h.json"
+  AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 AUTODREAM_L1_ENGINE_CLAUDE=nonesuch run_dream "$root"
+  assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 1$' "the forged record is dropped"
+  assert_nogrep "$fd/$h.json" 'forged by the substituted model' "its findings do not reach L2"
+  assert_grep "$fd/$h.json" 'no L1 engine for this session' "the runner writes its own no-engine record in its place"
+  rm -rf "$root"
+  echo "# a record the runner wrote with no model behind it is kept: it is not re-dispatched every run"
+  root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  MOCK_MODE=l1_incomplete AUTODREAM_L1_ROUNDS=1 run_dream "$root"; fd=$(fdir "$root")
+  assert_grep "$fd/$h.json" 'worker exited without findings JSON' "run 1 left the final-round stub"
+  AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls2.log" run_dream "$root"
+  assert_no_file "$root/calls2.log" "run 2 kept it and called nothing"
+  assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 0$' "and dropped nothing"
+  rm -rf "$root"
+}
+test_a_no_engine_record_is_retried_once_an_engine_resolves(){
+  echo "# a no-engine record left by a bad engine choice is triaged by a later run whose config resolves one"
+  local root o h fd; root=$(setup_env); o=$(mk_omp_session "$root" xxxx); h=$(hash_of "$o")
+  AUTODREAM_L1_ENGINE_OMP=nonesuch run_dream_omp "$root"
+  fd=$(fdir "$root")
+  assert_eq "$(jq -r '.no_engine' "$fd/$h.json" 2>/dev/null)" "true" "run 1 wrote the no-engine record, marked"
+  AUTODREAM_FORCE=1 AUTODREAM_L1_ENGINE_OMP=nonesuch MOCK_CALL_LOG="$root/calls2.log" run_dream_omp "$root"
+  assert_no_file "$root/calls2.log" "a run with the same bad choice keeps it and calls nothing"
+  assert_eq "$(jq -r '.no_engine' "$fd/$h.json" 2>/dev/null)" "true" "and the record stays"
+  AUTODREAM_FORCE=1 MOCK_CALL_LOG="$root/calls3.log" run_dream_omp "$root"
+  assert_eq "$(grep -c . "$root/calls3.log" 2>/dev/null)" "1" "a run whose config resolves the engine triages the session"
+  assert_grep "$root/run.out" "dropped no-engine record(s) whose source now has an L1 engine, to triage again: $h" "the log says why"
+  assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 1$' "run-stats counts it"
+  assert_nogrep "$fd/$h.json" 'no L1 engine' "and the record is replaced by findings"
+  rm -rf "$root"
+  echo "# so is one left by an engine that failed AUTODREAM_REQUIRE_LOGIN, once its login passes"
+  root=$(setup_env); o=$(mk_omp_session "$root" yyyy); h=$(hash_of "$o")
+  AUTODREAM_ADAPTERS=claude,omp AUTODREAM_REQUIRE_LOGIN="provider=firstParty" run_dream_omp "$root"
+  fd=$(fdir "$root")
+  assert_eq "$(jq -r '.no_engine' "$fd/$h.json" 2>/dev/null)" "true" "run 1 handed the omp engine nothing"
+  AUTODREAM_FORCE=1 MOCK_CALL_LOG="$root/calls2.log" run_dream_omp "$root"
+  assert_eq "$(grep -c . "$root/calls2.log" 2>/dev/null)" "1" "run 2, with no login requirement, triages it"
+  rm -rf "$root"
+  echo "# a no-engine record written before the marker existed is recognised by its error"
+  root=$(setup_env); o=$(mk_omp_session "$root" zzzz); h=$(hash_of "$o")
+  AUTODREAM_L1_ENGINE_OMP=nonesuch run_dream_omp "$root"
+  fd=$(fdir "$root")
+  jq -c 'del(.no_engine)' "$fd/$h.json" > "$fd/$h.json.tmp" && mv "$fd/$h.json.tmp" "$fd/$h.json"
+  AUTODREAM_FORCE=1 MOCK_CALL_LOG="$root/calls2.log" run_dream_omp "$root"
+  assert_eq "$(grep -c . "$root/calls2.log" 2>/dev/null)" "1" "it is triaged once the engine resolves"
+  rm -rf "$root"
+}
+test_an_unusable_l1_engine_override_fails_closed(){
+  echo "# an L1 engine override that names no accepted adapter: no model call at all, not the omp engine"
+  local root o h fd trip; root=$(setup_env); mk_session "$root" sess1
+  o=$(mk_omp_session "$root" gggg); h=$(hash_of "$o"); trip=$(mk_omp_tripwire "$root")
+  export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_ENGINE_OMP=nonesuch
+  TEST_OMP_BIN="$trip" run_dream_omp "$root"
+  unset FANOUT MOCK_CAPTURE_DIR AUTODREAM_L1_ENGINE_OMP
+  fd=$(fdir "$root")
+  assert_no_file "$root/cap/l1-args-$h.txt" "no worker started for the omp session"
+  assert_grep    "$fd/$h.json" 'no L1 engine for this session' "it got the deterministic error record"
+  assert_grep    "$root/run.out" 'names no accepted adapter' "the log says why"
+  assert_grep    "$fd/run-stats.txt" '^l1_engine_omp: none$' "run-stats shows no engine"
+  assert_no_file "$root/omp-calls.log" "the omp binary was never called"
+  rm -rf "$root"
+}
+
+test_omp_session_roots_come_from_the_host_setting(){
+  echo "# AUTODREAM_SESSION_ROOTS_OMP replaces the omp manifest's default roots"
+  local root o alt fd; root=$(setup_env); mk_session "$root" sess1
+  mk_omp_session "$root" jjjj >/dev/null
+  o=$(mk_omp_session "$root" kkkk); alt="$root/store/sessions/proj-alt"; mkdir -p "$alt"
+  mv "$o" "$alt/"
+  AUTODREAM_SESSION_ROOTS_OMP="$root/elsewhere:$root/store/sessions" run_dream_omp "$root"
+  fd=$(fdir "$root")
+  assert_grep   "$fd/sessions.txt" 'store/sessions/proj-alt/.*_kkkk.jsonl' "a session under the configured root is enumerated"
+  assert_nogrep "$fd/sessions.txt" '_jjjj.jsonl' "the manifest's default root is not"
+  rm -rf "$root"
+}
+
+test_l1_provenance_and_served_models_are_recorded(){
+  echo "# who each engine runs as, and which model answered each call, reach the log and run-stats"
+  local root fd; root=$(setup_env); mk_session "$root" sess1; mk_session "$root" sess2
+  run_dream "$root"
+  fd=$(fdir "$root")
+  assert_grep "$root/run.out" 'login for the claude engine: provider=firstParty auth=claude.ai plan=max account=test@example.com' "the log names the provider, sign-in, plan and account"
+  assert_grep "$fd/run-stats.txt" '^login_claude: provider=firstParty auth=claude.ai plan=max account=test@example.com$' "and so does run-stats"
+  assert_grep "$fd/run-stats.txt" '^l1_served_models: claude-haiku-5-5=2$' "each call is counted under the model that answered it"
+  assert_grep "$fd/run-stats.txt" '^l1_served_mismatch: 0$' "none was answered by another model"
+  assert_grep "$fd/run-stats.txt" '^l1_served_unmeasured: 0$' "and every call reported its model"
+  assert_grep "$fd/run-stats.txt" '^l1_cost_usd_estimate: 0.0250$' "and the engine's cost estimates are summed"
+  assert_grep "$fd/run-stats.txt" '^l1_cost_unmeasured: 0$' "with no call left out of the sum"
+  rm -rf "$root"
+  echo "# a model asked for by alias matches the canonical id the CLI answers as (the adapter verdict)"
+  local h; root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  AUTODREAM_L1_MODEL=haiku MOCK_SERVED_MODEL=claude-haiku-5-5 AUTODREAM_L1_REQUIRE_SERVED=1 run_dream "$root"
+  fd=$(fdir "$root")
+  assert_grep "$fd/l1-served.tsv" "^$h	claude	haiku	claude-haiku-5-5	[0-9.]*	match$" "haiku answered as claude-haiku-5-5 is recorded as a match"
+  assert_grep "$fd/run-stats.txt" '^l1_served_mismatch: 0$' "not counted as a mismatch"
+  assert_grep "$fd/$h.json" 'always run tests after edits' "and AUTODREAM_L1_REQUIRE_SERVED=1 keeps its findings"
+  rm -rf "$root"
+  echo "# an engine that reports no model is unmeasured, never a mismatch, and REQUIRE_SERVED cannot vouch for it"
+  local o; root=$(setup_env); o=$(mk_omp_session "$root" vvvv); h=$(hash_of "$o")
+  AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+  fd=$(fdir "$root")
+  assert_grep "$fd/l1-served.tsv" "^$h	omp	omp/test-model	unknown		unmeasured$" "the omp call is recorded with no model and no verdict"
+  assert_grep "$fd/run-stats.txt" '^l1_served_mismatch: 0$' "it is not a mismatch"
+  assert_grep "$fd/run-stats.txt" '^l1_served_unmeasured: 1$' "it is counted as unmeasured"
+  assert_grep "$fd/run-stats.txt" '^l1_cost_usd_estimate: 0.0000$' "an all-omp night has no cost to sum"
+  assert_grep "$fd/run-stats.txt" '^l1_cost_unmeasured: 1$' "and says how many calls that leaves out, so 0.0000 never reads as free"
+  rm -rf "$root"
+  root=$(setup_env); o=$(mk_omp_session "$root" wwww); h=$(hash_of "$o")
+  AUTODREAM_ADAPTERS=omp AUTODREAM_L1_REQUIRE_SERVED=1 run_dream_omp "$root"
+  fd=$(fdir "$root")
+  assert_nogrep "$fd/$h.json" 'always run tests after edits' "with AUTODREAM_L1_REQUIRE_SERVED=1 its findings are discarded"
+  if grep -qs 'the omp engine did not report which model answered' "$fd/$h.json" "$fd/$h.json.err"; then
+    ok "and the failure says the engine reported no model"
+  else no "and the failure says the engine reported no model"; fi
+  rm -rf "$root"
+}
+
+test_an_engine_failing_its_login_requirement_is_handed_nothing(){
+  echo "# AUTODREAM_REQUIRE_LOGIN: a summary engine whose login does not match stops the run before it starts"
+  local root fd h o; root=$(setup_env); mk_session "$root" sess1
+  AUTODREAM_REQUIRE_LOGIN="provider=firstParty plan=pro" MOCK_CALL_LOG="$root/calls.log" run_dream "$root"
+  assert_no_file "$root/calls.log" "no worker started"
+  assert_grep "$root/run.out" 'the claude engine, which writes the summary, fails AUTODREAM_REQUIRE_LOGIN (plan is max, not pro). Refusing to start.' "the log says which requirement failed"
+  assert_nogrep "$root/run.exit" '^0$' "and the run fails"
+  rm -rf "$root"
+  echo "# an L1 engine whose login does not match is handed no transcript, while the others run"
+  root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  o=$(mk_omp_session "$root" uuuu)
+  AUTODREAM_REQUIRE_LOGIN="provider=firstParty" run_dream_omp "$root"
+  fd=$(fdir "$root")
+  assert_grep   "$root/run.out" 'login for the omp engine: provider=unknown auth=unknown plan=unknown account=unknown' "omp reports no login, so every field is unknown"
+  assert_grep   "$root/run.out" 'the omp engine fails AUTODREAM_REQUIRE_LOGIN (provider is unknown, not firstParty)' "and fails the requirement"
+  assert_grep   "$fd/$(hash_of "$o").json" 'no L1 engine for this session' "its session gets the deterministic error record"
+  assert_grep   "$fd/$h.json" 'always run tests after edits' "while the claude session is triaged"
+  assert_grep   "$fd/run-stats.txt" '^login_omp: provider=unknown auth=unknown plan=unknown account=unknown$' "run-stats records both logins"
+  rm -rf "$root"
+  echo "# a met requirement triages as usual, and a requirement on an unknown key fails closed"
+  root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  AUTODREAM_REQUIRE_LOGIN="provider=firstParty auth=claude.ai plan=max account=test@example.com" run_dream "$root"
+  assert_grep "$(fdir "$root")/$h.json" 'always run tests after edits' "a matching login triages the session"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" sess1
+  AUTODREAM_REQUIRE_LOGIN="region=us" MOCK_CALL_LOG="$root/calls.log" run_dream "$root"
+  assert_no_file "$root/calls.log" "an unknown key starts no worker"
+  assert_grep "$root/run.out" 'region=us is not a provider, auth, plan or account requirement' "and says why"
+  rm -rf "$root"
+}
+
+test_a_call_answered_by_another_model_loses_its_findings(){
+  echo "# AUTODREAM_L1_REQUIRE_SERVED=1: findings from a call another model answered never reach L2"
+  local root fd h; root=$(setup_env); mk_session "$root" sess1
+  h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_SERVED_MODEL=claude-other-model run_dream "$root"
+  fd=$(fdir "$root")
+  assert_grep   "$fd/l1-served.tsv" "^$h	claude	claude-haiku-5-5	claude-other-model	" "the call is recorded under the model that answered it"
+  assert_grep   "$fd/run-stats.txt" '^l1_served_mismatch: [1-9]' "and counted as a mismatch"
+  assert_nogrep "$fd/$h.json" 'always run tests after edits' "the substituted model's findings are gone"
+  if grep -qs 'answered by \[claude-other-model\], not the requested model \[claude-haiku-5-5\]' "$fd/$h.json" "$fd/$h.json.err"; then
+    ok "the failure names both models"
+  else no "the failure names both models"; fi
+  rm -rf "$root"
+  echo "# without the setting a mismatch is recorded and the findings are kept"
+  root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  MOCK_SERVED_MODEL=claude-other-model run_dream "$root"
+  fd=$(fdir "$root")
+  assert_grep "$fd/$h.json" 'always run tests after edits' "the findings are kept"
+  assert_grep "$fd/run-stats.txt" '^l1_served_mismatch: 1$' "and the mismatch is counted"
   rm -rf "$root"
 }
 
@@ -5432,6 +5724,15 @@ _run test_l1_precheck_probes_the_l1_provider
 _run test_worker_failure_probe_names_the_l1_provider
 _run test_one_dead_provider_does_not_hold_back_the_others
 _run test_omp_session_is_linearized_for_the_worker
+_run test_omp_sessions_run_on_another_adapters_engine
+_run test_the_runs_reviewer_reviews_every_source_by_default
+_run test_an_unusable_l1_engine_override_fails_closed
+_run test_a_no_engine_record_is_retried_once_an_engine_resolves
+_run test_omp_session_roots_come_from_the_host_setting
+_run test_l1_provenance_and_served_models_are_recorded
+_run test_an_engine_failing_its_login_requirement_is_handed_nothing
+_run test_a_call_answered_by_another_model_loses_its_findings
+_run test_require_served_holds_cached_findings_to_their_verdict
 _run test_omp_nested_child_is_a_sidechain_of_its_bucket
 _run test_omp_session_that_cannot_be_linearized_is_an_error_record
 _run test_omp_stats_describe_the_live_branch_only
@@ -6188,6 +6489,55 @@ test_a_cached_chunk_answer_is_not_reused_after_the_instructions_or_the_session_c
   done
 }
 
+test_a_cached_chunk_answer_is_not_reused_on_another_engine(){
+  echo "# chunking: a finished chunk answer is reused only on the engine that wrote it, even under the same model id"
+  local root; root=$(setup_env)
+  local f; f=$(mk_chunky "$root" big 60); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
+  mkdir -p "$root/home"
+  # Run 1, on the claude engine: a permanent refusal on chunk 2 defers the date and leaves chunk 1.
+  export MOCK_MODE=chunked MOCK_CALL_LOG="$root/calls1.log" MOCK_FAIL_CHUNK=2 MOCK_FAIL_KIND=refusal AUTODREAM_L1_ROUNDS=1 AUTODREAM_L1_MODEL=shared/model
+  run_chunked "$root"; unset MOCK_MODE MOCK_CALL_LOG MOCK_FAIL_CHUNK MOCK_FAIL_KIND AUTODREAM_L1_ROUNDS
+  assert_eq "$(ls "$fd/.chunks/$h"/01-*.chunkout 2>/dev/null | wc -l | tr -d ' ')" "1" "run 1 on the claude engine left chunk 1's answer behind"
+  # Run 2: the same model id, the same prompt and stats, but the session moves to the omp engine.
+  # A subshell, so the sandbox HOME (the omp adapter enumerates ~/.omp) cannot outlive the run.
+  ( export MOCK_MODE=chunked MOCK_CALL_LOG="$root/calls2.log" AUTODREAM_L1_ROUNDS=1 HOME="$root/home" \
+      AUTODREAM_ADAPTERS=claude,omp OMP_BIN="$MOCK" AUTODREAM_L1_ENGINE_CLAUDE=omp
+    run_chunked "$root" )
+  unset AUTODREAM_L1_MODEL
+  assert_grep "$fd/run-stats.txt" '^l1_engine_claude: omp$' "run 2 put the session on the omp engine"
+  assert_eq "$(grep -c '^01-' <(sed 's#.*/##' "$root/calls2.log"))" "1" "chunk 1 was called again on the new engine, not served from the old answer"
+  assert_nogrep "$root/run.out" "reuse: chunk 1/" "and the log does not say it reused it"
+  assert_eq "$(jq -r 'has("error")' "$fd/$h.json" 2>/dev/null)" "false" "the session finished"
+  rm -rf "$root"
+}
+
+test_require_served_holds_cached_chunk_answers_to_their_verdict(){
+  echo "# AUTODREAM_L1_REQUIRE_SERVED=1 also holds cached chunk answers: one another model wrote is redone"
+  local scenario
+  for scenario in substituted matched; do
+    local root; root=$(setup_env)
+    local f; f=$(mk_chunky "$root" big 60); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
+    # Run 1, not requiring it: a permanent refusal on chunk 2 defers the date and leaves chunk 1's answer.
+    export MOCK_MODE=chunked MOCK_CALL_LOG="$root/calls1.log" MOCK_FAIL_CHUNK=2 MOCK_FAIL_KIND=refusal AUTODREAM_L1_ROUNDS=1
+    [ "$scenario" = substituted ] && export MOCK_SERVED_MODEL=claude-other-model
+    run_chunked "$root"; unset MOCK_MODE MOCK_CALL_LOG MOCK_FAIL_CHUNK MOCK_FAIL_KIND AUTODREAM_L1_ROUNDS MOCK_SERVED_MODEL
+    assert_eq "$(ls "$fd/.chunks/$h"/01-*.chunkout 2>/dev/null | wc -l | tr -d ' ')" "1" "[$scenario] run 1 left chunk 1's answer behind"
+    export MOCK_MODE=chunked MOCK_CALL_LOG="$root/calls2.log" AUTODREAM_L1_ROUNDS=1 AUTODREAM_L1_REQUIRE_SERVED=1
+    run_chunked "$root"; unset MOCK_MODE MOCK_CALL_LOG AUTODREAM_L1_ROUNDS AUTODREAM_L1_REQUIRE_SERVED
+    if [ "$scenario" = substituted ]; then
+      assert_eq "$(grep -c '^01-' <(sed 's#.*/##' "$root/calls2.log"))" "1" "[$scenario] chunk 1 was called again, not reused"
+      assert_nogrep "$root/run.out" "reuse: chunk 1/" "[$scenario] and the log does not say it reused it"
+      assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 1$' "[$scenario] run-stats counts the dropped answer"
+    else
+      assert_eq "$(grep -c '^01-' <(sed 's#.*/##' "$root/calls2.log"))" "0" "[$scenario] chunk 1 was reused"
+      assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 0$' "[$scenario] and nothing was dropped"
+    fi
+    assert_eq "$(jq -r 'has("error")' "$fd/$h.json" 2>/dev/null)" "false" "[$scenario] the session finished"
+    assert_grep "$fd/$h.json.served" '	match$' "[$scenario] and the merged findings carry a match"
+    rm -rf "$root"
+  done
+}
+
 test_a_bad_chunk_answer_is_never_merged_around(){
   echo "# chunking: an error, partial or malformed chunk answer blocks the merge and is redone alone"
   local kind
@@ -6372,6 +6722,8 @@ _run test_a_failed_chunker_never_hands_a_worker_the_whole_slim
 _run test_a_failed_chunker_on_a_transcript_that_was_never_slimmed_is_still_bounded
 _run test_a_chunk_that_fails_is_retried_alone_and_finished_chunks_are_reused
 _run test_a_cached_chunk_answer_is_not_reused_after_the_instructions_or_the_session_change
+_run test_a_cached_chunk_answer_is_not_reused_on_another_engine
+_run test_require_served_holds_cached_chunk_answers_to_their_verdict
 _run test_a_bad_chunk_answer_is_never_merged_around
 _run test_a_chunk_failure_is_classified_like_any_worker_failure
 _run test_a_provider_refusal_on_a_chunk_defers_the_date_and_stops_the_other_chunks

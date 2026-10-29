@@ -170,11 +170,15 @@ case "$cmd" in
     # adapter: tests/adapter-claude.sh pins it against that literal text, so a change here
     # that alters what the nightly runs has to say so. NO shell expansion of the paths in
     # the system prompt, hence the escaped dollar sign in the text.
+    # --output-format json makes stdout one small result object that names the models that
+    # answered (read back by `served`). Not stream-json: --verbose would echo every Read result,
+    # the whole transcript, onto stdout, and a failed worker copies its stdout into the .err.
     effort=$(l1_effort) || exit 2
     set -- "$1" ${effort:+--effort "$effort"}
     model=$1; shift
     printf '%s\0' "${CLAUDE_BIN:-$HOME/.local/bin/claude}" \
       --print \
+      --output-format json \
       --permission-mode bypassPermissions \
       --model "$model" \
       "$@" \
@@ -205,6 +209,41 @@ case "$cmd" in
       --strict-mcp-config \
       --settings '{"disableAllHooks":true}' \
       --system-prompt 'Reply with the single word ok and exit.'
+    ;;
+
+  served) # $1=stdout of one L1 call $2=the model it asked for
+          # -> "<model>[,<model>...]<TAB><estimated cost USD><TAB><match|mismatch>", exit 1 without a result
+    # The models come from the result object's modelUsage, which lists every model that answered
+    # any part of the call. The cost is the CLI's estimate at API prices, not what a subscription
+    # bills; it is kept because it compares models on real numbers.
+    # The verdict is match when every model that answered is the one asked for, judged here because
+    # only this adapter knows the CLI's naming: modelUsage carries canonical ids (claude-haiku-5-5)
+    # while a host may ask by alias (haiku). A bare family name matches any id of that family
+    # (claude-<name>-...), a full id only itself, and a context suffix such as [1m] is ignored on
+    # both sides. An alias the family rule cannot read (default, opusplan) is a mismatch: the
+    # runner then cannot vouch for the model, which is what AUTODREAM_L1_REQUIRE_SERVED asks.
+    [ "$#" -ge 1 ] && [ -r "$1" ] || exit 1
+    line=$(jq -r --arg want "${2:-}" 'select(type == "object" and .type == "result")
+      | ((.modelUsage // {}) | keys | sort) as $m
+      | ($want | sub("\\[[^\\]]*\\]$"; "")) as $w
+      | [($m | join(",")), ((.total_cost_usd // "") | tostring),
+         (if ($m | length) > 0 and all($m[]; sub("\\[[^\\]]*\\]$"; "") as $s
+                | $s == $w or (($w | test("^[a-z]+$")) and ($s | startswith("claude-" + $w + "-"))))
+          then "match" else "mismatch" end)]
+      | @tsv' "$1" 2>/dev/null | head -1)
+    case "$line" in ""|$'\t'*) exit 1 ;; esac
+    printf '%s\n' "$line"
+    ;;
+
+  whoami) # -> one JSON object {provider, auth, plan, account}, each "unknown" when not reported
+    # Who this engine's calls run as, read from the login they will use, with no model call:
+    # `claude auth status --json` reports the API provider (firstParty is Anthropic's own API),
+    # the sign-in method, the subscription plan and the account email.
+    out=$("${CLAUDE_BIN:-$HOME/.local/bin/claude}" auth status --json </dev/null 2>/dev/null) || out=""
+    [ -n "$out" ] || out="{}"
+    printf '%s' "$out" | jq -c '{provider: (.apiProvider // "unknown"), auth: (.authMethod // "unknown"),
+      plan: (.subscriptionType // "unknown"), account: (.email // "unknown")} | map_values(tostring)' 2>/dev/null \
+      || printf '{"provider":"unknown","auth":"unknown","plan":"unknown","account":"unknown"}\n'
     ;;
 
   l1-env) # -> KEY=VALUE lines the engine needs in its environment

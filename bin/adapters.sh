@@ -196,21 +196,47 @@ adapter_run() { # $1=name $2=subcommand [args...]
   "$root/$name/adapter.sh" "$@"
 }
 
-# The model one adapter's L1 workers run, resolved in a fixed order so a host can pin one
-# harness without touching another:
-#   AUTODREAM_L1_MODEL_<NAME>   that adapter only (the name upper-cased, dashes to underscores)
-#   AUTODREAM_L1_MODEL          every adapter
-#   the manifest's l1_model     the adapter's own default
-# A model id belongs to one engine (neuralwatt/glm-5.3-flash means nothing to claude), which
-# is why the per-adapter form exists: the generic one is an override for hosts with one engine.
-adapter_l1_model() { # $1=name -> model on stdout, exit 1 when none resolves
+# The adapter whose engine reviews one source's sessions in L1. Which harness holds a transcript
+# and which engine reads it are separate choices: the run has one reviewer, the engine that writes
+# the summary, unless the host picks another, resolved in a fixed order:
+#   AUTODREAM_L1_ENGINE_<NAME>   that source only (the name upper-cased, dashes to underscores)
+#   AUTODREAM_L1_ENGINE          every source
+#   $2                           the run's reviewer: the L2 engine (AUTODREAM_L2_ENGINE, else the
+#                                first enabled adapter), passed by the runner
+#   the source itself            only when no reviewer is passed
+# Only the model call moves. The source's own adapter still enumerates, normalizes, describes and
+# adds its triage notes. A choice that names no accepted adapter resolves nothing, so the caller
+# leaves those sessions untriaged instead of falling back to some other engine.
+adapter_l1_engine() { # $1=source $2=the run's reviewer -> engine adapter on stdout, exit 1 when none resolves
   local name="$1" up var v
   _adapter_name_safe "$name" || return 1
   up=$(printf '%s' "$name" | tr 'a-z-' 'A-Z_')
+  var="AUTODREAM_L1_ENGINE_$up"
+  v="${!var:-${AUTODREAM_L1_ENGINE:-${2:-$name}}}"
+  if [ "$v" != "$name" ]; then
+    _adapter_name_safe "$v" && _adapter_ok "$v" || return 1
+  fi
+  printf '%s' "$v"
+}
+
+# The model one source's L1 calls run. A model id belongs to one engine (neuralwatt/glm-5.3-flash
+# means nothing to claude), so the engine is resolved first (adapter_l1_engine) and the model is
+# keyed by it, never by the source, in a fixed order so a host can pin one engine without touching
+# another:
+#   AUTODREAM_L1_MODEL_<ENGINE>   that engine only, whichever source's sessions it reads (the name
+#                                 upper-cased, dashes to underscores), like AUTODREAM_L2_MODEL_<NAME>
+#   AUTODREAM_L1_MODEL            every engine: an override for hosts with one engine
+#   the manifest's l1_model       that engine's default
+# With the reviewer on claude, AUTODREAM_L1_MODEL_OMP therefore does not reach omp sessions, and
+# an omp model id never reaches the claude CLI.
+adapter_l1_model() { # $1=source $2=the run's reviewer -> model on stdout, exit 1 when none resolves
+  local engine up var v
+  engine=$(adapter_l1_engine "$1" "${2:-}") || return 1
+  up=$(printf '%s' "$engine" | tr 'a-z-' 'A-Z_')
   var="AUTODREAM_L1_MODEL_$up"
   v="${!var:-}"
   [ -n "$v" ] || v="${AUTODREAM_L1_MODEL:-}"
-  [ -n "$v" ] || v=$(adapter_manifest_get "$name" '.l1_model' 2>/dev/null) || v=""
+  [ -n "$v" ] || v=$(adapter_manifest_get "$engine" '.l1_model' 2>/dev/null) || v=""
   [ -n "$v" ] || return 1
   printf '%s' "$v"
 }

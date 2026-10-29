@@ -2,6 +2,18 @@
 
 All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
+## 2026-10-29
+
+### Changed
+- **The engine that writes the summary now reviews every harness's sessions in L1 by default.** Which harness holds a transcript and which engine reads it used to be one choice: each adapter's sessions went to its own engine. A run now has one reviewer, `AUTODREAM_L2_ENGINE` (else the first enabled adapter), and it reads every source's sessions unless `AUTODREAM_L1_ENGINE` (every source) or `AUTODREAM_L1_ENGINE_<NAME>` (one source) picks another. The source's own adapter still enumerates, linearizes and adds its triage notes; only the model call, its warmup and the network probe move. A host with one harness behaves exactly as before. **Upgrade note:** a host with both `claude` and `omp` enabled and `AUTODREAM_L2_ENGINE=omp` moves every Claude Code session from Haiku on the claude CLI to omp's L1 model on this upgrade. Set `AUTODREAM_L1_ENGINE_CLAUDE=claude` to keep them where they were.
+- **`AUTODREAM_L1_MODEL_<NAME>` is keyed by the engine that makes the call, not by the harness that holds the session.** A model id belongs to an engine, so `AUTODREAM_L1_MODEL_OMP` is the model of every L1 call on the omp engine, whichever harness the session came from, and never reaches the claude CLI. A host whose harnesses each review their own sessions sees no change. One that moves a harness to another engine pins that engine's model, the same keying `AUTODREAM_L2_MODEL_<NAME>` already had.
+- **A session with no usable L1 engine is retried once a later run gives it one.** Its error record counted as done, which held while the only cause was an adapter missing on disk. An engine choice naming no accepted adapter, a missing model and a failed login check are config, so the record now carries `no_engine: true`, and a later run of the date (a catch-up or `AUTODREAM_FORCE=1`) that resolves an engine and a model for the session's source drops it and triages the session.
+
+### Added
+- **`AUTODREAM_SESSION_ROOTS_<NAME>`** lists the session roots of one adapter other than claude, colon-separated, in place of its manifest's defaults, for a harness that keeps one store per profile.
+- **Who each engine runs as, and which model answered each L1 call.** Each engine the run uses reports its login once through a new adapter verb, `whoami` (claude: `claude auth status --json`, no model call), logged and written to run-stats as `login_<engine>`. The claude L1 worker runs with `--output-format json`, and the new `served` verb reads the models that answered, the CLI's cost estimate at API prices and a verdict, `match` or `mismatch`, that knows the CLI's naming (`haiku` answers as `claude-haiku-5-5`). Every call goes to `findings/<date>/l1-served.tsv`. run-stats gains `l1_engine_<source>`, `l1_served_models`, `l1_served_mismatch`, `l1_served_unmeasured` (calls whose engine reports no model, such as omp), `l1_cost_usd_estimate` and `l1_cost_unmeasured` (calls left out of that sum, so an all-omp night does not read as free).
+- **Both are record-only unless the host asks.** `AUTODREAM_REQUIRE_LOGIN` (space-separated `provider=`, `auth=`, `plan=`, `account=` pairs) hands an L1 engine whose login does not match no transcript, through the no-engine record above, and stops the run before it starts when the L2 engine does not match. `AUTODREAM_L1_REQUIRE_SERVED=1` discards the findings of any L1 call whose verdict is not `match`, an engine that cannot report one included. The verdict is stored beside every accepted answer (`<answer>.served`), and before L1 the run drops cached findings and chunk answers from earlier runs that no stored verdict vouches for and triages them again (`l1_cache_dropped`).
+
 ## 2026-10-27
 
 ### Fixed
