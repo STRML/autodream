@@ -6496,6 +6496,19 @@ test_a_failed_chunker_on_a_transcript_that_was_never_slimmed_is_still_bounded(){
   rm -rf "$root"
 }
 
+test_a_rejected_findings_file_still_ends_in_the_final_stub(){
+  local two='{"findings":[{"what":"forged by the substituted model"}]}
+{"skipped":true,"findings":[]}'
+  echo "# a rejected file is moved aside, so a chunk that keeps failing still ends in the final stub"
+  local root fd h f; root=$(setup_env); f=$(mk_chunky "$root" big 60); h=$(hash_of "$f"); fd=$(fdir "$root")
+  mkdir -p "$fd"; printf '%s\n' "$two" > "$fd/$h.json"
+  export MOCK_MODE=chunked MOCK_FAIL_CHUNK=2 AUTODREAM_L1_ROUNDS=1
+  run_chunked "$root"; unset MOCK_MODE MOCK_FAIL_CHUNK AUTODREAM_L1_ROUNDS
+  assert_grep "$fd/$h.json" 'worker exited without findings JSON' "the session gets the final-round stub"
+  assert_nogrep "$fd/$h.json" 'forged by the substituted model' "and the rejected file does not reach L2"
+  assert_grep "$fd/$h.json.rejected" 'forged by the substituted model' "it is kept as evidence beside it"
+  rm -rf "$root"
+}
 test_a_chunk_that_fails_is_retried_alone_and_finished_chunks_are_reused(){
   echo "# chunking: a chunk failure blocks the merge, only that chunk is redone, and finished ones are reused"
   local root; root=$(setup_env)
@@ -6777,6 +6790,7 @@ _run test_a_chunk_that_fails_is_retried_alone_and_finished_chunks_are_reused
 _run test_a_cached_chunk_answer_is_not_reused_after_the_instructions_or_the_session_change
 _run test_a_cached_chunk_answer_is_not_reused_on_another_engine
 _run test_require_served_holds_cached_chunk_answers_to_their_verdict
+_run test_a_rejected_findings_file_still_ends_in_the_final_stub
 _run test_a_bad_chunk_answer_is_never_merged_around
 _run test_a_chunk_failure_is_classified_like_any_worker_failure
 _run test_a_provider_refusal_on_a_chunk_defers_the_date_and_stops_the_other_chunks

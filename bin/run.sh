@@ -2181,6 +2181,12 @@ reconcile_findings_with_worklist() {
 # or shape: a worker can write error, skipped or no_engine as easily as the runner can (#167). A
 # runner record from before the marker existed is triaged once more and comes back marked.
 #
+# The limit, which this shares with the match verdict: every .served lives in the findings dir,
+# where a worker holding the Write tool can reach it, so a worker that rewrites ANOTHER session's
+# record and its .served together is not caught here. The dispatcher replaces each worker's own
+# .served after it exits, which covers the worker's own session only. Closing the cross-session
+# case needs provenance a worker cannot write at all, not a better check on these files.
+#
 # Runs once, after reconcile_findings_with_worklist and before the pre-L1 cache snapshot, so the
 # dispatcher, l1_missing_count and L1_PRECACHED all see the same set. Counted in run-stats as
 # l1_cache_dropped and named in the log.
@@ -2469,6 +2475,14 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
     # (L1_FINDINGS_OK, defined once in the parent) because this body is a single-quoted bash -c
     # where a quote silently breaks the quoting, and l1_missing_count must run the same check.
     jq -s -e "$L1_FINDINGS_OK" "$output" >/dev/null 2>&1 && exit 0
+    # A file that fails the check is moved out of the way now, not left in place: every later
+    # step reads a non-empty $output as this round having produced a result, so a chunk failure
+    # with the old file still there skipped the final stub and the rejected file reached L2.
+    # Kept as <hash>.json.rejected (no glob for *.json reaches it) as the evidence of what it was.
+    if [ -e "$output" ]; then
+      mv -f "$output" "$output.rejected" 2>/dev/null || rm -f "$output"
+      rm -f "$output.served"
+    fi
 
     # Validate the session is readable BEFORE spawning a worker. A path that find
     # enumerated but that is gone/unreadable by dispatch time otherwise sends the
