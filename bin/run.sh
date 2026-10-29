@@ -2157,6 +2157,43 @@ reconcile_findings_with_worklist() {
     log "WARNING: $FINDINGS_OUTSIDE_WORKLIST findings JSON(s) belong to no session in this run's worklist; moved to $_q so L2 does not read them: $OUTSIDE_FINDINGS_NAMES"
   fi
 }
+# A cached L1 result is reused only if this run would accept it now. With
+# AUTODREAM_L1_REQUIRE_SERVED=1, a findings JSON or chunk answer a model wrote is held to the
+# verdict the runner stored beside it (<answer>.served, written in dispatch_l1): one with no
+# verdict, or any verdict but match, came from a run that did not require it, or from before the
+# verdict existed, and is dropped so this run triages it again. A record carrying error or skipped
+# is kept: the runner writes those itself with no model behind it (a noise-gate skip, an unreadable
+# session, a final-round stub), and the post-L1 passes add fields to them, so their shape cannot
+# be told from a worker's. Runs once, after reconcile_findings_with_worklist and before the pre-L1
+# cache snapshot, so the dispatcher, l1_missing_count and L1_PRECACHED all see the same set.
+# Counted in run-stats as l1_cache_dropped and named in the log.
+L1_CACHE_DROPPED=0
+drop_unacceptable_l1_cache() {
+  L1_CACHE_DROPPED=0
+  [ "${AUTODREAM_L1_REQUIRE_SERVED:-0}" = 1 ] || return 0
+  local _h _f _names="" _chunks=0
+  while IFS= read -r _h; do
+    [ -n "$_h" ] || continue
+    _f="$FINDINGS_DIR/$_h.json"
+    [ -f "$_f" ] || continue
+    l1_record_is_runner_only "$_f" && continue
+    [ "$(served_verdict "$_f")" = match ] && continue
+    rm -f "$_f" "$_f.served"
+    L1_CACHE_DROPPED=$((L1_CACHE_DROPPED + 1)); _names="${_names:+$_names }$_h"
+  done < <(worklist_hashes)
+  for _f in "$FINDINGS_DIR"/.chunks/*/*.chunkout; do
+    [ -f "$_f" ] || continue
+    [ "$(served_verdict "$_f")" = match ] && continue
+    rm -f "$_f" "$_f.served"
+    L1_CACHE_DROPPED=$((L1_CACHE_DROPPED + 1)); _chunks=$((_chunks + 1))
+  done
+  [ "$L1_CACHE_DROPPED" -eq 0 ] || log "AUTODREAM_L1_REQUIRE_SERVED=1: dropped $L1_CACHE_DROPPED cached L1 result(s) no served verdict vouches for, to triage again (sessions: ${_names:-none}; chunk answers: $_chunks)"
+}
+# 0 for a record that says the session was not triaged (error) or was not sent to a model (skipped).
+l1_record_is_runner_only() { # $1=findings JSON
+  jq -e 'has("error") or has("skipped")' "$1" >/dev/null 2>&1
+}
+served_verdict() { cut -s -f4 "$1.served" 2>/dev/null | head -1; } # $1=answer -> its stored verdict
 scan_worklist_leftovers() {
   L1_ERR_ORPHANED=0; ORPHAN_ERR_NAMES=""
   local _hashes _f _h
@@ -2672,7 +2709,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
         else
           printf "the %s engine did not report which model answered, so the call cannot be held to the requested model [%s]; its findings are discarded (AUTODREAM_L1_REQUIRE_SERVED=1)\n" "$engine" "$model" >> "$3"
         fi
-        rm -f "$2"
+        rm -f "$2" "$2.served"
         return 1
       fi
 
@@ -2693,7 +2730,16 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
         rm -f "$2"
       fi
 
-      [ -s "$2" ] && return 0
+      # The verdict travels with the answer it describes, in <answer>.served (engine, requested
+      # model, models that answered, verdict), written by the runner after the engine has exited,
+      # so whatever the worker wrote there itself is replaced. A later run reads it before reusing
+      # the answer: with AUTODREAM_L1_REQUIRE_SERVED=1 a cached findings JSON or chunk answer is
+      # reused only when this says match (drop_unacceptable_l1_cache in the parent).
+      rm -f "$2.served"
+      if [ -s "$2" ]; then
+        printf "%s\t%s\t%s\t%s\n" "$engine" "$model" "${l1smodels:-unknown}" "$l1sverdict" > "$2.served"
+        return 0
+      fi
       # Worker exited without writing findings JSON. Record a diagnostic so the
       # failure is visible.
       printf "worker produced no findings JSON for %s (incomplete run: the engine exited without writing output)\n" "${l1_subject:-$session}" >> "$3"
@@ -2816,8 +2862,24 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
         if bash "$MERGER" --session "$session" --elided "$elided" "${parts[@]}" > "$output.merge" 2>> "$errlog" \
            && [ -s "$output.merge" ] && jq -e ".findings | arrays" "$output.merge" >/dev/null 2>&1; then
           mv -f "$output.merge" "$output"
+          # The merged answer is vouched for only as far as its chunks were: match when every chunk
+          # answer says match, mismatch when any says mismatch, unmeasured otherwise (a chunk
+          # whose engine reports no model, or an answer cached before the verdict existed).
+          mverdict=match; mmodels=""
+          for cpart in "${parts[@]}"; do
+            cpv=$(cut -s -f4 "$cpart.served" 2>/dev/null | head -1)
+            cpm=$(cut -s -f3 "$cpart.served" 2>/dev/null | head -1)
+            mmodels="$mmodels,${cpm:-unknown}"
+            case "$cpv" in
+              match) ;;
+              mismatch) mverdict=mismatch ;;
+              *) [ "$mverdict" = mismatch ] || mverdict=unmeasured ;;
+            esac
+          done
+          mmodels=$(printf "%s\n" "${mmodels#,}" | tr "," "\n" | sort -u | paste -s -d "," -)
+          printf "%s\t%s\t%s\t%s\n" "$engine" "$model" "$mmodels" "$mverdict" > "$output.served"
         else
-          rm -f "$output.merge" "${parts[@]}"
+          rm -f "$output.merge" "${parts[@]}" "${parts[@]/%/.served}"
           printf "merging the %s chunk answers of %s failed; they were discarded so the next round redoes them\n" "$nchunks" "$session" >> "$errlog"
         fi
       else
@@ -3276,6 +3338,7 @@ run() {
       printf 'l1_errored_provider: 0\n'
       printf 'l1_errored_unclassified: 0\n'
       printf 'l1_sessions_already_done_at_start: 0\n'
+      printf 'l1_cache_dropped: 0\n'
       printf 'l1_sessions_freshly_processed: 0\n'
       printf 'l1_elapsed_seconds: 0\n'
       printf 'oversized_total: 0\n'
@@ -3484,6 +3547,7 @@ EOF
 
   sweep_killed_leftovers
   reconcile_findings_with_worklist
+  drop_unacceptable_l1_cache
 
   clean_work_bucket  # start clean: drop any stub left by a prior run's workers
 
@@ -4037,6 +4101,8 @@ PY
     # Cached vs. fresh: lets the aggregator distinguish a sub-second "elapsed"
     # caused by everything already being done from a broken timer.
     printf 'l1_sessions_already_done_at_start: %s\n' "$L1_PRECACHED"
+    # Cached results this run would not reuse (drop_unacceptable_l1_cache), triaged again instead.
+    printf 'l1_cache_dropped: %s\n' "$L1_CACHE_DROPPED"
     printf 'l1_sessions_freshly_processed: %s\n' "$L1_FRESHLY_PROCESSED"
     printf 'l1_elapsed_seconds: %s\n' "$L1_ELAPSED"
     # Global cross-session overlap stat (#14) — see compute_overlap_stats above.

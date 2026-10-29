@@ -4332,6 +4332,40 @@ test_the_runs_reviewer_reviews_every_source_by_default(){
   rm -rf "$root"
 }
 
+test_require_served_holds_cached_findings_to_their_verdict(){
+  echo "# AUTODREAM_L1_REQUIRE_SERVED=1 also holds cached findings: one another model wrote is triaged again"
+  local root fd h; root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  MOCK_SERVED_MODEL=claude-other-model run_dream "$root"
+  fd=$(fdir "$root")
+  assert_grep "$fd/$h.json" 'always run tests after edits' "run 1, not requiring it, kept the substituted model's findings"
+  assert_grep "$fd/$h.json.served" '	claude-other-model	mismatch$' "and stored the mismatch beside them"
+  AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls2.log" run_dream "$root"
+  assert_eq "$(grep -c . "$root/calls2.log" 2>/dev/null)" "1" "run 2, requiring it, called the engine for the session again"
+  assert_grep "$root/run.out" 'dropped 1 cached L1 result(s) no served verdict vouches for' "the log says why"
+  assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 1$' "run-stats counts it"
+  assert_grep "$fd/run-stats.txt" '^l1_sessions_already_done_at_start: 0$' "and it is not counted as already done"
+  assert_grep "$fd/$h.json.served" '	claude-haiku-5-5	match$' "the new findings carry a match"
+  assert_grep "$fd/$h.json" 'always run tests after edits' "and are kept"
+  rm -rf "$root"
+  echo "# findings with no stored verdict (written before it existed) are triaged again; a match is reused"
+  root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  run_dream "$root"; fd=$(fdir "$root")
+  AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls2.log" run_dream "$root"
+  assert_no_file "$root/calls2.log" "findings whose verdict is match are reused, with no call"
+  assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 0$' "and nothing is dropped"
+  rm -f "$fd/$h.json.served"
+  AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls3.log" run_dream "$root"
+  assert_eq "$(grep -c . "$root/calls3.log" 2>/dev/null)" "1" "findings with no verdict are triaged again"
+  rm -rf "$root"
+  echo "# a record the runner wrote with no model behind it is kept: it is not re-dispatched every run"
+  root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  MOCK_MODE=l1_incomplete AUTODREAM_L1_ROUNDS=1 run_dream "$root"; fd=$(fdir "$root")
+  assert_grep "$fd/$h.json" 'worker exited without findings JSON' "run 1 left the final-round stub"
+  AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls2.log" run_dream "$root"
+  assert_no_file "$root/calls2.log" "run 2 kept it and called nothing"
+  assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 0$' "and dropped nothing"
+  rm -rf "$root"
+}
 test_an_unusable_l1_engine_override_fails_closed(){
   echo "# an L1 engine override that names no accepted adapter: no model call at all, not the omp engine"
   local root o h fd trip; root=$(setup_env); mk_session "$root" sess1
@@ -5639,6 +5673,7 @@ _run test_omp_session_roots_come_from_the_host_setting
 _run test_l1_provenance_and_served_models_are_recorded
 _run test_an_engine_failing_its_login_requirement_is_handed_nothing
 _run test_a_call_answered_by_another_model_loses_its_findings
+_run test_require_served_holds_cached_findings_to_their_verdict
 _run test_omp_nested_child_is_a_sidechain_of_its_bucket
 _run test_omp_session_that_cannot_be_linearized_is_an_error_record
 _run test_omp_stats_describe_the_live_branch_only
@@ -6417,6 +6452,33 @@ test_a_cached_chunk_answer_is_not_reused_on_another_engine(){
   rm -rf "$root"
 }
 
+test_require_served_holds_cached_chunk_answers_to_their_verdict(){
+  echo "# AUTODREAM_L1_REQUIRE_SERVED=1 also holds cached chunk answers: one another model wrote is redone"
+  local scenario
+  for scenario in substituted matched; do
+    local root; root=$(setup_env)
+    local f; f=$(mk_chunky "$root" big 60); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
+    # Run 1, not requiring it: a permanent refusal on chunk 2 defers the date and leaves chunk 1's answer.
+    export MOCK_MODE=chunked MOCK_CALL_LOG="$root/calls1.log" MOCK_FAIL_CHUNK=2 MOCK_FAIL_KIND=refusal AUTODREAM_L1_ROUNDS=1
+    [ "$scenario" = substituted ] && export MOCK_SERVED_MODEL=claude-other-model
+    run_chunked "$root"; unset MOCK_MODE MOCK_CALL_LOG MOCK_FAIL_CHUNK MOCK_FAIL_KIND AUTODREAM_L1_ROUNDS MOCK_SERVED_MODEL
+    assert_eq "$(ls "$fd/.chunks/$h"/01-*.chunkout 2>/dev/null | wc -l | tr -d ' ')" "1" "[$scenario] run 1 left chunk 1's answer behind"
+    export MOCK_MODE=chunked MOCK_CALL_LOG="$root/calls2.log" AUTODREAM_L1_ROUNDS=1 AUTODREAM_L1_REQUIRE_SERVED=1
+    run_chunked "$root"; unset MOCK_MODE MOCK_CALL_LOG AUTODREAM_L1_ROUNDS AUTODREAM_L1_REQUIRE_SERVED
+    if [ "$scenario" = substituted ]; then
+      assert_eq "$(grep -c '^01-' <(sed 's#.*/##' "$root/calls2.log"))" "1" "[$scenario] chunk 1 was called again, not reused"
+      assert_nogrep "$root/run.out" "reuse: chunk 1/" "[$scenario] and the log does not say it reused it"
+      assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 1$' "[$scenario] run-stats counts the dropped answer"
+    else
+      assert_eq "$(grep -c '^01-' <(sed 's#.*/##' "$root/calls2.log"))" "0" "[$scenario] chunk 1 was reused"
+      assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 0$' "[$scenario] and nothing was dropped"
+    fi
+    assert_eq "$(jq -r 'has("error")' "$fd/$h.json" 2>/dev/null)" "false" "[$scenario] the session finished"
+    assert_grep "$fd/$h.json.served" '	match$' "[$scenario] and the merged findings carry a match"
+    rm -rf "$root"
+  done
+}
+
 test_a_bad_chunk_answer_is_never_merged_around(){
   echo "# chunking: an error, partial or malformed chunk answer blocks the merge and is redone alone"
   local kind
@@ -6602,6 +6664,7 @@ _run test_a_failed_chunker_on_a_transcript_that_was_never_slimmed_is_still_bound
 _run test_a_chunk_that_fails_is_retried_alone_and_finished_chunks_are_reused
 _run test_a_cached_chunk_answer_is_not_reused_after_the_instructions_or_the_session_change
 _run test_a_cached_chunk_answer_is_not_reused_on_another_engine
+_run test_require_served_holds_cached_chunk_answers_to_their_verdict
 _run test_a_bad_chunk_answer_is_never_merged_around
 _run test_a_chunk_failure_is_classified_like_any_worker_failure
 _run test_a_provider_refusal_on_a_chunk_defers_the_date_and_stops_the_other_chunks
