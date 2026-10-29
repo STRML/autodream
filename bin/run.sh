@@ -2169,9 +2169,12 @@ reconcile_findings_with_worklist() {
 # verdict the runner stored beside it (<answer>.served, written in dispatch_l1): one with no
 # verdict, or any verdict but match, came from a run that did not require it, or from before the
 # verdict existed, and is dropped so this run triages it again. A record carrying error or skipped
-# is kept: the runner writes those itself with no model behind it (a noise-gate skip, an unreadable
-# session, a final-round stub), and the post-L1 passes add fields to them, so their shape cannot
-# be told from a worker's.
+# with an empty findings array is kept: the runner writes those itself with no model behind it (a
+# noise-gate skip, an unreadable session, a final-round stub), and the post-L1 passes add fields to
+# them, so their shape cannot be told from a worker's. Neither can their keys, since a worker can
+# write any of them, so the empty array is what is trusted: every record the runner writes has
+# findings: [], and one with findings in it is model output whatever else it carries. That holds
+# for the no-engine marker as well, so a no_engine record with findings goes through the verdict.
 #
 # Runs once, after reconcile_findings_with_worklist and before the pre-L1 cache snapshot, so the
 # dispatcher, l1_missing_count and L1_PRECACHED all see the same set. Counted in run-stats as
@@ -2211,8 +2214,9 @@ drop_unacceptable_l1_cache() {
     || log "AUTODREAM_L1_REQUIRE_SERVED=1: dropped cached L1 result(s) no served verdict vouches for, to triage again (sessions: ${_unverified:-none}; chunk answers: $_chunks)"
 }
 # 0 for a no-engine record, by its marker or, for one written before the marker, by its error.
+# Findings in it make it model output (see l1_record_is_runner_only).
 l1_record_has_no_engine() { # $1=findings JSON
-  jq -e '.no_engine == true or ((.error // "") | tostring | startswith("no L1 engine for this session"))' "$1" >/dev/null 2>&1
+  jq -e '(.no_engine == true or ((.error // "") | tostring | startswith("no L1 engine for this session"))) and .findings == []' "$1" >/dev/null 2>&1
 }
 # 0 when this run resolved an engine and a model for the source, as dispatch_l1 will read them.
 l1_source_has_engine() { # $1=source adapter
@@ -2223,9 +2227,10 @@ l1_source_has_engine() { # $1=source adapter
   case "$_e" in ""|*[!abcdefghijklmnopqrstuvwxyz0123456789_-]*) return 1 ;; esac
   [ -n "$_m" ] && [ -x "$ADAPTERS_DIR/$_e/adapter.sh" ]
 }
-# 0 for a record that says the session was not triaged (error) or was not sent to a model (skipped).
+# 0 for a record that says the session was not triaged (error) or was not sent to a model (skipped)
+# and has no findings. A worker can write either key, so a record with findings is model output.
 l1_record_is_runner_only() { # $1=findings JSON
-  jq -e 'has("error") or has("skipped")' "$1" >/dev/null 2>&1
+  jq -e '(has("error") or has("skipped")) and .findings == []' "$1" >/dev/null 2>&1
 }
 served_verdict() { cut -s -f4 "$1.served" 2>/dev/null | head -1; } # $1=answer -> its stored verdict
 scan_worklist_leftovers() {

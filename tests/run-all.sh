@@ -4357,6 +4357,29 @@ test_require_served_holds_cached_findings_to_their_verdict(){
   AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls3.log" run_dream "$root"
   assert_eq "$(grep -c . "$root/calls3.log" 2>/dev/null)" "1" "findings with no verdict are triaged again"
   rm -rf "$root"
+  echo "# a model answer with findings is held to its verdict even when it carries the runner's skipped or error key"
+  local key
+  for key in skipped error; do
+    root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+    MOCK_SERVED_MODEL=claude-other-model run_dream "$root"; fd=$(fdir "$root")
+    jq -c --arg k "$key" '{session_path} + {($k): true, findings: [{what: "forged by the substituted model"}]}' \
+      "$fd/$h.json" > "$fd/$h.json.tmp" && mv "$fd/$h.json.tmp" "$fd/$h.json"
+    AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 MOCK_CALL_LOG="$root/calls2.log" run_dream "$root"
+    assert_eq "$(grep -c . "$root/calls2.log" 2>/dev/null)" "1" "$key: run 2 triaged the session again"
+    assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 1$' "$key: run-stats counts the drop"
+    assert_nogrep "$fd/$h.json" 'forged by the substituted model' "$key: the forged findings are gone"
+    rm -rf "$root"
+  done
+  echo "# so is one carrying no_engine, while its source has no engine to triage it again"
+  root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
+  MOCK_SERVED_MODEL=claude-other-model run_dream "$root"; fd=$(fdir "$root")
+  jq -c '{session_path, no_engine: true, findings: [{what: "forged by the substituted model"}]}' \
+    "$fd/$h.json" > "$fd/$h.json.tmp" && mv "$fd/$h.json.tmp" "$fd/$h.json"
+  AUTODREAM_FORCE=1 AUTODREAM_L1_REQUIRE_SERVED=1 AUTODREAM_L1_ENGINE_CLAUDE=nonesuch run_dream "$root"
+  assert_grep "$fd/run-stats.txt" '^l1_cache_dropped: 1$' "the forged record is dropped"
+  assert_nogrep "$fd/$h.json" 'forged by the substituted model' "its findings do not reach L2"
+  assert_grep "$fd/$h.json" 'no L1 engine for this session' "the runner writes its own no-engine record in its place"
+  rm -rf "$root"
   echo "# a record the runner wrote with no model behind it is kept: it is not re-dispatched every run"
   root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
   MOCK_MODE=l1_incomplete AUTODREAM_L1_ROUNDS=1 run_dream "$root"; fd=$(fdir "$root")
