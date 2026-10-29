@@ -4086,8 +4086,11 @@ PY
       printf 'l1_served_mismatch: %s\n' "$(awk -F'\t' '$6 == "mismatch"' "$FINDINGS_DIR/l1-served.tsv" | wc -l | tr -d ' ')"
       printf 'l1_served_unmeasured: %s\n' "$(awk -F'\t' '$6 != "match" && $6 != "mismatch"' "$FINDINGS_DIR/l1-served.tsv" | wc -l | tr -d ' ')"
       printf 'l1_cost_usd_estimate: %s\n' "$(awk -F'\t' '$5 != "" { s += $5 } END { printf "%.4f", s }' "$FINDINGS_DIR/l1-served.tsv")"
+      # The calls the sum above leaves out because their engine reported no cost (omp, or a claude
+      # call with no result object), so an all-omp night reads 0.0000 beside a count, not alone.
+      printf 'l1_cost_unmeasured: %s\n' "$(awk -F'\t' '$5 == ""' "$FINDINGS_DIR/l1-served.tsv" | wc -l | tr -d ' ')"
     else
-      printf 'l1_served_models: none\nl1_served_mismatch: 0\nl1_served_unmeasured: 0\nl1_cost_usd_estimate: 0.0000\n'
+      printf 'l1_served_models: none\nl1_served_mismatch: 0\nl1_served_unmeasured: 0\nl1_cost_usd_estimate: 0.0000\nl1_cost_unmeasured: 0\n'
     fi
     # yes when the circuit breaker cut the retry budget, so a short l1_rounds_used is not
     # mistaken for a run that finished early and cleanly.

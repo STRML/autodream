@@ -4438,6 +4438,7 @@ test_l1_provenance_and_served_models_are_recorded(){
   assert_grep "$fd/run-stats.txt" '^l1_served_mismatch: 0$' "none was answered by another model"
   assert_grep "$fd/run-stats.txt" '^l1_served_unmeasured: 0$' "and every call reported its model"
   assert_grep "$fd/run-stats.txt" '^l1_cost_usd_estimate: 0.0250$' "and the engine's cost estimates are summed"
+  assert_grep "$fd/run-stats.txt" '^l1_cost_unmeasured: 0$' "with no call left out of the sum"
   rm -rf "$root"
   echo "# a model asked for by alias matches the canonical id the CLI answers as (the adapter verdict)"
   local h; root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
@@ -4454,6 +4455,8 @@ test_l1_provenance_and_served_models_are_recorded(){
   assert_grep "$fd/l1-served.tsv" "^$h	omp	omp/test-model	unknown		unmeasured$" "the omp call is recorded with no model and no verdict"
   assert_grep "$fd/run-stats.txt" '^l1_served_mismatch: 0$' "it is not a mismatch"
   assert_grep "$fd/run-stats.txt" '^l1_served_unmeasured: 1$' "it is counted as unmeasured"
+  assert_grep "$fd/run-stats.txt" '^l1_cost_usd_estimate: 0.0000$' "an all-omp night has no cost to sum"
+  assert_grep "$fd/run-stats.txt" '^l1_cost_unmeasured: 1$' "and says how many calls that leaves out, so 0.0000 never reads as free"
   rm -rf "$root"
   root=$(setup_env); o=$(mk_omp_session "$root" wwww); h=$(hash_of "$o")
   AUTODREAM_ADAPTERS=omp AUTODREAM_L1_REQUIRE_SERVED=1 run_dream_omp "$root"
