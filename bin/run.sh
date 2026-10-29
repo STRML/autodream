@@ -2043,6 +2043,12 @@ wait_for_network() { # 0 = network is up, 1 = gave up after the cap; no-op when 
   return 0
 }
 
+# The one test for a usable findings JSON, run with jq -s: exactly one JSON value, an object, with a
+# findings array. jq -e judges only the LAST value in a file, so a forged object followed by a good
+# one passed the old `.findings | arrays` check and L2 read the first (#167). merge-chunks.sh --check
+# is the same rule for chunk answers. Exported because the worker is a separate bash -c.
+export L1_FINDINGS_OK='length == 1 and (.[0] | type == "object" and (.findings | type) == "array")'
+
 l1_missing_count() { # count sessions in $SESSIONS_LIST that still have no findings JSON
   local m=0 s h
   while IFS= read -r s; do
@@ -2050,8 +2056,8 @@ l1_missing_count() { # count sessions in $SESSIONS_LIST that still have no findi
     # An unvalidated hash here counts the session missing forever and the retry
     # loop re-dispatches it every round.
     h=$(session_hash "$s") || { m=$((m + 1)); continue; }
-    # Same check the dispatcher applies on the way out; see the worker for why `arrays`.
-    jq -e ".findings | arrays" "$FINDINGS_DIR/$h.json" >/dev/null 2>&1 || m=$((m + 1))
+    # Same check the dispatcher applies on the way out (L1_FINDINGS_OK).
+    jq -s -e "$L1_FINDINGS_OK" "$FINDINGS_DIR/$h.json" >/dev/null 2>&1 || m=$((m + 1))
   done < "$SESSIONS_LIST"
   printf '%s' "$m"
 }
@@ -2168,13 +2174,12 @@ reconcile_findings_with_worklist() {
 # With AUTODREAM_L1_REQUIRE_SERVED=1, a findings JSON or chunk answer a model wrote is held to the
 # verdict the runner stored beside it (<answer>.served, written in dispatch_l1): one with no
 # verdict, or any verdict but match, came from a run that did not require it, or from before the
-# verdict existed, and is dropped so this run triages it again. A record carrying error or skipped
-# with an empty findings array is kept: the runner writes those itself with no model behind it (a
-# noise-gate skip, an unreadable session, a final-round stub), and the post-L1 passes add fields to
-# them, so their shape cannot be told from a worker's. Neither can their keys, since a worker can
-# write any of them, so the empty array is what is trusted: every record the runner writes has
-# findings: [], and one with findings in it is model output whatever else it carries. That holds
-# for the no-engine marker as well, so a no_engine record with findings goes through the verdict.
+# verdict existed, and is dropped so this run triages it again. A record the runner wrote itself,
+# with no model behind it (a noise-gate skip, an unreadable session, a normalize failure, a
+# no-engine record, a final-round stub), is kept when its .served says runner and its findings are
+# empty. Provenance comes from that marker, which the runner writes, never from the record's keys
+# or shape: a worker can write error, skipped or no_engine as easily as the runner can (#167). A
+# runner record from before the marker existed is triaged once more and comes back marked.
 #
 # Runs once, after reconcile_findings_with_worklist and before the pre-L1 cache snapshot, so the
 # dispatcher, l1_missing_count and L1_PRECACHED all see the same set. Counted in run-stats as
@@ -2188,12 +2193,14 @@ drop_unacceptable_l1_cache() {
     [ -n "$_h" ] || continue
     _f="$FINDINGS_DIR/$_h.json"
     [ -f "$_f" ] || continue
+    # Dropping a no-engine record only costs a triage, so its shape is enough to do that.
     if l1_record_has_no_engine "$_f"; then
       _src=$(printf '%s\n' "$AUTODREAM_SOURCE_MAP" | awk -F'\t' -v h="$_h" '$1 == h { print $2; exit }')
-      l1_source_has_engine "$_src" || continue
-      rm -f "$_f" "$_f.served"
-      L1_CACHE_DROPPED=$((L1_CACHE_DROPPED + 1)); _unrouted="${_unrouted:+$_unrouted }$_h"
-      continue
+      if l1_source_has_engine "$_src"; then
+        rm -f "$_f" "$_f.served"
+        L1_CACHE_DROPPED=$((L1_CACHE_DROPPED + 1)); _unrouted="${_unrouted:+$_unrouted }$_h"
+        continue
+      fi
     fi
     [ "$_served" = 1 ] || continue
     l1_record_is_runner_only "$_f" && continue
@@ -2213,10 +2220,10 @@ drop_unacceptable_l1_cache() {
   [ -z "$_unverified" ] && [ "$_chunks" -eq 0 ] \
     || log "AUTODREAM_L1_REQUIRE_SERVED=1: dropped cached L1 result(s) no served verdict vouches for, to triage again (sessions: ${_unverified:-none}; chunk answers: $_chunks)"
 }
-# 0 for a no-engine record, by its marker or, for one written before the marker, by its error.
-# Findings in it make it model output (see l1_record_is_runner_only).
+# 0 for a no-engine record, by its no_engine key or, for one written before the key, by its error.
+# Only ever used to drop a record, so a worker that forges one buys itself a retriage, nothing more.
 l1_record_has_no_engine() { # $1=findings JSON
-  jq -e '(.no_engine == true or ((.error // "") | tostring | startswith("no L1 engine for this session"))) and .findings == []' "$1" >/dev/null 2>&1
+  jq -s -e 'length == 1 and (.[0] | (.no_engine == true or ((.error // "") | tostring | startswith("no L1 engine for this session"))) and .findings == [])' "$1" >/dev/null 2>&1
 }
 # 0 when this run resolved an engine and a model for the source, as dispatch_l1 will read them.
 l1_source_has_engine() { # $1=source adapter
@@ -2227,10 +2234,12 @@ l1_source_has_engine() { # $1=source adapter
   case "$_e" in ""|*[!abcdefghijklmnopqrstuvwxyz0123456789_-]*) return 1 ;; esac
   [ -n "$_m" ] && [ -x "$ADAPTERS_DIR/$_e/adapter.sh" ]
 }
-# 0 for a record that says the session was not triaged (error) or was not sent to a model (skipped)
-# and has no findings. A worker can write either key, so a record with findings is model output.
+# 0 for a record the runner wrote with no model behind it: its .served says runner (the dispatcher
+# writes that marker beside every such record) and it holds one value with no findings. The empty
+# findings array is a second guard, for a worker that rewrites another session's record in place.
 l1_record_is_runner_only() { # $1=findings JSON
-  jq -e '(has("error") or has("skipped")) and .findings == []' "$1" >/dev/null 2>&1
+  [ "$(served_verdict "$1")" = runner ] || return 1
+  jq -s -e 'length == 1 and .[0].findings == []' "$1" >/dev/null 2>&1
 }
 served_verdict() { cut -s -f4 "$1.served" 2>/dev/null | head -1; } # $1=answer -> its stored verdict
 scan_worklist_leftovers() {
@@ -2456,11 +2465,10 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
     # garbage JSON). Treat it as missing so this pass re-dispatches it, rather
     # than letting it count as done and feed broken records to L2.
     # `jq -e .findings` is truthy for a STRING or an OBJECT, so {"findings":"oops"} counted as a
-    # finished session and reached L2 as a result. `arrays` emits nothing for a non-array, so jq
-    # -e exits non-zero. Written this way rather than as `(.findings | type) == "array"`: this
-    # body is a single-quoted bash -c where a quote silently breaks the quoting, and the same
-    # check in l1_missing_count must read as the same check.
-    jq -e ".findings | arrays" "$output" >/dev/null 2>&1 && exit 0
+    # finished session and reached L2 as a result. The filter comes from the environment
+    # (L1_FINDINGS_OK, defined once in the parent) because this body is a single-quoted bash -c
+    # where a quote silently breaks the quoting, and l1_missing_count must run the same check.
+    jq -s -e "$L1_FINDINGS_OK" "$output" >/dev/null 2>&1 && exit 0
 
     # Validate the session is readable BEFORE spawning a worker. A path that find
     # enumerated but that is gone/unreadable by dispatch time otherwise sends the
@@ -2469,6 +2477,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
     # is correct — retrying would not help.
     if [ ! -r "$session" ]; then
       jq -cn --arg p "$session" "{session_path: \$p, error: \"session file not readable at dispatch\", findings: []}" > "$output"
+      printf "runner\t-\t-\trunner\n" > "$output.served"
       rm -f "$errlog"
       echo "skip (unreadable): $session ($hash)" >&2
       exit 0
@@ -2488,6 +2497,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       gate=$(jq -r --argjson min_turns "${AUTODREAM_MIN_USER_TURNS:-2}" --argjson min_minutes "${AUTODREAM_MIN_MINUTES:-1}" "if (.isSidechain == true) or ((.tool_call_count // 0) >= 5) then 0 elif (.user_message_count // 0) < \$min_turns then 1 elif ((.duration_minutes // 0) > 0) and ((.duration_minutes // 0) < \$min_minutes) then 1 else 0 end" "$statsfile" 2>/dev/null)
       if [ "$gate" = "1" ]; then
         jq -cn --arg p "$session" "{session_path: \$p, skipped: \"below_noise_gate\", findings: []}" > "$output"
+        printf "runner\t-\t-\trunner\n" > "$output.served"
         rm -f "$errlog"
         echo "gated (below noise threshold): $session ($hash)" >&2
         exit 0
@@ -2517,6 +2527,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
           # record, so a refusal can be told from an environment fault by reading it.
           jq -cn --arg p "$session" --arg a "$wsrc" --arg why "$normerr" \
             "{session_path: \$p, error: (\"session could not be normalized by the \" + \$a + \" adapter: \" + \$why), findings: []}" > "$output"
+          printf "runner\t-\t-\trunner\n" > "$output.served"
           rm -f "$errlog"
           echo "skip (not normalizable): $session ($hash)" >&2
           exit 0
@@ -2586,6 +2597,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       # (drop_unacceptable_l1_cache in the parent).
       rm -f "$slimfile" "$normfile" "$dayfile"
       jq -cn --arg p "$session" --arg s "$src" --arg m "$model" "{session_path: \$p, no_engine: true, error: (\"no L1 engine for this session (source [\" + \$s + \"], model [\" + \$m + \"])\"), findings: []}" > "$output"
+      printf "runner\t-\t-\trunner\n" > "$output.served"
       rm -f "$errlog"
       echo "skip (no engine): $session ($hash)" >&2
       exit 0
@@ -2765,7 +2777,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       if [ -n "${5:-}" ]; then
         l1_ok() { bash "$MERGER" --check "$1"; }
       else
-        l1_ok() { jq -e ".findings | arrays" "$1" >/dev/null 2>&1; }
+        l1_ok() { jq -s -e "$L1_FINDINGS_OK" "$1" >/dev/null 2>&1; }
       fi
       if [ -s "$2" ] && ! l1_ok "$2"; then
         printf "worker wrote output with no usable .findings key; treating as a failure\n" >> "$3"
@@ -2903,7 +2915,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
         # itself. A merge that fails anyway drops every cached answer so the next round cannot
         # loop on them.
         if bash "$MERGER" --session "$session" --elided "$elided" "${parts[@]}" > "$output.merge" 2>> "$errlog" \
-           && [ -s "$output.merge" ] && jq -e ".findings | arrays" "$output.merge" >/dev/null 2>&1; then
+           && [ -s "$output.merge" ] && jq -s -e "$L1_FINDINGS_OK" "$output.merge" >/dev/null 2>&1; then
           mv -f "$output.merge" "$output"
           # The merged answer is vouched for only as far as its chunks were: match when every chunk
           # answer says match, mismatch when any says mismatch, unmeasured otherwise (a chunk
@@ -2972,6 +2984,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
         [ "$chunked" = 1 ] && cmeta="{\"chunks\":$nchunks,\"chunks_elided\":$elided}"
         jq -cn --arg p "$session" --arg r "${AUTODREAM_L1_ROUNDS:-5}" --argjson b "${sz:-0}" --argjson l "${lines:-0}" --argjson sl "$([ -n "$slimfile" ] && echo true || echo false)" --argjson cm "$cmeta" \
           "{session_path: \$p, error: (\"worker exited without findings JSON after \" + \$r + \" rounds\"), meta: ({bytes: \$b, lines: \$l, slimmed: \$sl} + \$cm), findings: []}" > "$output"
+        printf "runner\t-\t-\trunner\n" > "$output.served"
         echo "FAIL (metadata stub written): $session ($hash) [$(($(date +%s) - t0))s] — see $errlog" >&2
       else
         echo "FAIL: $session ($hash) [$(($(date +%s) - t0))s] — see $errlog" >&2
@@ -3943,7 +3956,7 @@ PY
   for fjson in "$FINDINGS_DIR"/*.json; do
     case "$fjson" in *.stats.json) continue ;; esac
     [ -s "$fjson" ] || continue
-    jq -e ".findings | arrays" "$fjson" >/dev/null 2>&1 || continue
+    jq -s -e "$L1_FINDINGS_OK" "$fjson" >/dev/null 2>&1 || continue
     sidecar="${fjson%.json}.stats.json"
     skilltmp="$fjson.skills.tmp"
     if ! jq -e 'type == "object" and (["skills_invoked", "skills_invoked_count", "skills_invoked_counts", "skills_authored"] - keys | length == 0)' "$sidecar" >/dev/null 2>&1; then
