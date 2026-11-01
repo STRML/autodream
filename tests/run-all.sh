@@ -3244,6 +3244,35 @@ test_fanout_stats(){
   rm -rf "$root"
 }
 
+# The roll-up L2 counts from (2026-10-31: L2 could list 200 of 2683 entries and counted a sample).
+# The fanout fixture has 2 ungated top-level sessions, 1 gated one and 5 ungated workers.
+test_rollup_written_for_l2(){
+  echo "# rollup.tsv and categories.tsv: one row per session, written before L2"
+  local root; root=$(setup_env)
+  mk_fanout_fixture "$root"
+  run_dream "$root"
+  local d; d=$(fdir "$root")
+  assert_eq "$(tail -n +2 "$d/rollup.tsv" 2>/dev/null | grep -c .)" "8" "rollup.tsv has a row for every session, gated included"
+  assert_eq "$(tail -n +2 "$d/rollup.tsv" 2>/dev/null | awk -F'\t' '$2 == "gated"' | wc -l | tr -d ' ')" "1" "the gated session is marked gated"
+  assert_eq "$(tail -n +2 "$d/rollup.tsv" 2>/dev/null | awk -F'\t' '$2 != "gated" && $5 == "true" && $7 != ""' | wc -l | tr -d ' ')" "5" "the five workers are nested and name a parent, as fanouts.tsv does"
+  assert_grep "$d/categories.tsv" '^category' "categories.tsv is written with its header"
+  assert_grep "$d/run-stats.txt" '^rollup_rows: 8$' "run-stats.txt carries the roll-up row count"
+  assert_grep "$d/run-stats.txt" '^rollup_ungated: 7$' "and the ungated count, which matches sessions_top_level + sessions_nested"
+  rm -rf "$root"
+}
+
+test_prompt_counts_from_the_rollup(){
+  echo "# PROMPT.md: counts come from rollup.tsv and categories.tsv, and the findings dir is never listed"
+  local P="$REPO/prompts/PROMPT.md"
+  assert_grep   "$P" 'rollup.tsv' "PROMPT.md names rollup.tsv"
+  assert_grep   "$P" 'categories.tsv' "PROMPT.md names categories.tsv"
+  assert_grep   "$P" 'Never Glob, list or read the findings directory to count anything' "PROMPT.md forbids globbing the findings dir to count"
+  assert_nogrep "$P" 'Glob it' "PROMPT.md no longer tells L2 to glob the findings JSONs"
+  assert_nogrep "$P" 'Read them all' "or to read every findings JSON"
+  assert_nogrep "$P" 'use Glob then Read' "and How to start does not glob them either"
+  assert_nogrep "$P" '\*\.json\.err' "a failed triage is found from the status column, not a *.json.err glob"
+}
+
 test_overlap_none(){
   echo "# overlap (#14): sessions more than 30 minutes apart -> both stats 0, keys still present"
   local root; root=$(setup_env)
@@ -3429,6 +3458,8 @@ _run test_overlap_none
 _run test_overlap_drops_advisor_sidecars
 _run test_overlap_drops_nested_sidecars
 _run test_fanout_stats
+_run test_rollup_written_for_l2
+_run test_prompt_counts_from_the_rollup
 _run test_overlap_not_measured_missing_bin
 _run test_overlap_not_measured_empty_output
 _run test_overlap_not_measured_malformed_output
@@ -6809,7 +6840,7 @@ if [ -z "$_list" ]; then
 fi
 # The suites that drive launchd need plutil and launchctl, so they run on macOS only (CI runs
 # them in launchd.yml, when a launchd file changes).
-_suites="portable lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux review-prompt notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt shard"
+_suites="portable rollup lib-project preflight adapters adapter-claude adapter-omp adapter-contract slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux review-prompt notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt shard"
 [ "$(uname -s)" = Darwin ] && _suites="$_suites scheduler-label autodream-now install-review-agent install-dry-run install-dir install-skill"
 for _suite in $_suites; do
   _owns || continue

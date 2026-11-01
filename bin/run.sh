@@ -457,6 +457,8 @@ fi
 # chunk note, so the off path is what it was.
 CHUNKER=$(find_lib chunk-transcript.sh) || CHUNKER=""
 MERGER=$(find_lib merge-chunks.sh) || MERGER=""
+# The per-session roll-up L2 counts from (rollup.tsv, categories.tsv). Artifacts only, no model calls.
+ROLLUP=$(find_lib rollup.sh) || ROLLUP=""
 L1_CHUNKING=0
 if [ "$AUTODREAM_L1_CHUNK_BYTES" -gt 0 ] && [ -n "$CHUNKER" ] && [ -n "$MERGER" ]; then
   L1_CHUNKING=1
@@ -2439,6 +2441,33 @@ compute_fanout_stats() {
   FANOUT_LARGEST=$(printf '%s' "$rows" | cut -f2 | sort | uniq -c | sort -rn | awk 'NR == 1 { print $1 }')
 }
 
+# Writes rollup.tsv and categories.tsv for L2, which counts from them instead of listing the
+# findings dir: Glob and directory reads stop at 200 entries, and a night of 885 sessions is 2683
+# (2026-10-31, when L2 counted from a 90-file sample and never saw fanouts.tsv). Runs after the
+# skill-field pass, which rewrites the fields it reads, and after compute_fanout_stats, whose
+# fanouts.tsv gives each worker its parent. A failure logs, says so in run-stats.txt and leaves no
+# stale file from an earlier run, so L2 reports the counts as unavailable rather than wrong.
+write_rollup() {
+  local out
+  rm -f "$FINDINGS_DIR/rollup.tsv" "$FINDINGS_DIR/categories.tsv" 2>/dev/null
+  if [ -z "$ROLLUP" ]; then
+    log "WARNING: rollup.sh not found; L2 has no rollup.tsv to count from"
+    printf 'rollup: helper missing\n' >> "$FINDINGS_DIR/run-stats.txt"
+    return 0
+  fi
+  out=$(bash "$ROLLUP" "$FINDINGS_DIR" 2>>"$RUN_LOG" | tail -1)
+  case "$out" in
+    "rollup: rows="*) ;;
+    *) log "WARNING: rollup.sh failed; L2 has no rollup.tsv to count from"
+       # One file without the other would be read as a whole roll-up.
+       rm -f "$FINDINGS_DIR/rollup.tsv" "$FINDINGS_DIR/categories.tsv" 2>/dev/null
+       printf 'rollup: failed\n' >> "$FINDINGS_DIR/run-stats.txt"
+       return 0 ;;
+  esac
+  log "$out"
+  printf '%s\n' "${out#rollup: }" | tr ' ' '\n' | sed -n 's/^\([a-z]*\)=\([0-9]*\)$/rollup_\1: \2/p' >> "$FINDINGS_DIR/run-stats.txt"
+}
+
 dispatch_l1() { # one parallel pass; idempotent worker → only the still-missing sessions run
   # NUL-delimited, one argument per worker, so the path reaches the worker byte for byte.
   # `xargs -I {}` turned a tab into a space, deleted a backslash and died on a quote with
@@ -4316,6 +4345,8 @@ PY
     TRIAGE_SUMMARY="triage: helper missing"
   fi
   printf 'triage_candidates: %s\n' "$TRIAGE_SUMMARY" >> "$FINDINGS_DIR/run-stats.txt"
+
+  write_rollup
 
   # ---- Skills inventory and per-source facts (written for L2 to read) ----
   write_adapter_inputs

@@ -2,6 +2,11 @@
 
 All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
+## 2026-11-01
+
+### Fixed
+- **L2 counts from a roll-up, not from a sample of the findings directory.** Glob and a directory read stop at 200 entries, and a findings directory holds three files per session plus about thirty side files. On 2026-10-31 it held 2683 entries for 885 sessions: the report counted from a 90-file sample and never saw `fanouts.tsv`. After L1, `bin/rollup.sh` writes `rollup.tsv` (one row per session, gated ones included, with a `status` column, the sidecar's counts, the parent from `fanouts.tsv`, the findings as `category:severity` and the skill counts) and `categories.tsv` (sessions, findings and up to five example hashes per category and severity). `PROMPT.md` takes every count from those two files, opens a `<hash>.json` only to quote evidence, names every side file by exact path, and tells L2 never to list the findings directory to count anything. run-stats gains `rollup_rows`, `rollup_ungated`, `rollup_gated`, `rollup_error`, `rollup_unreadable` and `rollup_categories`, or `rollup: failed`.
+
 ## 2026-10-29
 
 ### Changed
