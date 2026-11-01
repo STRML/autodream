@@ -2271,6 +2271,177 @@ test_changelog_survives_a_force_pushed_remote(){
   rm -rf "$root"
 }
 
+# A notify.sh stand-in that records each call's arguments, one call per line.
+stub_notify(){ # $1=root
+  printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s/notify-args.txt"\nexit 0\n' "$1" > "$1/autodream/notify.sh"
+  chmod +x "$1/autodream/notify.sh"
+}
+
+test_changelog_failure_quotes_git_stderr(){
+  echo "# a failed fetch quotes git's own reason in its section, sanitized, and keeps the full stderr in the run log"
+  command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local realgit; realgit=$(command -v git)
+  # A git that fails every clone and fetch the way a real one does: noise first, the cause,
+  # then git's boilerplate advice. The cause carries a backtick, HTML, a CR and a long tail.
+  local long; long=$(printf 'x%.0s' $(seq 1 300))
+  mkdir -p "$root/gitshim"
+  {
+    printf '#!/bin/bash\n'
+    printf 'for a in "$@"; do case "$a" in clone|fetch)\n'
+    printf '  printf "\\n   \\nhint: a hint line\\nwarning: filtering not recognized by server, ignoring\\nWarning: Permanently added github.com (ED25519) to the list of known hosts.\\n" >&2\n'
+    printf '  printf "fatal: unable to access \\140https://x/\\140: <b>boom</b> %s\\r\\n" >&2\n' "$long"
+    printf '  printf "\\nPlease make sure you have the correct access rights\\nand the repository exists.\\n" >&2\n'
+    printf '  exit 128 ;; esac; done\n'
+    printf 'exec "%s" "$@"\n' "$realgit"
+  } > "$root/gitshim/git"
+  chmod +x "$root/gitshim/git"
+  stub_notify "$root"
+
+  export AUTODREAM_CHANGELOG=1
+  export AUTODREAM_CHANGELOG_SOURCES="Shim|https://example.invalid/shim.git|CHANGELOG.md|$root/autodream/cache/shim"
+  PATH="$root/gitshim:$PATH" run_dream "$root"
+  unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES
+
+  local cw="$(fdir "$root")/changelog-window.md" line
+  line=$(grep 'Git clone failed' "$cw")
+  case "$line" in
+    "Git clone failed (fatal: unable to access 'https://x/': (b)boom(/b) xxx"*) ok "the section quotes the cause line, not the hint, warning or advice" ;;
+    *) no "the section quotes the cause line (got: $line)" ;;
+  esac
+  case "$line" in
+    *'...); Shim changes not checked this run.') ok "a long line is capped and marked" ;;
+    *) no "a long line is capped and marked (got: $line)" ;;
+  esac
+  [ "${#line}" -le 300 ] && ok "the quoted line is bounded" || no "the quoted line is bounded (${#line} chars)"
+  assert_nogrep "$cw" '`'                       "no backtick reaches the markdown"
+  assert_nogrep "$cw" '<b>'                     "no HTML reaches the markdown"
+  assert_nogrep "$cw" "$(printf '\r')"          "no carriage return reaches the markdown"
+  assert_nogrep "$cw" 'and the repository exists' "git's advice is not quoted"
+  assert_nogrep "$cw" 'Permanently added'         "ssh's capitalised Warning: line is not quoted as the cause"
+  assert_grep "$root/run.out" 'and the repository exists' "the full stderr still goes to the run log"
+  assert_grep "$root/run.out" 'hint: a hint line'         "every stderr line goes to the run log, not only the quoted one"
+  rm -rf "$root"
+}
+
+test_changelog_log_failure_is_not_a_quiet_night(){
+  echo "# a git log -p that fails (a lazy blob fetch in a partial clone) is a failed source, not a quiet night"
+  command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local up="$root/upstream"; mkdir -p "$up"
+  ( cd "$up" && git init -q && git config user.email t@t.invalid && git config user.name t
+    printf '# Changelog\n\n## 3.3.3\n\n- Never read\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T12:00:00" GIT_COMMITTER_DATE="2020-01-02T12:00:00" git commit -q -m 'chore: release' )
+  local realgit; realgit=$(command -v git)
+  # A git that clones fine and fails only the patch read, the way a promisor fetch does.
+  mkdir -p "$root/gitshim"
+  {
+    printf '#!/bin/bash\n'
+    printf 'case " $* " in *" log -p "*)\n'
+    printf '  printf "fatal: could not fetch 1234abcd from promisor remote\\n" >&2; exit 128 ;; esac\n'
+    printf 'exec "%s" "$@"\n' "$realgit"
+  } > "$root/gitshim/git"
+  chmod +x "$root/gitshim/git"
+  stub_notify "$root"
+  export AUTODREAM_CHANGELOG=1
+  export AUTODREAM_CHANGELOG_SOURCES="Lazy|$up|CHANGELOG.md|$root/autodream/cache/lazy"
+  PATH="$root/gitshim:$PATH" run_dream "$root"
+  unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES
+  local cw="$(fdir "$root")/changelog-window.md"
+  assert_grep   "$cw" 'Git log failed (fatal: could not fetch 1234abcd from promisor remote)' "the section says the diff could not be read, and why"
+  assert_nogrep "$cw" 'No changelog commits in this window' "it does not read as a quiet night"
+  assert_grep   "$root/notify-args.txt" '^--warning ' "a failed log counts toward every source failing"
+  rm -rf "$root"
+}
+
+test_changelog_all_sources_failed_notifies(){
+  echo "# every changelog source failing in one run posts one warning naming the first failure"
+  command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
+  local root; root=$(setup_env); mk_session "$root" sess1
+  stub_notify "$root"
+  export AUTODREAM_CHANGELOG=1
+  export AUTODREAM_CHANGELOG_SOURCES="GhostA|$root/ghost-a.git|CHANGELOG.md|$root/autodream/cache/ga;GhostB|$root/ghost-b.git|CHANGELOG.md|$root/autodream/cache/gb"
+  run_dream "$root"
+  unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES
+
+  local cw="$(fdir "$root")/changelog-window.md" args="$root/notify-args.txt"
+  assert_grep "$cw" "Git clone failed (fatal: repository '.*ghost-a.git' does not exist)" "the first source's section quotes git"
+  assert_grep "$cw" "Git clone failed (fatal: repository '.*ghost-b.git' does not exist)" "the second source's section quotes git"
+  assert_eq "$(grep -c '^--warning ' "$args" 2>/dev/null)" "1" "exactly one changelog warning is posted"
+  assert_grep "$args" "^--warning $DATE " "the warning names the run date"
+  assert_grep "$args" "all 2 " "the warning says every source failed"
+  assert_grep "$args" "ghost-a.git' does not exist" "the warning quotes the first failure"
+  assert_nogrep "$args" '^--failure' "a changelog failure is not reported as a failed run"
+  rm -rf "$root"
+}
+
+test_changelog_partial_failure_does_not_notify(){
+  echo "# one changelog source failing while another works posts no warning"
+  command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local a="$root/up-a"; mkdir -p "$a"
+  ( cd "$a" && git init -q && git config user.email t@t.invalid && git config user.name t
+    printf '# Changelog\n\n## 9.9.9\n\n- Alpha in-window\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T12:00:00" GIT_COMMITTER_DATE="2020-01-02T12:00:00" \
+      git commit -q -m 'alpha release' )
+  stub_notify "$root"
+  export AUTODREAM_CHANGELOG=1
+  export AUTODREAM_CHANGELOG_SOURCES="Alpha|$a|CHANGELOG.md|$root/autodream/cache/a;Ghost|$root/nope.git|CHANGELOG.md|$root/autodream/cache/ghost"
+  run_dream "$root"
+  unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES
+  local cw="$(fdir "$root")/changelog-window.md"
+  assert_grep   "$cw" 'Alpha in-window'  "the working source is read"
+  assert_grep   "$cw" 'Git clone failed' "the dead source reports its failure"
+  assert_nogrep "$root/notify-args.txt" '^--warning' "a partial failure posts no warning"
+  rm -rf "$root"
+}
+
+test_changelog_owned_cache_ignores_global_insteadof(){
+  echo "# an owned cache fetches anonymously: a global url.insteadOf cannot redirect it (2026-10-30/31 ssh failures)"
+  command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local up="$root/upstream"; mkdir -p "$up"
+  ( cd "$up" && git init -q && git config user.email t@t.invalid && git config user.name t
+    # Serve filters, so the clone is a real blob:none partial clone and git log -p has to
+    # fetch old blobs on demand, through the same config the fetch uses.
+    git config uploadpack.allowFilter true
+    printf '# Changelog\n\n## [1.0.0]\n\n- First in-window\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T10:00:00" GIT_COMMITTER_DATE="2020-01-02T10:00:00" git commit -q -m 'chore: first' )
+  # The host shape: a user-wide rewrite of every URL of this scheme to somewhere unusable
+  # (on the real host, https://github.com/ to ssh with no key loaded).
+  mkdir -p "$root/home"
+  printf '[url "file:///nonexistent-autodream-bogus"]\n\tinsteadOf = file://\n' > "$root/home/.gitconfig"
+  # The cache dir is deliberately not created: a fresh install's first clone must count as
+  # owned too.
+  export AUTODREAM_CHANGELOG=1
+  export AUTODREAM_CHANGELOG_SOURCES="Owned|file://$up|CHANGELOG.md|$root/autodream/cache/own;Foreign|file://$up|CHANGELOG.md|$root/elsewhere/foreign"
+  HOME="$root/home" run_dream "$root"
+  local cw="$(fdir "$root")/changelog-window.md"
+  assert_grep "$cw" 'First in-window' "the owned cache clones despite the global rewrite"
+  assert_grep "$cw" 'nonexistent-autodream-bogus' "a repo outside the cache still honours the user's git config"
+
+  # Two more commits. Run 2's reset checks out only the newest, so the middle commit's blob
+  # is never materialized by a checkout: git log -p has to fetch it from the remote on demand,
+  # and that fetch goes through the same config (panel review of PR #173: with only the last
+  # commit added, every blob log -p needed was already local and the lazy fetch went untested).
+  ( cd "$up" && printf '# Changelog\n\n## [1.0.1]\n\n- Middle in-window\n\n## [1.0.0]\n\n- First in-window\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T11:00:00" GIT_COMMITTER_DATE="2020-01-02T11:00:00" git commit -q -m 'chore: middle'
+    printf '# Changelog\n\n## [1.0.2]\n\n- Last in-window\n\n## [1.0.1]\n\n- Middle in-window\n\n## [1.0.0]\n\n- First in-window\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T12:00:00" GIT_COMMITTER_DATE="2020-01-02T12:00:00" git commit -q -m 'chore: last' )
+  HOME="$root/home" AUTODREAM_FORCE=1 run_dream "$root"
+  unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES
+  assert_grep   "$cw" 'Last in-window'   "the owned cache fetches despite the global rewrite"
+  assert_grep   "$cw" 'Middle in-window' "and reads a blob no checkout fetched, fetched on demand by log -p"
+  assert_nogrep "$cw" 'Git pull failed'  "no pull failure is reported for the owned cache"
+  assert_nogrep "$cw" 'Git log failed'   "no log failure is reported for the owned cache"
+  rm -rf "$root"
+}
+
 test_autodream_now_from_a_checkout_uses_the_default_install(){
   echo "# autodream-now.sh run from the repo must not adopt bin/ as its install dir"
   local T; T=$(mktemp -d "${TMPDIR:-/tmp}/ccad.XXXXXX")
@@ -2992,6 +3163,26 @@ EOF
   rm -rf "$root"
 }
 
+test_notify_warning_is_not_a_failure(){
+  echo "# notify.sh --warning posts a WARNING banner and leaves no FAILED inbox file; --failure still does"
+  local NOTIFY="$REPO/bin/notify.sh"
+  local root; root=$(mktemp -d "${TMPDIR:-/tmp}/ccad.XXXXXX")
+  mkdir -p "$root/cc-autodream.app/Contents/MacOS"
+  printf '#!/bin/sh\nfor a in "$@"; do echo "$a"; done >> "%s/banner.log"\n' "$root" \
+    > "$root/cc-autodream.app/Contents/MacOS/terminal-notifier"
+  chmod +x "$root/cc-autodream.app/Contents/MacOS/terminal-notifier"
+  AUTODREAM_DIR="$root" "$NOTIFY" --warning 2020-03-01 "changelog sources all failed" > "$root/notify.out" 2>&1
+  assert_eq "$?" "0" "a warning exits 0"
+  assert_grep "$root/banner.log" '^WARNING: changelog sources all failed$' "the banner is labelled WARNING"
+  assert_grep "$root/banner.log" '^autodream-warn-2020-03-01$' "in its own notification group"
+  assert_no_file "$root/inbox/2020-03-01-FAILED.txt" "a warning writes no FAILED inbox file"
+  : > "$root/banner.log"
+  AUTODREAM_DIR="$root" "$NOTIFY" --failure 2020-03-01 "the run died" > "$root/notify.out" 2>&1
+  assert_grep "$root/banner.log" '^FAILED: the run died$' "a failure is still labelled FAILED"
+  assert_file "$root/inbox/2020-03-01-FAILED.txt" "and still writes its inbox file"
+  rm -rf "$root"
+}
+
 test_notify_open_command(){
   echo "# notify.sh opens the inbox via AUTODREAM_OPEN (multi-word commands, deprecated SUBL alias)"
   local NOTIFY="$REPO/bin/notify.sh"
@@ -3408,6 +3599,11 @@ _run test_changelog_refuses_foreign_cache_dir
 _run test_changelog_single_remote_suppresses_defaults
 _run test_changelog_dedupe_is_scoped_to_the_release
 _run test_changelog_survives_a_force_pushed_remote
+_run test_changelog_failure_quotes_git_stderr
+_run test_changelog_log_failure_is_not_a_quiet_night
+_run test_changelog_all_sources_failed_notifies
+_run test_changelog_partial_failure_does_not_notify
+_run test_changelog_owned_cache_ignores_global_insteadof
 _run test_prune_helper
 _run test_autodream_now_from_a_checkout_uses_the_default_install
 _run test_self_session_excluded
@@ -3453,6 +3649,7 @@ _run test_oversized_gate_script_open
 _run test_oversized_gate_script_empty
 _run test_oversized_gate_script_args
 _run test_notify_count
+_run test_notify_warning_is_not_a_failure
 _run test_notify_open_command
 _run test_notify_dryrun
 _run test_runner_dirty_ignores_untracked
