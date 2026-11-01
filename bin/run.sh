@@ -2455,7 +2455,9 @@ write_rollup() {
     printf 'rollup: helper missing\n' >> "$FINDINGS_DIR/run-stats.txt"
     return 0
   fi
-  out=$(bash "$ROLLUP" "$FINDINGS_DIR" 2>>"$RUN_LOG" | tail -1)
+  # The source map built before any model ran, not sessions-source.txt, which an L1 worker can
+  # rewrite.
+  out=$(AUTODREAM_SOURCE_MAP="${AUTODREAM_SOURCE_MAP:-}" bash "$ROLLUP" "$FINDINGS_DIR" 2>>"$RUN_LOG" | tail -1)
   case "$out" in
     "rollup: rows="*) ;;
     *) log "WARNING: rollup.sh failed; L2 has no rollup.tsv to count from"

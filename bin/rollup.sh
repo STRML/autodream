@@ -20,12 +20,15 @@
 # Columns of rollup.tsv:
 #   hash status project source nested is_advisor parent outcome user_message_count turn_count
 #   tool_call_count duration_minutes models_used findings skills_invoked_count skills_invoked_counts
+#   skills_authored instructions_given_count
 # status is triaged, gated (the noise gate's "skipped": "below_noise_gate" stub), error (the record
-# has an "error" key) or unreadable (the findings JSON does not parse). Every status but gated is
-# the set compute_fanout_stats in run.sh calls the report's N. nested is the sidecar's isSidechain or
+# has an "error" key) or unreadable (the findings JSON does not parse, or its findings is not an
+# array). Every status but gated is the set compute_fanout_stats in run.sh calls the report's N. nested is the sidecar's isSidechain or
 # nested, the same test fanout_rows applies. parent comes from fanouts.tsv, which holds ungated
 # workers only, so a gated child reads nested with a blank parent. findings is a comma list of
 # category:severity, and skills_invoked_counts a comma list of name=count (skill names carry ':').
+# skills_authored is a comma list, and instructions_given_count the length of instructions_given,
+# so L2 knows which sessions to open for the compliance check without opening every one.
 # Text cells are escaped by jq's @tsv, so a tab or newline in a value never breaks a row.
 
 set -u
@@ -36,7 +39,7 @@ OUT=${2:-$DIR}
 [ -d "$OUT" ] || { echo "rollup.sh: no output dir: '${OUT}'" >&2; exit 2; }
 command -v jq >/dev/null 2>&1 || { echo "rollup.sh: jq not found" >&2; exit 2; }
 
-ROLLUP_HEADER='hash	status	project	source	nested	is_advisor	parent	outcome	user_message_count	turn_count	tool_call_count	duration_minutes	models_used	findings	skills_invoked_count	skills_invoked_counts'
+ROLLUP_HEADER='hash	status	project	source	nested	is_advisor	parent	outcome	user_message_count	turn_count	tool_call_count	duration_minutes	models_used	findings	skills_invoked_count	skills_invoked_counts	skills_authored	instructions_given_count'
 CATEGORIES_HEADER='category	severity	sessions	findings	example_hashes'
 
 # One findings JSON (stdin: the record; $st: the sidecar, [] when missing or unreadable) -> the
@@ -51,7 +54,8 @@ ROW_JQ='
   | if $s != null and ($s | type) != "object" then error("sidecar not an object") else . end
   | (if (.findings | type) == "array" then .findings else [] end) as $f
   | [ $h,
-      (if .skipped == "below_noise_gate" then "gated" elif has("error") then "error" else "triaged" end),
+      (if .skipped == "below_noise_gate" then "gated" elif has("error") then "error"
+       elif (.findings | type) != "array" then "unreadable" else "triaged" end),
       (.project | cell),
       (if $s then ($s.isSidechain == true or $s.nested == true) else null end | cell),
       (if $s then ($s.is_advisor == true) elif has("is_advisor") then (.is_advisor == true) else null end | cell),
@@ -64,7 +68,9 @@ ROW_JQ='
       (.skills_invoked_count | cell),
       (if (.skills_invoked_counts | type) == "object"
        then (.skills_invoked_counts | to_entries | map("\(.key | skill)=\(.value)") | join(","))
-       else "" end)
+       else "" end),
+      (if (.skills_authored | type) == "array" then (.skills_authored | map(skill) | join(",")) else "" end),
+      (if (.instructions_given | type) == "array" then (.instructions_given | length) else null end | cell)
     ] | @tsv'
 
 # The sidecar's counts for a findings JSON that does not parse, so the row still says how big
@@ -81,9 +87,9 @@ UNREADABLE_JQ='
       ($s.user_message_count | cell), ($s.turn_count | cell), ($s.tool_call_count | cell),
       ($s.duration_minutes | cell),
       (if ($s.models_used | type) == "array" then ($s.models_used | map(tostring) | join(",")) else "" end),
-      "", "", "" ] | @tsv'
+      "", "", "", "", "" ] | @tsv'
 
-# $1=hash -> one row (14 columns) on stdout. The first program that succeeds wins: the record
+# $1=hash -> one row (16 columns) on stdout. The first program that succeeds wins: the record
 # with its sidecar, the record alone (a sidecar that does not parse or is not an object), the
 # sidecar alone (a record that does not parse), then the bare hash.
 session_row() {
@@ -107,35 +113,56 @@ session_hashes() {
   done | LC_ALL=C sort
 }
 
-# stdin: 14-column rows -> 16 columns, source after project and parent after is_advisor
+# stdin: 16-column rows -> 18 columns, source after project and parent after is_advisor.
+# The source comes from AUTODREAM_SOURCE_MAP when the runner passes it: that map was built before
+# any model ran, and an L1 worker holds the Write tool and can rewrite sessions-source.txt. The
+# file is the fallback for a standalone run.
 join_source_parent() {
   awk -F'\t' -v OFS='\t' -v src="$DIR/sessions-source.txt" -v fan="$DIR/fanouts.tsv" '
     BEGIN {
-      while ((getline line < src) > 0) { split(line, a, "\t"); if (!(a[1] in s)) s[a[1]] = a[2] }
+      if (ENVIRON["AUTODREAM_SOURCE_MAP"] != "") {
+        n = split(ENVIRON["AUTODREAM_SOURCE_MAP"], lines, "\n")
+        for (i = 1; i <= n; i++) { split(lines[i], a, "\t"); if (a[1] != "" && !(a[1] in s)) s[a[1]] = a[2] }
+      } else {
+        while ((getline line < src) > 0) { split(line, a, "\t"); if (!(a[1] in s)) s[a[1]] = a[2] }
+      }
       while ((getline line < fan) > 0) { split(line, a, "\t"); if (!(a[1] in p)) p[a[1]] = a[2] }
     }
-    { print $1, $2, $3, s[$1], $4, $5, p[$1], $6, $7, $8, $9, $10, $11, $12, $13, $14 }'
+    { print $1, $2, $3, s[$1], $4, $5, p[$1], $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16 }'
 }
 
-# stdin: rollup.tsv body -> categories.tsv body, most findings first
+# stdin: rollup.tsv body -> categories.tsv body. One row per category and severity, plus one
+# row per category with severity "all", whose sessions column is the category's count across
+# severities (a session with a high and a low finding counts once there). An advisor's findings
+# are counted under its parent session, so a parent and its advisor with the same finding are one
+# session, as PROMPT.md asks; the example hashes stay the real ones. Ordered by the category's
+# total findings, then category, then all, high, medium, low.
 tally_categories() {
   awk -F'\t' -v OFS='\t' '
     $14 != "" {
+      owner = ($6 == "true" && $7 != "") ? $7 : $1
       n = split($14, f, ",")
-      split("", seen)
       for (i = 1; i <= n; i++) {
-        k = f[i]; findings[k]++
-        if (k in seen) continue
-        seen[k] = 1; sessions[k]++
-        if (sessions[k] <= 5) ex[k] = (ex[k] == "" ? $1 : ex[k] "," $1)
+        c = f[i]; sub(/:[^:]*$/, "", c)
+        count(f[i], owner, $1); count(c ":all", owner, $1)
+      }
+    }
+    function count(k, owner, h) {
+      findings[k]++
+      if (!((k, owner) in owned)) { owned[k, owner] = 1; sessions[k]++ }
+      if (!((k, h) in shown) && examples[k] < 5) {
+        shown[k, h] = 1; examples[k]++
+        ex[k] = (ex[k] == "" ? h : ex[k] "," h)
       }
     }
     END {
+      rank["all"] = 0; rank["high"] = 1; rank["medium"] = 2; rank["low"] = 3
       for (k in findings) {
         c = k; sub(/:[^:]*$/, "", c); v = k; sub(/^.*:/, "", v)
-        print c, v, sessions[k], findings[k], ex[k]
+        r = (v in rank) ? rank[v] : 4
+        print findings[c ":all"], c, r, v, sessions[k], findings[k], ex[k]
       }
-    }' | LC_ALL=C sort -t "$(printf '\t')" -k4,4nr -k1,1 -k2,2
+    }' | LC_ALL=C sort -t "$(printf '\t')" -k1,1nr -k2,2 -k3,3n | cut -f2,4-
 }
 
 # $1=header $2=final path; stdin = body. A temp beside the target and one rename, so a reader
@@ -155,7 +182,7 @@ printf '%s' "$BODY" | grep . | write_atomic "$ROLLUP_HEADER" "$OUT/rollup.tsv" \
 printf '%s' "$CATS" | grep . | write_atomic "$CATEGORIES_HEADER" "$OUT/categories.tsv" \
   || { echo "rollup.sh: could not write $OUT/categories.tsv" >&2; exit 1; }
 
-printf '%s\n' "$BODY" | awk -F'\t' -v cats="$(printf '%s' "$CATS" | grep -c .)" '
+printf '%s\n' "$BODY" | awk -F'\t' -v cats="$(printf '%s\n' "$CATS" | awk -F'\t' '$2 == "all"' | grep -c .)" '
   NF { rows++; n[$2]++ }
   END {
     printf "rollup: rows=%d triaged=%d gated=%d error=%d unreadable=%d ungated=%d categories=%d\n",
