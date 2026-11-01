@@ -3259,6 +3259,7 @@ test_rollup_written_for_l2(){
   assert_grep "$d/findings.tsv" '^hash' "findings.tsv is written with its header"
   assert_grep "$d/run-stats.txt" '^rollup_rows: 8$' "run-stats.txt carries the roll-up row count"
   assert_grep "$d/run-stats.txt" '^rollup_ungated: 7$' "and the ungated count, which matches sessions_top_level + sessions_nested"
+  assert_grep "$d/run-stats.txt" '^rollup_advisor_tool_findings: 0$' "a key with an underscore reaches run-stats too"
   rm -rf "$root"
 }
 

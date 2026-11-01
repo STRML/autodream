@@ -2467,7 +2467,7 @@ write_rollup() {
        return 0 ;;
   esac
   log "$out"
-  printf '%s\n' "${out#rollup: }" | tr ' ' '\n' | sed -n 's/^\([a-z]*\)=\([0-9]*\)$/rollup_\1: \2/p' >> "$FINDINGS_DIR/run-stats.txt"
+  printf '%s\n' "${out#rollup: }" | tr ' ' '\n' | sed -n 's/^\([a-z_]*\)=\([0-9]*\)$/rollup_\1: \2/p' >> "$FINDINGS_DIR/run-stats.txt"
 }
 
 dispatch_l1() { # one parallel pass; idempotent worker → only the still-missing sessions run
