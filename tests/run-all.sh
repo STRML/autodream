@@ -2289,7 +2289,7 @@ test_changelog_failure_quotes_git_stderr(){
   {
     printf '#!/bin/bash\n'
     printf 'for a in "$@"; do case "$a" in clone|fetch)\n'
-    printf '  printf "\\n   \\nhint: a hint line\\nwarning: filtering not recognized by server, ignoring\\n" >&2\n'
+    printf '  printf "\\n   \\nhint: a hint line\\nwarning: filtering not recognized by server, ignoring\\nWarning: Permanently added github.com (ED25519) to the list of known hosts.\\n" >&2\n'
     printf '  printf "fatal: unable to access \\140https://x/\\140: <b>boom</b> %s\\r\\n" >&2\n' "$long"
     printf '  printf "\\nPlease make sure you have the correct access rights\\nand the repository exists.\\n" >&2\n'
     printf '  exit 128 ;; esac; done\n'
@@ -2318,8 +2318,40 @@ test_changelog_failure_quotes_git_stderr(){
   assert_nogrep "$cw" '<b>'                     "no HTML reaches the markdown"
   assert_nogrep "$cw" "$(printf '\r')"          "no carriage return reaches the markdown"
   assert_nogrep "$cw" 'and the repository exists' "git's advice is not quoted"
+  assert_nogrep "$cw" 'Permanently added'         "ssh's capitalised Warning: line is not quoted as the cause"
   assert_grep "$root/run.out" 'and the repository exists' "the full stderr still goes to the run log"
   assert_grep "$root/run.out" 'hint: a hint line'         "every stderr line goes to the run log, not only the quoted one"
+  rm -rf "$root"
+}
+
+test_changelog_log_failure_is_not_a_quiet_night(){
+  echo "# a git log -p that fails (a lazy blob fetch in a partial clone) is a failed source, not a quiet night"
+  command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local up="$root/upstream"; mkdir -p "$up"
+  ( cd "$up" && git init -q && git config user.email t@t.invalid && git config user.name t
+    printf '# Changelog\n\n## 3.3.3\n\n- Never read\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T12:00:00" GIT_COMMITTER_DATE="2020-01-02T12:00:00" git commit -q -m 'chore: release' )
+  local realgit; realgit=$(command -v git)
+  # A git that clones fine and fails only the patch read, the way a promisor fetch does.
+  mkdir -p "$root/gitshim"
+  {
+    printf '#!/bin/bash\n'
+    printf 'case " $* " in *" log -p "*)\n'
+    printf '  printf "fatal: could not fetch 1234abcd from promisor remote\\n" >&2; exit 128 ;; esac\n'
+    printf 'exec "%s" "$@"\n' "$realgit"
+  } > "$root/gitshim/git"
+  chmod +x "$root/gitshim/git"
+  stub_notify "$root"
+  export AUTODREAM_CHANGELOG=1
+  export AUTODREAM_CHANGELOG_SOURCES="Lazy|$up|CHANGELOG.md|$root/autodream/cache/lazy"
+  PATH="$root/gitshim:$PATH" run_dream "$root"
+  unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES
+  local cw="$(fdir "$root")/changelog-window.md"
+  assert_grep   "$cw" 'Git log failed (fatal: could not fetch 1234abcd from promisor remote)' "the section says the diff could not be read, and why"
+  assert_nogrep "$cw" 'No changelog commits in this window' "it does not read as a quiet night"
+  assert_grep   "$root/notify-args.txt" '^--warning ' "a failed log counts toward every source failing"
   rm -rf "$root"
 }
 
@@ -2391,14 +2423,22 @@ test_changelog_owned_cache_ignores_global_insteadof(){
   assert_grep "$cw" 'First in-window' "the owned cache clones despite the global rewrite"
   assert_grep "$cw" 'nonexistent-autodream-bogus' "a repo outside the cache still honours the user's git config"
 
-  ( cd "$up" && printf '# Changelog\n\n## [1.0.1]\n\n- Second in-window\n\n## [1.0.0]\n\n- First in-window\n' > CHANGELOG.md
+  # Two more commits. Run 2's reset checks out only the newest, so the middle commit's blob
+  # is never materialized by a checkout: git log -p has to fetch it from the remote on demand,
+  # and that fetch goes through the same config (panel review of PR #173: with only the last
+  # commit added, every blob log -p needed was already local and the lazy fetch went untested).
+  ( cd "$up" && printf '# Changelog\n\n## [1.0.1]\n\n- Middle in-window\n\n## [1.0.0]\n\n- First in-window\n' > CHANGELOG.md
     git add CHANGELOG.md
-    GIT_AUTHOR_DATE="2020-01-02T11:00:00" GIT_COMMITTER_DATE="2020-01-02T11:00:00" git commit -q -m 'chore: second' )
+    GIT_AUTHOR_DATE="2020-01-02T11:00:00" GIT_COMMITTER_DATE="2020-01-02T11:00:00" git commit -q -m 'chore: middle'
+    printf '# Changelog\n\n## [1.0.2]\n\n- Last in-window\n\n## [1.0.1]\n\n- Middle in-window\n\n## [1.0.0]\n\n- First in-window\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T12:00:00" GIT_COMMITTER_DATE="2020-01-02T12:00:00" git commit -q -m 'chore: last' )
   HOME="$root/home" AUTODREAM_FORCE=1 run_dream "$root"
   unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES
-  assert_grep   "$cw" 'Second in-window' "the owned cache fetches despite the global rewrite"
-  assert_grep   "$cw" 'First in-window'  "and reads the older blobs it fetches on demand"
+  assert_grep   "$cw" 'Last in-window'   "the owned cache fetches despite the global rewrite"
+  assert_grep   "$cw" 'Middle in-window' "and reads a blob no checkout fetched, fetched on demand by log -p"
   assert_nogrep "$cw" 'Git pull failed'  "no pull failure is reported for the owned cache"
+  assert_nogrep "$cw" 'Git log failed'   "no log failure is reported for the owned cache"
   rm -rf "$root"
 }
 
@@ -3560,6 +3600,7 @@ _run test_changelog_single_remote_suppresses_defaults
 _run test_changelog_dedupe_is_scoped_to_the_release
 _run test_changelog_survives_a_force_pushed_remote
 _run test_changelog_failure_quotes_git_stderr
+_run test_changelog_log_failure_is_not_a_quiet_night
 _run test_changelog_all_sources_failed_notifies
 _run test_changelog_partial_failure_does_not_notify
 _run test_changelog_owned_cache_ignores_global_insteadof

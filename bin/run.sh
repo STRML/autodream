@@ -1416,14 +1416,15 @@ changelog_git() { # $1=owned (yes|no), then git's arguments
 }
 
 # The stderr line that names why git failed, made safe to quote inside one markdown line.
-# The FIRST line that is not blank, a hint or a warning: git puts the cause first and its
+# The FIRST line that is not blank, a hint or a warning (any case: OpenSSH prints
+# "Warning: Permanently added ..." ahead of "Permission denied"): git puts the cause first and its
 # boilerplate advice last ("Please make sure you have the correct access rights / and the
 # repository exists."), so the last line says nothing. Backticks and angle brackets would open
 # a code span or an HTML tag in the section L2 reads, so they are swapped out; length is capped.
 changelog_err_line() { # $1=stderr file
   local line
   line=$(tr -d '\r' < "$1" 2>/dev/null \
-    | grep -v -e '^[[:space:]]*$' -e '^[[:space:]]*hint:' -e '^[[:space:]]*warning:' \
+    | grep -v -i -e '^[[:space:]]*$' -e '^[[:space:]]*hint:' -e '^[[:space:]]*warning:' \
     | head -n 1 | tr '\t`<>' " '()" | tr -d '\000-\037\177' \
     | sed 's/[[:space:]][[:space:]]*/ /g; s/^ //; s/ $//')
   [ "${#line}" -le 200 ] || line="${line:0:197}..."
@@ -1463,6 +1464,12 @@ changelog_sync() { # $1=repo $2=owned
     return
   fi
   ( cd "$1" && git pull --ff-only --quiet )
+}
+
+# The window's changelog diff for one source, written to $4.
+changelog_patch() { # $1=repo $2=owned $3=path $4=dest file
+  ( cd "$1" && changelog_git "$2" log -p --reverse \
+      --since="$TARGET_DATE 00:00:00" --until="$NEXT_DATE 00:00:00" -- "$3" ) > "$4"
 }
 
 # Clone a source that has no repo yet. Returns non-zero when there is nothing to read.
@@ -1530,11 +1537,19 @@ changelog_one() { # $1=name $2=remote $3=path $4=repo $5=out
   # release header it sits under: `### Fixed` and `- Fixed a crash` repeat across releases, and
   # a window-wide key dropped them from the second release, leaving its bullets under no
   # heading or the first release's (review of https://github.com/STRML/cc-autodream/pull/83).
-  added=$( cd "$repo" && changelog_git "$owned" log -p --reverse \
-             --since="$TARGET_DATE 00:00:00" --until="$NEXT_DATE 00:00:00" \
-             -- "$path" 2>/dev/null \
-           | grep '^+' | grep -v '^+++' | sed 's/^+//' \
+  # The patch is read through a file so git's own status is seen: in a blob:none cache,
+  # `log -p` fetches old blobs from the remote, and a failure there piped straight into the
+  # filters below read as "No changelog commits in this window" (panel review of PR #173).
+  local patchf
+  patchf=$(mktemp "${TMPDIR:-/tmp}/clpatch.XXXXXX" 2>/dev/null) \
+    || { changelog_fail "$name" "No scratch file for the changelog diff" "" "$out"; return 1; }
+  if ! changelog_step "$name" "Git log failed" "$out" changelog_patch "$repo" "$owned" "$path" "$patchf"; then
+    rm -f "$patchf"
+    return 1
+  fi
+  added=$( grep '^+' "$patchf" | grep -v '^+++' | sed 's/^+//' \
            | awk '!NF { print; next } /^## \[/ { hdr = $0 } !seen[hdr SUBSEP $0]++' )
+  rm -f "$patchf"
   # Cap per source. One chatty monorepo must not crowd the other harnesses out of L2's
   # context; the cap is per section, so a quiet source is never truncated for a loud one.
   local cap="${AUTODREAM_CHANGELOG_MAX_LINES:-400}" total
@@ -1583,7 +1598,9 @@ changelog_window() {
   # The default caches live here. cache_owns resolves this directory, so on a fresh install
   # the first clone would count as foreign, and run with the user's git config, without it.
   mkdir -p "$AUTODREAM_DIR/cache" 2>/dev/null || true
-  CHANGELOG_FIRST_ERR=""
+  # Local here, and seen by changelog_fail and changelog_warn_all_failed through bash's
+  # dynamic scoping, so it never outlives the run's one changelog pass.
+  local CHANGELOG_FIRST_ERR=""
   local name remote path repo sources=0 failed=0
   # Here-string rather than a pipe: a piped while-read runs in a subshell, and this loop
   # sets counters (and changelog_fail sets CHANGELOG_FIRST_ERR) that are read below.
