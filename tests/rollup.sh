@@ -83,10 +83,12 @@ for i in $(seq 201 220); do
 done
 # 221-225: gated omp children (nested, not sidechain): nested, but no fanouts.tsv row, since that file holds ungated rows only.
 for i in $(seq 221 225); do gated "$i"; sidecar "$i" false true false; source_row "$i" omp; done
-# 231-233: omp advisor sidecars under parent 5. 231 and 232 repeat the parent's sandbox_friction:low,
-# which must not add a session; 233 has a finding its parent lacks, counted as the parent's session.
+# 231-233: omp advisor sidecars under parent 5. 231 and 232 carry sandbox_friction, a tool-behavior
+# finding L1 suppresses for advisors: a triage failure, never a ranked pattern. 232 and 233 both
+# carry memory_miss:medium, a content finding: one session, counted as the parent's.
 for i in 231 232 233; do
   af='[{"category":"sandbox_friction","severity":"low"}]'
+  [ "$i" -eq 232 ] && af='[{"category":"sandbox_friction","severity":"low"},{"category":"memory_miss","severity":"medium"}]'
   [ "$i" -eq 233 ] && af='[{"category":"memory_miss","severity":"medium"}]'
   triaged "$i" "$af"; sidecar "$i" true true true; source_row "$i" omp
   printf '%s\t%s\n' "$(h "$i")" "$(h 5)" >> "$F/fanouts.tsv"
@@ -104,15 +106,18 @@ triaged 243 "$SF"; printf 'not json' > "$F/$(h 243).stats.json"; source_row 243 
 # 244: parses, but findings is not an array (run.sh's L1_FINDINGS_OK refuses it too).
 printf '{"session_path":"/s/244.jsonl","findings":"oops"}\n' > "$F/$(h 244).json"
 sidecar 244 false false false; source_row 244 claude
+# 245: a gated stub whose findings is not an array: the array check comes before the gate.
+printf '{"session_path":"/s/245.jsonl","skipped":"below_noise_gate","findings":"oops"}\n' > "$F/$(h 245).json"
+sidecar 245 false false false; source_row 245 claude
 # Side files that share the directory and must not become rows.
 printf '{"not":"a session"}\n' > "$F/pins-like.json"
 printf '{"findings":[{"category":"sandbox_friction","severity":"low"}]}\n' > "$F/outside-worklist/$(h 999).json"
 printf 'worker exit code: 1\n' > "$F/$(h 240).json.err"
 : > "$F/run-stats.txt"; : > "$F/changelog-window.md"
 
-# Totals by construction: 100 + 90 + 20 + 5 + 3 + 1 + 1 + 1 + 1 + 1 = 223 sessions.
-# triaged 100 + 20 + 3 + 1 (241) + 1 (243) = 125; gated 90 + 5 = 95; error 1; unreadable 2 (242, 244).
-# Ungated, the set compute_fanout_stats calls N: 125 + 1 + 2 = 128.
+# Totals by construction: 100 + 90 + 20 + 5 + 3 + 1 + 1 + 1 + 1 + 1 + 1 = 224 sessions.
+# triaged 100 + 20 + 3 + 1 (241) + 1 (243) = 125; gated 90 + 5 = 95; error 1;
+# unreadable 3 (242, 244, 245). Ungated, the set the report calls N: 125 + 1 + 3 = 129.
 
 echo "# a findings dir with more than 200 sessions rolls up every one of them"
 OUT="$T/out"; mkdir -p "$OUT"
@@ -120,9 +125,9 @@ summary=$("$BIN" "$F" "$OUT" 2>"$T/err"); rc=$?
 assert_eq "$rc" "0" "exit 0"
 R="$OUT/rollup.tsv"; C="$OUT/categories.tsv"
 assert_eq "$(head -1 "$R")" "$(printf 'hash\tstatus\tproject\tsource\tnested\tis_advisor\tparent\toutcome\tuser_message_count\tturn_count\ttool_call_count\tduration_minutes\tmodels_used\tfindings\tskills_invoked_count\tskills_invoked_counts\tskills_authored\tinstructions_given_count')" "rollup.tsv opens with its header"
-assert_eq "$(tail -n +2 "$R" | wc -l | tr -d ' ')" "223" "one row per session, 223 of them"
+assert_eq "$(tail -n +2 "$R" | wc -l | tr -d ' ')" "224" "one row per session, 224 of them"
 assert_eq "$(awk -F'\t' 'NF != 18' "$R" | wc -l | tr -d ' ')" "0" "every row has 18 columns, a tab inside a project included"
-assert_eq "$(tail -n +2 "$R" | cut -f1 | sort -u | wc -l | tr -d ' ')" "223" "no session appears twice"
+assert_eq "$(tail -n +2 "$R" | cut -f1 | sort -u | wc -l | tr -d ' ')" "224" "no session appears twice"
 assert_eq "$(tail -n +2 "$R" | cut -f1 | LC_ALL=C sort -c 2>&1 && echo sorted)" "sorted" "rows are in hash order"
 assert_eq "$(grep -c "$(h 999)" "$R")" "0" "a findings JSON moved to outside-worklist/ is not a row"
 assert_eq "$(grep -c 'pins-like' "$R")" "0" "a non-hash .json side file is not a row"
@@ -132,8 +137,8 @@ st(){ tail -n +2 "$R" | awk -F'\t' -v s="$1" '$2 == s' | wc -l | tr -d ' '; }
 assert_eq "$(st triaged)" "125" "125 triaged"
 assert_eq "$(st gated)" "95" "95 gated"
 assert_eq "$(st error)" "1" "1 error stub"
-assert_eq "$(st unreadable)" "2" "2 unreadable: one does not parse, one has no findings array"
-assert_eq "$(tail -n +2 "$R" | awk -F'\t' '$2 != "gated"' | wc -l | tr -d ' ')" "128" "128 ungated, the same set compute_fanout_stats counts"
+assert_eq "$(st unreadable)" "3" "3 unreadable: one does not parse, two have no findings array"
+assert_eq "$(tail -n +2 "$R" | awk -F'\t' '$2 != "gated"' | wc -l | tr -d ' ')" "129" "129 ungated: every row but a valid gated stub"
 
 echo "# nested, advisor and parent"
 row(){ awk -F'\t' -v k="$1" '($1 "") == (k "")' "$R"; }  # string compare: 0000000000e7 is numeric to awk
@@ -168,13 +173,21 @@ assert_eq "$(col "$(h 242)" 2)" "unreadable" "an unparseable findings JSON is a 
 assert_eq "$(row "$(h 242)" | cut -f9)" "3" "and still carries its sidecar's counts"
 assert_eq "$(col "$(h 240)" 2)/$(col "$(h 240)" 14)" "error/" "an error stub is marked error"
 assert_eq "$(col "$(h 244)" 2)/$(col "$(h 244)" 9)" "unreadable/3" "findings that is not an array is unreadable, with its sidecar counts"
+assert_eq "$(col "$(h 245)" 2)" "unreadable" "even on a gated stub, so a forged stub cannot drop out of N"
 
 echo "# categories.tsv tallies every finding"
 assert_eq "$(head -1 "$C")" "$(printf 'category\tseverity\tsessions\tfindings\texample_hashes')" "categories.tsv opens with its header"
-assert_eq "$(tail -n +2 "$C" | cut -f1-4)" "$(printf 'sandbox_friction\tall\t101\t103\nsandbox_friction\tlow\t101\t103\ntool_loop\tall\t20\t20\ntool_loop\tmedium\t20\t20\nmissed_skill\tall\t10\t12\nmissed_skill\thigh\t10\t11\nmissed_skill\tlow\t1\t1\nmemory_miss\tall\t2\t2\nmemory_miss\tmedium\t1\t1\nmemory_miss\tunknown\t1\t1')" "exact counts; the all row counts a session once across severities and an advisor under its parent"
+assert_eq "$(tail -n +2 "$C" | cut -f1-4)" "$(printf 'sandbox_friction\tall\t101\t101\nsandbox_friction\tlow\t101\t101\ntool_loop\tall\t20\t20\ntool_loop\tmedium\t20\t20\nmissed_skill\tall\t10\t12\nmissed_skill\thigh\t10\t11\nmissed_skill\tlow\t1\t1\nmemory_miss\tall\t2\t3\nmemory_miss\tmedium\t1\t2\nmemory_miss\tunknown\t1\t1')" "exact counts: all counts a session once across severities, an advisor counts under its parent, and its tool-behavior findings not at all"
 assert_eq "$(awk -F'\t' '$1 == "missed_skill" && $2 == "high" {print $5}' "$C")" "$(h 1),$(h 2),$(h 3),$(h 4),$(h 5)" "up to five example hashes, in hash order"
-assert_eq "$(awk -F'\t' '$1 == "memory_miss" && $2 == "all" {print $5}' "$C")" "$(h 2),$(h 233)" "fewer when fewer sessions have it, and an advisor's example is its own hash"
-assert_eq "$summary" "rollup: rows=223 triaged=125 gated=95 error=1 unreadable=2 ungated=128 categories=4" "a one-line summary on stdout"
+assert_eq "$(awk -F'\t' '$1 == "memory_miss" && $2 == "all" {print $5}' "$C")" "$(h 2),$(h 232),$(h 233)" "fewer when fewer sessions have it, and an advisor's example is its own hash"
+
+echo "# findings.tsv has one row per finding, for patterns narrower than a category"
+FT="$OUT/findings.tsv"
+assert_eq "$(head -1 "$FT")" "$(printf 'hash\tcategory\tseverity\twhat')" "findings.tsv opens with its header"
+assert_eq "$(tail -n +2 "$FT" | wc -l | tr -d ' ')" "138" "138 findings, advisors' included"
+assert_eq "$(awk -F'\t' -v k="$(h 50)" '($1 "") == (k "")' "$FT")" "$(printf '%s\tsandbox_friction\tlow\tx' "$(h 50)")" "hash, category, severity and what"
+assert_eq "$(awk -F'\t' 'NF != 4' "$FT" | wc -l | tr -d ' ')" "0" "every row has four columns"
+assert_eq "$summary" "rollup: rows=224 triaged=125 gated=95 error=1 unreadable=3 ungated=129 categories=4 findings=138 advisor_tool_findings=2" "a one-line summary on stdout"
 
 echo "# the runner's in-memory source map wins over sessions-source.txt, which an L1 worker can rewrite"
 OUT2="$T/out2"; mkdir -p "$OUT2"
@@ -193,12 +206,16 @@ assert_eq "$(find "$F2" -name '*.tmp*' | wc -l | tr -d ' ')" "0" "no temp file i
 echo "# an empty findings dir writes header-only files"
 E="$T/empty"; mkdir -p "$E"
 summary=$("$BIN" "$E" 2>/dev/null); rc=$?
-assert_eq "$rc/$(wc -l < "$E/rollup.tsv" | tr -d ' ')/$(wc -l < "$E/categories.tsv" | tr -d ' ')" "0/1/1" "exit 0, one header line each"
-assert_eq "$summary" "rollup: rows=0 triaged=0 gated=0 error=0 unreadable=0 ungated=0 categories=0" "and a zero summary"
+assert_eq "$rc/$(wc -l < "$E/rollup.tsv" | tr -d ' ')/$(wc -l < "$E/categories.tsv" | tr -d ' ')/$(wc -l < "$E/findings.tsv" | tr -d ' ')" "0/1/1/1" "exit 0, one header line each"
+assert_eq "$summary" "rollup: rows=0 triaged=0 gated=0 error=0 unreadable=0 ungated=0 categories=0 findings=0 advisor_tool_findings=0" "and a zero summary"
 
 echo "# a findings dir that is not there, or an output dir that cannot be written, fails loudly"
 "$BIN" "$T/nope" >/dev/null 2>&1; rc=$?
 assert_eq "$rc" "2" "a missing findings dir exits 2"
+FB="$T/failbin"; mkdir -p "$FB"; printf '#!/bin/sh\nexit 1\n' > "$FB/sort"; chmod +x "$FB/sort"
+FO="$T/failout"; mkdir -p "$FO"
+PATH="$FB:$PATH" "$BIN" "$F" "$FO" >/dev/null 2>&1; rc=$?
+assert_eq "$rc/$(ls "$FO" | wc -l | tr -d ' ')" "1/0" "a failed sort exits 1 and publishes nothing, never an empty tally"
 RO="$T/ro"; mkdir -p "$RO"; chmod 555 "$RO"
 "$BIN" "$F2" "$RO" >/dev/null 2>&1; rc=$?
 chmod 755 "$RO"

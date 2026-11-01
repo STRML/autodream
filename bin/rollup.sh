@@ -4,7 +4,10 @@
 # Usage:  rollup.sh <findings-dir> [<out-dir>]      (out-dir defaults to the findings dir)
 # Writes: <out-dir>/rollup.tsv      header, then one row per session, ungated and gated alike
 #         <out-dir>/categories.tsv  header, then category, severity, sessions, findings, example hashes
-# Stdout: one line, "rollup: rows=N triaged=N gated=N error=N unreadable=N ungated=N categories=N"
+#         <out-dir>/findings.tsv    header, then hash, category, severity, what: one row per finding,
+#                                   so L2 can count a pattern narrower than a category
+# Stdout: one line, "rollup: rows=N triaged=N gated=N error=N unreadable=N ungated=N categories=N
+#         findings=N advisor_tool_findings=N"
 # Exit:   0 written, 1 a file could not be written, 2 usage (no such dir, no jq)
 #
 # Why. L2 reads with Glob and Read, and both stop at 200 entries. A findings dir holds three files
@@ -23,15 +26,21 @@
 #   skills_authored instructions_given_count
 # status is triaged, gated (the noise gate's "skipped": "below_noise_gate" stub), error (the record
 # has an "error" key) or unreadable (the findings JSON does not parse, or its findings is not an
-# array). Every status but gated is the set compute_fanout_stats in run.sh calls the report's N. nested is the sidecar's isSidechain or
-# nested, the same test fanout_rows applies. parent comes from fanouts.tsv, which holds ungated
-# workers only, so a gated child reads nested with a blank parent. findings is a comma list of
-# category:severity, and skills_invoked_counts a comma list of name=count (skill names carry ':').
+# array, checked before the gate). Every status but gated is the set compute_fanout_stats in run.sh
+# calls the report's N; the one difference is a gated stub whose findings is not an array, which
+# that function reads as gated by its text and this script calls unreadable. nested is the
+# sidecar's isSidechain or nested, the same test fanout_rows applies. parent comes from
+# fanouts.tsv, which holds ungated workers only, so a gated child reads nested with a blank
+# parent. findings is a comma list of category:severity, and skills_invoked_counts a comma list
+# of name=count (skill names carry ':').
 # skills_authored is a comma list, and instructions_given_count the length of instructions_given,
 # so L2 knows which sessions to open for the compliance check without opening every one.
 # Text cells are escaped by jq's @tsv, so a tab or newline in a value never breaks a row.
 
 set -u
+# A failed stage anywhere in a pipeline (a sort with no temp space) fails the write, so a broken
+# tally can never be published as a genuine zero.
+set -o pipefail
 
 DIR=${1:-}
 OUT=${2:-$DIR}
@@ -41,9 +50,11 @@ command -v jq >/dev/null 2>&1 || { echo "rollup.sh: jq not found" >&2; exit 2; }
 
 ROLLUP_HEADER='hash	status	project	source	nested	is_advisor	parent	outcome	user_message_count	turn_count	tool_call_count	duration_minutes	models_used	findings	skills_invoked_count	skills_invoked_counts	skills_authored	instructions_given_count'
 CATEGORIES_HEADER='category	severity	sessions	findings	example_hashes'
+FINDINGS_HEADER='hash	category	severity	what'
 
-# One findings JSON (stdin: the record; $st: the sidecar, [] when missing or unreadable) -> the
-# row without its source and parent columns, which awk joins in afterwards.
+# One findings JSON (stdin: the record; $st: the sidecar, [] when missing or unreadable) -> an
+# "R" line holding the row without its source and parent columns, which awk joins in afterwards,
+# then one "F" line per finding for findings.tsv.
 # shellcheck disable=SC2016 # jq program, not shell
 ROW_JQ='
   def cell: if . == null then "" else tostring end;
@@ -53,9 +64,9 @@ ROW_JQ='
   | ($st[0] // null) as $s
   | if $s != null and ($s | type) != "object" then error("sidecar not an object") else . end
   | (if (.findings | type) == "array" then .findings else [] end) as $f
-  | [ $h,
-      (if .skipped == "below_noise_gate" then "gated" elif has("error") then "error"
-       elif (.findings | type) != "array" then "unreadable" else "triaged" end),
+  | ([ "R", $h,
+      (if (.findings | type) != "array" then "unreadable"
+       elif .skipped == "below_noise_gate" then "gated" elif has("error") then "error" else "triaged" end),
       (.project | cell),
       (if $s then ($s.isSidechain == true or $s.nested == true) else null end | cell),
       (if $s then ($s.is_advisor == true) elif has("is_advisor") then (.is_advisor == true) else null end | cell),
@@ -71,7 +82,10 @@ ROW_JQ='
        else "" end),
       (if (.skills_authored | type) == "array" then (.skills_authored | map(skill) | join(",")) else "" end),
       (if (.instructions_given | type) == "array" then (.instructions_given | length) else null end | cell)
-    ] | @tsv'
+    ] | @tsv),
+    ($f[] | select(type == "object")
+     | ["F", $h, (.category // "unknown" | word), (.severity // "unknown" | word), (.what // "" | tostring)]
+     | @tsv)'
 
 # The sidecar's counts for a findings JSON that does not parse, so the row still says how big
 # the session was.
@@ -80,7 +94,7 @@ UNREADABLE_JQ='
   def cell: if . == null then "" else tostring end;
   ($st[0] // null) as $s
   | if $s != null and ($s | type) != "object" then error("sidecar not an object") else . end
-  | [ $h, "unreadable", "",
+  | [ "R", $h, "unreadable", "",
       (if $s then ($s.isSidechain == true or $s.nested == true) else null end | cell),
       (if $s then ($s.is_advisor == true) else null end | cell),
       "",
@@ -109,7 +123,8 @@ session_hashes() {
     [ -f "$f" ] || continue
     b=${f##*/}; b=${b%.json}
     case "$b" in *[!0-9a-f]*) continue ;; esac
-    [ "${#b}" -eq 12 ] && printf '%s\n' "$b"
+    [ "${#b}" -eq 12 ] || continue
+    printf '%s\n' "$b"
   done | LC_ALL=C sort
 }
 
@@ -135,15 +150,19 @@ join_source_parent() {
 # row per category with severity "all", whose sessions column is the category's count across
 # severities (a session with a high and a low finding counts once there). An advisor's findings
 # are counted under its parent session, so a parent and its advisor with the same finding are one
-# session, as PROMPT.md asks; the example hashes stay the real ones. Ordered by the category's
-# total findings, then category, then all, high, medium, low.
+# session, as PROMPT.md asks; the example hashes stay the real ones. An advisor's tool-behavior
+# findings (sandbox_friction, tool_loop, missed_skill) are not counted at all: L1 suppresses them
+# for advisors, so one that arrives is a triage failure, which L2 reads from rollup.tsv. Ordered
+# by the category's total findings, then category, then all, high, medium, low.
 tally_categories() {
   awk -F'\t' -v OFS='\t' '
+    BEGIN { advisor_tool["sandbox_friction"]; advisor_tool["tool_loop"]; advisor_tool["missed_skill"] }
     $14 != "" {
       owner = ($6 == "true" && $7 != "") ? $7 : $1
       n = split($14, f, ",")
       for (i = 1; i <= n; i++) {
         c = f[i]; sub(/:[^:]*$/, "", c)
+        if ($6 == "true" && (c in advisor_tool)) continue
         count(f[i], owner, $1); count(c ":all", owner, $1)
       }
     }
@@ -174,17 +193,37 @@ write_atomic() {
   rm -f "$tmp"; return 1
 }
 
-BODY=$(session_hashes | while IFS= read -r h; do session_row "$h"; done | join_source_parent)
-CATS=$(printf '%s\n' "$BODY" | grep . | tally_categories)
+# Each stage is checked: under pipefail a failed jq, awk or sort fails the run instead of
+# publishing a short table.
+RAW=$(session_hashes | while IFS= read -r h; do session_row "$h" || exit 1; done) \
+  || { echo "rollup.sh: reading the findings failed" >&2; exit 1; }
+BODY=$(printf '%s\n' "$RAW" | awk '/^R\t/ { print substr($0, 3) }' | join_source_parent) \
+  || { echo "rollup.sh: building rollup rows failed" >&2; exit 1; }
+FINDS=$(printf '%s\n' "$RAW" | awk '/^F\t/ { print substr($0, 3) }') \
+  || { echo "rollup.sh: building finding rows failed" >&2; exit 1; }
+CATS=$(printf '%s\n' "$BODY" | sed '/^$/d' | tally_categories) \
+  || { echo "rollup.sh: tallying categories failed" >&2; exit 1; }
 
-printf '%s' "$BODY" | grep . | write_atomic "$ROLLUP_HEADER" "$OUT/rollup.tsv" \
-  || { echo "rollup.sh: could not write $OUT/rollup.tsv" >&2; exit 1; }
-printf '%s' "$CATS" | grep . | write_atomic "$CATEGORIES_HEADER" "$OUT/categories.tsv" \
-  || { echo "rollup.sh: could not write $OUT/categories.tsv" >&2; exit 1; }
+# $1=body $2=header $3=file name
+publish() {
+  printf '%s\n' "$1" | sed '/^$/d' | write_atomic "$2" "$OUT/$3" \
+    || { echo "rollup.sh: could not write $OUT/$3" >&2; exit 1; }
+}
+publish "$BODY" "$ROLLUP_HEADER" rollup.tsv
+publish "$CATS" "$CATEGORIES_HEADER" categories.tsv
+publish "$FINDS" "$FINDINGS_HEADER" findings.tsv
 
-printf '%s\n' "$BODY" | awk -F'\t' -v cats="$(printf '%s\n' "$CATS" | awk -F'\t' '$2 == "all"' | grep -c .)" '
-  NF { rows++; n[$2]++ }
+printf '%s\n' "$BODY" | awk -F'\t' \
+  -v cats="$(printf '%s\n' "$CATS" | awk -F'\t' '$2 == "all"' | wc -l | tr -d ' ')" \
+  -v finds="$(printf '%s\n' "$FINDS" | sed '/^$/d' | wc -l | tr -d ' ')" '
+  NF {
+    rows++; n[$2]++
+    if ($6 == "true") {
+      k = split($14, f, ",")
+      for (i = 1; i <= k; i++) if (f[i] ~ /^(sandbox_friction|tool_loop|missed_skill):/) adv++
+    }
+  }
   END {
-    printf "rollup: rows=%d triaged=%d gated=%d error=%d unreadable=%d ungated=%d categories=%d\n",
-      rows, n["triaged"], n["gated"], n["error"], n["unreadable"], rows - n["gated"], cats
+    printf "rollup: rows=%d triaged=%d gated=%d error=%d unreadable=%d ungated=%d categories=%d findings=%d advisor_tool_findings=%d\n",
+      rows, n["triaged"], n["gated"], n["error"], n["unreadable"], rows - n["gated"], cats, finds, adv
   }'

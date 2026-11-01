@@ -2441,7 +2441,7 @@ compute_fanout_stats() {
   FANOUT_LARGEST=$(printf '%s' "$rows" | cut -f2 | sort | uniq -c | sort -rn | awk 'NR == 1 { print $1 }')
 }
 
-# Writes rollup.tsv and categories.tsv for L2, which counts from them instead of listing the
+# Writes rollup.tsv, categories.tsv and findings.tsv for L2, which counts from them instead of listing the
 # findings dir: Glob and directory reads stop at 200 entries, and a night of 885 sessions is 2683
 # (2026-10-31, when L2 counted from a 90-file sample and never saw fanouts.tsv). Runs after the
 # skill-field pass, which rewrites the fields it reads, and after compute_fanout_stats, whose
@@ -2449,7 +2449,7 @@ compute_fanout_stats() {
 # stale file from an earlier run, so L2 reports the counts as unavailable rather than wrong.
 write_rollup() {
   local out
-  rm -f "$FINDINGS_DIR/rollup.tsv" "$FINDINGS_DIR/categories.tsv" 2>/dev/null
+  rm -f "$FINDINGS_DIR/rollup.tsv" "$FINDINGS_DIR/categories.tsv" "$FINDINGS_DIR/findings.tsv" 2>/dev/null
   if [ -z "$ROLLUP" ]; then
     log "WARNING: rollup.sh not found; L2 has no rollup.tsv to count from"
     printf 'rollup: helper missing\n' >> "$FINDINGS_DIR/run-stats.txt"
@@ -2461,8 +2461,8 @@ write_rollup() {
   case "$out" in
     "rollup: rows="*) ;;
     *) log "WARNING: rollup.sh failed; L2 has no rollup.tsv to count from"
-       # One file without the other would be read as a whole roll-up.
-       rm -f "$FINDINGS_DIR/rollup.tsv" "$FINDINGS_DIR/categories.tsv" 2>/dev/null
+       # One file without the others would be read as a whole roll-up.
+       rm -f "$FINDINGS_DIR/rollup.tsv" "$FINDINGS_DIR/categories.tsv" "$FINDINGS_DIR/findings.tsv" 2>/dev/null
        printf 'rollup: failed\n' >> "$FINDINGS_DIR/run-stats.txt"
        return 0 ;;
   esac
