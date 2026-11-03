@@ -427,3 +427,5 @@ the adapter contract is defined by.
 ## License
 
 MIT — see LICENSE.
+
+<!-- CI probe for #178: a README-only diff; never merged. -->
