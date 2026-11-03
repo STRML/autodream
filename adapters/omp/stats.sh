@@ -62,7 +62,25 @@ jq -R -s \
   --argjson transcript_mtime "${mtime:-0}" \
   --argjson is_advisor_name "$is_advisor_name" \
   --argjson nested_name "$nested_name" \
+  --arg home "${HOME:-}" \
   '
+  def skill_md_name: capture("(?:^|/)(?<name>[^/]+)/SKILL\\.md$").name;
+  # A tool path as an absolute file name, or null when it cannot be resolved: relative to the
+  # session cwd, `~` against $HOME, then `.`, `..` and repeated slashes folded away. Lexical
+  # only, so a symlinked skill dir and its target are two names (see the authoring note below).
+  def abs_path($cwd):
+    (if test("^[A-Za-z][A-Za-z0-9+.-]*://") then null
+     elif startswith("/") then .
+     elif . == "~" or startswith("~/") then (if ($home | startswith("/")) then $home + .[1:] else null end)
+     elif startswith("~") then null
+     elif $cwd != null then $cwd + "/" + .
+     else null
+     end)
+    | if . == null then null
+      else reduce (split("/")[]) as $s ([];
+          if $s == "" or $s == "." then . elif $s == ".." then .[:-1] else . + [$s] end)
+        | "/" + join("/")
+      end;
   [
     split("\n")[]
     | fromjson?
@@ -202,11 +220,20 @@ jq -R -s \
   # per-file source rule of $tool_uses, so a call in a main session, written both as a start
   # record and as a block, counts once.
   #
-  # A SKILL.md path the session also writes or edits is being authored, not used, so its
-  # reads are left out. The match is by skill name (the directory above SKILL.md), because a
-  # hashline edit names a path relative to cwd while a read names it absolute, and an edit
-  # start record carries no args: its path is only in the `[path#HASH]` header of the block, so
-  # both record shapes are read here. A `skill://` read is never authoring.
+  # A SKILL.md file the session also writes or edits is being authored, not used, so its
+  # reads are left out. The match is by FILE (#179): two skills with one name in different
+  # roots (a project `.claude/skills/x` and `~/.claude/skills/x`) do not mask each other. A
+  # hashline edit names its path relative to the session cwd while a read usually names it
+  # absolute, and an edit start record carries no args (its path is only in the `[path#HASH]`
+  # header of the block, so both record shapes are read here), so every path goes through
+  # abs_path against the cwd of the session header (or of autodream_meta in a linearized copy)
+  # first. A path that cannot be resolved (no cwd, `~` with no HOME, `~user`, a URL such as the
+  # raw.githubusercontent.com SKILL.md a session fetches before installing it) falls back to the
+  # old rule, a match by skill name (the directory above SKILL.md): an unresolvable edit masks
+  # every read of that name, an unresolvable read is masked by any edit of that name. The
+  # resolution is lexical, so the sidecar depends on the transcript alone: a read through a
+  # symlinked install (`~/.claude/skills/x -> ~/git/skills/x`) of the file the session edits
+  # under its target name counts as use. A `skill://` read is never authoring.
   #
   # This field used to be filled in by haiku, and it was unmeasurable, not merely noisy —
   # the 2026-09-04 report read `skills_invoked: []` on a session that called manage_skill
@@ -230,7 +257,10 @@ jq -R -s \
       | gsub("^\\s+|\\s+$"; "")
       | sub(":[^/]*$"; "")
     ] as $read_paths
-  | ([
+  | ([ $lines[] | select(.type == "autodream_meta") | .cwd ]
+     + [ $lines[] | select(.type == "session") | .cwd ]
+     | map(select(type == "string" and startswith("/"))) | first) as $cwd
+  | [
       ($lines[] | select(.type == "custom" and .customType == "tool_execution_start") | .data
         | select(type == "object" and ((.toolName? // "") | IN("edit", "write"))) | .args),
       ($lines[] | select(.type == "message") | .message.content | select(type == "array") | .[]
@@ -239,8 +269,11 @@ jq -R -s \
     | map(select(type == "object"))
     | [ .[] | (.path? | select(type == "string")),
               (.input? | select(type == "string") | scan("(?:^|\\n)\\[([^\\]#\\n]+)#") | .[0]) ]
-    | [ .[] | (try capture("(?:^|/)(?<name>[^/]+)/SKILL\\.md$") catch empty) | .name ]
-    | map({key: ., value: true}) | from_entries) as $authored_md
+    | [ .[] | select(test("(?:^|/)[^/]+/SKILL\\.md$")) | {name: skill_md_name, file: abs_path($cwd)} ]
+    as $authored
+  | ($authored | map(select(.file != null) | {key: .file, value: true}) | from_entries) as $authored_files
+  | ($authored | map(select(.file == null) | {key: .name, value: true}) | from_entries) as $authored_names_unresolved
+  | ($authored | map({key: .name, value: true}) | from_entries) as $authored_names
   | ([
       $lines[]
       | select(.type == "custom_message" and (.customType? // "") == "skill-prompt")
@@ -256,9 +289,14 @@ jq -R -s \
     ] + [
       $read_paths[]
       | select(startswith("skill://") | not)
+      | abs_path($cwd) as $file
       | (try capture("(?:^|/)(?<name>[^/*?]+)/SKILL\\.md$") catch empty)
       | .name
-      | select($authored_md[.] != true)
+      | select(
+          if $file == null then $authored_names[.] != true
+          else $authored_files[$file] != true and $authored_names_unresolved[.] != true
+          end
+        )
     ]) as $skills_invoked
   # Both record shapes, unioned. PORT_CONTRACT.md documents tool usage as
   # custom/tool_execution_start records, and those DO carry a data.args payload —
