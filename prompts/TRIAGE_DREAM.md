@@ -95,3 +95,6 @@ Rank the table most actionable first (verified and high priority at the top, `ne
 and `unverified` below). Keep titles imperative and short enough to be a ticket title. Prefer
 fewer, well-grounded items over a long padded list. If nothing is actionable, say so in one line
 under the heading and leave the table out.
+
+<!-- CI probe for #178: a prompt-only diff; never merged. -->
+
