@@ -369,8 +369,9 @@ SPT="$tmp/skill-by-file-tilde.jsonl"
 } > "$SPT"
 HOME=/Users/x "$A" stats "$SPT" "$tmp/stspt.json" >/dev/null 2>&1
 assert_eq "$(jq -r '"\(.skills_invoked|join(",")) \(.skills_invoked_count)"' "$tmp/stspt.json")" "qux 1" "~, . and .. resolve to the file they name before the authoring match"
-# Fallback: a path that cannot be resolved (no cwd in the header, no HOME for `~`) is matched by
-# skill name, as before #179. Two absolute paths are still compared as files.
+# Fallback: a path that cannot be resolved (no cwd in the header, no HOME for `~`, a URL) is matched
+# by skill name, as before #179. Two absolute paths are still compared as files. The URL read of a
+# SKILL.md fetched to install it is the 2026-09-27 forks-omp session's shape.
 SPU="$tmp/skill-by-file-nocwd.jsonl"
 { echo "$HDR_TITLE"
   printf '{"type":"session","id":"01a00000-0000-7000-8000-000000000045","timestamp":"2026-01-02T12:00:00.000Z"}\n'
@@ -381,6 +382,8 @@ SPU="$tmp/skill-by-file-nocwd.jsonl"
   RD 4 b3 '/Users/y/skills/bar/SKILL.md'
   RS 5 r4 edit '/Users/x/skills/zed/SKILL.md'; RB 5 s5 edit '/Users/x/skills/zed/SKILL.md'
   RD 6 b5 '~/skills/zed/SKILL.md'
+  RS 7 r6 write '/Users/x/.claude/skills/tsai/SKILL.md'; RB 7 s7 write '/Users/x/.claude/skills/tsai/SKILL.md'
+  RD 8 b7 'https://raw.githubusercontent.com/o/skills/main/skills/tsai/SKILL.md'
 } > "$SPU"
 HOME= "$A" stats "$SPU" "$tmp/stspu.json" >/dev/null 2>&1
 assert_eq "$(jq -r '"\(.skills_invoked|join(",")) \(.skills_invoked_count)"' "$tmp/stspu.json")" "bar 1" "an unresolvable path falls back to the skill-name match; resolvable ones compare as files"

@@ -69,7 +69,8 @@ jq -R -s \
   # session cwd, `~` against $HOME, then `.`, `..` and repeated slashes folded away. Lexical
   # only, so a symlinked skill dir and its target are two names (see the authoring note below).
   def abs_path($cwd):
-    (if startswith("/") then .
+    (if test("^[A-Za-z][A-Za-z0-9+.-]*://") then null
+     elif startswith("/") then .
      elif . == "~" or startswith("~/") then (if ($home | startswith("/")) then $home + .[1:] else null end)
      elif startswith("~") then null
      elif $cwd != null then $cwd + "/" + .
@@ -226,7 +227,8 @@ jq -R -s \
   # absolute, and an edit start record carries no args (its path is only in the `[path#HASH]`
   # header of the block, so both record shapes are read here), so every path goes through
   # abs_path against the cwd of the session header (or of autodream_meta in a linearized copy)
-  # first. A path that cannot be resolved (no cwd, `~` with no HOME, `~user`) falls back to the
+  # first. A path that cannot be resolved (no cwd, `~` with no HOME, `~user`, a URL such as the
+  # raw.githubusercontent.com SKILL.md a session fetches before installing it) falls back to the
   # old rule, a match by skill name (the directory above SKILL.md): an unresolvable edit masks
   # every read of that name, an unresolvable read is masked by any edit of that name. The
   # resolution is lexical, so the sidecar depends on the transcript alone: a read through a
