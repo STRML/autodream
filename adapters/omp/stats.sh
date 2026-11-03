@@ -148,10 +148,26 @@ jq -R -s \
       | select(type == "object" and .type == "toolCall")
       | select(((.id? // "") as $i | $rejected[$i]) != true)
     ] as $tool_blocks
+  # A call keeps its id and arguments so the skill reads below follow this same per-file source
+  # rule. A start record can lack args (a hashline edit, manage_skill): its block, matched by call
+  # id, supplies them.
+  | ([
+      $tool_blocks[]
+      | select(((.id? // null) | type) == "string" and ((.arguments? // null) | type) == "object")
+      | {key: .id, value: .arguments}
+    ] | from_entries) as $block_args
   | (
       if ($tool_starts | length) > 0
-      then [$tool_starts[] | {name: (.data.toolName? // null)}]
-      else [$tool_blocks[] | {name: (.name? // .toolName? // null)}]
+      then [$tool_starts[] | {
+          name: (.data.toolName? // null),
+          id: (.data.toolCallId? // null),
+          args: (
+            if ((.data.args? // null) | type) == "object" then .data.args
+            else ((.data.toolCallId? // null) as $i | if ($i | type) == "string" then $block_args[$i] else null end)
+            end
+          )
+        }]
+      else [$tool_blocks[] | {name: (.name? // .toolName? // null), id: (.id? // null), args: (.arguments? // null)}]
       end
     ) as $tool_uses
   | [
@@ -167,24 +183,83 @@ jq -R -s \
       | select(type == "string")
       | try (sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) catch empty
     ] as $timestamps
-  # Skill INVOCATION. OMP records it exactly one way: a custom_message of customType
-  # "skill-prompt" whose content opens with the bracket line below and then inlines the
-  # whole skill. There is no skill tool call and no other customType, so this record is
-  # the only mechanical trace a skill ever leaves. Verified against all 204 transcripts in
-  # the OMP store on 2026-09-05: 7 such records, every one matching this pattern.
+  # Skill INVOCATION leaves two traces in omp.
+  #
+  # 1. The user ran /<skill>: a custom_message of customType "skill-prompt" whose content
+  #    opens with the bracket line below and then inlines the whole skill.
+  # 2. The model loaded a skill itself, with the read tool: `skill://<name>` (omp resolves
+  #    it to the SKILL.md of that skill) or a `<dir>/<name>/SKILL.md` path. This is the common
+  #    case. Measured 2026-11-03 over the 739 omp transcripts modified since 2026-10-27: 2
+  #    held a skill-prompt record, 16 made a read call on skill://<name> and 18 on a SKILL.md
+  #    path. Counting only (1), as this file did until then, totalled 2 invocations across
+  #    them; counting both totals 50 across 29 transcripts, so a `missed_skill` finding from
+  #    the old detector says nothing.
+  #
+  # A read counts when it loads the skill itself: `skill://<name>`, `skill://<name>/SKILL.md`
+  # or `.../<name>/SKILL.md`, after dropping a trailing read selector (`:raw`, `:1-60`) and
+  # splitting the `a; b` path list omp accepts. A reference file inside a skill, a directory listing,
+  # a glob and a read whose result is an error (an unknown skill) do not. Reads follow the
+  # per-file source rule of $tool_uses, so a call in a main session, written both as a start
+  # record and as a block, counts once.
+  #
+  # A SKILL.md path the session also writes or edits is being authored, not used, so its
+  # reads are left out. The match is by skill name (the directory above SKILL.md), because a
+  # hashline edit names a path relative to cwd while a read names it absolute, and an edit
+  # start record carries no args: its path is only in the `[path#HASH]` header of the block, so
+  # both record shapes are read here. A `skill://` read is never authoring.
   #
   # This field used to be filled in by haiku, and it was unmeasurable, not merely noisy —
   # the 2026-09-04 report read `skills_invoked: []` on a session that called manage_skill
   # ten times and concluded the ~200-skill inventory never fires. Those calls were skill
   # AUTHORING, which is why $skills_authored below is counted separately: "wrote five
   # skills, invoked none" and "ignored the inventory" are different findings.
+  | ([
+      $lines[]
+      | select(.type == "message" and (.message.role? // "") == "toolResult" and (.message.isError? == true))
+      | .message.toolCallId
+      | select(type == "string")
+      | {key: ., value: true}
+    ] | from_entries) as $errored
   | [
+      $tool_uses[]
+      | select(.name == "read")
+      | select(((.id // "") | tostring) as $i | $errored[$i] != true)
+      | (.args | if type == "object" then .path else null end)
+      | select(type == "string")
+      | split(";")[]
+      | gsub("^\\s+|\\s+$"; "")
+      | sub(":[^/]*$"; "")
+    ] as $read_paths
+  | ([
+      ($lines[] | select(.type == "custom" and .customType == "tool_execution_start") | .data
+        | select(type == "object" and ((.toolName? // "") | IN("edit", "write"))) | .args),
+      ($lines[] | select(.type == "message") | .message.content | select(type == "array") | .[]
+        | select(type == "object" and .type == "toolCall" and ((.name? // "") | IN("edit", "write"))) | .arguments)
+    ]
+    | map(select(type == "object"))
+    | [ .[] | (.path? | select(type == "string")),
+              (.input? | select(type == "string") | scan("(?:^|\\n)\\[([^\\]#\\n]+)#") | .[0]) ]
+    | [ .[] | (try capture("(?:^|/)(?<name>[^/]+)/SKILL\\.md$") catch empty) | .name ]
+    | map({key: ., value: true}) | from_entries) as $authored_md
+  | ([
       $lines[]
       | select(.type == "custom_message" and (.customType? // "") == "skill-prompt")
       | .content
       | select(type == "string")
       | (try (capture("^\\[IMPORTANT: User invoked the \"(?<name>[^\"]+)\" skill") | .name) catch empty)
-    ] as $skills_invoked
+    ] + [
+      $read_paths[]
+      | select(startswith("skill://"))
+      | ltrimstr("skill://")
+      | (try capture("^(?<name>[^/*?\\s]+)(?:/SKILL\\.md)?$") catch empty)
+      | .name
+    ] + [
+      $read_paths[]
+      | select(startswith("skill://") | not)
+      | (try capture("(?:^|/)(?<name>[^/*?]+)/SKILL\\.md$") catch empty)
+      | .name
+      | select($authored_md[.] != true)
+    ]) as $skills_invoked
   # Both record shapes, unioned. PORT_CONTRACT.md documents tool usage as
   # custom/tool_execution_start records, and those DO carry a data.args payload —
   # measured across the OMP store on 2026-09-06: 20,185 of 26,308 such records have it.
