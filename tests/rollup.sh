@@ -38,10 +38,12 @@ F="$T/findings"
 mkdir -p "$F/outside-worklist"
 h(){ printf '%012x' "$1"; }   # a session's 12-hex artifact key from its fixture number
 
-# sidecar NUM SIDECHAIN NESTED ADVISOR
+# sidecar NUM SIDECHAIN NESTED ADVISOR [SANDBOX_SHAPE_DENIES as a raw JSON value; absent when omitted,
+# as in an omp sidecar or one written before the field existed]
 sidecar(){
-  printf '{"user_message_count":%s,"turn_count":%s,"tool_call_count":%s,"duration_minutes":%s,"models_used":["m-a","m-b"],"isSidechain":%s,"nested":%s,"is_advisor":%s}\n' \
-    3 7 4 2.5 "$2" "$3" "$4" > "$F/$(h "$1").stats.json"
+  local extra=""; [ "$#" -ge 5 ] && extra=",\"sandbox_shape_denies\":$5"
+  printf '{"user_message_count":%s,"turn_count":%s,"tool_call_count":%s,"duration_minutes":%s,"models_used":["m-a","m-b"],"isSidechain":%s,"nested":%s,"is_advisor":%s%s}\n' \
+    3 7 4 2.5 "$2" "$3" "$4" "$extra" > "$F/$(h "$1").stats.json"
 }
 served(){ printf 'runner\t-\t-\trunner\n' > "$F/$(h "$1").json.served"; }
 source_row(){ printf '%s\t%s\n' "$(h "$1")" "$2" >> "$F/sessions-source.txt"; }
@@ -67,8 +69,12 @@ for i in $(seq 1 100); do
   [ "$i" -eq 2 ] && f='[{"category":"sandbox_friction","severity":"low"},{"category":"missed_skill","severity":"high"},{"category":"memory_miss"}]'
   # 6 has the same category at two severities: one session in the category's "all" row.
   [ "$i" -eq 6 ] && f='[{"category":"sandbox_friction","severity":"low"},{"category":"missed_skill","severity":"high"},{"category":"missed_skill","severity":"low"}]'
-  triaged "$i" "$f"; sidecar "$i" false false false; source_row "$i" claude
+  triaged "$i" "$f"; sidecar "$i" false false false 0; source_row "$i" claude
 done
+# sandbox_shape_denies: 4 hit the deny 124 times, 9 exactly 10 times, 11 once. 12's sidecar
+# predates the field and 13's holds a string: both blank, never 0.
+sidecar 4 false false false 124; sidecar 9 false false false 10; sidecar 11 false false false 1
+sidecar 12 false false false; sidecar 13 false false false '"lots"'
 # 7 authored a skill and was given two instructions.
 jq -c '.skills_authored = ["new-skill"] | .instructions_given = ["do x", "do y"]' "$F/$(h 7).json" > "$T/7.json" && mv "$T/7.json" "$F/$(h 7).json"
 # 3's project holds a tab, which must not split the row.
@@ -100,7 +106,7 @@ sidecar 240 false false false; source_row 240 claude
 triaged 241 '[]'; source_row 241 claude
 # 242: a findings JSON that does not parse.
 printf '{"session_path": "/s/242.jsonl", "findings": [' > "$F/$(h 242).json"
-sidecar 242 false false false; source_row 242 claude
+sidecar 242 false false false 3; source_row 242 claude
 # 243: a sidecar that does not parse; the findings still count.
 triaged 243 "$SF"; printf 'not json' > "$F/$(h 243).stats.json"; source_row 243 claude
 # 244: parses, but findings is not an array (run.sh's L1_FINDINGS_OK refuses it too).
@@ -124,9 +130,9 @@ OUT="$T/out"; mkdir -p "$OUT"
 summary=$("$BIN" "$F" "$OUT" 2>"$T/err"); rc=$?
 assert_eq "$rc" "0" "exit 0"
 R="$OUT/rollup.tsv"; C="$OUT/categories.tsv"
-assert_eq "$(head -1 "$R")" "$(printf 'hash\tstatus\tproject\tsource\tnested\tis_advisor\tparent\toutcome\tuser_message_count\tturn_count\ttool_call_count\tduration_minutes\tmodels_used\tfindings\tskills_invoked_count\tskills_invoked_counts\tskills_authored\tinstructions_given_count')" "rollup.tsv opens with its header"
+assert_eq "$(head -1 "$R")" "$(printf 'hash\tstatus\tproject\tsource\tnested\tis_advisor\tparent\toutcome\tuser_message_count\tturn_count\ttool_call_count\tduration_minutes\tmodels_used\tfindings\tskills_invoked_count\tskills_invoked_counts\tskills_authored\tinstructions_given_count\tsandbox_shape_denies')" "rollup.tsv opens with its header"
 assert_eq "$(tail -n +2 "$R" | wc -l | tr -d ' ')" "224" "one row per session, 224 of them"
-assert_eq "$(awk -F'\t' 'NF != 18' "$R" | wc -l | tr -d ' ')" "0" "every row has 18 columns, a tab inside a project included"
+assert_eq "$(awk -F'\t' 'NF != 19' "$R" | wc -l | tr -d ' ')" "0" "every row has 19 columns, a tab inside a project included"
 assert_eq "$(tail -n +2 "$R" | cut -f1 | sort -u | wc -l | tr -d ' ')" "224" "no session appears twice"
 assert_eq "$(tail -n +2 "$R" | cut -f1 | LC_ALL=C sort -c 2>&1 && echo sorted)" "sorted" "rows are in hash order"
 assert_eq "$(grep -c "$(h 999)" "$R")" "0" "a findings JSON moved to outside-worklist/ is not a row"
@@ -174,6 +180,18 @@ assert_eq "$(row "$(h 242)" | cut -f9)" "3" "and still carries its sidecar's cou
 assert_eq "$(col "$(h 240)" 2)/$(col "$(h 240)" 14)" "error/" "an error stub is marked error"
 assert_eq "$(col "$(h 244)" 2)/$(col "$(h 244)" 9)" "unreadable/3" "findings that is not an array is unreadable, with its sidecar counts"
 assert_eq "$(col "$(h 245)" 2)" "unreadable" "even on a gated stub, so a forged stub cannot drop out of N"
+
+echo "# sandbox_shape_denies comes from the sidecar, and a blank means unmeasured"
+assert_eq "$(col "$(h 4)" 19)" "124" "the sidecar's count"
+assert_eq "$(col "$(h 9)" 19)/$(col "$(h 11)" 19)" "10/1" "every count, not only the high ones"
+assert_eq "$(col "$(h 50)" 19)" "0" "a measured zero stays 0"
+assert_eq "$(col "$(h 12)" 19)" "" "a sidecar without the field is blank, not 0"
+assert_eq "$(col "$(h 13)" 19)" "" "a value that is not a number is blank"
+assert_eq "$(col "$(h 150)" 19)" "" "an omp row, whose sidecar has no such field, is blank"
+assert_eq "$(col "$(h 241)" 19)" "" "a missing sidecar is blank"
+assert_eq "$(col "$(h 243)" 19)" "" "an unparseable sidecar is blank"
+assert_eq "$(col "$(h 242)" 19)" "3" "an unparseable findings JSON still carries its sidecar's count"
+assert_eq "$(tail -n +2 "$R" | awk -F'\t' '$19 != "" && $19 + 0 >= 10' | cut -f1 | tr '\n' ' ')" "$(h 4) $(h 9) " "two sessions at or over 10"
 
 echo "# categories.tsv tallies every finding"
 assert_eq "$(head -1 "$C")" "$(printf 'category\tseverity\tsessions\tfindings\texample_hashes')" "categories.tsv opens with its header"

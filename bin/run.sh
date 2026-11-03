@@ -107,6 +107,9 @@
 #                             open-questions marker; earlier unmarked reports are treated
 #                             as complete (legacy) rather than abandoned
 #                                                                     default: 2026-08-19
+#   AUTODREAM_SANDBOX_SHAPE_MIN  a session with at least this many denies signed by the sandbox-shape
+#                        guard is listed in the report's self-audit (rollup.tsv's sandbox_shape_denies,
+#                        threshold passed to L2 as run-stats sandbox_shape_denies_min)   default: 10
 #   AUTODREAM_MIN_USER_TURNS  noise-gate floor on user_message_count  default: 2
 #   AUTODREAM_MIN_MINUTES     noise-gate floor on duration_minutes    default: 1
 #   AUTODREAM_STATS_BIN       override the resolved session-stats.sh path, authoritative
@@ -241,6 +244,15 @@ case "$AUTODREAM_L1_MAX_CHUNKS" in
 esac
 AUTODREAM_L1_MAX_CHUNKS=$((10#$AUTODREAM_L1_MAX_CHUNKS))
 [ "$AUTODREAM_L1_MAX_CHUNKS" -ge 1 ] || { echo "FATAL: AUTODREAM_L1_MAX_CHUNKS must be at least 1" >&2; exit 1; }
+# The report lists sessions with at least this many sandbox-shape denies. 0 would list every
+# session, so the floor is 1. L2 cannot read the environment, so write_rollup hands it the value
+# through run-stats.txt.
+AUTODREAM_SANDBOX_SHAPE_MIN="${AUTODREAM_SANDBOX_SHAPE_MIN:-10}"
+case "$AUTODREAM_SANDBOX_SHAPE_MIN" in
+  ''|*[!0-9]*) echo "FATAL: AUTODREAM_SANDBOX_SHAPE_MIN must be a positive integer (got '$AUTODREAM_SANDBOX_SHAPE_MIN')" >&2; exit 1 ;;
+esac
+AUTODREAM_SANDBOX_SHAPE_MIN=$((10#$AUTODREAM_SANDBOX_SHAPE_MIN))
+[ "$AUTODREAM_SANDBOX_SHAPE_MIN" -ge 1 ] || { echo "FATAL: AUTODREAM_SANDBOX_SHAPE_MIN must be a positive integer (got 0, which would list every session)" >&2; exit 1; }
 # The noise gate hands these to jq --argjson with stderr discarded. A non-number makes jq
 # fail, the gate comes back empty, and every session goes to a model call with no message.
 for _knob in AUTODREAM_MIN_USER_TURNS AUTODREAM_MIN_MINUTES; do
@@ -2562,6 +2574,7 @@ write_rollup() {
   esac
   log "$out"
   printf '%s\n' "${out#rollup: }" | tr ' ' '\n' | sed -n 's/^\([a-z_]*\)=\([0-9]*\)$/rollup_\1: \2/p' >> "$FINDINGS_DIR/run-stats.txt"
+  printf 'sandbox_shape_denies_min: %s\n' "$AUTODREAM_SANDBOX_SHAPE_MIN" >> "$FINDINGS_DIR/run-stats.txt"
 }
 
 dispatch_l1() { # one parallel pass; idempotent worker → only the still-missing sessions run
