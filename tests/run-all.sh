@@ -2463,6 +2463,33 @@ test_changelog_owned_cache_ignores_global_insteadof(){
   rm -rf "$root"
 }
 
+test_changelog_nested_cache_path_is_owned_on_first_clone(){
+  echo "# a cache path nested under a missing directory is owned on its first clone (#174)"
+  command -v git >/dev/null 2>&1 || { echo "  skip - git not available"; return 0; }
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local up="$root/upstream"; mkdir -p "$up"
+  ( cd "$up" && git init -q && git config user.email t@t.invalid && git config user.name t
+    printf '# Changelog\n\n## [1.0.0]\n\n- Nested in-window\n' > CHANGELOG.md
+    git add CHANGELOG.md
+    GIT_AUTHOR_DATE="2020-01-02T10:00:00" GIT_COMMITTER_DATE="2020-01-02T10:00:00" git commit -q -m 'chore: first' )
+  mkdir -p "$root/home"
+  printf '[url "file:///nonexistent-autodream-bogus"]\n\tinsteadOf = file://\n' > "$root/home/.gitconfig"
+  # A symlink inside the cache that points outside it, with the rest of the path missing:
+  # walking up to the nearest existing directory must still resolve the link and refuse.
+  local ad; ad=$(cd "$root/autodream" 2>/dev/null && pwd) || ad="$root/autodream"
+  mkdir -p "$ad/cache" "$root/outside"
+  ln -s "$root/outside" "$ad/cache/link"
+  export AUTODREAM_CHANGELOG=1
+  export AUTODREAM_CHANGELOG_SOURCES="Nested|file://$up|CHANGELOG.md|$ad/cache/nested/deeper/source;Escape|file://$up|CHANGELOG.md|$ad/cache/link/missing/source"
+  HOME="$root/home" run_dream "$root"
+  unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES
+  local cw="$(fdir "$root")/changelog-window.md"
+  assert_grep   "$cw" 'Nested in-window' "a nested owned cache clones anonymously on its first run"
+  assert_file   "$ad/cache/nested/deeper/source/CHANGELOG.md" "the nested clone landed inside the cache"
+  assert_grep   "$cw" 'nonexistent-autodream-bogus' "a missing path behind a symlink out of the cache keeps the user's git config"
+  rm -rf "$root"
+}
+
 test_autodream_now_from_a_checkout_uses_the_default_install(){
   echo "# autodream-now.sh run from the repo must not adopt bin/ as its install dir"
   local T; T=$(mktemp -d "${TMPDIR:-/tmp}/ccad.XXXXXX")
@@ -3657,6 +3684,7 @@ _run test_changelog_log_failure_is_not_a_quiet_night
 _run test_changelog_all_sources_failed_notifies
 _run test_changelog_partial_failure_does_not_notify
 _run test_changelog_owned_cache_ignores_global_insteadof
+_run test_changelog_nested_cache_path_is_owned_on_first_clone
 _run test_prune_helper
 _run test_autodream_now_from_a_checkout_uses_the_default_install
 _run test_self_session_excluded

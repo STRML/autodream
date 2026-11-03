@@ -1402,11 +1402,21 @@ changelog_sources() {
 
 # True only when $1's parent directory resolves, symlinks and all, inside $AUTODREAM_DIR/cache.
 # A `..` anywhere is refused before resolving, so the basename cannot climb out either.
+# Parents that do not exist yet are skipped up to the nearest one that does, and that one is
+# resolved: a nested source like cache/nested/source is owned on its first clone (#174). Only a
+# name that does not exist at all is skipped, so a symlink in the path, dangling or not, is
+# still resolved or refused, never walked past. With no `..`, what clone creates below that
+# ancestor stays below it.
 cache_owns() {
   local cache parent
   case "$1" in *..*) return 1 ;; esac
   cache=$(cd "$AUTODREAM_DIR/cache" 2>/dev/null && pwd -P) || return 1
-  parent=$(cd "$(dirname "$1")" 2>/dev/null && pwd -P) || return 1
+  parent=$(dirname "$1")
+  while [ ! -e "$parent" ] && [ ! -L "$parent" ]; do
+    [ "$parent" != "$(dirname "$parent")" ] || return 1
+    parent=$(dirname "$parent")
+  done
+  parent=$(cd "$parent" 2>/dev/null && pwd -P) || return 1
   case "$parent/" in "$cache"/*) return 0 ;; esac
   return 1
 }
@@ -1607,8 +1617,9 @@ changelog_window() {
   # loop in a `> "$out"` block: log() writes to stdout, so that would file the runner's
   # own progress lines as upstream release notes.
   printf '# Harness changelogs — commits in [%s, %s)\n\n' "$TARGET_DATE" "$NEXT_DATE" > "$out"
-  # The default caches live here. cache_owns resolves this directory, so on a fresh install
-  # the first clone would count as foreign, and run with the user's git config, without it.
+  # The default caches live here. cache_owns resolves this directory as the root every owned
+  # path must sit under, so on a fresh install the first clone would count as foreign, and run
+  # with the user's git config, without it.
   mkdir -p "$AUTODREAM_DIR/cache" 2>/dev/null || true
   # Local here, and seen by changelog_fail and changelog_warn_all_failed through bash's
   # dynamic scoping, so it never outlives the run's one changelog pass.
