@@ -108,7 +108,7 @@ jq -R -s \
       $lines[]
       | select(.type == "user" and .isMeta != true)
       | .message.content
-      | if type == "string" then . elif type == "array" then ([.[]? | select(.type == "text") | .text] | join("\n")) else empty end
+      | if type == "string" then . elif type == "array" then ([.[]? | select(type == "object" and .type == "text") | .text | strings] | join("\n")) else empty end
       | (try (capture("<command-name>/?(?<name>[^<\\s]+)</command-name>") | .name) catch empty)
       # Claude Code records its own commands the same way as a skill. Without this list a session
       # that only ran /clear or /model would measure as having invoked a skill. Best effort: a
@@ -134,8 +134,8 @@ jq -R -s \
       | .message.content[]
       | select(type == "object" and .type == "tool_result" and .is_error == true)
       | .content
-      | if type == "string" then . elif type == "array" then ([.[]? | select(.type == "text") | .text] | join("\n")) else "" end
-      | select(test("^\\s*(<tool_use_error>)?\\s*sandbox-shape: "))
+      | if type == "string" then . elif type == "array" then ([.[]? | select(type == "object" and .type == "text") | .text | strings] | join("\n")) else "" end
+      | select(test("\\A\\s*(<tool_use_error>)?\\s*sandbox-shape: "))
     ] | length) as $sandbox_shape_denies
   | {
       user_message_count: ($user_messages | length),

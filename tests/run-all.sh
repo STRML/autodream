@@ -979,10 +979,12 @@ test_session_stats(){
     '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"e","is_error":false,"content":"   12\tthe bypass flag is refused as sandbox-shape: see git.md"}]}}' \
     '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"f","is_error":false,"content":"sandbox-shape: printed by a grep, not a deny"}]}}' \
     '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"g","is_error":true,"content":"Operation not permitted: mentions sandbox-shape: mid-text"}]}}' \
+    '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"h","is_error":true,"content":"exit 1\nsandbox-shape: on a later line of an error, not its opening"}]}}' \
+    '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"i","is_error":true,"content":["a bare string element",{"type":"text","text":"<tool_use_error>sandbox-shape: beside a non-object element</tool_use_error>"}]}]}}' \
     '{"type":"attachment","attachment":{"type":"instructions","content":"sandbox-shape: in an instructions file"}}' \
     '{"type":"assistant","message":{"content":[{"type":"text","text":"sandbox-shape: quoted by the agent"}]}}' > "$fixture"
   "$REPO/bin/session-stats.sh" "$fixture" "$out"
-  assert_eq "$(jq -r .sandbox_shape_denies "$out")" "4" "four signed denies: string content, bare or wrapped, array content, two blocks in one record"
+  assert_eq "$(jq -r .sandbox_shape_denies "$out")" "5" "five signed denies: string content, bare or wrapped, array content (one beside a non-object element), two blocks in one record; a later line is not the opening"
   rm -rf "$root"
 }
 
