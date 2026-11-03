@@ -915,8 +915,9 @@ test_session_stats(){
     '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"b","content":"result"}]}}' > "$fixture"
   "$REPO/bin/session-stats.sh" "$fixture" "$out"
   assert_eq "$(jq -r 'keys | sort | join(",")' "$out")" \
-    "duration_minutes,isSidechain,models_used,skills_authored,skills_invoked,skills_invoked_count,skills_invoked_counts,tool_call_count,tools_used,transcript_bytes,transcript_mtime,turn_count,user_message_count,user_turn_timestamps" \
+    "duration_minutes,isSidechain,models_used,sandbox_shape_denies,skills_authored,skills_invoked,skills_invoked_count,skills_invoked_counts,tool_call_count,tools_used,transcript_bytes,transcript_mtime,turn_count,user_message_count,user_turn_timestamps" \
     "stats output has exactly the specified fields"
+  assert_eq "$(jq -r .sandbox_shape_denies "$out")" "0" "no sandbox-shape deny is a measured 0, not a blank"
   assert_eq "$(jq -r '.user_turn_timestamps | length' "$out")" "0" "no timestamped user turns in this fixture -> empty user_turn_timestamps"
   assert_eq "$(jq -r .user_message_count "$out")" "1" "tool_result carriers are excluded from user message count"
   assert_eq "$(jq -r .turn_count "$out")" "4" "turn count includes tool_result carriers"
@@ -964,6 +965,24 @@ test_session_stats(){
   assert_eq "$(jq -r .tool_call_count "$out")" "3" "sidechain tool calls are counted mechanically"
   assert_eq "$(jq -r '.tools_used | join(",")' "$out")" "Bash,Read,Write" "sidechain tools are sorted and unique"
   assert_eq "$(jq -r .isSidechain "$out")" "true" "sidechain marker is copied"
+
+  # sandbox_shape_denies counts tool_result blocks whose text OPENS with a deny the
+  # sandbox-shape guard signs. The real deny is a tool_use_error with is_error true
+  # (measured 2026-11-03: 52 in one local-llm session, every one anchored). A Read or grep
+  # that merely shows the string mid-text, an attachment and an assistant line are not denies.
+  fixture="$root/shape.jsonl"; out="$root/shape.stats.json"
+  printf '%s\n' \
+    '{"type":"user","message":{"content":"push it"}}' \
+    '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"a","is_error":true,"content":"<tool_use_error>sandbox-shape: this command already runs outside the sandbox. Drop dangerouslyDisableSandbox and send it again unchanged.</tool_use_error>"}]}}' \
+    '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"b","is_error":true,"content":"sandbox-shape: the wrapper (cd, git -C, timeout or a redirect) is what puts this call back inside the sandbox"}]}}' \
+    '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"c","is_error":true,"content":[{"type":"text","text":"<tool_use_error>sandbox-shape: this command already runs outside the sandbox.</tool_use_error>"}]},{"type":"tool_result","tool_use_id":"d","is_error":true,"content":"<tool_use_error>sandbox-shape: second block in one record</tool_use_error>"}]}}' \
+    '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"e","is_error":false,"content":"   12\tthe bypass flag is refused as sandbox-shape: see git.md"}]}}' \
+    '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"f","is_error":false,"content":"sandbox-shape: printed by a grep, not a deny"}]}}' \
+    '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"g","is_error":true,"content":"Operation not permitted: mentions sandbox-shape: mid-text"}]}}' \
+    '{"type":"attachment","attachment":{"type":"instructions","content":"sandbox-shape: in an instructions file"}}' \
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"sandbox-shape: quoted by the agent"}]}}' > "$fixture"
+  "$REPO/bin/session-stats.sh" "$fixture" "$out"
+  assert_eq "$(jq -r .sandbox_shape_denies "$out")" "4" "four signed denies: string content, bare or wrapped, array content, two blocks in one record"
   rm -rf "$root"
 }
 
@@ -3466,6 +3485,38 @@ test_prompt_counts_from_the_rollup(){
   assert_nogrep "$P" 'Read them all' "or to read every findings JSON"
   assert_nogrep "$P" 'use Glob then Read' "and How to start does not glob them either"
   assert_nogrep "$P" '\*\.json\.err' "a failed triage is found from the status column, not a *.json.err glob"
+  assert_grep   "$P" '`sandbox_shape_denies`' "PROMPT.md names the sandbox_shape_denies column"
+  assert_grep   "$P" 'sandbox_shape_denies_min' "and reads its threshold from run-stats.txt"
+}
+
+# The sandbox-shape guard's denies, counted by the runner (2026-11-03): #175 stopped L1 scoring
+# them as sandbox_friction, which left a session that hit the deny 124 times invisible.
+test_sandbox_shape_denies_reach_the_rollup(){
+  echo "# sandbox_shape_denies: counted from the transcript, carried into rollup.tsv, threshold in run-stats"
+  local root; root=$(setup_env); mk_session "$root" quiet
+  local f="$root/projects/proj-a/shape.jsonl" i
+  printf '%s\n' '{"type":"user","cwd":"/tmp/proj-a","message":{"content":"push the branch"}}' \
+    '{"type":"user","message":{"content":"keep going"}}' > "$f"
+  for i in $(seq 1 12); do
+    printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t%s","name":"Bash","input":{"command":"ls","dangerouslyDisableSandbox":true}}]}}\n' "$i" >> "$f"
+    printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t%s","is_error":true,"content":"<tool_use_error>sandbox-shape: this command already runs outside the sandbox. Drop dangerouslyDisableSandbox and send it again unchanged.</tool_use_error>"}]}}\n' "$i" >> "$f"
+  done
+  touch -t "$STAMP" "$f"
+  run_dream "$root"
+  local d; d=$(fdir "$root")
+  local col; col=$(head -1 "$d/rollup.tsv" 2>/dev/null | tr '\t' '\n' | grep -n '^sandbox_shape_denies$' | cut -d: -f1)
+  assert_eq "${col:-none}" "19" "rollup.tsv has the column, last"
+  assert_eq "$(awk -F'\t' -v k="$(hash_of "$f")" -v c="${col:-19}" '($1 "") == (k "") {print $c}' "$d/rollup.tsv")" "12" "the session's twelve denies"
+  assert_eq "$(awk -F'\t' -v k="$(hash_of "$root/projects/proj-a/quiet.jsonl")" -v c="${col:-19}" '($1 "") == (k "") {print $c}' "$d/rollup.tsv")" "0" "a session with none reads a measured 0"
+  assert_grep "$d/run-stats.txt" '^sandbox_shape_denies_min: 10$' "the default threshold reaches run-stats for L2"
+  AUTODREAM_FORCE=1 AUTODREAM_SANDBOX_SHAPE_MIN=05 run_dream "$root"
+  assert_grep "$d/run-stats.txt" '^sandbox_shape_denies_min: 5$' "an override reaches it too, read as decimal"
+  AUTODREAM_FORCE=1 AUTODREAM_SANDBOX_SHAPE_MIN=ten run_dream "$root"
+  assert_eq "$(cat "$root/run.exit")" "1" "a non-numeric threshold refuses to start"
+  assert_grep "$root/run.out" 'AUTODREAM_SANDBOX_SHAPE_MIN must be a positive integer' "and says why"
+  AUTODREAM_FORCE=1 AUTODREAM_SANDBOX_SHAPE_MIN=0 run_dream "$root"
+  assert_eq "$(cat "$root/run.exit")" "1" "0 refuses to start: it would list every session"
+  rm -rf "$root"
 }
 
 test_overlap_none(){
@@ -3661,6 +3712,7 @@ _run test_overlap_drops_nested_sidecars
 _run test_fanout_stats
 _run test_rollup_written_for_l2
 _run test_prompt_counts_from_the_rollup
+_run test_sandbox_shape_denies_reach_the_rollup
 _run test_overlap_not_measured_missing_bin
 _run test_overlap_not_measured_empty_output
 _run test_overlap_not_measured_malformed_output
@@ -6528,7 +6580,7 @@ test_chunking_leaves_a_transcript_that_fits_alone(){
   AUTODREAM_L1_CHUNK_BYTES=300000 run_chunked "$root"; unset MOCK_MODE MOCK_CALL_LOG
   assert_eq "$(wc -l < "$root/calls.log" | tr -d ' ')" "1" "one engine call"
   assert_eq "$(nreads "$root")" "0" "and it was not a chunk"
-  assert_nogrep "$root/cap/l1-stdin-$h.txt" 'Chunk note' "its prompt carries no chunk note"
+  assert_nogrep "$root/cap/l1-stdin-$h.txt" '^## Chunk note' "its prompt carries no chunk note"
   assert_grep "$fd/run-stats.txt" 'l1_chunked_sessions: 0$' "run-stats counts no chunked session"
   assert_grep "$fd/run-stats.txt" 'l1_chunk_calls: 0$' "and no chunk call"
   assert_nogrep "$root/cap/l1-read-$h.txt" 'HOOKNOISE' "it was slimmed with the bookkeeping dropped, so it reads as the conversation"
@@ -6581,7 +6633,7 @@ test_chunking_off_is_the_old_behaviour(){
   if cmp -s "$root/plain.slim" "$root/cap/l1-read-$h.txt"; then ok "what the worker read is exactly what the slimmer writes with no mode set"; else no "what the worker read is exactly what the slimmer writes with no mode set"; fi
   assert_grep "$root/cap/l1-read-$h.txt" 'lines elided by autodream for size' "with the elision marker and the head/tail view"
   assert_grep "$root/cap/l1-read-$h.txt" 'HOOKNOISE' "the bookkeeping is still in it (the reshape is part of the chunked mode)"
-  assert_nogrep "$root/cap/l1-stdin-$h.txt" 'Chunk note' "no chunk note"
+  assert_nogrep "$root/cap/l1-stdin-$h.txt" '^## Chunk note' "no chunk note"
   assert_eq "$(nreads "$root")" "0" "no chunk worker"
   assert_grep "$fd/run-stats.txt" 'l1_chunk_bytes: 0$' "run-stats says chunking is off"
   assert_grep "$fd/run-stats.txt" 'l1_chunk_calls: 0$' "and made no chunk call"

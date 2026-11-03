@@ -23,7 +23,7 @@
 # Columns of rollup.tsv:
 #   hash status project source nested is_advisor parent outcome user_message_count turn_count
 #   tool_call_count duration_minutes models_used findings skills_invoked_count skills_invoked_counts
-#   skills_authored instructions_given_count
+#   skills_authored instructions_given_count sandbox_shape_denies
 # status is triaged, gated (the noise gate's "skipped": "below_noise_gate" stub), error (the record
 # has an "error" key) or unreadable (the findings JSON does not parse, or its findings is not an
 # array, checked before the gate). Every status but gated is the set compute_fanout_stats in run.sh
@@ -35,6 +35,9 @@
 # of name=count (skill names carry ':').
 # skills_authored is a comma list, and instructions_given_count the length of instructions_given,
 # so L2 knows which sessions to open for the compliance check without opening every one.
+# sandbox_shape_denies is the sidecar's count of denies signed by the sandbox-shape guard. It is
+# blank, never 0, when the sidecar is missing, broken, predates the field, holds a non-number, or
+# comes from a harness that does not measure it (omp).
 # Text cells are escaped by jq's @tsv, so a tab or newline in a value never breaks a row.
 
 set -u
@@ -48,7 +51,7 @@ OUT=${2:-$DIR}
 [ -d "$OUT" ] || { echo "rollup.sh: no output dir: '${OUT}'" >&2; exit 2; }
 command -v jq >/dev/null 2>&1 || { echo "rollup.sh: jq not found" >&2; exit 2; }
 
-ROLLUP_HEADER='hash	status	project	source	nested	is_advisor	parent	outcome	user_message_count	turn_count	tool_call_count	duration_minutes	models_used	findings	skills_invoked_count	skills_invoked_counts	skills_authored	instructions_given_count'
+ROLLUP_HEADER='hash	status	project	source	nested	is_advisor	parent	outcome	user_message_count	turn_count	tool_call_count	duration_minutes	models_used	findings	skills_invoked_count	skills_invoked_counts	skills_authored	instructions_given_count	sandbox_shape_denies'
 CATEGORIES_HEADER='category	severity	sessions	findings	example_hashes'
 FINDINGS_HEADER='hash	category	severity	what'
 
@@ -81,7 +84,8 @@ ROW_JQ='
        then (.skills_invoked_counts | to_entries | map("\(.key | skill)=\(.value)") | join(","))
        else "" end),
       (if (.skills_authored | type) == "array" then (.skills_authored | map(skill) | join(",")) else "" end),
-      (if (.instructions_given | type) == "array" then (.instructions_given | length) else null end | cell)
+      (if (.instructions_given | type) == "array" then (.instructions_given | length) else null end | cell),
+      (if ($s.sandbox_shape_denies | type) == "number" then $s.sandbox_shape_denies else null end | cell)
     ] | @tsv),
     ($f[] | select(type == "object")
      | ["F", $h, (.category // "unknown" | word), (.severity // "unknown" | word), (.what // "" | tostring)]
@@ -101,9 +105,10 @@ UNREADABLE_JQ='
       ($s.user_message_count | cell), ($s.turn_count | cell), ($s.tool_call_count | cell),
       ($s.duration_minutes | cell),
       (if ($s.models_used | type) == "array" then ($s.models_used | map(tostring) | join(",")) else "" end),
-      "", "", "", "", "" ] | @tsv'
+      "", "", "", "", "",
+      (if ($s.sandbox_shape_denies | type) == "number" then $s.sandbox_shape_denies else null end | cell) ] | @tsv'
 
-# $1=hash -> one row (16 columns) on stdout. The first program that succeeds wins: the record
+# $1=hash -> one row (17 columns) on stdout. The first program that succeeds wins: the record
 # with its sidecar, the record alone (a sidecar that does not parse or is not an object), the
 # sidecar alone (a record that does not parse), then the bare hash.
 session_row() {
@@ -128,7 +133,7 @@ session_hashes() {
   done | LC_ALL=C sort
 }
 
-# stdin: 16-column rows -> 18 columns, source after project and parent after is_advisor.
+# stdin: 17-column rows -> 19 columns, source after project and parent after is_advisor.
 # The source comes from AUTODREAM_SOURCE_MAP when the runner passes it: that map was built before
 # any model ran, and an L1 worker holds the Write tool and can rewrite sessions-source.txt. The
 # file is the fallback for a standalone run.
@@ -143,7 +148,7 @@ join_source_parent() {
       }
       while ((getline line < fan) > 0) { split(line, a, "\t"); if (!(a[1] in p)) p[a[1]] = a[2] }
     }
-    { print $1, $2, $3, s[$1], $4, $5, p[$1], $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16 }'
+    { print $1, $2, $3, s[$1], $4, $5, p[$1], $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17 }'
 }
 
 # stdin: rollup.tsv body -> categories.tsv body. One row per category and severity, plus one

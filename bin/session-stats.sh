@@ -122,6 +122,21 @@ jq -R -s \
       | select(type == "string")
       | (try (capture("(^|/)skills/(?<name>[^/]+)/SKILL\\.md$") | .name) catch empty)
     ]) as $skills_authored
+  # Denies the sandbox-shape guard signs: a tool_result whose text OPENS with "sandbox-shape: ",
+  # bare or inside <tool_use_error>, with is_error true. Each one is a turn spent on a
+  # dangerouslyDisableSandbox the guard refused. L1 stopped scoring them as sandbox_friction
+  # (#175), so this count is the only place a session that keeps hitting the guard shows up.
+  # Anchored, because a Read or grep of a file that mentions the guard holds the same words
+  # mid-text (measured 2026-11-03: 52 anchored denies and 1 such echo in one session).
+  | ([
+      $lines[]
+      | select(.type == "user" and (.message.content | type) == "array")
+      | .message.content[]
+      | select(type == "object" and .type == "tool_result" and .is_error == true)
+      | .content
+      | if type == "string" then . elif type == "array" then ([.[]? | select(.type == "text") | .text] | join("\n")) else "" end
+      | select(test("^\\s*(<tool_use_error>)?\\s*sandbox-shape: "))
+    ] | length) as $sandbox_shape_denies
   | {
       user_message_count: ($user_messages | length),
       turn_count: ($turns | length),
@@ -143,6 +158,7 @@ jq -R -s \
       skills_invoked_count: ($skills_invoked | length),
       skills_invoked_counts: ($skills_invoked | group_by(.) | map({key: .[0], value: length}) | from_entries),
       skills_authored: ($skills_authored | unique | sort),
+      sandbox_shape_denies: $sandbox_shape_denies,
       # compliance_markers retired 2026-10-30 (omp: 2026-08-08): agents follow the retry
       # and delegation rules without typing the marker line, so the count measured silence.
       transcript_bytes: $transcript_bytes,
