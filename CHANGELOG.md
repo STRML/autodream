@@ -2,6 +2,11 @@
 
 All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
+## 2026-11-03
+
+### Added
+- **Sessions that keep hitting the sandbox-shape guard show up again, counted by the runner.** #175 stopped L1 scoring a deny signed `sandbox-shape:` as `sandbox_friction`, because the guard working is not friction, and that made a session that hit the deny over and over invisible (one rush-ops session hit it 124 times). `session-stats.sh` now counts the `tool_result` blocks with `is_error` true whose text opens with that signature, bare or inside `<tool_use_error>`, into the sidecar's `sandbox_shape_denies`. `rollup.tsv` carries it as a new last column, blank (never 0) when the sidecar is missing or broken or comes from omp, which does not measure it. The self-audit lists each session at or over `AUTODREAM_SANDBOX_SHAPE_MIN` (default 10, written to run-stats as `sandbox_shape_denies_min` so L2 can read it) as `hash · project · N denies`, and never folds them into a `sandbox_friction` pattern.
+
 ## 2026-11-01
 
 ### Fixed
