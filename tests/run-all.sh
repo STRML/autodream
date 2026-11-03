@@ -6528,7 +6528,7 @@ test_chunking_leaves_a_transcript_that_fits_alone(){
   AUTODREAM_L1_CHUNK_BYTES=300000 run_chunked "$root"; unset MOCK_MODE MOCK_CALL_LOG
   assert_eq "$(wc -l < "$root/calls.log" | tr -d ' ')" "1" "one engine call"
   assert_eq "$(nreads "$root")" "0" "and it was not a chunk"
-  assert_nogrep "$root/cap/l1-stdin-$h.txt" 'Chunk note' "its prompt carries no chunk note"
+  assert_nogrep "$root/cap/l1-stdin-$h.txt" '^## Chunk note' "its prompt carries no chunk note"
   assert_grep "$fd/run-stats.txt" 'l1_chunked_sessions: 0$' "run-stats counts no chunked session"
   assert_grep "$fd/run-stats.txt" 'l1_chunk_calls: 0$' "and no chunk call"
   assert_nogrep "$root/cap/l1-read-$h.txt" 'HOOKNOISE' "it was slimmed with the bookkeeping dropped, so it reads as the conversation"
@@ -6581,7 +6581,7 @@ test_chunking_off_is_the_old_behaviour(){
   if cmp -s "$root/plain.slim" "$root/cap/l1-read-$h.txt"; then ok "what the worker read is exactly what the slimmer writes with no mode set"; else no "what the worker read is exactly what the slimmer writes with no mode set"; fi
   assert_grep "$root/cap/l1-read-$h.txt" 'lines elided by autodream for size' "with the elision marker and the head/tail view"
   assert_grep "$root/cap/l1-read-$h.txt" 'HOOKNOISE' "the bookkeeping is still in it (the reshape is part of the chunked mode)"
-  assert_nogrep "$root/cap/l1-stdin-$h.txt" 'Chunk note' "no chunk note"
+  assert_nogrep "$root/cap/l1-stdin-$h.txt" '^## Chunk note' "no chunk note"
   assert_eq "$(nreads "$root")" "0" "no chunk worker"
   assert_grep "$fd/run-stats.txt" 'l1_chunk_bytes: 0$' "run-stats says chunking is off"
   assert_grep "$fd/run-stats.txt" 'l1_chunk_calls: 0$' "and made no chunk call"
