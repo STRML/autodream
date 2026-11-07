@@ -2,6 +2,11 @@
 
 All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
+## 2026-11-06
+
+### Added
+- **A warning banner before a claude.ai sign-in ends.** Once a stored claude.ai sign-in passes its end date, every model call fails and the night is lost, and nothing warned beforehand. Claude Code 2.1.318 reports the end date as `loginExpiresAt` in `claude auth status --json`. The claude adapter's `whoami` now returns it as `expires` (`unknown` when not reported), the log and run-stats `login_<engine>:` line end in `expires=<ISO time>`, and a sign-in that ends within `AUTODREAM_LOGIN_WARN_DAYS` (default 10, the same lead time as the CLI's own `claude -p` warning; 0 turns it off) posts one `notify.sh --warning` banner per engine per run that names `claude auth login`. The run goes ahead either way.
+
 ## 2026-11-03
 
 ### Added

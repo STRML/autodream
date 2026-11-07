@@ -235,15 +235,17 @@ case "$cmd" in
     printf '%s\n' "$line"
     ;;
 
-  whoami) # -> one JSON object {provider, auth, plan, account}, each "unknown" when not reported
+  whoami) # -> one JSON object {provider, auth, plan, account, expires}, each "unknown" when not reported
     # Who this engine's calls run as, read from the login they will use, with no model call:
     # `claude auth status --json` reports the API provider (firstParty is Anthropic's own API),
-    # the sign-in method, the subscription plan and the account email.
+    # the sign-in method, the subscription plan, the account email and, for a stored claude.ai
+    # sign-in (Claude Code 2.1.318 and later), when that sign-in ends.
     out=$("${CLAUDE_BIN:-$HOME/.local/bin/claude}" auth status --json </dev/null 2>/dev/null) || out=""
     [ -n "$out" ] || out="{}"
     printf '%s' "$out" | jq -c '{provider: (.apiProvider // "unknown"), auth: (.authMethod // "unknown"),
-      plan: (.subscriptionType // "unknown"), account: (.email // "unknown")} | map_values(tostring)' 2>/dev/null \
-      || printf '{"provider":"unknown","auth":"unknown","plan":"unknown","account":"unknown"}\n'
+      plan: (.subscriptionType // "unknown"), account: (.email // "unknown"),
+      expires: (.loginExpiresAt // "unknown")} | map_values(tostring)' 2>/dev/null \
+      || printf '{"provider":"unknown","auth":"unknown","plan":"unknown","account":"unknown","expires":"unknown"}\n'
     ;;
 
   l1-env) # -> KEY=VALUE lines the engine needs in its environment

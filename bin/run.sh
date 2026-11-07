@@ -98,6 +98,8 @@
 #                        status). An L1 engine that fails triages nothing; a failing L2 engine
 #                        stops the run before it starts      default: record only
 #                        (e.g. "provider=firstParty auth=claude.ai plan=max")
+#   AUTODREAM_LOGIN_WARN_DAYS  post a warning banner when an engine's claude.ai sign-in ends within
+#                        this many days; 0 turns it off                       default: 10
 #   AUTODREAM_L1_REQUIRE_SERVED  1 discards the findings of any L1 call answered by a model other
 #                        than the requested one, as the engine's served verb judges it (claude: an
 #                        alias such as haiku matches the claude-haiku-... id it answers as). An
@@ -773,7 +775,7 @@ review_engine() {
 # Who an engine's calls run as, read once per engine before it is handed anything: the adapter's
 # whoami verb reports the API provider, sign-in method, plan and account of its login (claude:
 # `claude auth status`, no model call), and an engine without the verb reports unknown. Each answer
-# is logged once and kept in ENGINE_LOGINS (engine, provider, auth, plan, account; tab-separated)
+# is logged once and kept in ENGINE_LOGINS (engine, provider, auth, plan, account, expires; tab-separated)
 # for run-stats. AUTODREAM_REQUIRE_LOGIN lists key=value pairs that must all match; on a mismatch
 # this returns 1 with the reason in LOGIN_REFUSAL.
 ENGINE_LOGINS=""
@@ -784,9 +786,10 @@ engine_login_ok() { # $1=engine -> 0 when its login meets AUTODREAM_REQUIRE_LOGI
   if [ -z "$row" ]; then
     who=$(adapter_run "$eng" whoami 2>/dev/null) || who=""
     printf '%s' "$who" | jq -e 'type == "object"' >/dev/null 2>&1 || who='{}'
-    row="$eng"$'\t'"$(printf '%s' "$who" | jq -r '[.provider, .auth, .plan, .account] | map(. // "unknown" | tostring) | @tsv')"
+    row="$eng"$'\t'"$(printf '%s' "$who" | jq -r '[.provider, .auth, .plan, .account, .expires] | map(. // "unknown" | tostring) | @tsv')"
     ENGINE_LOGINS="${ENGINE_LOGINS}${row}"$'\n'
-    log "login for the $eng engine: $(printf '%s' "$row" | awk -F'\t' '{ printf "provider=%s auth=%s plan=%s account=%s", $2, $3, $4, $5 }')"
+    log "login for the $eng engine: $(printf '%s' "$row" | awk -F'\t' '{ printf "provider=%s auth=%s plan=%s account=%s expires=%s", $2, $3, $4, $5, $6 }')"
+    login_expiry_warn "$eng" "$(printf '%s' "$row" | cut -f6)"
   fi
   LOGIN_REFUSAL=""
   for req in ${AUTODREAM_REQUIRE_LOGIN:-}; do
@@ -801,6 +804,28 @@ engine_login_ok() { # $1=engine -> 0 when its login meets AUTODREAM_REQUIRE_LOGI
     [ "$have" = "$want" ] || { LOGIN_REFUSAL="$k is $have, not $want"; return 1; }
   done
   return 0
+}
+# Once a stored claude.ai sign-in passes its end date every model call fails and the night is lost,
+# and nothing said so beforehand. So a sign-in that ends within AUTODREAM_LOGIN_WARN_DAYS (default 10,
+# the lead time Claude Code's own `claude -p` warning uses) posts one warning banner per engine per
+# run. engine_login_ok calls this once per engine, when it first reads the login.
+login_expiry_warn() { # $1=engine $2=end time as whoami reports it (ISO 8601 UTC) or unknown
+  local days="${AUTODREAM_LOGIN_WARN_DAYS:-10}" stamp end left msg
+  [ "$days" -gt 0 ] 2>/dev/null || return 0
+  stamp=$(printf '%s' "$2" | sed -n 's/^\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\)T\([0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\).*Z$/\1 \2/p')
+  [ -n "$stamp" ] || return 0
+  end=$(TZ=UTC pdate_epoch "$stamp") || return 0
+  left=$(( end - $(date +%s) ))
+  [ "$left" -lt $(( days * 86400 )) ] || return 0
+  if [ "$left" -le 0 ]; then
+    msg="the claude.ai sign-in of the $1 engine ended $2; run claude auth login"
+  else
+    msg="the claude.ai sign-in of the $1 engine ends $2 (in $(( left / 86400 )) days); run claude auth login before then"
+  fi
+  log "WARNING: $msg"
+  [ -x "$AUTODREAM_DIR/notify.sh" ] || return 0
+  "$AUTODREAM_DIR/notify.sh" --warning "$TARGET_DATE" "$msg" \
+    || log "login expiry notification returned non-zero (continuing)"
 }
 _enabled_adapters_uncached() {
   # "Genuinely absent" means the loader is not sourced OR the adapters tree does
@@ -4255,9 +4280,9 @@ PY
     # Who each engine the run used ran as (engine_login_ok), and which models answered the L1 calls
     # recorded for this date in l1-served.tsv, so a report traces to the login and model behind it.
     # The cost is the engine's own estimate at API prices, not what a subscription bills.
-    while IFS=$'\t' read -r _msrc _pprov _pauth _pplan _pacct; do
+    while IFS=$'\t' read -r _msrc _pprov _pauth _pplan _pacct _pexp; do
       [ -n "$_msrc" ] || continue
-      printf 'login_%s: provider=%s auth=%s plan=%s account=%s\n' "$(printf '%s' "$_msrc" | tr '-' '_')" "$_pprov" "$_pauth" "$_pplan" "$_pacct"
+      printf 'login_%s: provider=%s auth=%s plan=%s account=%s expires=%s\n' "$(printf '%s' "$_msrc" | tr '-' '_')" "$_pprov" "$_pauth" "$_pplan" "$_pacct" "${_pexp:-unknown}"
     done <<< "${ENGINE_LOGINS:-}"
     # Mismatch is the adapter verdict (column 6), the same one AUTODREAM_L1_REQUIRE_SERVED acts on.
     # A call the engine reported no model for (omp has no served verb), or a row written before the

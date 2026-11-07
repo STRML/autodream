@@ -4813,13 +4813,49 @@ test_omp_session_roots_come_from_the_host_setting(){
   rm -rf "$root"
 }
 
+test_login_expiry_warns_before_the_sign_in_ends(){
+  echo "# a claude.ai sign-in that ends within AUTODREAM_LOGIN_WARN_DAYS posts one warning; the run still goes ahead"
+  local root fd soon
+  local base='{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"test@example.com","subscriptionType":"max"'
+  soon=$(TZ=UTC pdate_fmt_epoch "$(( $(date +%s) + 3 * 86400 + 3600 ))" '+%Y-%m-%dT%H:%M:%S.000Z')
+  root=$(setup_env); mk_session "$root" sess1; stub_notify "$root"
+  MOCK_AUTH_STATUS="$base,\"loginExpiresAt\":\"$soon\"}" run_dream "$root"
+  fd=$(fdir "$root")
+  assert_grep "$fd/run-stats.txt" "^login_claude: provider=firstParty auth=claude.ai plan=max account=test@example.com expires=$soon\$" "run-stats records when the sign-in ends"
+  assert_grep "$root/run.out" "WARNING: the claude.ai sign-in of the claude engine ends $soon (in 3 days)" "the log says when, in days"
+  assert_eq "$(grep -c '^--warning .*sign-in of the claude engine ends' "$root/notify-args.txt" 2>/dev/null)" "1" "one banner, though L1 and L2 both check the engine"
+  assert_grep "$root/notify-args.txt" 'claude auth login' "and the banner names the fix"
+  [ -n "$(ls "$fd"/*.json 2>/dev/null | grep -v stats)" ] && ok "the night is still triaged" || no "the night is still triaged"
+  rm -rf "$root"
+  echo "# a sign-in that has already ended says so"
+  root=$(setup_env); mk_session "$root" sess1; stub_notify "$root"
+  MOCK_AUTH_STATUS="$base,\"loginExpiresAt\":\"2020-01-01T00:00:00.000Z\"}" run_dream "$root"
+  assert_grep "$root/notify-args.txt" '^--warning .*sign-in of the claude engine ended 2020-01-01T00:00:00.000Z' "an ended sign-in reads as ended"
+  rm -rf "$root"
+  echo "# one far off, or none reported, posts nothing"
+  root=$(setup_env); mk_session "$root" sess1; stub_notify "$root"
+  MOCK_AUTH_STATUS="$base,\"loginExpiresAt\":\"2099-01-01T00:00:00.000Z\"}" run_dream "$root"
+  assert_nogrep "$root/notify-args.txt" 'sign-in of the' "a sign-in 70 years out posts nothing"
+  assert_nogrep "$root/run.out" 'WARNING: the claude.ai sign-in' "and logs no warning"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" sess1; stub_notify "$root"
+  run_dream "$root"
+  assert_nogrep "$root/notify-args.txt" 'sign-in of the' "an unknown end date posts nothing"
+  rm -rf "$root"
+  echo "# AUTODREAM_LOGIN_WARN_DAYS=0 turns the warning off"
+  root=$(setup_env); mk_session "$root" sess1; stub_notify "$root"
+  AUTODREAM_LOGIN_WARN_DAYS=0 MOCK_AUTH_STATUS="$base,\"loginExpiresAt\":\"$soon\"}" run_dream "$root"
+  assert_nogrep "$root/notify-args.txt" 'sign-in of the' "no banner"
+  rm -rf "$root"
+}
+
 test_l1_provenance_and_served_models_are_recorded(){
   echo "# who each engine runs as, and which model answered each call, reach the log and run-stats"
   local root fd; root=$(setup_env); mk_session "$root" sess1; mk_session "$root" sess2
   run_dream "$root"
   fd=$(fdir "$root")
-  assert_grep "$root/run.out" 'login for the claude engine: provider=firstParty auth=claude.ai plan=max account=test@example.com' "the log names the provider, sign-in, plan and account"
-  assert_grep "$fd/run-stats.txt" '^login_claude: provider=firstParty auth=claude.ai plan=max account=test@example.com$' "and so does run-stats"
+  assert_grep "$root/run.out" 'login for the claude engine: provider=firstParty auth=claude.ai plan=max account=test@example.com expires=unknown' "the log names the provider, sign-in, plan, account and when the sign-in ends"
+  assert_grep "$fd/run-stats.txt" '^login_claude: provider=firstParty auth=claude.ai plan=max account=test@example.com expires=unknown$' "and so does run-stats"
   assert_grep "$fd/run-stats.txt" '^l1_served_models: claude-haiku-5-5=2$' "each call is counted under the model that answered it"
   assert_grep "$fd/run-stats.txt" '^l1_served_mismatch: 0$' "none was answered by another model"
   assert_grep "$fd/run-stats.txt" '^l1_served_unmeasured: 0$' "and every call reported its model"
@@ -6093,6 +6129,7 @@ _run test_an_unusable_l1_engine_override_fails_closed
 _run test_a_no_engine_record_is_retried_once_an_engine_resolves
 _run test_omp_session_roots_come_from_the_host_setting
 _run test_l1_provenance_and_served_models_are_recorded
+_run test_login_expiry_warns_before_the_sign_in_ends
 _run test_an_engine_failing_its_login_requirement_is_handed_nothing
 _run test_a_call_answered_by_another_model_loses_its_findings
 _run test_require_served_holds_cached_findings_to_their_verdict

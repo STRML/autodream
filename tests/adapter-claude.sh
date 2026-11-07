@@ -306,13 +306,13 @@ assert_eq "$("$A" served "$tmp/r7" claude-opus-5-5 | cut -f3)" "match" "includin
 
 echo "# whoami: who the engine's calls run as, read from claude auth status"
 printf '%s\n' '#!/bin/sh' '[ "$1 $2 $3" = "auth status --json" ] || exit 9' \
-  "printf '%s\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"email\":\"a@example.com\",\"subscriptionType\":\"max\",\"orgId\":\"x\"}'" > "$tmp/fake-claude"
+  "printf '%s\n' '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"email\":\"a@example.com\",\"subscriptionType\":\"max\",\"loginExpiresAt\":\"2026-11-15T05:26:13.425Z\",\"orgId\":\"x\"}'" > "$tmp/fake-claude"
 chmod +x "$tmp/fake-claude"
-assert_eq "$(CLAUDE_BIN="$tmp/fake-claude" "$A" whoami)" '{"provider":"firstParty","auth":"claude.ai","plan":"max","account":"a@example.com"}' "provider, sign-in, plan and account, nothing else"
+assert_eq "$(CLAUDE_BIN="$tmp/fake-claude" "$A" whoami)" '{"provider":"firstParty","auth":"claude.ai","plan":"max","account":"a@example.com","expires":"2026-11-15T05:26:13.425Z"}' "provider, sign-in, plan, account and when the sign-in ends, nothing else"
 printf '%s\n' '#!/bin/sh' "printf '%s\n' '{\"loggedIn\":false,\"authMethod\":\"none\",\"apiProvider\":\"firstParty\",\"subscriptionType\":null}'; exit 1" > "$tmp/fake-claude-out"
 chmod +x "$tmp/fake-claude-out"
-assert_eq "$(CLAUDE_BIN="$tmp/fake-claude-out" "$A" whoami)" '{"provider":"unknown","auth":"unknown","plan":"unknown","account":"unknown"}' "a failing status call reports unknown, not what it half-printed"
-assert_eq "$(CLAUDE_BIN=/usr/bin/false "$A" whoami)" '{"provider":"unknown","auth":"unknown","plan":"unknown","account":"unknown"}' "no status at all reports unknown"
+assert_eq "$(CLAUDE_BIN="$tmp/fake-claude-out" "$A" whoami)" '{"provider":"unknown","auth":"unknown","plan":"unknown","account":"unknown","expires":"unknown"}' "a failing status call reports unknown, not what it half-printed"
+assert_eq "$(CLAUDE_BIN=/usr/bin/false "$A" whoami)" '{"provider":"unknown","auth":"unknown","plan":"unknown","account":"unknown","expires":"unknown"}' "no status at all reports unknown"
 
 printf '\npassed: %s   failed: %s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
