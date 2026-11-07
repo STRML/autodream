@@ -3225,6 +3225,9 @@ test_notify_warning_is_not_a_failure(){
   assert_grep "$root/banner.log" '^autodream-warn-2020-03-01$' "in its own notification group"
   assert_no_file "$root/inbox/2020-03-01-FAILED.txt" "a warning writes no FAILED inbox file"
   : > "$root/banner.log"
+  AUTODREAM_DIR="$root" "$NOTIFY" --warning 2020-03-01 "the sign-in ends soon" login-claude > "$root/notify.out" 2>&1
+  assert_grep "$root/banner.log" '^autodream-warn-login-claude-2020-03-01$' "a warning with a key gets a group of its own, so a later warning cannot replace it"
+  : > "$root/banner.log"
   AUTODREAM_DIR="$root" "$NOTIFY" --failure 2020-03-01 "the run died" > "$root/notify.out" 2>&1
   assert_grep "$root/banner.log" '^FAILED: the run died$' "a failure is still labelled FAILED"
   assert_file "$root/inbox/2020-03-01-FAILED.txt" "and still writes its inbox file"
@@ -4813,13 +4816,69 @@ test_omp_session_roots_come_from_the_host_setting(){
   rm -rf "$root"
 }
 
+test_login_expiry_warns_before_the_sign_in_ends(){
+  echo "# a claude.ai sign-in that ends within AUTODREAM_LOGIN_WARN_DAYS posts one warning; the run still goes ahead"
+  local root fd soon
+  local base='{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"test@example.com","subscriptionType":"max"'
+  soon=$(TZ=UTC pdate_fmt_epoch "$(( $(date +%s) + 3 * 86400 + 3600 ))" '+%Y-%m-%dT%H:%M:%S.000Z')
+  root=$(setup_env); mk_session "$root" sess1; stub_notify "$root"
+  MOCK_AUTH_STATUS="$base,\"loginExpiresAt\":\"$soon\"}" run_dream "$root"
+  fd=$(fdir "$root")
+  assert_grep "$fd/run-stats.txt" "^login_claude: provider=firstParty auth=claude.ai plan=max account=test@example.com expires=$soon\$" "run-stats records when the sign-in ends"
+  assert_grep "$root/run.out" "WARNING: the claude.ai sign-in of the claude engine ends $soon (in 3 days)" "the log says when, in days"
+  assert_eq "$(grep -c '^--warning .*sign-in of the claude engine ends' "$root/notify-args.txt" 2>/dev/null)" "1" "one banner, though L1 and L2 both check the engine"
+  assert_grep "$root/notify-args.txt" 'claude auth login' "and the banner names the fix"
+  [ -n "$(ls "$fd"/*.json 2>/dev/null | grep -v stats)" ] && ok "the night is still triaged" || no "the night is still triaged"
+  rm -rf "$root"
+  echo "# a sign-in that has already ended fails the login check: the summary engine stops the run before it reads anything"
+  root=$(setup_env); mk_session "$root" sess1; stub_notify "$root"
+  MOCK_AUTH_STATUS="$base,\"loginExpiresAt\":\"2020-01-01T00:00:00.000Z\"}" MOCK_CALL_LOG="$root/calls.log" run_dream "$root"
+  assert_grep "$root/run.out" 'the claude engine, which writes the summary, fails its login check (its claude.ai sign-in ended 2020-01-01T00:00:00.000Z; run claude auth login). Refusing to start.' "the log says the sign-in ended and how to fix it"
+  assert_grep "$root/notify-args.txt" '^--failure ' "the failure banner is the one posted"
+  assert_nogrep "$root/notify-args.txt" '^--warning .*sign-in' "with no warning on top of it"
+  assert_no_file "$root/calls.log" "and no transcript reaches a model"
+  rm -rf "$root"
+  echo "# a sign-in that ends within a day counts hours, not 0 days"
+  local hours; hours=$(TZ=UTC pdate_fmt_epoch "$(( $(date +%s) + 5 * 3600 - 60 ))" '+%Y-%m-%dT%H:%M:%S.000Z')
+  root=$(setup_env); mk_session "$root" sess1; stub_notify "$root"
+  MOCK_AUTH_STATUS="$base,\"loginExpiresAt\":\"$hours\"}" run_dream "$root"
+  assert_grep "$root/run.out" "sign-in of the claude engine ends $hours (in 5 hours)" "five hours out reads as 5 hours"
+  rm -rf "$root"
+  echo "# AUTODREAM_LOGIN_WARN_DAYS=08 is 8 days, not an octal error that kills the run"
+  root=$(setup_env); mk_session "$root" sess1; stub_notify "$root"
+  AUTODREAM_LOGIN_WARN_DAYS=08 MOCK_AUTH_STATUS="$base,\"loginExpiresAt\":\"$soon\"}" run_dream "$root"
+  assert_eq "$(grep -c '^--warning .*sign-in of the claude engine ends' "$root/notify-args.txt" 2>/dev/null)" "1" "the warning still posts"
+  assert_file "$(fdir "$root")/run-stats.txt" "and the run finishes"
+  rm -rf "$root"
+  echo "# an end date on a login that is not claude.ai posts nothing (only a stored claude.ai sign-in has one)"
+  root=$(setup_env); mk_session "$root" sess1; stub_notify "$root"
+  MOCK_AUTH_STATUS='{"loggedIn":true,"authMethod":"apiKey","apiProvider":"firstParty","loginExpiresAt":"'"$soon"'"}' run_dream "$root"
+  assert_nogrep "$root/notify-args.txt" 'sign-in of the' "no banner"
+  rm -rf "$root"
+  echo "# one far off, or none reported, posts nothing"
+  root=$(setup_env); mk_session "$root" sess1; stub_notify "$root"
+  MOCK_AUTH_STATUS="$base,\"loginExpiresAt\":\"2099-01-01T00:00:00.000Z\"}" run_dream "$root"
+  assert_nogrep "$root/notify-args.txt" 'sign-in of the' "a sign-in 70 years out posts nothing"
+  assert_nogrep "$root/run.out" 'WARNING: the claude.ai sign-in' "and logs no warning"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" sess1; stub_notify "$root"
+  run_dream "$root"
+  assert_nogrep "$root/notify-args.txt" 'sign-in of the' "an unknown end date posts nothing"
+  rm -rf "$root"
+  echo "# AUTODREAM_LOGIN_WARN_DAYS=0 turns the warning off"
+  root=$(setup_env); mk_session "$root" sess1; stub_notify "$root"
+  AUTODREAM_LOGIN_WARN_DAYS=0 MOCK_AUTH_STATUS="$base,\"loginExpiresAt\":\"$soon\"}" run_dream "$root"
+  assert_nogrep "$root/notify-args.txt" 'sign-in of the' "no banner"
+  rm -rf "$root"
+}
+
 test_l1_provenance_and_served_models_are_recorded(){
   echo "# who each engine runs as, and which model answered each call, reach the log and run-stats"
   local root fd; root=$(setup_env); mk_session "$root" sess1; mk_session "$root" sess2
   run_dream "$root"
   fd=$(fdir "$root")
-  assert_grep "$root/run.out" 'login for the claude engine: provider=firstParty auth=claude.ai plan=max account=test@example.com' "the log names the provider, sign-in, plan and account"
-  assert_grep "$fd/run-stats.txt" '^login_claude: provider=firstParty auth=claude.ai plan=max account=test@example.com$' "and so does run-stats"
+  assert_grep "$root/run.out" 'login for the claude engine: provider=firstParty auth=claude.ai plan=max account=test@example.com expires=unknown' "the log names the provider, sign-in, plan, account and when the sign-in ends"
+  assert_grep "$fd/run-stats.txt" '^login_claude: provider=firstParty auth=claude.ai plan=max account=test@example.com expires=unknown$' "and so does run-stats"
   assert_grep "$fd/run-stats.txt" '^l1_served_models: claude-haiku-5-5=2$' "each call is counted under the model that answered it"
   assert_grep "$fd/run-stats.txt" '^l1_served_mismatch: 0$' "none was answered by another model"
   assert_grep "$fd/run-stats.txt" '^l1_served_unmeasured: 0$' "and every call reported its model"
@@ -4859,7 +4918,7 @@ test_an_engine_failing_its_login_requirement_is_handed_nothing(){
   local root fd h o; root=$(setup_env); mk_session "$root" sess1
   AUTODREAM_REQUIRE_LOGIN="provider=firstParty plan=pro" MOCK_CALL_LOG="$root/calls.log" run_dream "$root"
   assert_no_file "$root/calls.log" "no worker started"
-  assert_grep "$root/run.out" 'the claude engine, which writes the summary, fails AUTODREAM_REQUIRE_LOGIN (plan is max, not pro). Refusing to start.' "the log says which requirement failed"
+  assert_grep "$root/run.out" 'the claude engine, which writes the summary, fails its login check (plan is max, not pro). Refusing to start.' "the log says which requirement failed"
   assert_nogrep "$root/run.exit" '^0$' "and the run fails"
   rm -rf "$root"
   echo "# an L1 engine whose login does not match is handed no transcript, while the others run"
@@ -4867,11 +4926,11 @@ test_an_engine_failing_its_login_requirement_is_handed_nothing(){
   o=$(mk_omp_session "$root" uuuu)
   AUTODREAM_REQUIRE_LOGIN="provider=firstParty" run_dream_omp "$root"
   fd=$(fdir "$root")
-  assert_grep   "$root/run.out" 'login for the omp engine: provider=unknown auth=unknown plan=unknown account=unknown' "omp reports no login, so every field is unknown"
-  assert_grep   "$root/run.out" 'the omp engine fails AUTODREAM_REQUIRE_LOGIN (provider is unknown, not firstParty)' "and fails the requirement"
+  assert_grep   "$root/run.out" 'login for the omp engine: provider=unknown auth=unknown plan=unknown account=unknown expires=unknown' "omp reports no login, so every field is unknown"
+  assert_grep   "$root/run.out" 'the omp engine fails its login check (provider is unknown, not firstParty)' "and fails the requirement"
   assert_grep   "$fd/$(hash_of "$o").json" 'no L1 engine for this session' "its session gets the deterministic error record"
   assert_grep   "$fd/$h.json" 'always run tests after edits' "while the claude session is triaged"
-  assert_grep   "$fd/run-stats.txt" '^login_omp: provider=unknown auth=unknown plan=unknown account=unknown$' "run-stats records both logins"
+  assert_grep   "$fd/run-stats.txt" '^login_omp: provider=unknown auth=unknown plan=unknown account=unknown expires=unknown$' "run-stats records both logins"
   rm -rf "$root"
   echo "# a met requirement triages as usual, and a requirement on an unknown key fails closed"
   root=$(setup_env); mk_session "$root" sess1; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
@@ -6093,6 +6152,7 @@ _run test_an_unusable_l1_engine_override_fails_closed
 _run test_a_no_engine_record_is_retried_once_an_engine_resolves
 _run test_omp_session_roots_come_from_the_host_setting
 _run test_l1_provenance_and_served_models_are_recorded
+_run test_login_expiry_warns_before_the_sign_in_ends
 _run test_an_engine_failing_its_login_requirement_is_handed_nothing
 _run test_a_call_answered_by_another_model_loses_its_findings
 _run test_require_served_holds_cached_findings_to_their_verdict

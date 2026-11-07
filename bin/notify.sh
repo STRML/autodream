@@ -35,15 +35,20 @@ set -u
 # upstream changelog source failing). Same banner path, labelled WARNING, and no
 # <date>-FAILED.txt in the inbox, because the run did not fail.
 #
-#   notify.sh --warning <date> <reason>
+#   notify.sh --warning <date> <reason> [<key>]
+#
+# A key gives the warning a notification group of its own (autodream-warn-<key>-<date>), so two
+# warnings for one date do not replace each other. Without one, every warning shares a group.
 FAILURE_MODE=0
 BANNER_LABEL=FAILED
+WARN_KEY=""
 case "${1:-}" in
   --failure|--warning)
     FAILURE_MODE=1
     [ "$1" = "--warning" ] && BANNER_LABEL=WARNING
     DATE="${2:?Usage: notify.sh $1 <date> <reason>}"
     FAIL_REASON="${3:-the run stopped before it produced a report}"
+    WARN_KEY="${4:-}"
     REPORT=""
     ;;
 esac
@@ -94,7 +99,7 @@ if [ "$FAILURE_MODE" = "1" ]; then
   # cannot be posted must not become a second failure on top of the first.
   msg="Autodream $BANNER_LABEL for $DATE — $FAIL_REASON"
   label_lc=failure; group=fail
-  [ "$BANNER_LABEL" = "WARNING" ] && { label_lc=warning; group=warn; }
+  [ "$BANNER_LABEL" = "WARNING" ] && { label_lc=warning; group=warn${WARN_KEY:+-$WARN_KEY}; }
   # Honour the dry-run contract, which this branch returned before reaching. Its
   # documented promise is "writes no inbox file, posts no banner, opens nothing",
   # and anyone exercising the new failure path with it set got a live banner and a
