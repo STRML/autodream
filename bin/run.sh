@@ -776,8 +776,9 @@ review_engine() {
 # whoami verb reports the API provider, sign-in method, plan and account of its login (claude:
 # `claude auth status`, no model call), and an engine without the verb reports unknown. Each answer
 # is logged once and kept in ENGINE_LOGINS (engine, provider, auth, plan, account, expires; tab-separated)
-# for run-stats. AUTODREAM_REQUIRE_LOGIN lists key=value pairs that must all match; on a mismatch
-# this returns 1 with the reason in LOGIN_REFUSAL.
+# for run-stats. AUTODREAM_REQUIRE_LOGIN lists key=value pairs that must all match, and a claude.ai
+# sign-in past its end date fails too, since every model call on it would; either way this returns 1
+# with the reason in LOGIN_REFUSAL.
 ENGINE_LOGINS=""
 LOGIN_REFUSAL=""
 engine_login_ok() { # $1=engine -> 0 when its login meets AUTODREAM_REQUIRE_LOGIN, or nothing is required
@@ -789,9 +790,17 @@ engine_login_ok() { # $1=engine -> 0 when its login meets AUTODREAM_REQUIRE_LOGI
     row="$eng"$'\t'"$(printf '%s' "$who" | jq -r '[.provider, .auth, .plan, .account, .expires] | map(. // "unknown" | tostring) | @tsv')"
     ENGINE_LOGINS="${ENGINE_LOGINS}${row}"$'\n'
     log "login for the $eng engine: $(printf '%s' "$row" | awk -F'\t' '{ printf "provider=%s auth=%s plan=%s account=%s expires=%s", $2, $3, $4, $5, $6 }')"
-    login_expiry_warn "$eng" "$(printf '%s' "$row" | cut -f6)"
+    login_expiry_warn "$eng" "$(printf '%s' "$row" | cut -f3)" "$(printf '%s' "$row" | cut -f6)"
   fi
   LOGIN_REFUSAL=""
+  if [ "$(printf '%s' "$row" | cut -f3)" = "claude.ai" ]; then
+    local exp left
+    exp=$(printf '%s' "$row" | cut -f6)
+    if left=$(login_seconds_left "$exp") && [ "$left" -le 0 ]; then
+      LOGIN_REFUSAL="its claude.ai sign-in ended $exp; run claude auth login"
+      return 1
+    fi
+  fi
   for req in ${AUTODREAM_REQUIRE_LOGIN:-}; do
     k=${req%%=*}; want=${req#*=}
     case "$k" in
@@ -805,26 +814,33 @@ engine_login_ok() { # $1=engine -> 0 when its login meets AUTODREAM_REQUIRE_LOGI
   done
   return 0
 }
-# Once a stored claude.ai sign-in passes its end date every model call fails and the night is lost,
-# and nothing said so beforehand. So a sign-in that ends within AUTODREAM_LOGIN_WARN_DAYS (default 10,
-# the lead time Claude Code's own `claude -p` warning uses) posts one warning banner per engine per
-# run. engine_login_ok calls this once per engine, when it first reads the login.
-login_expiry_warn() { # $1=engine $2=end time as whoami reports it (ISO 8601 UTC) or unknown
-  local days="${AUTODREAM_LOGIN_WARN_DAYS:-10}" stamp end left msg
-  [ "$days" -gt 0 ] 2>/dev/null || return 0
-  stamp=$(printf '%s' "$2" | sed -n 's/^\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\)T\([0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\).*Z$/\1 \2/p')
-  [ -n "$stamp" ] || return 0
-  end=$(TZ=UTC pdate_epoch "$stamp") || return 0
-  left=$(( end - $(date +%s) ))
-  [ "$left" -lt $(( days * 86400 )) ] || return 0
-  if [ "$left" -le 0 ]; then
-    msg="the claude.ai sign-in of the $1 engine ended $2; run claude auth login"
-  else
-    msg="the claude.ai sign-in of the $1 engine ends $2 (in $(( left / 86400 )) days); run claude auth login before then"
-  fi
+# Seconds until a whoami end time (ISO 8601 UTC, as `claude auth status` prints loginExpiresAt), negative
+# once it has passed. Exits 1 for unknown or any shape it does not read.
+login_seconds_left() { # $1=end time
+  local stamp end
+  stamp=$(printf '%s' "$1" | sed -n 's/^\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\)T\([0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\).*Z$/\1 \2/p')
+  [ -n "$stamp" ] || return 1
+  end=$(TZ=UTC pdate_epoch "$stamp") || return 1
+  printf '%s' "$(( end - $(date +%s) ))"
+}
+# A claude.ai sign-in that ends within AUTODREAM_LOGIN_WARN_DAYS (default 10, the lead time Claude
+# Code's own `claude -p` warning uses) posts one warning banner per engine per run, in a notification
+# group of its own so a later warning on the same date cannot replace it. One that has already ended
+# posts nothing here: engine_login_ok refuses it, and the caller's failure says so.
+login_expiry_warn() { # $1=engine $2=auth $3=end time as whoami reports it
+  local days="${AUTODREAM_LOGIN_WARN_DAYS:-10}" left when msg
+  [ "$2" = "claude.ai" ] || return 0
+  case "$days" in ''|*[!0-9]*) return 0 ;; esac
+  days=$(( 10#$days ))
+  [ "$days" -gt 0 ] || return 0
+  left=$(login_seconds_left "$3") || return 0
+  [ "$left" -gt 0 ] && [ "$left" -le $(( days * 86400 )) ] || return 0
+  if [ "$left" -lt 86400 ]; then when="$(( (left + 3599) / 3600 )) hours"
+  else when="$(( left / 86400 )) days"; fi
+  msg="the claude.ai sign-in of the $1 engine ends $3 (in $when); run claude auth login before then"
   log "WARNING: $msg"
   [ -x "$AUTODREAM_DIR/notify.sh" ] || return 0
-  "$AUTODREAM_DIR/notify.sh" --warning "$TARGET_DATE" "$msg" \
+  "$AUTODREAM_DIR/notify.sh" --warning "$TARGET_DATE" "$msg" "login-$1" \
     || log "login expiry notification returned non-zero (continuing)"
 }
 _enabled_adapters_uncached() {
@@ -3462,7 +3478,7 @@ run() {
   # The engine that writes the summary (and runs dream triage) receives every finding, so its login
   # is held to AUTODREAM_REQUIRE_LOGIN before anything is read.
   if ! engine_login_ok "$_l2e"; then
-    log_fatal "the $_l2e engine, which writes the summary, fails AUTODREAM_REQUIRE_LOGIN ($LOGIN_REFUSAL). Refusing to start."
+    log_fatal "the $_l2e engine, which writes the summary, fails its login check ($LOGIN_REFUSAL). Refusing to start."
     fatal_exit; return 1
   fi
 
@@ -3764,7 +3780,7 @@ EOF
   while IFS= read -r _eng; do
     [ -n "$_eng" ] || continue
     engine_login_ok "$_eng" && continue
-    log "WARNING: the $_eng engine fails AUTODREAM_REQUIRE_LOGIN ($LOGIN_REFUSAL); the sessions it would read will not be triaged"
+    log "WARNING: the $_eng engine fails its login check ($LOGIN_REFUSAL); the sessions it would read will not be triaged"
     AUTODREAM_L1_ENGINES=$(printf '%s' "$AUTODREAM_L1_ENGINES" | awk -F'\t' -v e="$_eng" 'BEGIN { OFS = "\t" } $2 == e { $2 = "" } { print }')$'\n'
   done < <(printf '%s' "$AUTODREAM_L1_ENGINES" | awk -F'\t' 'NF >= 2 && $2 != "" && !seen[$2]++ { print $2 }')
   export ADAPTERS_DIR AUTODREAM_SOURCE_MAP AUTODREAM_L1_MODELS AUTODREAM_L1_ENGINES AUTODREAM_L1_PROBE_URLS AUTODREAM_NORMALIZE_SOURCES
