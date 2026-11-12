@@ -24,6 +24,10 @@ AUTODREAM_TRIAGE_SURFACE=cmux
 #   true             switch to the new workspace immediately
 # AUTODREAM_TRIAGE_FOCUS=false
 
+# The model the morning triage session (review.sh) runs on, passed as --model.
+# Without it the session would take the default model from your Claude settings.
+# AUTODREAM_REVIEW_MODEL=opus
+
 # Path to the cmux CLI. Only consulted when the surface above is `cmux`.
 # Defaults to the app-bundle path; uncomment to override.
 # CMUX_BIN=/Applications/cmux.app/Contents/Resources/bin/cmux

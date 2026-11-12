@@ -63,7 +63,8 @@ MOCK
 run_review(){ # $1=root [args...]
   local root="$1"; shift
   ARGV_DIR="$root/argv" \
-  AUTODREAM_CONFIG="$root/nonexistent-config" \
+  AUTODREAM_REVIEW_MODEL="${TEST_REVIEW_MODEL:-}" \
+  AUTODREAM_CONFIG="${REVIEW_CONFIG:-$root/nonexistent-config}" \
   AUTODREAM_TRIAGE_SURFACE=inline \
   DREAMS_DIR="$root/dreams" \
   CLAUDE_BIN="$root/bin/claude" \
@@ -165,7 +166,7 @@ test_missing_section_still_launches(){
   printf '# Autodream — 2020-01-02\n\n## Top patterns\n\nNothing.\n\n<!-- autodream:open-questions=1 -->\n' \
     > "$root/dreams/2020-01-02.md"
   run_review "$root" --force 2020-01-02
-  assert_eq "$(cat "$root/argv/count" 2>/dev/null)" "5" "a section-less report still launches the session"
+  assert_eq "$(cat "$root/argv/count" 2>/dev/null)" "7" "a section-less report still launches the session"
   system_prompt "$root" > "$root/sp"
   assert_grep "$root/sp" 'open-questions date="2020-01-02"' "the empty block is still well formed"
 }
@@ -196,7 +197,7 @@ test_unclosed_block_is_not_a_block(){
     printf '<!-- autodream:open-questions=1 -->\n'
   } > "$root/dreams/2020-01-02.md"
   run_review "$root" --force 2020-01-02
-  assert_eq "$(cat "$root/argv/count" 2>/dev/null)" "5" "an unclosed block does not stop the launch"
+  assert_eq "$(cat "$root/argv/count" 2>/dev/null)" "7" "an unclosed block does not stop the launch"
 }
 
 test_oversized_legacy_report_points_at_the_heading(){
@@ -223,7 +224,43 @@ test_temps_are_removed(){
   assert_eq "$after" "$before" "no question temp file survives the launch"
 }
 
+model_arg(){ cat "$1/argv/arg7" 2>/dev/null; }
+model_flag(){ cat "$1/argv/arg6" 2>/dev/null; }
+
+test_session_runs_on_opus_by_default(){
+  local root; root=$(setup_env); mk_report "$root" 2020-01-02 "$Q_BLOCK"
+  run_review "$root" --force 2020-01-02
+  assert_eq "$(model_flag "$root")" "--model" "the session is launched with --model"
+  assert_eq "$(model_arg "$root")" "opus" "the default triage model is opus, not the settings.json default"
+  assert_eq "$(launch_prompt "$root")" 'Start the triage: restate the first open question and recommend one action.' "the launch prompt keeps its place before --model"
+}
+
+test_env_model_beats_the_default(){
+  local root; root=$(setup_env); mk_report "$root" 2020-01-02 "$Q_BLOCK"
+  ( export TEST_REVIEW_MODEL=sonnet; run_review "$root" --force 2020-01-02 )
+  assert_eq "$(model_arg "$root")" "sonnet" "AUTODREAM_REVIEW_MODEL in the environment picks the model"
+}
+
+test_callers_model_variable_does_not_leak_into_the_suite(){
+  local root; root=$(setup_env); mk_report "$root" 2020-01-02 "$Q_BLOCK"
+  ( export AUTODREAM_REVIEW_MODEL=sonnet; run_review "$root" --force 2020-01-02 )
+  assert_eq "$(model_arg "$root")" "opus" "an AUTODREAM_REVIEW_MODEL exported in the caller's shell does not change the default row"
+}
+
+test_config_model_beats_the_default_and_env_beats_config(){
+  local root; root=$(setup_env); mk_report "$root" 2020-01-02 "$Q_BLOCK"
+  printf 'AUTODREAM_REVIEW_MODEL=haiku\n' > "$root/config"
+  ( export REVIEW_CONFIG="$root/config"; run_review "$root" --force 2020-01-02 )
+  assert_eq "$(model_arg "$root")" "haiku" "AUTODREAM_REVIEW_MODEL in the config picks the model"
+  ( export REVIEW_CONFIG="$root/config" TEST_REVIEW_MODEL=sonnet; run_review "$root" --force 2020-01-02 )
+  assert_eq "$(model_arg "$root")" "sonnet" "the environment wins over the config"
+}
+
 echo "tests/review-prompt.sh"
+test_session_runs_on_opus_by_default
+test_env_model_beats_the_default
+test_callers_model_variable_does_not_leak_into_the_suite
+test_config_model_beats_the_default_and_env_beats_config
 test_block_content_is_inlined_findings_not
 test_markdown_inside_the_block_is_text
 test_legacy_report_uses_the_heading_fallback
