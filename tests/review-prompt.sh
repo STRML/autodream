@@ -63,6 +63,7 @@ MOCK
 run_review(){ # $1=root [args...]
   local root="$1"; shift
   ARGV_DIR="$root/argv" \
+  AUTODREAM_REVIEW_MODEL="${TEST_REVIEW_MODEL:-}" \
   AUTODREAM_CONFIG="${REVIEW_CONFIG:-$root/nonexistent-config}" \
   AUTODREAM_TRIAGE_SURFACE=inline \
   DREAMS_DIR="$root/dreams" \
@@ -236,8 +237,14 @@ test_session_runs_on_opus_by_default(){
 
 test_env_model_beats_the_default(){
   local root; root=$(setup_env); mk_report "$root" 2020-01-02 "$Q_BLOCK"
-  ( export AUTODREAM_REVIEW_MODEL=sonnet; run_review "$root" --force 2020-01-02 )
+  ( export TEST_REVIEW_MODEL=sonnet; run_review "$root" --force 2020-01-02 )
   assert_eq "$(model_arg "$root")" "sonnet" "AUTODREAM_REVIEW_MODEL in the environment picks the model"
+}
+
+test_callers_model_variable_does_not_leak_into_the_suite(){
+  local root; root=$(setup_env); mk_report "$root" 2020-01-02 "$Q_BLOCK"
+  ( export AUTODREAM_REVIEW_MODEL=sonnet; run_review "$root" --force 2020-01-02 )
+  assert_eq "$(model_arg "$root")" "opus" "an AUTODREAM_REVIEW_MODEL exported in the caller's shell does not change the default row"
 }
 
 test_config_model_beats_the_default_and_env_beats_config(){
@@ -245,13 +252,14 @@ test_config_model_beats_the_default_and_env_beats_config(){
   printf 'AUTODREAM_REVIEW_MODEL=haiku\n' > "$root/config"
   ( export REVIEW_CONFIG="$root/config"; run_review "$root" --force 2020-01-02 )
   assert_eq "$(model_arg "$root")" "haiku" "AUTODREAM_REVIEW_MODEL in the config picks the model"
-  ( export REVIEW_CONFIG="$root/config" AUTODREAM_REVIEW_MODEL=sonnet; run_review "$root" --force 2020-01-02 )
+  ( export REVIEW_CONFIG="$root/config" TEST_REVIEW_MODEL=sonnet; run_review "$root" --force 2020-01-02 )
   assert_eq "$(model_arg "$root")" "sonnet" "the environment wins over the config"
 }
 
 echo "tests/review-prompt.sh"
 test_session_runs_on_opus_by_default
 test_env_model_beats_the_default
+test_callers_model_variable_does_not_leak_into_the_suite
 test_config_model_beats_the_default_and_env_beats_config
 test_block_content_is_inlined_findings_not
 test_markdown_inside_the_block_is_text
