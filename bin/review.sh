@@ -23,6 +23,9 @@
 # it to whatever app is the default handler for public.shell-script (iTerm2 on
 # this host), so the triage kept opening in iTerm2. `cmux` gives it a dedicated
 # workspace instead. Env vars override the config file; config overrides defaults.
+#
+# The session runs on AUTODREAM_REVIEW_MODEL (default opus), passed as --model; a config
+# line or an environment variable of that name picks another.
 
 set -u
 
@@ -54,7 +57,7 @@ _rf="$(dirname "$_src")/report-format.sh"
 # Load the config file first, then let any env-provided values win over it.
 __env_dreams="${DREAMS_DIR:-}"; __env_claude="${CLAUDE_BIN:-}"
 __env_surface="${AUTODREAM_TRIAGE_SURFACE:-}"; __env_cmux="${CMUX_BIN:-}"
-__env_focus="${AUTODREAM_TRIAGE_FOCUS:-}"
+__env_focus="${AUTODREAM_TRIAGE_FOCUS:-}"; __env_model="${AUTODREAM_REVIEW_MODEL:-}"
 CONFIG_FILE="${AUTODREAM_CONFIG:-$AUTODREAM_DIR/config}"
 # shellcheck disable=SC1090
 [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
@@ -63,11 +66,15 @@ CONFIG_FILE="${AUTODREAM_CONFIG:-$AUTODREAM_DIR/config}"
 [ -n "$__env_surface" ] && AUTODREAM_TRIAGE_SURFACE="$__env_surface"
 [ -n "$__env_cmux" ] && CMUX_BIN="$__env_cmux"
 [ -n "$__env_focus" ] && AUTODREAM_TRIAGE_FOCUS="$__env_focus"
+[ -n "$__env_model" ] && AUTODREAM_REVIEW_MODEL="$__env_model"
 
 # Reports live in the sibling of the install dir (~/.omp/agent/dreams here).
 DREAMS_DIR="${DREAMS_DIR:-$(dirname "$AUTODREAM_DIR")/dreams}"
 CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
 AUTODREAM_TRIAGE_SURFACE="${AUTODREAM_TRIAGE_SURFACE:-inline}"
+# The model the triage session runs on. Without --model it inherits the user's settings.json
+# default, which is not the model the triage was meant to run on.
+AUTODREAM_REVIEW_MODEL="${AUTODREAM_REVIEW_MODEL:-opus}"
 CMUX_BIN="${CMUX_BIN:-/Applications/cmux.app/Contents/Resources/bin/cmux}"
 # Whether the cmux triage workspace grabs focus on launch. Default false so a
 # nightly/background run does not yank you out of what you are doing.
@@ -274,7 +281,7 @@ if [ "$AUTODREAM_TRIAGE_SURFACE" = "cmux" ]; then
     # and an unquoted one would break the inner shell parse. $FORCE_ARG is
     # generated here and can only be empty or " --force", so it stays literal.
     shq(){ printf '%q' "$1"; }
-    INNER_CMD="env AUTODREAM_TRIAGE_SURFACE=inline CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 DREAMS_DIR=$(shq "$DREAMS_DIR") CLAUDE_BIN=$(shq "$CLAUDE_BIN") $(shq "$SELF") $(shq "$DATE")$FORCE_ARG"
+    INNER_CMD="env AUTODREAM_TRIAGE_SURFACE=inline CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 AUTODREAM_REVIEW_MODEL=$(shq "$AUTODREAM_REVIEW_MODEL") DREAMS_DIR=$(shq "$DREAMS_DIR") CLAUDE_BIN=$(shq "$CLAUDE_BIN") $(shq "$SELF") $(shq "$DATE")$FORCE_ARG"
     WS_OUT=$("$CMUX" workspace create \
       --name "$DATE Autodream Triage" \
       --cwd "$HOME" \
@@ -453,4 +460,5 @@ cd "$HOME" || exit 1
 exec "$CLAUDE_BIN" \
   --permission-mode bypassPermissions \
   --append-system-prompt "$SYSTEM" \
-  "Start the triage: restate the first open question and recommend one action."
+  "Start the triage: restate the first open question and recommend one action." \
+  --model "$AUTODREAM_REVIEW_MODEL"
