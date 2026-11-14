@@ -1,6 +1,7 @@
 # Dropped threads: a cross-day index of work Sam started and never finished
 
-Status: design, awaiting Sam's approval (2026-11-14).
+Status: approved by Sam 2026-11-14; revised the same day after an adversarial Fable
+review (findings numbered F1 to F12 below).
 
 ## Intent
 
@@ -16,218 +17,229 @@ each session alone, in one night. It can say that a session's goal was `not_achi
 but it cannot say that nothing in the nine days since picked the goal back up. That
 second half is what makes a thread dropped, and it needs memory across days.
 
-When a dropped thread turns up, Sam should be able to resume it: start a new session
+When a dropped thread turns up, Sam should be able to resume it in a new session
 already briefed on the goal, where the work stopped, and which transcripts hold the
-detail. (Claude's call, 2026-11-14, taken as a two-way door.)
+detail. He also wants a place to explore: a Claude Code session that knows the index,
+and a local HTML dashboard it opens (Sam, 2026-11-14: "a session I can open, maybe in
+cc, maybe with a local html dashboard it renders, so I explore ideas").
 
 ## Goals
 
-- Keep a persistent thread index, updated nightly, that links sessions across days
-  into threads and gives each thread a status.
-- Add a "Dropped threads" section to the morning report: the top few, each with the
-  reason it counts as dropped.
-- Ship a CLI to list, search, close and resume threads.
-- Capture ideas Sam deferred mid-session ("later", "we should also", "park that") as
-  threads of their own.
-- Give Sam a place to explore threads and ideas: a Claude Code session that knows the
-  index, and a local HTML dashboard it opens (Sam, 2026-11-14: "a session I can open,
-  maybe in cc, maybe with a local html dashboard it renders, so I explore ideas").
-- Run the linker on the engine Sam picks: Haiku by default, local DeepSeek through
-  the omp adapter as an option.
+- Keep a persistent thread index, updated nightly, that links Sam's sessions across
+  days into threads and gives each thread a status.
+- Add a "Dropped threads" section to the morning report.
+- Ship a CLI to list, search, close, reopen and resume threads.
+- Ship `threads.html` and an explore session.
+- Capture ideas Sam deferred mid-session as threads of their own.
+- Run the linker on an engine Sam names: Haiku by default, local DeepSeek as an option.
 
 ## Non-goals
 
-- A separate always-on daemon. The nightly launchd job is the daemon, and a thread
-  index one day stale is fine.
-- Re-reading transcripts. L1 already reads every session and writes
-  `underlying_goal`, `outcome` and `notable_initiatives`, and the index is built from
-  those fields.
-- A served web app. The dashboard is a static file regenerated each night; nothing
-  listens on a port.
+- A separate always-on daemon. The nightly launchd job is the daemon.
+- Re-reading transcripts. L1 already writes `underlying_goal`, `outcome` and
+  `notable_initiatives` for every session, and the index is built from those fields.
+- A served web app. The dashboard is a static file; nothing listens on a port.
 
 ## Anti-goals
 
 Any of these makes the feature a failure even if it runs:
 
-- A list so long that Sam stops reading it. The report shows at most 5, ranked.
-- Threads built from subagent and workflow sidecars. A `debugger` subagent's
-  `not_achieved` belongs to its parent session. Only top-level sessions form threads.
-- A thread Sam closed coming back the next night because a new session reworded its
-  goal.
-- An L1 or linker worker that can forge, close or rewrite a thread it was not given.
-  The repo's rule holds here too: the runner writes state, and models only propose.
+- A list so long that Sam stops reading it. The report shows at most 5.
+- Threads built from sessions Sam did not drive: subagents, workflow workers, review
+  rounds, scripted probes.
+- A thread Sam closed coming back because a new session reworded its goal.
+- A model that can write the index, or transcript text that can act on Sam's machine
+  through the resume brief, the explore session or the HTML page.
 
 ## Approaches considered
 
 | | Approach | Trade-off |
 |---|---|---|
-| A | **Incremental LLM linker, nightly, per project** (picked) | One small call per project that had sessions that night. The call gets the project's open threads and tonight's goals, assigns each goal to a thread or starts a new one, and says whether any thread is now finished. It is cheap, it handles rewording, and the state stays small. Links come from a model judgment, so some will be wrong; `close` and `merge` in the CLI correct them. |
-| B | Embedding similarity over goals, clustered per project | Deterministic, with no model call per night. Short goals reworded across days ("fix 404 on cache export", later "mlx-serve export endpoint") cluster poorly, and the threshold would need tuning per project. It could become a pre-filter for A later. |
-| C | Separate daemon that re-reads transcripts with local DeepSeek | Independent of autodream, but it repeats L1's read of every session and needs its own session roots, sleep handling, retries and self-pollution defenses. Rejected. |
+| A | **Nightly LLM linker over L1's facets** (picked) | One call a night over every new eligible session. It handles reworded goals and keeps state small. Links come from a model judgment, so some will be wrong; `close` and `reopen` correct them. |
+| B | Embedding similarity over goals | Deterministic, but short goals reworded across days cluster poorly and need a tuned threshold. Could pre-filter A later. |
+| C | Separate daemon re-reading transcripts with local DeepSeek | Repeats L1's whole read plus its sleep, retry and self-pollution defenses. Rejected. |
 
 ## Delivery order
 
-Everything below ships; the order keeps each PR testable on its own.
+Everything below ships. The order keeps each PR testable on its own.
 
-1. Thread index, linker, `threads.sh` list/search/close/reopen/merge/resume,
-   `threads.sh backfill` for work threads, and the report section. Once it merges,
-   Claude runs the backfill over all 173 dates on local DeepSeek, so the index holds
-   past work before anyone opens the explorer.
+1. Thread index, linker, `threads.sh` list/search/close/reopen/resume/backfill, and
+   the report section. Once it merges, Claude runs the backfill on local DeepSeek, so
+   the index holds past work before the explorer exists.
 2. `threads.html` and `threads.sh explore`.
-3. `deferred_ideas` in L1. Ideas from before this PR exist only in the transcripts,
-   so recovering them means re-triaging every old session. That stays a separate
-   opt-in run, and its cost is measured on a sample and quoted before it starts.
+3. `deferred_ideas` in L1. Ideas from before this PR exist only in transcripts, so
+   recovering them means re-triaging old sessions. That stays a separate opt-in run,
+   and its cost is measured on a sample and quoted to Sam before it starts.
 
-## The linker's engine
+Cut: `merge` (use close plus the linker), and a `/threads` command in the
+`autodream-band` mod.
 
-The linker gets a new adapter verb, `threads-argv`, shaped like `l2-argv` but with no
-tools at all: its input arrives on stdin and its answer leaves on stdout. Reusing
-`l1-argv` would grant `Read Write` under `bypassPermissions`, which would let a model
-write `threads.jsonl`. The omp adapter gets the same verb, so local DeepSeek can run
-it.
+## Which sessions form threads (F1, F2, F10)
 
-## Design
+Measured over 2026-11-01 to 11-13 (479 top-level triaged sessions): 224 have one user
+message, 122 read as review rounds, and storage buckets split one repo across
+harnesses (`-Users-samuelreed-git-oss-local-llm` and `-git-oss-local-llm`). So:
+
+- **Eligible** means top-level (`nested` false in the runner's data), at least 2 user
+  messages (`user_message_count` from the stats sidecar), and a session cwd outside
+  `$TMPDIR`, `/tmp`, `/private/tmp` and any `scratchpad` directory. 254 of the 479
+  pass the message test. A session whose sidecar is missing is not eligible and is
+  counted in `threads_unmeasured`.
+- **Goal** is `underlying_goal`, else the first entry of `notable_initiatives`, which
+  is a string rather than an array in omp findings and must be read as either.
+- **Repo** is a hint, not a partition. The runner derives it from the session cwd:
+  a worktree path (`.claude/worktrees/<name>`, `.worktrees/<name>`) maps to its main
+  repo, and the claude and omp bucket encodings map to the same path. A session whose
+  cwd it cannot resolve gets an empty repo.
+- **Session path and repo come from the runner**, held in memory from before L1 (the
+  `SESSION_ROWS` pattern `triage-candidates.sh` uses). Never from `sessions.txt`, a
+  findings JSON or `rollup.tsv`, all of which an L1 worker can rewrite
+  (`bin/run.sh:3691`).
+
+## The linker (F1, F5, F6, F11)
 
 ```
- L1 (existing) ─▶ findings/<date>/<hash>.json   new field: deferred_ideas[]
- rollup.sh (existing) ─▶ rollup.tsv             nested (runner), outcome (L1 model)
+ eligible sessions from the last 14 days not yet in the index
+        +  open threads (id, title, repo, goal, last_seen), last 90 days
+        +  closed threads (id, title, repo only)
         │
-        ▼
- bin/threads.sh link <date>          new; runs after rollup, before L2
-   for each project with top-level sessions tonight:
-     input  = the project's open threads + tonight's goals and deferred ideas
-     engine = AUTODREAM_THREADS_ENGINE (default: the L1 engine)
-     tools  = none; input on stdin, assignments on stdout (like L2)
-     output = validated by the runner, the only writer
+        ▼  one call, stdin → stdout, no tools, hard timeout
+ assignments: {hash, thread: <id>|new, title?, finished: bool}
         │
-        ▼
- $AUTODREAM_DIR/threads/threads.jsonl    one row per thread, one rename per write
- findings/<date>/dropped-threads.md      top 5; L2 reads it by exact path
-        │
-        ▼
- L2 copies it into "Dropped threads"     as it copies triage-candidates.md today
- threads.sh [query] [--dropped] [--project p]
- threads.sh close|reopen|merge <id> ...
- threads.sh resume <id>                  prints a brief; --launch starts claude with it
+        ▼  runner validates each assignment alone; a bad one is dropped, not the batch
+ lock → re-read threads.jsonl → merge → write temp → rename → unlock
 ```
 
-### The thread record
+- **One call a night**, across all repos. When the input passes
+  `AUTODREAM_THREADS_MAX_INPUT` bytes, split it into calls by repo hint, never by
+  storage bucket.
+- **Catch-up, no watermark.** Each night links every eligible `(date, hash)` from the
+  last 14 days that the index lacks. A failed or skipped night is filled by the next
+  one, a rebuild of an older date is harmless, and backfill uses the same path.
+  Records are keyed by `(date, hash)`, so a re-triaged session replaces its link.
+- **Engine.** `AUTODREAM_THREADS_ENGINE` names an adapter and
+  `AUTODREAM_THREADS_MODEL` a model; the defaults are `claude` and
+  `claude-haiku-5-5`. Each adapter gets a `threads-argv` verb with no tools. A test
+  proves the verb cannot write: the mock tries to write a file and the file must not
+  appear. The omp warmup drops `--tools` under `yolo` (`adapters/omp/adapter.sh:125`),
+  so the omp verb must pass an explicit empty tool list, verified against the CLI
+  before PR 1 merges.
+- **Bounded.** `AUTODREAM_THREADS_TIMEOUT` (default 300 seconds) through the same
+  `timeout` wrapper as L1. Any failure is logged and counted, and the report is
+  written anyway.
+- **The lock covers only the merge.** No model call runs under it, so the
+  `question-streaks.sh` lock's 120-second stale reclaim (`bin/question-streaks.sh:188`)
+  is safe to copy. The CLI takes the same lock for close and reopen.
+
+## The thread record
 
 | Field | Source |
 |---|---|
-| `id` | `t-<8 hex>`, assigned by the runner, never by a model |
-| `project` | derived by the runner from the real session path (the `pin-projects.tsv` rule), never from a findings JSON or `rollup.tsv`, which copies the model's value when python3 is missing |
+| `id` | `t-<8 hex>`, assigned by the runner |
 | `kind` | `work` or `idea` |
-| `title` | proposed by the model, capped at 120 characters by the runner |
-| `goal` | the newest `underlying_goal`, or the idea text |
-| `sessions[]` | `{date, hash, session_path, outcome}`; `session_path` from `sessions.txt` |
+| `repo` | runner hint, may be empty |
+| `title` | model-proposed, capped at 120 characters, control characters stripped |
+| `goal` | newest eligible session's goal |
+| `sessions[]` | `{date, hash, session_path, outcome}`, path from the runner |
 | `status` | `open`, `done`, `closed_by_sam` |
-| `last_seen` | date of the newest linked session |
-| `updated_by` | `linker` or `sam` |
+| `done_by` | `linker` or `sam` |
+| `last_seen` | maximum date across `sessions[]` |
 
-### Status rules
+## Status rules (F3, F9)
 
-The runner applies these rules. A model's output never sets a status directly.
+- **done:** the linker marks a session `finished` AND that session's `outcome` is
+  `fully_achieved` or `mostly_achieved`. Both are model judgments, from two calls.
+  Every thread closed this way that night is listed in the report, so a wrong close is
+  visible.
+- **dropped** (computed at read time, never stored): `open`, `last_seen` older than
+  `AUTODREAM_THREADS_DROPPED_DAYS` (default 7), and the newest outcome is
+  `not_achieved`, `partially_achieved` or `unclear_from_transcript`. A thread whose
+  newest outcome is `mostly_achieved` stays open and quiet, without being reported as
+  dropped. Fable's simulation put this near 4 a week.
+- **closed_by_sam** is sticky. The linker sees closed threads as id and title, so a
+  reworded session attaches instead of spawning a new thread; only `reopen` changes
+  the status.
 
-- A thread becomes `done` only when the linker says a session finished it AND that
-  session's `outcome` is `fully_achieved` or `mostly_achieved`. Both are model
-  judgments, but from two separate calls (the linker and that session's L1 worker),
-  so one call cannot close a thread alone.
-- A thread counts as dropped when it is `open`, its `last_seen` is older than
-  `AUTODREAM_THREADS_DROPPED_DAYS` (default 7), and its newest outcome is not
-  `fully_achieved`. Dropped is computed at read time and never stored.
-- `closed_by_sam` is sticky. The linker sees closed threads as id and title only, so
-  it can attach a reworded session to one instead of starting a new thread. Only
-  `reopen` changes its status.
+**Report ranking:** threads that crossed into dropped since the last report first,
+then the rest by linked-session count. Two of the five slots are reserved for ideas
+when any exist, so ideas are not starved by a long work list.
 
-The report ranks dropped threads by kind (`work` before `idea`), then by the number of
-linked sessions (effort already spent), then by how recently the thread went quiet.
-It shows at most 5.
+## Backfill (F11)
 
-### Deferred ideas
+`threads.sh backfill FROM TO [--engine E] [--model M] [--max-calls N]` runs the same
+catch-up over a past range, oldest first, prints its call count before starting and
+stops at the budget. Goals exist from 2026-07-17, so that is the useful floor. Only
+dates from 2026-11-01 have `rollup.tsv`, so backfill reads `nested` and
+`user_message_count` from the stats sidecars directly. A date without sidecars is
+skipped and named in the output.
 
-SESSION_TRIAGE.md gains a `deferred_ideas` field: up to 3 one-line things the user
-raised in the session and explicitly put off, each with a verbatim quote under 200
-characters. The prompt tells L1 to leave the field empty rather than infer an idea.
-Each idea becomes a `kind: idea` thread through the same linker, so a later session
-that does the work closes it.
-
-### Backfill
-
-Work threads backfill from the findings already on disk (173 date directories since
-2026-05-25), oldest first, with one linker pass per project per date. Backfill never
-runs by itself: Sam starts it with `threads.sh backfill FROM TO [--engine E]
-[--max-calls N]`, which prints the call count before it starts and stops at the
-budget. Local DeepSeek is the suggested engine for it, since it costs nothing per
-call. Deferred ideas cannot be backfilled without re-triaging every session; that
-is a separate opt-in run.
-
-### Resume brief
-
-`threads resume <id>` prints the goal; each linked session's date, outcome and
-`notable_initiatives`; the last session's findings; and the transcript paths.
-`--launch` opens a claude session with the brief as its first prompt. The `review.sh`
-rules apply: never inline a whole report, and never launch with a one-word prompt.
-
-### Explore: a session plus a dashboard
+## Resume and explore (F8)
 
 ```
- threads.sh explore
-   │
-   ├─▶ threads.sh render ─▶ $DREAMS_DIR/threads.html   static, one file, no server
-   │                         open in the browser
-   │
-   └─▶ claude session (cmux split, as review.sh does)
-         first prompt: what the index holds, where it lives, the CLI verbs
-         tools: Read on threads.jsonl and findings; Bash for `threads.sh ...`
-         Sam asks: "what did I drop on mlx-serve?", "which ideas cluster?",
-                   "close t-3fa1, it's dead", "resume t-91c0"
-         after any close/reopen/merge it re-renders the HTML
+ threads.sh resume <id>            prints the brief
+ threads.sh resume <id> --launch   claude, default permission mode, cwd = repo or $HOME
+ threads.sh explore                renders threads.html, opens it, starts claude in a
+                                   cmux split with tools Read + Bash(threads.sh *)
 ```
 
-The dashboard:
+The brief carries runner facts (dates, outcomes, repo, transcript paths), the goal and
+title inside a fenced block labelled as data from transcripts, and an instruction to
+Read the transcripts for detail. It never inlines `evidence_excerpt` or findings text.
+Unlike `review.sh` (`bin/review.sh:461`), neither command passes
+`bypassPermissions`. The review.sh launch rules still apply: no whole report inlined,
+no one-word prompt.
+
+## The dashboard (F9)
 
 ```
- ┌ Threads ─────────────────────────── [search______] [project ▾] ┐
- │ Dropped (12)   Open (40)   Ideas (18)   Done (131)              │
- ├─────────────────────────────────────────────────────────────────┤
- │ ⚠ mlx-serve cache export 404          local-llm   3 sess  9d    │
- │   last: not_achieved · "find why export returns 404"            │
- │   [copy resume command]  [copy close command]                   │
- │ ⚠ idea: per-pack prefix warmup        local-llm   1 sess  14d   │
- │   "we should also warm the prefix cache per pack, later"        │
- │ ...                                                             │
- └─────────────────────────────────────────────────────────────────┘
+ ┌ Threads ─────────────────────────── [search______] [repo ▾] ────┐
+ │ Dropped (4)   Open (40)   Ideas (18)   Done (131)                │
+ ├──────────────────────────────────────────────────────────────────┤
+ │ ⚠ mlx-serve cache export 404          local-llm   3 sess  9d     │
+ │   last: not_achieved · "find why export returns 404"             │
+ │   [copy resume command]  [copy close command]                    │
+ └──────────────────────────────────────────────────────────────────┘
 ```
 
-The page is read-only: its buttons copy a CLI command, so every state change still
-goes through the CLI and its lock. Search and filters run client-side over the thread
-data embedded in the page. `threads.sh render` runs at the end of each nightly run
-and after every CLI write. The page is a local file, not a published Artifact, per
-the house rule for reports Sam reads.
+- One static file, `$DREAMS_DIR/threads.html`, written by temp file and rename at the
+  end of each nightly run and after every CLI write. A failed render keeps the old
+  page, and the header shows the generation time.
+- Thread data is embedded as JSON in a `type="application/json"` script tag with `<`
+  escaped, and rendered with `textContent` only.
+- A CSP meta tag: `default-src 'none'; script-src 'self' 'unsafe-inline';
+  style-src 'unsafe-inline'; connect-src 'none'`.
+- Copy buttons build commands only from ids matching `^t-[0-9a-f]{8}$`.
+- It is a local file, not a published Artifact, per the house rule for reports Sam
+  reads.
 
-The session is the place for questions the page cannot answer, such as grouping
-ideas by theme or reading a transcript to decide whether a thread is dead. The
-`autodream-band` mod can also gain a `/threads` command that starts the same session
-in place.
+## Deferred ideas (F12)
+
+SESSION_TRIAGE.md gains `deferred_ideas`: up to 3 things the user raised in the
+session and explicitly put off, each with a verbatim quote under 200 characters, empty
+rather than inferred. `bin/merge-chunks.sh` merges fields by explicit rule
+(`bin/merge-chunks.sh:83-86`), so it gets a rule for this field (concatenate, dedupe,
+cap 3) and a test. Ideas reach the linker as `kind: idea` candidates.
 
 ## Failure matrix
 
 | State or input | What happens | How it can fail | What the caller is told |
 |---|---|---|---|
-| No top-level sessions tonight | Linker skipped; dropped set recomputed | none | Report section built from the current index |
-| Linker engine down or refusing | That project's threads untouched | Stale links | run-stats `threads_link_failed: N`; report says the index was not updated for that project |
-| Linker output malformed, or names an unknown thread id | That project's assignments discarded | Wrong link | `threads_rejected: N` in run-stats, log line |
-| Linker closes a thread whose session outcome is not achieved | Close ignored | False `done` | `threads_close_refused: N` |
-| `threads.jsonl` exists but cannot be read | No write, no report section | Index frozen | Banner, and run-stats `threads_state: unreadable`; never read as empty |
-| Rebuild of an older date (`AUTODREAM_FORCE=1`) | Refused by a watermark, as in `question-streaks.sh` | History rewritten | `threads_skipped: older_date` |
-| Two runs at once (nightly and `autodream-now.sh`) | `mkdir` lock; the second run skips | Lost update | `threads_skipped: locked` |
-| Sam runs `close` during a nightly run | CLI takes the same lock | Lost close | CLI waits, then fails loudly |
-| A session is re-triaged with a different goal | Link keyed by `(date, hash)` and replaced | Duplicate thread | none; the update is idempotent |
-| Render fails (bad record, disk full) | Previous `threads.html` kept; written by temp file and rename | Stale page | Page header shows its generation time; run-stats `threads_render: failed` |
-| Thread text holds HTML or script | Escaped on render; data embedded as JSON in a non-executing script tag | Script injection from a transcript quote | Not reachable; a test feeds `</script>` through a goal |
-| A worker forges `project` or `session_path` in a findings JSON | Project comes from the session path, path from `sessions.txt` | Thread filed under another project | Not reachable by construction, python3 or not; a test forges both |
-| Linker tries to write a file | It has no tools | State written by a model | Not reachable; the adapter verb grants none |
+| Nothing triaged tonight (early return, `bin/run.sh:3677`) | Catch-up and render still run on that path | Section missing | Report section from the current index |
+| No eligible sessions tonight | No linker call; dropped set recomputed | none | `threads_linked: 0` |
+| Linker engine down, refusing or timed out | Index untouched; next night catches up | Stale links for a day | `threads_link: failed`, report notes the index is a night behind |
+| One assignment malformed, unknown id, or unknown hash | That assignment dropped, the rest kept | Wrong link | `threads_rejected: N` |
+| Linker marks finished but outcome not achieved | Link kept, close ignored | False done | `threads_close_refused: N` |
+| Linker auto-closes a thread wrongly | Thread listed under "closed tonight" | Silent false done | Visible in the report; `reopen` fixes it |
+| `threads.jsonl` exists but cannot be read | No write, no render | Index read as empty | Banner, `threads_state: unreadable` |
+| Two runs at once, or a CLI write during a run | Lock held only for the merge; the loser retries 3 times then skips | Lost update | `threads_skipped: locked`; CLI fails loudly |
+| A session re-triaged with a new goal | Its `(date, hash)` link replaced | Duplicate thread | none |
+| Rebuild of an older date | Catch-up links only what is missing | History rewritten | none |
+| A worker rewrites `sessions.txt` or a findings JSON's `project`/`session_path` | Path and repo come from the runner's in-memory rows | Thread misfiled | Not reachable; a test forges all three |
+| The linker verb tries to write a file | It has no tools | A model writes state | Not reachable; a test proves it |
+| Session sidecar missing | Session not eligible | Real work skipped | `threads_unmeasured: N` |
+| Render fails | Old page kept | Stale page | Header time; `threads_render: failed` |
+| Thread text holds `</script>` or HTML | Escaped and set with `textContent` | Script injection | Not reachable; a test feeds it through |
+| Resume brief built from a goal holding instructions | Goal quoted as data; default permission mode | Injected session acts | Every tool call still asks Sam |
 
 Each row becomes a red E2E test in `tests/run-all.sh`, with a mock linker, before the
 code it covers exists.
@@ -236,7 +248,5 @@ code it covers exists.
 
 - Prompt wording for the linker and for `deferred_ideas`.
 - CLI flag names. The entry point is a new `bin/threads.sh`, linked into
-  `$AUTODREAM_DIR` by `install.sh`; the `autodream` skill can call it.
-- Batch size when a project has more open threads than fit one call. A starting
-  point: the 40 most recent open threads in full, plus up to 40 closed ones as id
-  and title.
+  `$AUTODREAM_DIR` by `install.sh`.
+- `AUTODREAM_THREADS_MAX_INPUT`'s default, from a measured night.
