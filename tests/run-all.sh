@@ -7590,6 +7590,418 @@ test_l2_diag_long_command_lines_keep_the_sections_intact(){
   rm -rf "$root"
 }
 
+thread_cleanup(){
+  if command -v trash >/dev/null 2>&1; then
+    trash "$@"
+    return $?
+  fi
+  local path
+  for path in "$@"; do
+    [ -e "$path" ] || continue
+    find "$path" -depth -type f -exec unlink {} \; 2>/dev/null
+    find "$path" -depth -type d -exec rmdir {} \; 2>/dev/null
+  done
+}
+thread_state(){ printf '%s/threads.jsonl' "$1/autodream"; }
+thread_call_count(){
+  if [ -f "$1/threads-calls.txt" ]; then
+    wc -l < "$1/threads-calls.txt" | tr -d ' '
+  else
+    printf '0'
+  fi
+}
+thread_request_json(){
+  sed -n '/^AUTODREAM_THREADS_REQUEST$/,$p' "$1" | sed '1d' | sed -n '1p'
+}
+thread_candidate_count(){
+  thread_request_json "$1" | jq -r '.candidates | length'
+}
+thread_index_count(){
+  [ -f "$(thread_state "$1")" ] && jq -sr 'length' "$(thread_state "$1")" || printf '0'
+}
+mk_thread_session(){ # $1=root $2=name $3=cwd [$4=nested]
+  local f="$1/projects/proj-a/$2.jsonl" nested="${4:-false}"
+  mkdir -p "$(dirname "$f")"
+  jq -cn --arg cwd "$3" --arg text "start $2" --argjson nested "$nested" \
+    '{type:"user",cwd:$cwd,isSidechain:$nested,message:{content:$text}}' > "$f"
+  jq -cn --arg cwd "$3" --arg text "continue $2" --argjson nested "$nested" \
+    '{type:"user",cwd:$cwd,isSidechain:$nested,message:{content:$text}}' >> "$f"
+  touch -t "$STAMP" "$f"
+  printf '%s' "$f"
+}
+seed_thread_findings(){ # $1=root $2=session $3=goal $4=initiatives JSON $5=outcome
+  local h; h=$(hash_of "$2")
+  mkdir -p "$(fdir "$1")"
+  jq -cn --arg goal "$3" --argjson initiatives "$4" --arg outcome "$5" \
+    '{underlying_goal:$goal,notable_initiatives:$initiatives,outcome:$outcome,findings:[]}' \
+    > "$(fdir "$1")/$h.json"
+  printf '%s' "$h"
+}
+seed_thread_record(){ # $1=root $2=id $3=repo $4=goal $5=date $6=hash $7=path $8=outcome $9=status
+  local done_by=""
+  [ "$9" = closed_by_sam ] && done_by=sam
+  jq -cn --arg id "$2" --arg repo "$3" --arg goal "$4" --arg date "$5" \
+    --arg hash "$6" --arg path "$7" --arg outcome "$8" --arg status "$9" \
+    --arg done_by "$done_by" \
+    '{id:$id,kind:"work",repo:$repo,title:"Existing thread",goal:$goal,
+      sessions:[{date:$date,hash:$hash,session_path:$path,outcome:$outcome}],
+      status:$status,done_by:(if $done_by == "" then null else $done_by end),last_seen:$date}' \
+    > "$(thread_state "$1")"
+}
+mk_thread_pair(){ # $1=root $2=prefix $3=cwd
+  local a b
+  a=$(mk_thread_session "$1" "$2-a" "$3")
+  b=$(mk_thread_session "$1" "$2-b" "$3")
+  seed_thread_findings "$1" "$a" "$2 goal a" '[]' partially_achieved >/dev/null
+  seed_thread_findings "$1" "$b" "$2 goal b" '[]' partially_achieved >/dev/null
+}
+
+test_threads_eligibility_and_goal_fallback(){
+  echo "# threads: only measured top-level sessions outside temp paths become candidates"
+  local root a b nested single temp scratch req candidate_count array_fallback_goal string_fallback_goal
+  root=$(setup_env)
+  a=$(mk_thread_session "$root" array "$REPO")
+  b=$(mk_thread_session "$root" string "$REPO")
+  nested=$(mk_thread_session "$root" nested "$REPO" true)
+  temp=$(mk_thread_session "$root" temp /tmp/thread-probe)
+  scratch=$(mk_thread_session "$root" scratch "$REPO/scratchpad/probe")
+  single="$root/projects/proj-a/single.jsonl"
+  jq -cn --arg cwd "$REPO" '{type:"user",cwd:$cwd,message:{content:"one turn"}}' > "$single"
+  touch -t "$STAMP" "$single"
+  seed_thread_findings "$root" "$a" "" '["first initiative","second initiative"]' partially_achieved >/dev/null
+  seed_thread_findings "$root" "$b" "" '"omp initiative"' partially_achieved >/dev/null
+  seed_thread_findings "$root" "$nested" "nested goal" '[]' partially_achieved >/dev/null
+  seed_thread_findings "$root" "$temp" "temp goal" '[]' partially_achieved >/dev/null
+  seed_thread_findings "$root" "$scratch" "scratch goal" '[]' partially_achieved >/dev/null
+  export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  req="$root/cap/threads-stdin-1.txt"
+  candidate_count=$(thread_candidate_count "$req")
+  array_fallback_goal=$(thread_request_json "$req" | jq -r '.candidates[] | select(.goal == "first initiative") | .goal')
+  string_fallback_goal=$(thread_request_json "$req" | jq -r '.candidates[] | select(.goal == "omp initiative") | .goal')
+  assert_eq "$candidate_count" 2 "only eligible human sessions reach linker"
+  assert_eq "$array_fallback_goal" "first initiative" "array fallback"
+  assert_eq "$string_fallback_goal" "omp initiative" "string fallback"
+  thread_cleanup "$root"
+}
+
+test_threads_missing_sidecar_is_unmeasured(){
+  echo "# threads: a missing stats sidecar is disclosed and excluded"
+  local root session stats_stub
+  root=$(setup_env)
+  session=$(mk_thread_session "$root" missing "$REPO")
+  seed_thread_findings "$root" "$session" "missing sidecar goal" '[]' partially_achieved >/dev/null
+  stats_stub="$root/no-stats.sh"
+  printf '#!/bin/bash\nexit 1\n' > "$stats_stub"
+  chmod +x "$stats_stub"
+  export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
+  AUTODREAM_STATS_BIN="$stats_stub" run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  assert_grep "$(fdir "$root")/run-stats.txt" '^threads_unmeasured: 1$' "missing measurement"
+  assert_eq "$(thread_call_count "$root/cap")" 0 "unmeasured source excluded"
+  thread_cleanup "$root"
+}
+
+test_threads_runner_provenance_survives_worker_tampering(){
+  echo "# threads: paths and repos come from runner memory before L1"
+  local root real_session real_hash real_common real_repo forged forged_count stored_path stored_repo
+  root=$(setup_env)
+  real_session=$(mk_thread_session "$root" provenance "$REPO")
+  real_hash=$(hash_of "$real_session")
+  real_common=$(git -C "$REPO" rev-parse --git-common-dir)
+  case "$real_common" in /*) real_common=$(cd -P "$real_common" 2>/dev/null && pwd -P) ;; *) real_common=$(cd -P "$REPO/$real_common" 2>/dev/null && pwd -P) ;; esac
+  real_repo=$(dirname "$real_common")
+  forged="$root/projects/proj-a/forged.jsonl"
+  export MOCK_THREADS_MODE=good MOCK_THREADS_TAMPER=1 MOCK_THREADS_L1_GOAL="provenance goal" MOCK_FORGED_SESSION="$forged" MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_THREADS_TAMPER MOCK_THREADS_L1_GOAL MOCK_FORGED_SESSION MOCK_CAPTURE_DIR
+  stored_path=$(jq -sr --arg hash "$real_hash" '[.[].sessions[] | select(.hash == $hash) | .session_path] | first // empty' "$(thread_state "$root")")
+  stored_repo=$(jq -sr --arg hash "$real_hash" '[.[] | select(any(.sessions[]; .hash == $hash)) | .repo] | first // empty' "$(thread_state "$root")")
+  forged_count=$(jq -sr --arg path "$forged" '[.[].sessions[] | select(.session_path == $path)] | length' "$(thread_state "$root")")
+  assert_eq "$stored_path" "$real_session" "runner path wins"
+  assert_eq "$stored_repo" "$real_repo" "runner repo wins"
+  assert_eq "$forged_count" 0 "forged worklist entry excluded"
+  thread_cleanup "$root"
+}
+
+test_threads_one_call_across_repo_hints(){
+  echo "# threads: one request spans Claude and OMP buckets and two canonical repos"
+  local root repo_two repo_two_git claude_a claude_b state calls linked_harnesses linked_repos
+  root=$(setup_env)
+  repo_two_git=$(mktemp -d /private/tmp/adt.XXXXXX) || { no "isolated repo fixture"; thread_cleanup "$root"; return 0; }
+  repo_two="$REPO/.thread-fixture.$$"
+  if ! mkdir "$repo_two" 2>/dev/null; then
+    no "isolated repo fixture"
+    thread_cleanup "$repo_two_git" "$root"
+    return 0
+  fi
+  if ! GIT_TEMPLATE_DIR=/dev/null git -C "$repo_two_git" init -q >/dev/null 2>&1; then
+    no "isolated checkout fixture created"
+    thread_cleanup "$repo_two" "$repo_two_git" "$root"
+    return 0
+  fi
+  printf 'gitdir: %s/.git\n' "$repo_two_git" > "$repo_two/.git"
+  chmod -R a-w "$repo_two"
+  claude_a=$(mk_thread_session "$root" claude-main "$REPO")
+  claude_b=$(mk_thread_session "$root" claude-other "$repo_two")
+  seed_thread_findings "$root" "$claude_a" "claude main goal" '[]' partially_achieved >/dev/null
+  seed_thread_findings "$root" "$claude_b" "second repo goal" '[]' partially_achieved >/dev/null
+  mk_omp_session "$root" 01a00000-0000-7000-8000-000000000002 "$REPO" >/dev/null
+  export MOCK_THREADS_MODE=good MOCK_THREADS_L1_GOAL="omp initiative" MOCK_CAPTURE_DIR="$root/cap"
+  AUTODREAM_ADAPTERS=claude,omp run_dream_omp "$root"
+  unset MOCK_THREADS_MODE MOCK_THREADS_L1_GOAL MOCK_CAPTURE_DIR
+  state=$(thread_state "$root")
+  calls=$(thread_call_count "$root/cap")
+  linked_repos=$(jq -sr 'map(.repo) | unique | length' "$state")
+  linked_harnesses=claude
+  jq -se 'any(.[].sessions[]; .session_path | contains("/.omp/agent/sessions/"))' "$state" >/dev/null 2>&1 \
+    && linked_harnesses=claude,omp
+  assert_eq "$calls" 1 "normal night makes one linker call"
+  assert_eq "$linked_harnesses" "claude,omp" "bucket encodings converge"
+  assert_eq "$linked_repos" 2 "repo is a hint, not a partition"
+  chmod -R u+w "$repo_two" 2>/dev/null || true
+  thread_cleanup "$repo_two" "$repo_two_git" "$root"
+}
+
+test_threads_no_eligible_sessions_makes_no_call(){
+  echo "# threads: an empty pending set skips the model and reports zero links"
+  local root
+  root=$(setup_env)
+  mk_trivial_session "$root" one-turn
+  export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  assert_eq "$(thread_call_count "$root/cap")" 0 "empty pending set skips model"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^threads_linked: 0$' "honest zero"
+  thread_cleanup "$root"
+}
+
+test_threads_linker_failures_preserve_state_and_catch_up(){
+  echo "# threads: linker failures preserve state and the next report catches up"
+  local mode root session hash before after exit_code linked
+  for mode in absent refusal nonzero timeout unusable; do
+    root=$(setup_env)
+    session=$(mk_thread_session "$root" "failure-$mode" "$REPO")
+    seed_thread_findings "$root" "$session" "failure goal $mode" '[]' partially_achieved >/dev/null
+    seed_thread_record "$root" t-11111111 "$REPO" "existing goal" 2019-12-31 aaaaaaaaaaaa /old/session.jsonl partially_achieved open
+    before=$(cat "$(thread_state "$root")")
+    export MOCK_THREADS_MODE="fail_$mode" MOCK_CAPTURE_DIR="$root/cap"
+    if [ "$mode" = absent ]; then AUTODREAM_THREADS_ENGINE=missing run_dream "$root"
+    elif [ "$mode" = timeout ]; then AUTODREAM_THREADS_TIMEOUT=1 run_dream "$root"
+    else run_dream "$root"
+    fi
+    unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+    after=$(cat "$(thread_state "$root")")
+    exit_code=$(cat "$root/run.exit")
+    assert_eq "$after" "$before" "$mode failure leaves index untouched"
+    assert_eq "$exit_code" 0 "$mode failure keeps report green"
+    assert_grep "$(fdir "$root")/run-stats.txt" '^threads_link: failed$' "$mode failure disclosed"
+    thread_cleanup "$root"
+  done
+
+  root=$(setup_env)
+  session=$(mk_thread_session "$root" recover "$REPO")
+  hash=$(seed_thread_findings "$root" "$session" "recover after outage" '[]' partially_achieved)
+  export MOCK_THREADS_MODE=fail_refusal MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE
+  DATE=2020-01-03
+  STAMP=202001031200
+  export MOCK_THREADS_MODE=good
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  DATE=2020-01-02
+  STAMP=202001021200
+  linked=$(jq -sr --arg hash "$hash" '[.[].sessions[] | select(.hash == $hash)] | length' "$(thread_state "$root")")
+  assert_eq "$linked" 1 "next night catches up the failed source"
+  thread_cleanup "$root"
+}
+
+test_threads_rejects_assignments_individually(){
+  echo "# threads: invalid assignment rows are dropped while a valid sibling links"
+  local root a b state valid_links bad_mode
+  root=$(setup_env)
+  a=$(mk_thread_session "$root" reject-a "$REPO")
+  b=$(mk_thread_session "$root" reject-b "$REPO")
+  seed_thread_findings "$root" "$a" "valid sibling goal" '[]' partially_achieved >/dev/null
+  seed_thread_findings "$root" "$b" "bad sibling goal" '[]' partially_achieved >/dev/null
+  export MOCK_THREADS_MODE=bad_assignments MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  state=$(thread_state "$root")
+  valid_links=$(jq -sr '[.[].sessions[]] | length' "$state")
+  assert_eq "$valid_links" 1 "valid sibling survives rejected rows"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^threads_rejected: 3$' "three bad rows counted"
+  thread_cleanup "$root"
+
+  for bad_mode in bad_finished bad_duplicate bad_conflict; do
+    root=$(setup_env)
+    mk_thread_pair "$root" "$bad_mode" "$REPO"
+    export MOCK_THREADS_MODE="$bad_mode" MOCK_CAPTURE_DIR="$root/cap"
+    run_dream "$root"
+    unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+    assert_grep "$(fdir "$root")/run-stats.txt" '^threads_rejected: [1-9][0-9]*$' "$bad_mode is rejected"
+    assert_eq "$(thread_index_count "$root")" 1 "$bad_mode leaves its valid sibling"
+    thread_cleanup "$root"
+  done
+}
+
+test_threads_finished_requires_achieved_outcome(){
+  echo "# threads: finished=true cannot close a partial outcome"
+  local root session id status
+  root=$(setup_env)
+  session=$(mk_thread_session "$root" unfinished "$REPO")
+  seed_thread_findings "$root" "$session" "unfinished goal" '[]' partially_achieved >/dev/null
+  export MOCK_THREADS_MODE=finished MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  id=$(jq -sr '.[0].id' "$(thread_state "$root")")
+  status=$(jq -sr --arg id "$id" '.[] | select(.id == $id) | .status' "$(thread_state "$root")")
+  assert_eq "$status" open "unsupported close refused"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^threads_close_refused: 1$' "refusal counted"
+  thread_cleanup "$root"
+}
+
+test_threads_unreadable_index_prevents_write_and_render(){
+  echo "# threads: unreadable state is preserved and reported"
+  local root session state_before state_after page_before page_after warnings
+  root=$(setup_env)
+  session=$(mk_thread_session "$root" unreadable "$REPO")
+  seed_thread_findings "$root" "$session" "unreadable goal" '[]' partially_achieved >/dev/null
+  seed_thread_record "$root" t-22222222 "$REPO" "existing goal" 2019-12-31 aaaaaaaaaaaa /old/session.jsonl partially_achieved open
+  state_before=$(cat "$(thread_state "$root")")
+  chmod 000 "$(thread_state "$root")"
+  printf 'previous dashboard\n' > "$root/dreams/threads.html"
+  page_before=$(cat "$root/dreams/threads.html")
+  cat > "$root/autodream/notify.sh" <<'EOF_NOTIFY'
+#!/bin/bash
+printf '%s\n' "$*" >> "$MOCK_WARNING_LOG"
+EOF_NOTIFY
+  chmod +x "$root/autodream/notify.sh"
+  export MOCK_WARNING_LOG="$root/warnings.log" MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_WARNING_LOG MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  chmod 600 "$(thread_state "$root")"
+  state_after=$(cat "$(thread_state "$root")")
+  page_after=$(cat "$root/dreams/threads.html")
+  warnings=$(awk '/^--warning / { count++ } END { print count + 0 }' "$root/warnings.log")
+  assert_eq "$state_after" "$state_before" "index preserved"
+  assert_eq "$page_after" "$page_before" "page preserved"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^threads_state: unreadable$' "read failure disclosed"
+  assert_eq "$warnings" 1 "operator warned"
+  thread_cleanup "$root"
+}
+
+test_threads_concurrent_merges_preserve_cli_close(){
+  echo "# threads: a close during inference survives the later merge"
+  local root session status members
+  root=$(setup_env)
+  session=$(mk_thread_session "$root" concurrent "$REPO")
+  seed_thread_findings "$root" "$session" "concurrent goal" '[]' mostly_achieved >/dev/null
+  seed_thread_record "$root" t-33333333 "$REPO" "existing goal" 2019-12-31 aaaaaaaaaaaa /old/session.jsonl partially_achieved open
+  export MOCK_THREADS_MODE=close_during_call MOCK_THREADS_CLOSE_ID=t-33333333 \
+    MOCK_THREADS_CLI="$REPO/bin/threads.sh" MOCK_CAPTURE_DIR="$root/cap"
+  AUTODREAM_THREADS_STATE="$(thread_state "$root")" run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_THREADS_CLOSE_ID MOCK_THREADS_CLI MOCK_CAPTURE_DIR
+  status=$(jq -sr '.[] | select(.id == "t-33333333") | .status' "$(thread_state "$root")")
+  members=$(jq -sr '.[] | select(.id == "t-33333333") | [.sessions[] | .hash] | length' "$(thread_state "$root")")
+  assert_eq "$status" closed_by_sam "concurrent close survives"
+  assert_eq "$members" 2 "fresh state reread before merge"
+  thread_cleanup "$root"
+}
+
+test_threads_lock_exhaustion_is_bounded(){
+  echo "# threads: a held merge lock skips nightly work and makes CLI writes fail"
+  local root session lock cli_exit
+  root=$(setup_env)
+  session=$(mk_thread_session "$root" locked "$REPO")
+  seed_thread_findings "$root" "$session" "locked goal" '[]' partially_achieved >/dev/null
+  lock="$(thread_state "$root").lock"
+  mkdir "$lock"
+  export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  assert_grep "$(fdir "$root")/run-stats.txt" '^threads_skipped: locked$' "nightly skips"
+  AUTODREAM_DIR="$root/autodream" AUTODREAM_THREADS_STATE="$(thread_state "$root")" \
+    /bin/bash "$REPO/bin/threads.sh" close t-11111111 >/dev/null 2>&1
+  cli_exit=$?
+  assert_eq "$cli_exit" 1 "CLI fails loudly"
+  rmdir "$lock"
+  thread_cleanup "$root"
+}
+
+test_threads_retriaged_goal_replaces_source_link(){
+  echo "# threads: a successful re-triage replaces the source membership and goal"
+  local root session hash members goal
+  root=$(setup_env)
+  session=$(mk_thread_session "$root" retriaged "$REPO")
+  hash=$(hash_of "$session")
+  seed_thread_record "$root" t-44444444 "$REPO" "old goal" "$DATE" "$hash" "$session" partially_achieved open
+  export MOCK_THREADS_MODE=attach_existing MOCK_THREADS_CLOSE_ID=t-44444444 \
+    MOCK_THREADS_L1_GOAL="revised goal" MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_THREADS_CLOSE_ID MOCK_THREADS_L1_GOAL MOCK_CAPTURE_DIR
+  members=$(jq -sr --arg hash "$hash" '[.[] | select(.id == "t-44444444") | .sessions[] | select(.date == "2020-01-02" and .hash == $hash)] | length' "$(thread_state "$root")")
+  goal=$(jq -sr '.[] | select(.id == "t-44444444") | .goal' "$(thread_state "$root")")
+  assert_eq "$members" 1 "source key is replaced, not appended"
+  assert_eq "$goal" "revised goal" "fresh triage participates"
+  thread_cleanup "$root"
+}
+
+test_threads_older_rebuild_only_links_missing_sources(){
+  echo "# threads: an older rebuild skips existing links and preserves newer dates"
+  local root session hash before calls after
+  root=$(setup_env)
+  session=$(mk_thread_session "$root" older "$REPO")
+  hash=$(seed_thread_findings "$root" "$session" "old linked goal" '[]' partially_achieved)
+  seed_thread_record "$root" t-55555555 "$REPO" "newer goal" 2020-01-03 aaaaaaaaaaaa /newer/session.jsonl partially_achieved open
+  jq -c --arg date "$DATE" --arg hash "$hash" --arg path "$session" \
+    '.sessions += [{date:$date,hash:$hash,session_path:$path,outcome:"partially_achieved"}]' \
+    "$(thread_state "$root")" > "$(thread_state "$root").tmp"
+  mv "$(thread_state "$root").tmp" "$(thread_state "$root")"
+  before=$(jq -sr '.[0].last_seen' "$(thread_state "$root")")
+  export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  calls=$(thread_call_count "$root/cap")
+  after=$(jq -sr '.[0].last_seen' "$(thread_state "$root")")
+  assert_eq "$calls" 0 "older rebuild is idempotent"
+  assert_eq "$after" "$before" "history does not regress"
+  thread_cleanup "$root"
+}
+
+test_threads_linker_cannot_write(){
+  echo "# threads: linker runs without Write and valid stdout still links"
+  local root session attempted links
+  root=$(setup_env)
+  session=$(mk_thread_session "$root" no-write "$REPO")
+  seed_thread_findings "$root" "$session" "no write goal" '[]' partially_achieved >/dev/null
+  attempted="$root/should-not-exist"
+  export MOCK_THREADS_MODE=try_write MOCK_THREADS_WRITE="$attempted" MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_THREADS_WRITE MOCK_CAPTURE_DIR
+  links=$(jq -sr '[.[].sessions[]] | length' "$(thread_state "$root")")
+  assert_no_file "$attempted" "linker has no writable tools"
+  assert_eq "$links" 1 "valid stdout still reaches merge"
+  thread_cleanup "$root"
+}
+
+_run test_threads_eligibility_and_goal_fallback
+_run test_threads_missing_sidecar_is_unmeasured
+_run test_threads_runner_provenance_survives_worker_tampering
+_run test_threads_one_call_across_repo_hints
+_run test_threads_no_eligible_sessions_makes_no_call
+_run test_threads_linker_failures_preserve_state_and_catch_up
+_run test_threads_rejects_assignments_individually
+_run test_threads_finished_requires_achieved_outcome
+_run test_threads_unreadable_index_prevents_write_and_render
+_run test_threads_concurrent_merges_preserve_cli_close
+_run test_threads_lock_exhaustion_is_bounded
+_run test_threads_retriaged_goal_replaces_source_link
+_run test_threads_older_rebuild_only_links_missing_sources
+_run test_threads_linker_cannot_write
+
 test_prune_worktrees_wiring(){
   echo "# prune: run.sh calls the helper only when roots are set, records the summary, and survives a failing helper"
   local keep; keep=$(mktemp -d "${TMPDIR:-/tmp}/ccad.XXXXXX")   # outlives the per-run roots below

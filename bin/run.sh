@@ -2051,6 +2051,210 @@ session_rows() {
   done 3< "$dir/sessions.txt"
 }
 
+thread_repo_hint() {
+  local cwd=$1 common bare
+  [ -n "$cwd" ] && [ -d "$cwd" ] || return 0
+  common=$(git -C "$cwd" rev-parse --git-common-dir 2>/dev/null) || return 0
+  case "$common" in /*) ;; *) common="$cwd/$common" ;; esac
+  common=$(cd -P "$common" 2>/dev/null && pwd -P) || return 0
+  bare=$(git -C "$cwd" rev-parse --is-bare-repository 2>/dev/null) || return 0
+  if [ "$bare" = true ]; then
+    printf '%s' "$common"
+  else
+    dirname "$common"
+  fi
+}
+
+thread_stats_fields() {
+  local stats=$1 count nested
+  count=0
+  nested=false
+  if [ -r "$stats" ] && jq -e '
+    type == "object" and
+    (.user_message_count | type == "number" and . >= 0 and floor == .) and
+    ((.nested | type) == "boolean" or (.isSidechain | type) == "boolean")
+  ' "$stats" >/dev/null 2>&1; then
+    count=$(jq -r '.user_message_count | floor' "$stats")
+    nested=$(jq -r 'if (.nested | type) == "boolean" then .nested else .isSidechain end' "$stats")
+    printf '%s\t%s\ttrue' "$nested" "$count"
+  else
+    printf '%s\t%s\tfalse' "$nested" "$count"
+  fi
+}
+
+thread_source_rows() {
+  local from=$1 to=$2 tmp keys paths unique_paths finding date_dir date hash session src cwd repo fields nested count measured roots root end_date
+  local source_map=${AUTODREAM_SOURCE_MAP:-}
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/thread-source-rows.XXXXXX" 2>/dev/null) || return 1
+  keys="$tmp/history-keys.tsv"
+  paths="$tmp/path-map.jsonl"
+  unique_paths="$tmp/unique-paths.tsv"
+  : > "$keys" || { rmdir "$tmp" 2>/dev/null; return 1; }
+  : > "$paths" || { rmdir "$tmp" 2>/dev/null; return 1; }
+  [ -n "$source_map" ] || source_map=$(cat "$FINDINGS_DIR/sessions-source.txt" 2>/dev/null)
+
+  for date_dir in "$AUTODREAM_DIR"/findings/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]; do
+    [ -d "$date_dir" ] || continue
+    date=${date_dir##*/}
+    case "$date" in
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) pdate_epoch "$date" >/dev/null 2>&1 || continue ;;
+      *) continue ;;
+    esac
+    [[ "$date" < "$from" || "$date" > "$to" ]] && continue
+    [ "$date" = "$TARGET_DATE" ] && continue
+    for finding in "$date_dir"/*.json; do
+      [ -f "$finding" ] || continue
+      case "$finding" in *.stats.json) continue ;; esac
+      hash=${finding##*/}
+      hash=${hash%.json}
+      case "$hash" in
+        [0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef])
+          printf '%s\t%s\n' "$date" "$hash" >> "$keys" ;;
+      esac
+    done
+  done
+
+  end_date=${ENUM_END:-$to}
+  for src in $ENABLED_ADAPTERS; do
+    while IFS= read -r root; do
+      [ -n "$root" ] && [ -d "$root" ] || continue
+      while IFS= read -r -d '' session; do
+        hash=$(session_hash "$session") || continue
+        awk -F '\t' -v h="$hash" '($2 "x") == (h "x") { found = 1; exit } END { exit !found }' "$keys" || continue
+        case "$session" in *$'\t'*|*$'\n'*) continue ;; esac
+        cwd=$(adapter_run "$src" project "$session" 2>/dev/null </dev/null) || cwd=""
+        case "$cwd" in *$'\t'*|*$'\n'*) cwd="" ;; esac
+        repo=$(thread_repo_hint "$cwd")
+        case "$repo" in *$'\t'*|*$'\n'*) repo="" ;; esac
+        jq -cn --arg hash "$hash" --arg source "$src" --arg path "$session" --arg cwd "$cwd" --arg repo "$repo" \
+          '{hash:$hash,source:$source,session_path:$path,cwd:$cwd,repo:$repo}' >> "$paths"
+      done < <(adapter_run "$src" enumerate "$root" "$from" "$end_date" 2>/dev/null)
+    done < <(adapter_roots "$src")
+  done
+
+  python3 - "$paths" "$unique_paths" <<'PY_THREAD_PATHS'
+import json
+import sys
+
+source, destination = sys.argv[1:]
+by_hash = {}
+for line in open(source, encoding="utf-8"):
+    if line.strip():
+        item = json.loads(line)
+        key = item["hash"]
+        identity = (item["source"], item["session_path"], item["cwd"], item["repo"])
+        by_hash.setdefault(key, set()).add(identity)
+with open(destination, "w", encoding="utf-8") as output:
+    for key in sorted(by_hash):
+        values = by_hash[key]
+        if len(values) == 1:
+            source_name, path, cwd, repo = next(iter(values))
+            output.write("%s\t%s\t%s\t%s\t%s\n" % (key, source_name, path, cwd, repo))
+PY_THREAD_PATHS
+  if [ "$?" -ne 0 ]; then
+    find "$tmp" -depth -type f -exec unlink {} \; 2>/dev/null
+    rmdir "$tmp" 2>/dev/null
+    return 1
+  fi
+
+  while IFS= read -r session <&3; do
+    [ -n "$session" ] || continue
+    hash=$(session_hash "$session") || continue
+    src=$(printf '%s\n' "$source_map" | awk -F '\t' -v h="$hash" '($1 "x") == (h "x") { print $2; exit }')
+    [ -n "$src" ] || continue
+    cwd=$(printf '%s\n' "${SESSION_ROWS:-}" | awk -F '\t' -v h="$hash" '($1 "x") == (h "x") { print $3; exit }')
+    [ "$cwd" = "?" ] && cwd=""
+    repo=$(thread_repo_hint "$cwd")
+    fields=$(thread_stats_fields "$FINDINGS_DIR/$hash.stats.json")
+    IFS=$'\t' read -r nested count measured <<EOF_THREAD_FIELDS
+$fields
+EOF_THREAD_FIELDS
+    jq -cn --arg date "$to" --arg hash "$hash" --arg source "$src" --arg path "$session" \
+      --arg cwd "$cwd" --arg repo "$repo" --argjson nested "$nested" --argjson count "$count" \
+      --argjson measured "$measured" \
+      '{date:$date,hash:$hash,source:$source,session_path:$path,cwd:$cwd,repo:$repo,nested:$nested,user_message_count:$count,measured:$measured}'
+  done 3< "$SESSIONS_LIST"
+
+  while IFS=$'\t' read -r date hash; do
+    [ -n "$date" ] && [ -n "$hash" ] || continue
+    row=$(awk -F '\t' -v h="$hash" '($1 "x") == (h "x") { n++; line=$0 } END { if (n == 1) print line }' "$unique_paths")
+    [ -n "$row" ] || continue
+    IFS=$'\t' read -r _hash src session cwd repo <<EOF_THREAD_PATH
+$row
+EOF_THREAD_PATH
+    fields=$(thread_stats_fields "$AUTODREAM_DIR/findings/$date/$hash.stats.json")
+    IFS=$'\t' read -r nested count measured <<EOF_THREAD_FIELDS
+$fields
+EOF_THREAD_FIELDS
+    jq -cn --arg date "$date" --arg hash "$hash" --arg source "$src" --arg path "$session" \
+      --arg cwd "$cwd" --arg repo "$repo" --argjson nested "$nested" --argjson count "$count" \
+      --argjson measured "$measured" \
+      '{date:$date,hash:$hash,source:$source,session_path:$path,cwd:$cwd,repo:$repo,nested:$nested,user_message_count:$count,measured:$measured}'
+  done < "$keys"
+
+  find "$tmp" -depth -type f -exec unlink {} \; 2>/dev/null
+  rmdir "$tmp" 2>/dev/null
+}
+
+thread_refresh_pending() {
+  local state=$1 rows=$2 line date hash findings
+  THREADS_REFRESH_PENDING=""
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    date=$(printf '%s\n' "$line" | jq -r '.date')
+    [ "$date" = "$TARGET_DATE" ] || continue
+    hash=$(printf '%s\n' "$line" | jq -r '.hash')
+    printf '%s\n' "$state" | jq -e --arg date "$date" --arg hash "$hash" \
+      'any(.[]; any(.sessions[]?; .date == $date and .hash == $hash))' >/dev/null 2>&1 || continue
+    findings="$FINDINGS_DIR/$hash.json"
+    jq -s -e "$L1_FINDINGS_OK" "$findings" >/dev/null 2>&1 && continue
+    THREADS_REFRESH_PENDING="${THREADS_REFRESH_PENDING}${date}"$'\t'"${hash}"$'\n'
+  done <<EOF_THREAD_ROWS
+$rows
+EOF_THREAD_ROWS
+}
+
+thread_refresh_accepted() {
+  local line date hash findings
+  THREADS_REFRESH_KEYS=""
+  while IFS=$'\t' read -r date hash; do
+    [ -n "$date" ] && [ -n "$hash" ] || continue
+    findings="$FINDINGS_DIR/$hash.json"
+    jq -s -e "$L1_FINDINGS_OK" "$findings" >/dev/null 2>&1 || continue
+    THREADS_REFRESH_KEYS="${THREADS_REFRESH_KEYS}${date}"$'\t'"${hash}"$'\n'
+  done <<EOF_THREAD_PENDING
+${THREADS_REFRESH_PENDING:-}
+EOF_THREAD_PENDING
+}
+
+run_threads_update() {
+  local updater from
+  updater=$(find_lib threads.sh) || updater=""
+  THREADS_SUMMARY="threads_state: ok
+threads_link: not_needed
+threads_linked: 0
+threads_rejected: 0
+threads_close_refused: 0
+threads_unmeasured: 0
+threads_calls: 0"
+  [ -n "$updater" ] || return 0
+  from=$(pdate_shift "$TARGET_DATE" -13 d) || return 0
+  THREADS_SUMMARY=$(printf '%s\n' "$THREAD_SOURCE_ROWS" | env \
+    AUTODREAM_THREADS_TIMEOUT_BIN="$TIMEOUT_BIN" \
+    THREADS_REFRESH_KEYS="${THREADS_REFRESH_KEYS:-}" \
+    AUTODREAM_DIR="$AUTODREAM_DIR" \
+    "$updater" update "$TARGET_DATE" 2>> "$RUN_LOG") || {
+      THREADS_SUMMARY="threads_state: ok
+threads_link: failed
+threads_linked: 0
+threads_rejected: 0
+threads_close_refused: 0
+threads_unmeasured: 0
+threads_calls: 0"
+    }
+  clean_work_bucket
+}
+
 # stdin: session_rows output -> one project<TAB>cwd row per project. A project gets a cwd
 # only when all its sessions agree on one usable cwd. An unusable "?" still counts as a
 # distinct cwd, so it makes the project ambiguous rather than vanishing. Anything looser
@@ -3518,6 +3722,9 @@ run() {
 
   if [ "$COUNT" -eq 0 ]; then
     log "no sessions to triage; writing stub report and exiting"
+    THREAD_SOURCE_ROWS=$(thread_source_rows "$(pdate_shift "$TARGET_DATE" -13 d)" "$TARGET_DATE" 2>/dev/null) || THREAD_SOURCE_ROWS=""
+    THREADS_REFRESH_KEYS=""
+    run_threads_update
     # A zero-session night is not always an empty night. Every session can be
     # rejected for an unrepresentable path or dropped by collision handling, and
     # run-stats.txt is written on this path too. Without it the report said "no
@@ -3619,6 +3826,7 @@ run() {
       # L2 to name the dates for any non-empty value, so `none` was handed to it as
       # a date list to report.
       printf 'unassembled_dates: %s\n' "${UNASSEMBLED:-}"
+      printf '%s\n' "$THREADS_SUMMARY"
     } > "$FINDINGS_DIR/run-stats.txt" 2>/dev/null || true
     cat > "$REPORT_PATH" <<EOF
 # Autodream — $TARGET_DATE
@@ -3740,6 +3948,13 @@ EOF
   # models are resolved once per adapter, not per session.
   ADAPTERS_DIR=$(adapters_root)
   AUTODREAM_SOURCE_MAP=$(cat "$FINDINGS_DIR/sessions-source.txt" 2>/dev/null)
+  THREAD_SOURCE_ROWS=$(thread_source_rows "$(pdate_shift "$TARGET_DATE" -13 d)" "$TARGET_DATE" 2>/dev/null) || THREAD_SOURCE_ROWS=""
+  THREADS_STATE_PATH=${AUTODREAM_THREADS_STATE:-$AUTODREAM_DIR/threads.jsonl}
+  THREADS_STATE_SNAPSHOT='[]'
+  if [ -f "$THREADS_STATE_PATH" ]; then
+    THREADS_STATE_SNAPSHOT=$(jq -cs '.' "$THREADS_STATE_PATH" 2>/dev/null) || THREADS_STATE_SNAPSHOT=""
+  fi
+  thread_refresh_pending "$THREADS_STATE_SNAPSHOT" "$THREAD_SOURCE_ROWS"
   AUTODREAM_L1_MODELS=""
   AUTODREAM_L1_ENGINES=""
   AUTODREAM_L1_PROBE_URLS=""
@@ -4189,6 +4404,9 @@ PY
   done
   log "enforced mechanical skill fields from sidecars on $SKILLS_ENFORCED findings file(s); removed unmeasured skill fields from $SKILLS_DROPPED whose sidecar was missing, unreadable, or incomplete; $SKILLS_FAILED rewrite(s) failed"
 
+  thread_refresh_accepted
+  run_threads_update
+
   # ---- Self-audit stats: runtime telemetry only the runner can see ----
   # The aggregator can't observe its own machinery — which sessions were autodream's
   # own (already excluded), how many workers failed, how many retry rounds it took.
@@ -4388,6 +4606,7 @@ PY
     # window, which is the reading that matters — this is the key that gets a killed run
     # noticed the next morning instead of during an unrelated investigation two days on.
     printf 'unassembled_dates: %s\n' "${UNASSEMBLED:-}"
+    printf '%s\n' "$THREADS_SUMMARY"
     # Always emitted, even empty: a reader should never have to tell "no legacy reports"
     # apart from "this runner predates the key", which is the same ambiguity the epoch
     # exists to resolve.
