@@ -65,18 +65,36 @@ Any of these makes the feature a failure even if it runs:
 | B | Embedding similarity over goals, clustered per project | Deterministic, with no model call per night. Short goals reworded across days ("fix 404 on cache export", later "mlx-serve export endpoint") cluster poorly, and the threshold would need tuning per project. It could become a pre-filter for A later. |
 | C | Separate daemon that re-reads transcripts with local DeepSeek | Independent of autodream, but it repeats L1's read of every session and needs its own session roots, sleep handling, retries and self-pollution defenses. Rejected. |
 
+## Delivery order
+
+Everything below ships; the order keeps each PR testable on its own.
+
+1. Thread index, linker, `threads.sh` list/search/close/reopen/merge/resume, and the
+   report section.
+2. `threads.html` and `threads.sh explore`.
+3. `deferred_ideas` in L1, and `threads.sh backfill`.
+
+## The linker's engine
+
+The linker gets a new adapter verb, `threads-argv`, shaped like `l2-argv` but with no
+tools at all: its input arrives on stdin and its answer leaves on stdout. Reusing
+`l1-argv` would grant `Read Write` under `bypassPermissions`, which would let a model
+write `threads.jsonl`. The omp adapter gets the same verb, so local DeepSeek can run
+it.
+
 ## Design
 
 ```
  L1 (existing) ─▶ findings/<date>/<hash>.json   new field: deferred_ideas[]
- rollup.sh (existing) ─▶ rollup.tsv             runner-trusted: project, nested, outcome
+ rollup.sh (existing) ─▶ rollup.tsv             nested (runner), outcome (L1 model)
         │
         ▼
  bin/threads.sh link <date>          new; runs after rollup, before L2
    for each project with top-level sessions tonight:
      input  = the project's open threads + tonight's goals and deferred ideas
      engine = AUTODREAM_THREADS_ENGINE (default: the L1 engine)
-     output = assignments on stdout, validated by the runner
+     tools  = none; input on stdin, assignments on stdout (like L2)
+     output = validated by the runner, the only writer
         │
         ▼
  $AUTODREAM_DIR/threads/threads.jsonl    one row per thread, one rename per write
@@ -84,9 +102,9 @@ Any of these makes the feature a failure even if it runs:
         │
         ▼
  L2 copies it into "Dropped threads"     as it copies triage-candidates.md today
- autodream threads [query] [--dropped] [--project p]
- autodream threads close|reopen|merge <id> ...
- autodream threads resume <id>           prints a brief; --launch starts claude with it
+ threads.sh [query] [--dropped] [--project p]
+ threads.sh close|reopen|merge <id> ...
+ threads.sh resume <id>                  prints a brief; --launch starts claude with it
 ```
 
 ### The thread record
@@ -94,7 +112,7 @@ Any of these makes the feature a failure even if it runs:
 | Field | Source |
 |---|---|
 | `id` | `t-<8 hex>`, assigned by the runner, never by a model |
-| `project` | `rollup.tsv`, never a findings JSON |
+| `project` | derived by the runner from the real session path (the `pin-projects.tsv` rule), never from a findings JSON or `rollup.tsv`, which copies the model's value when python3 is missing |
 | `kind` | `work` or `idea` |
 | `title` | proposed by the model, capped at 120 characters by the runner |
 | `goal` | the newest `underlying_goal`, or the idea text |
@@ -108,13 +126,15 @@ Any of these makes the feature a failure even if it runs:
 The runner applies these rules. A model's output never sets a status directly.
 
 - A thread becomes `done` only when the linker says a session finished it AND that
-  session's `outcome` in `rollup.tsv` is `fully_achieved` or `mostly_achieved`.
-  Requiring both means one model call cannot close a thread alone.
+  session's `outcome` is `fully_achieved` or `mostly_achieved`. Both are model
+  judgments, but from two separate calls (the linker and that session's L1 worker),
+  so one call cannot close a thread alone.
 - A thread counts as dropped when it is `open`, its `last_seen` is older than
   `AUTODREAM_THREADS_DROPPED_DAYS` (default 7), and its newest outcome is not
   `fully_achieved`. Dropped is computed at read time and never stored.
-- `closed_by_sam` is sticky. The linker can attach new sessions to a closed thread,
-  but only `reopen` changes its status.
+- `closed_by_sam` is sticky. The linker sees closed threads as id and title only, so
+  it can attach a reworded session to one instead of starting a new thread. Only
+  `reopen` changes its status.
 
 The report ranks dropped threads by kind (`work` before `idea`), then by the number of
 linked sessions (effort already spent), then by how recently the thread went quiet.
@@ -130,10 +150,13 @@ that does the work closes it.
 
 ### Backfill
 
-Work threads backfill from the findings already on disk (176 date directories since
-2026-05-25), oldest first, with one linker pass per date through
-`threads.sh backfill FROM TO`. Deferred ideas cannot be backfilled without
-re-triaging every session. That run is opt-in on local DeepSeek and outside v1.
+Work threads backfill from the findings already on disk (173 date directories since
+2026-05-25), oldest first, with one linker pass per project per date. Backfill never
+runs by itself: Sam starts it with `threads.sh backfill FROM TO [--engine E]
+[--max-calls N]`, which prints the call count before it starts and stops at the
+budget. Local DeepSeek is the suggested engine for it, since it costs nothing per
+call. Deferred ideas cannot be backfilled without re-triaging every session; that
+is a separate opt-in run.
 
 ### Resume brief
 
@@ -145,14 +168,14 @@ rules apply: never inline a whole report, and never launch with a one-word promp
 ### Explore: a session plus a dashboard
 
 ```
- autodream threads explore
+ threads.sh explore
    │
    ├─▶ threads.sh render ─▶ $DREAMS_DIR/threads.html   static, one file, no server
    │                         open in the browser
    │
    └─▶ claude session (cmux split, as review.sh does)
          first prompt: what the index holds, where it lives, the CLI verbs
-         tools: Read on threads.jsonl and findings; Bash for `autodream threads ...`
+         tools: Read on threads.jsonl and findings; Bash for `threads.sh ...`
          Sam asks: "what did I drop on mlx-serve?", "which ideas cluster?",
                    "close t-3fa1, it's dead", "resume t-91c0"
          after any close/reopen/merge it re-renders the HTML
@@ -199,7 +222,8 @@ in place.
 | A session is re-triaged with a different goal | Link keyed by `(date, hash)` and replaced | Duplicate thread | none; the update is idempotent |
 | Render fails (bad record, disk full) | Previous `threads.html` kept; written by temp file and rename | Stale page | Page header shows its generation time; run-stats `threads_render: failed` |
 | Thread text holds HTML or script | Escaped on render; data embedded as JSON in a non-executing script tag | Script injection from a transcript quote | Not reachable; a test feeds `</script>` through a goal |
-| A worker forges `project` or `session_path` in a findings JSON | Both come from `rollup.tsv` and `sessions.txt` | Thread filed under another project | Not reachable by construction |
+| A worker forges `project` or `session_path` in a findings JSON | Project comes from the session path, path from `sessions.txt` | Thread filed under another project | Not reachable by construction, python3 or not; a test forges both |
+| Linker tries to write a file | It has no tools | State written by a model | Not reachable; the adapter verb grants none |
 
 Each row becomes a red E2E test in `tests/run-all.sh`, with a mock linker, before the
 code it covers exists.
@@ -207,7 +231,8 @@ code it covers exists.
 ## Left to the builder
 
 - Prompt wording for the linker and for `deferred_ideas`.
-- CLI flag names, and whether `autodream threads` is a new script or a subcommand of
-  an existing entry point.
+- CLI flag names. The entry point is a new `bin/threads.sh`, linked into
+  `$AUTODREAM_DIR` by `install.sh`; the `autodream` skill can call it.
 - Batch size when a project has more open threads than fit one call. A starting
-  point: send the 40 most recent open threads and no closed ones.
+  point: the 40 most recent open threads in full, plus up to 40 closed ones as id
+  and title.
