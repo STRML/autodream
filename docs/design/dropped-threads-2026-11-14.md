@@ -69,10 +69,14 @@ Any of these makes the feature a failure even if it runs:
 
 Everything below ships; the order keeps each PR testable on its own.
 
-1. Thread index, linker, `threads.sh` list/search/close/reopen/merge/resume, and the
-   report section.
+1. Thread index, linker, `threads.sh` list/search/close/reopen/merge/resume,
+   `threads.sh backfill` for work threads, and the report section. Once it merges,
+   Claude runs the backfill over all 173 dates on local DeepSeek, so the index holds
+   past work before anyone opens the explorer.
 2. `threads.html` and `threads.sh explore`.
-3. `deferred_ideas` in L1, and `threads.sh backfill`.
+3. `deferred_ideas` in L1. Ideas from before this PR exist only in the transcripts,
+   so recovering them means re-triaging every old session. That stays a separate
+   opt-in run, and its cost is measured on a sample and quoted before it starts.
 
 ## The linker's engine
 
