@@ -77,6 +77,11 @@
 #                            test can prove how much a worker was handed.
 #   MOCK_CAPTURE_DIR=<dir>   dump each layer's stdin + argv to <dir>/l{1,2}-*.txt
 #                            so tests can assert on the exact prompt framing.
+#   MOCK_THREADS_MODE=good|fail_*|bad_*  independent linker behavior, captured as
+#                            threads-stdin-N.txt, threads-args-N.txt and threads-calls.txt.
+#   MOCK_THREADS_TAMPER=1    L1 rewrites the worklist and its findings path after the runner
+#                            has captured trusted thread provenance.
+#   MOCK_THREADS_L1_GOAL=<text>  goal written by a successful L1 answer for re-triage tests.
 #   MOCK_CALL_LOG=<file>     append the L1 output path for every invocation of
 #                            this mock, one per line — lets a test prove the
 #                            model was (or was not) invoked for a given session
@@ -130,6 +135,98 @@ tamper_worklist() {
 }
 line1=$(printf '%s\n' "$input" | sed -n '1p')
 line2=$(printf '%s\n' "$input" | sed -n '2p')
+
+if [ "$line1" = "AUTODREAM_THREADS_LINKER" ]; then
+  threads_mode="${MOCK_THREADS_MODE:-good}"
+  threads_request=$(printf '%s\n' "$input" | sed -n '/^AUTODREAM_THREADS_REQUEST$/,$p' | sed '1d' | sed -n '1p')
+  threads_call=1
+  if [ -n "${MOCK_CAPTURE_DIR:-}" ]; then
+    mkdir -p "$MOCK_CAPTURE_DIR"
+    if [ -f "$MOCK_CAPTURE_DIR/threads-calls.txt" ]; then
+      threads_call=$(( $(wc -l < "$MOCK_CAPTURE_DIR/threads-calls.txt" | tr -d ' ') + 1 ))
+    fi
+    printf '%s\n' "$threads_call" >> "$MOCK_CAPTURE_DIR/threads-calls.txt"
+    printf '%s' "$input" > "$MOCK_CAPTURE_DIR/threads-stdin-$threads_call.txt"
+    printf '%s\n' "$@" > "$MOCK_CAPTURE_DIR/threads-args-$threads_call.txt"
+  fi
+  if [ -n "${MOCK_BACKFILL_OUTPUT_FILE:-}" ]; then
+    if grep -q '^planned_calls:' "$MOCK_BACKFILL_OUTPUT_FILE" 2>/dev/null; then
+      printf 'true\n' > "$MOCK_BACKFILL_PLAN_SEEN"
+    else
+      printf 'false\n' > "$MOCK_BACKFILL_PLAN_SEEN"
+    fi
+  fi
+  threads_good(){
+    printf '%s\n' "$threads_request" | jq -c '.candidates[] | {hash:.hash,thread:"new",title:.goal,finished:false}'
+  }
+  case "$threads_mode" in
+    fail_refusal) echo "provider refused the linker request" >&2; exit 1 ;;
+    fail_nonzero) threads_good; echo "linker failed after partial stdout" >&2; exit 7 ;;
+    fail_timeout) sleep 5; exit 0 ;;
+    fail_unusable) printf 'not a JSON assignment\n'; exit 0 ;;
+    close_during_call)
+      /bin/bash "$MOCK_THREADS_CLI" close "$MOCK_THREADS_CLOSE_ID" >/dev/null 2>&1
+      printf '%s\n' "$?" > "$MOCK_CAPTURE_DIR/threads-close-exit.txt"
+      jq -c --arg id "$MOCK_THREADS_CLOSE_ID" '.candidates[] | {hash:.hash,thread:$id,title:.goal,finished:true}' \
+        <<< "$threads_request"
+      exit 0
+      ;;
+    attach_existing)
+      jq -c --arg id "$MOCK_THREADS_CLOSE_ID" '.candidates[] | {hash:.hash,thread:$id,title:.goal,finished:false}' \
+        <<< "$threads_request"
+      exit 0
+      ;;
+    finished)
+      jq -c '.candidates[] | {hash:.hash,thread:"new",title:.goal,finished:true}' <<< "$threads_request"
+      exit 0
+      ;;
+    finished_existing)
+      jq -c --arg id "$MOCK_THREADS_CLOSE_ID" '.candidates[] | {hash:.hash,thread:$id,title:.goal,finished:true}' <<< "$threads_request"
+      exit 0
+      ;;
+    omit_last)
+      jq -c '.candidates[0] | {hash:.hash,thread:"new",title:.goal,finished:false}' <<< "$threads_request"
+      exit 0
+      ;;
+    bad_assignments)
+      first=$(jq -r '.candidates[0].hash // empty' <<< "$threads_request")
+      second=$(jq -r '.candidates[1].hash // empty' <<< "$threads_request")
+      threads_good | sed -n '1p'
+      printf '{not-json}\n'
+      printf '{"hash":"%s","thread":"t-ffffffff","finished":false}\n' "$second"
+      printf '{"hash":"2099-12-31-ffffffffffff","thread":"new","finished":false}\n'
+      exit 0
+      ;;
+    bad_finished)
+      first=$(jq -r '.candidates[0].hash // empty' <<< "$threads_request")
+      jq -cn --arg hash "$first" '{hash:$hash,thread:"new",finished:"yes"}'
+      jq -c '.candidates[1:][] | {hash:.hash,thread:"new",title:.goal,finished:false}' <<< "$threads_request"
+      exit 0
+      ;;
+    bad_duplicate)
+      first=$(jq -c '.candidates[0] // empty' <<< "$threads_request")
+      printf '%s\n' "$first" | jq -c '{hash:.hash,thread:"new",title:.goal,finished:false}'
+      printf '%s\n' "$first" | jq -c '{hash:.hash,thread:"new",title:.goal,finished:false}'
+      jq -c '.candidates[1:][] | {hash:.hash,thread:"new",title:.goal,finished:false}' <<< "$threads_request"
+      exit 0
+      ;;
+    bad_conflict)
+      first=$(jq -c '.candidates[0] // empty' <<< "$threads_request")
+      printf '%s\n' "$first" | jq -c '{hash:.hash,thread:"new",title:.goal,finished:false}'
+      printf '%s\n' "$first" | jq -c '{hash:.hash,thread:"t-ffffffff",title:.goal,finished:false}'
+      jq -c '.candidates[1:][] | {hash:.hash,thread:"new",title:.goal,finished:false}' <<< "$threads_request"
+      exit 0
+      ;;
+    try_write)
+      if printf '%s\n' "$@" | grep -qx 'Write' && [ -n "${MOCK_THREADS_WRITE:-}" ]; then
+        : > "$MOCK_THREADS_WRITE"
+      fi
+      threads_good
+      exit 0
+      ;;
+    *) threads_good; exit 0 ;;
+  esac
+fi
 
 # ---- Pre-fanout auth warmup ----
 # run.sh pipes the single word `ping` before dispatching L1. It is neither layer, and
@@ -275,6 +372,15 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
       if [ -f "$out.attempt" ]; then write_findings; else : > "$out.attempt"; fi ;;
     *) write_findings ;;
   esac
+  if [ -n "${MOCK_THREADS_L1_GOAL:-}" ] && [ -s "$out" ]; then
+    jq --arg goal "$MOCK_THREADS_L1_GOAL" '.underlying_goal = $goal' "$out" > "$out.threads.tmp" \
+      && mv "$out.threads.tmp" "$out"
+  fi
+  if [ -n "${MOCK_THREADS_TAMPER:-}" ] && [ -s "$out" ]; then
+    tamper_worklist "$(dirname "$out")"
+    jq --arg path "$MOCK_FORGED_SESSION" '.session_path = $path | .project = "forged-project"' "$out" > "$out.threads.tmp" \
+      && mv "$out.threads.tmp" "$out"
+  fi
   l1_reply
 elif printf '%s' "$input" | grep -q '^# Dream triage worker'; then
   # ---- Dream triage (bin/triage-dream.sh): its own capture files, never l2-*, so a test that
@@ -340,7 +446,9 @@ else
   # The open-questions marker is part of the real contract (PROMPT.md mandates it) and run.sh
   # treats its absence as a truncated report, so the good path emits it too, on stdout, ending
   # with the sentinel the runner strips, then the optional pin block.
-  printf '# Autodream — mock\n\nmock aggregate report\n\n<!-- autodream:open-questions=0 -->\n'
+  printf '# Autodream — mock\n\nmock aggregate report\n\n'
+  [ ! -r "$fdir/dropped-threads.md" ] || cat "$fdir/dropped-threads.md"
+  printf '\n<!-- autodream:open-questions=0 -->\n'
   echo "AUTODREAM_REPORT_END"
   if [ "$writes_pins" = 1 ]; then
     if [ "$mode" = "pins_unterminated" ]; then

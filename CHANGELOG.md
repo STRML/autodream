@@ -2,6 +2,11 @@
 
 All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
+## 2026-11-14
+
+### Added
+- **Dropped-thread reports, resume briefs and bounded backfill.** The nightly runner maintains a local JSONL index from trusted session facts, adds a ranked `## Dropped threads` section to reports, and catches up missed linker work without a watermark. `threads.sh` now renders reports, prints or launches a source-grounded resume brief, and backfills historical findings by sidecar with a preflight call budget. `install.sh` links the CLI.
+
 ## 2026-11-06
 
 ### Added

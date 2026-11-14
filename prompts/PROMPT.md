@@ -13,6 +13,8 @@ Report destination (literal absolute path): /absolute/path/to/dreams/YYYY-MM-DD.
 
 These are plain text values, **not shell variables**. Use them as literal paths with the Read tool; never write `$FINDINGS_DIR`, `$REPORT_PATH`, or any `$NAME` in a Bash command — no such environment variable is set, so it expands to nothing and the command fails.
 
+The runner also supplies a **Dropped threads runner input** line with the exact path to `dropped-threads.md`. Read that named file. Copy its `## Dropped threads` section verbatim into the report, preserving stale-index warnings and every entry under “Closed tonight”. Do not turn its recommendations into open questions.
+
 All other inputs you need (treat `<findings-dir>` below as the literal path from line 1):
 
 **Never Glob, list or read the findings directory to count anything.** A directory listing and a Glob both stop at 200 entries, and a findings directory holds three files per session plus about thirty side files: on 2026-10-31 it held 2683 entries for 885 sessions, a report counted from a 90-file sample, and it never saw `fanouts.tsv` at all. Every file in it that you need is named below; open each one by its exact path. Every count of sessions or findings, and every sum, tally and distribution over them, comes from `rollup.tsv`, `categories.tsv` and `findings.tsv`, never from a sample of findings JSONs. Read all three to the last line: when a file is longer than one Read returns, keep reading with an offset until the end.

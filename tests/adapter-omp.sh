@@ -425,6 +425,50 @@ printf '%s\0' /opt/test/omp --allow-home -p --approval-mode yolo --no-session --
 OMP_BIN=/opt/test/omp NO_ADVISOR_CFG=/opt/test/overlay.yml "$A" l1-argv deepseek/deepseek-flash > "$tmp/new-argv"
 if cmp -s "$tmp/old-argv" "$tmp/new-argv"; then ok "the omp L1 argv is byte for byte omp-autodream's"
 else no "the omp L1 argv is byte for byte omp-autodream's"; fi
+
+echo "# threads-argv: linker has no tools or ambient context"
+threads_argv=()
+threads_count=0
+OMP_BIN=/opt/test/omp NO_ADVISOR_CFG=/opt/test/overlay.yml "$A" threads-argv fixture-model > "$tmp/threads-argv" 2>/dev/null
+rc=$?
+while IFS= read -r -d '' arg; do threads_argv[$threads_count]="$arg"; threads_count=$((threads_count + 1)); done < "$tmp/threads-argv"
+assert_eq "$rc" 0 "threads-argv exists"
+requested_model=""
+tool_count=-1
+persists_session=true
+no_tools=false
+no_extensions=false
+no_skills=false
+no_rules=false
+no_context=false
+no_title=false
+i=0
+while [ "$i" -lt "$threads_count" ]; do
+  arg=${threads_argv[$i]}
+  case "$arg" in
+    --model) next=$((i + 1)); requested_model=${threads_argv[$next]} ;;
+    --tools=*) [ "$arg" = "--tools=" ] && tool_count=0 || tool_count=1 ;;
+    --no-session) persists_session=false ;;
+    --no-tools) no_tools=true ;;
+    --no-extensions) no_extensions=true ;;
+    --no-skills) no_skills=true ;;
+    --no-rules) no_rules=true ;;
+    --no-context-files) no_context=true ;;
+    --no-title) no_title=true ;;
+  esac
+  i=$((i + 1))
+done
+assert_eq "$requested_model" "fixture-model" "model passed literally"
+if [ "$no_tools" = true ] && [ "$tool_count" -eq 0 ]; then :; else tool_count=-1; fi
+assert_eq "$tool_count" 0 "explicit empty tool list"
+assert_eq "$persists_session" false "headless calls leave no session"
+loads_context_or_extensions=true
+if [ "$no_extensions" = true ] && [ "$no_skills" = true ] && [ "$no_rules" = true ] && [ "$no_context" = true ] && [ "$no_title" = true ]; then
+  loads_context_or_extensions=false
+fi
+assert_eq "$loads_context_or_extensions" false "no ambient tools"
+"$A" threads-argv >/dev/null 2>&1; assert_rc "$?" 2 "threads-argv requires a model"
+
 # The overlay defaults to the one beside the adapter, and it is the file that turns recall off.
 ov=$(OMP_BIN=/opt/test/omp "$A" l1-argv m | tr '\0' '\n' | sed -n '/^--config$/{n;p;}')
 assert_eq "$(basename "$ov")" "l1-no-advisor.yml" "the overlay defaults to the adapter's own"

@@ -24,6 +24,13 @@ AUTODREAM_TRIAGE_SURFACE=cmux
 #   true             switch to the new workspace immediately
 # AUTODREAM_TRIAGE_FOCUS=false
 
+# Cross-day dropped-thread linker. It uses a tool-less adapter call over L1 facets.
+# AUTODREAM_THREADS_ENGINE=claude
+# AUTODREAM_THREADS_MODEL=claude-haiku-5-5
+# AUTODREAM_THREADS_TIMEOUT=300
+# AUTODREAM_THREADS_MAX_INPUT=65536
+# AUTODREAM_THREADS_DROPPED_DAYS=7
+
 # The model the morning triage session (review.sh) runs on, passed as --model.
 # Without it the session would take the default model from your Claude settings.
 # AUTODREAM_REVIEW_MODEL=opus

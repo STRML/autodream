@@ -267,6 +267,45 @@ assert_eq "$(AUTODREAM_L1_EFFORT=low CLAUDE_BIN=/opt/test/claude "$A" l1-argv m 
 assert_eq "$(AUTODREAM_L1_EFFORT=low AUTODREAM_L1_EFFORT_CLAUDE=max CLAUDE_BIN=/opt/test/claude "$A" l1-argv m | tr '\0' '\n' | sed -n '/^--effort$/{n;p;}')" "max" "the per-adapter variable wins"
 assert_eq "$(AUTODREAM_L1_EFFORT=off CLAUDE_BIN=/opt/test/claude "$A" l1-argv m | tr '\0' '\n' | grep -c '^--effort$')" "0" "off omits the flag"
 if AUTODREAM_L1_EFFORT=turbo CLAUDE_BIN=/opt/test/claude "$A" l1-argv m >/dev/null 2>&1; then no "an unknown level is refused"; else ok "an unknown level is refused"; fi
+
+echo "# threads-argv: linker has no tools or ambient context"
+threads_argv=()
+threads_count=0
+CLAUDE_BIN=/opt/test/claude "$A" threads-argv fixture-model > "$tmp/threads-argv" 2>/dev/null
+rc=$?
+while IFS= read -r -d '' arg; do threads_argv[$threads_count]="$arg"; threads_count=$((threads_count + 1)); done < "$tmp/threads-argv"
+assert_eq "$rc" 0 "threads-argv exists"
+requested_model=""
+tool_count=-1
+persists_session=true
+no_sources=false
+strict_mcp=false
+slash_commands_off=false
+hooks_off=false
+i=0
+while [ "$i" -lt "$threads_count" ]; do
+  arg=${threads_argv[$i]}
+  case "$arg" in
+    --model) next=$((i + 1)); requested_model=${threads_argv[$next]} ;;
+    --tools) next=$((i + 1)); [ -z "${threads_argv[$next]}" ] && tool_count=0 || tool_count=1 ;;
+    --no-session-persistence) persists_session=false ;;
+    --setting-sources) next=$((i + 1)); [ -z "${threads_argv[$next]}" ] && no_sources=true ;;
+    --strict-mcp-config) strict_mcp=true ;;
+    --disable-slash-commands) slash_commands_off=true ;;
+    --settings) next=$((i + 1)); [ "${threads_argv[$next]}" = '{"disableAllHooks":true}' ] && hooks_off=true ;;
+  esac
+  i=$((i + 1))
+done
+assert_eq "$requested_model" "fixture-model" "model passed literally"
+assert_eq "$tool_count" 0 "explicit empty tool list"
+assert_eq "$persists_session" false "headless calls leave no session"
+loads_context_or_extensions=true
+if [ "$no_sources" = true ] && [ "$strict_mcp" = true ] && [ "$slash_commands_off" = true ] && [ "$hooks_off" = true ]; then
+  loads_context_or_extensions=false
+fi
+assert_eq "$loads_context_or_extensions" false "no ambient tools"
+"$A" threads-argv >/dev/null 2>&1; assert_eq "$?" 2 "threads-argv requires a model"
+
 assert_eq "$(CLAUDE_BIN=/opt/test/claude "$A" engine-bin)" "/opt/test/claude" "engine-bin honors CLAUDE_BIN"
 assert_eq "$(env -u CLAUDE_BIN HOME=/h "$A" engine-bin)" "/h/.local/bin/claude" "engine-bin defaults to the installer's location"
 assert_eq "$("$A" l1-env | tr '\n' ' ')" "CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 " "l1-env is the lean-query environment"

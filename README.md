@@ -398,6 +398,42 @@ Reading sessions is done through a **harness adapter**, so the runner does not k
 which agent produced a transcript. Two ship today, `claude` and `omp`; the seam is what lets a
 third arrive without forking the pipeline.
 
+## Dropped threads
+
+The nightly run links eligible sessions into a local thread index at
+`~/.claude/autodream/threads.jsonl`. Each JSONL record stores `id`, `kind`, `repo`,
+`title`, `goal`, `sessions` (date, session hash, transcript path and outcome),
+`status`, `done_by` and `last_seen`. Dropped status is computed when read: an open
+thread whose newest outcome is unfinished and older than
+`AUTODREAM_THREADS_DROPPED_DAYS` (default 7) is shown. No watermark is stored; every
+run catches up eligible unlinked sessions from the trailing 14 days.
+
+```sh
+~/.claude/autodream/threads.sh list
+~/.claude/autodream/threads.sh search 'release plan'
+~/.claude/autodream/threads.sh close t-0123abcd
+~/.claude/autodream/threads.sh reopen t-0123abcd
+~/.claude/autodream/threads.sh resume t-0123abcd
+~/.claude/autodream/threads.sh resume t-0123abcd --launch
+~/.claude/autodream/threads.sh backfill 2026-07-17 2026-11-13 --engine omp --model MODEL --max-calls 120
+```
+
+`resume` prints a brief with runner-owned dates, outcomes, repo and available transcript
+paths. `--launch` starts Claude with default permission mode in the repo when it exists,
+otherwise `$HOME`. Backfill reads findings and stats sidecars directly, so it works for
+dates without rollups. It prints `planned_calls` and `max_calls` before calls, then
+`actual_calls`; calls that fail still count against the budget. Dates without usable
+sidecars or left beyond the budget are named for catch-up later.
+
+The linker settings are `AUTODREAM_THREADS_ENGINE` (default `claude`),
+`AUTODREAM_THREADS_MODEL` (default `claude-haiku-5-5`),
+`AUTODREAM_THREADS_TIMEOUT` (300 seconds), `AUTODREAM_THREADS_MAX_INPUT` (65536
+bytes before requests split by repo hint), and `AUTODREAM_THREADS_DROPPED_DAYS` (7).
+Nightly `run-stats.txt` records `threads_state`, `threads_link`, `threads_linked`,
+`threads_rejected`, `threads_close_refused`, `threads_unmeasured`, `threads_calls`,
+and `threads_skipped` when the merge lock is held. A failed linker leaves the prior
+index in place and the report section names the failure.
+
 - `adapters/<name>/` — one directory per harness: `manifest.json` (data, read with
   `jq`, never sourced), `adapter.sh` (enumerate, normalize, project, stats, slim,
   is-self, skills-inventory), and `facts.md` (the remedy vocabulary for that harness, so
