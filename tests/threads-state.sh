@@ -109,6 +109,23 @@ test_threads_missing_state_is_empty() {
   assert_eq "$count" 0 "missing index reads as empty"
 }
 
+test_threads_report_without_index_is_empty() {
+  local dir="$TMP/fresh-report" report
+  mkdir -p "$dir/dreams"
+  report=$(AUTODREAM_DIR="$dir" DREAMS_DIR="$dir/dreams" "$THREADS" report 2020-01-02 2>&1)
+  assert_eq "$report" "$(printf '## Dropped threads\n\nNo dropped threads are currently eligible.')" "fresh install report renders an empty section without a warning"
+}
+
+test_threads_rejects_null_session_as_unreadable_state() {
+  local dir="$TMP/null-session" output rc
+  mkdir -p "$dir"
+  printf '%s\n' '{"id":"t-12345678","kind":"work","repo":"","title":"broken","goal":"broken","sessions":[null],"status":"open","done_by":null,"last_seen":"2020-01-01"}' > "$dir/threads.jsonl"
+  output=$(AUTODREAM_DIR="$dir" "$THREADS" close t-12345678 2>&1)
+  rc=$?
+  assert_eq "$rc" 1 "malformed session element is rejected by the state reader"
+  case "$output" in *"malformed state"*) ok "malformed session is reported as unreadable state" ;; *) no "malformed session is reported as unreadable state ($output)" ;; esac
+}
+
 test_threads_invalid_and_unknown_ids_are_refused() {
   local dir="$TMP/ids" invalid_rc unknown_rc
   seed "$dir"
@@ -162,6 +179,8 @@ for test_name in \
   test_threads_cli_refuses_unreadable_state \
   test_threads_list_computes_dropped \
   test_threads_missing_state_is_empty \
+  test_threads_report_without_index_is_empty \
+  test_threads_rejects_null_session_as_unreadable_state \
   test_threads_invalid_and_unknown_ids_are_refused \
   test_threads_search_treats_metacharacters_literally \
   test_threads_dropped_days_accepts_leading_zero \

@@ -175,6 +175,7 @@ link "$REPO_DIR/bin/pending-triage.sh"        "$TARGET/pending-triage.sh"
 link "$REPO_DIR/adapters"                     "$TARGET/adapters"
 link "$REPO_DIR/prompts/PROMPT.md"      "$TARGET/PROMPT.md"
 link "$REPO_DIR/prompts/SESSION_TRIAGE.md" "$TARGET/SESSION_TRIAGE.md"
+link "$REPO_DIR/prompts/THREAD_LINKER.md" "$TARGET/THREAD_LINKER.md"
 link "$REPO_DIR/prompts/TRIAGE_DREAM.md"   "$TARGET/TRIAGE_DREAM.md"
 link "$REPO_DIR/prompts/L2_SYSTEM.txt"      "$TARGET/L2_SYSTEM.txt"
 
