@@ -8304,6 +8304,81 @@ test_threads_render_runs_on_empty_night_and_cli_write(){
   thread_cleanup "$root"
 }
 
+test_threads_explore_launch_is_constrained(){
+  echo "# threads: explore opens the dashboard and launches a scoped Claude session"
+  local root open_bin cmux_bin claude_bin opened_path cmux_operation permission_mode tools bash_permission installed_threads_permission prompt args inlined prompt_words launch_rc
+  root=$(setup_env)
+  ln -s "$REPO/bin/threads.sh" "$root/autodream/threads.sh"
+  jq -cn '{id:"t-60000001",kind:"work",repo:"/repo",title:"PRIVATE_THREAD_INDEX",goal:"private index data",sessions:[],status:"open",done_by:null,last_seen:"2020-01-01"}' > "$root/autodream/threads.jsonl"
+  printf 'PRIVATE_THREAD_REPORT\n' > "$root/dreams/2020-01-01.md"
+  mkdir -p "$root/launch-bin"
+  open_bin="$root/launch-bin/open"
+  cmux_bin="$root/launch-bin/cmux"
+  claude_bin="$root/launch-bin/claude"
+  printf '%s\n' '#!/bin/bash' 'printf "%s\\n" "$@" > "$MOCK_OPEN_ARGS"' > "$open_bin"
+  printf '%s\n' '#!/bin/bash' 'printf "%s\\n" "$@" > "$MOCK_CMUX_ARGS"' 'while [ "$#" -gt 0 ]; do if [ "$1" = --command ]; then shift; printf "%s" "$1" > "$MOCK_CMUX_COMMAND"; /bin/bash -c "$1"; exit $?; fi; shift; done' > "$cmux_bin"
+  printf '%s\n' '#!/bin/bash' 'printf "%s\\n" "$@" > "$MOCK_CLAUDE_ARGS"' 'last=""; for arg do last=$arg; done; printf "%s" "$last" > "$MOCK_CLAUDE_PROMPT"' > "$claude_bin"
+  chmod +x "$open_bin" "$cmux_bin" "$claude_bin"
+  AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" OPEN_BIN="$open_bin" \
+    CMUX_BIN="$cmux_bin" CLAUDE_BIN="$claude_bin" MOCK_OPEN_ARGS="$root/open.args" \
+    MOCK_CMUX_ARGS="$root/cmux.args" MOCK_CMUX_COMMAND="$root/cmux.command" \
+    MOCK_CLAUDE_ARGS="$root/claude.args" MOCK_CLAUDE_PROMPT="$root/claude.prompt" \
+    /bin/bash "$REPO/bin/threads.sh" explore > "$root/explore.out" 2>&1
+  launch_rc=$?
+  opened_path=$(cat "$root/open.args" 2>/dev/null | sed -n '1p')
+  cmux_operation=$(sed -n '1p' "$root/cmux.args" 2>/dev/null)
+  permission_mode=$(awk 'p {print; exit} $0 == "--permission-mode" {p=1}' "$root/claude.args" 2>/dev/null)
+  tools=$(awk 'p {print; exit} $0 == "--tools" {p=1}' "$root/claude.args" 2>/dev/null)
+  bash_permission=$(awk 'p {print; exit} $0 == "--allowedTools" {p=1}' "$root/claude.args" 2>/dev/null)
+  installed_threads_permission="Bash($root/autodream/threads.sh *)"
+  prompt=$(cat "$root/claude.prompt" 2>/dev/null)
+  args=$(cat "$root/claude.args" 2>/dev/null)
+  inlined=false
+  if printf '%s\n' "$args" | grep -Eq 'PRIVATE_THREAD_(INDEX|REPORT)'; then inlined=true; fi
+  assert_eq "$opened_path" "$root/dreams/threads.html" "opens local dashboard"
+  assert_eq "$cmux_operation" new-split "opens a split"
+  assert_eq "$permission_mode" default "normal permission mode"
+  assert_eq "$tools" "Read,Bash" "explorer toolset"
+  assert_grep "$root/claude.args" '^--strict-mcp-config$' "MCP tools are disabled"
+  assert_grep "$root/claude.args" '^--disable-slash-commands$' "skills and commands are disabled"
+  assert_grep "$root/claude.args" 'disableAllHooks' "hooks are disabled"
+  assert_eq "$bash_permission" "$installed_threads_permission" "CLI scope"
+  assert_eq "$inlined" false "prompt points to files"
+  assert_grep "$root/claude.args" "$root/autodream/threads.jsonl" "prompt references the index path"
+  assert_grep "$root/claude.args" "$root/dreams/threads.html" "prompt references the dashboard path"
+  assert_eq "$launch_rc" 0 "explore launch succeeds"
+  prompt_words=0
+  [ ! -s "$root/claude.prompt" ] || prompt_words=$(wc -w < "$root/claude.prompt" | tr -d ' ')
+  [ "$prompt_words" -gt 1 ] && ok "launch carries explicit intent" || no "launch carries explicit intent"
+  thread_cleanup "$root"
+}
+
+test_threads_explore_quotes_paths_and_reports_launch_failure(){
+  echo "# threads: explore quotes shell paths and reports cmux failures"
+  local parent root injected open_bin cmux_bin claude_bin failed_cmux_exit
+  parent=$(mktemp -d "${TMPDIR:-/tmp}/ccad.XXXXXX")
+  root="$parent/O'Brien;\$(touch $parent/injected)"
+  mkdir -p "$root/autodream" "$root/dreams" "$root/launch-bin"
+  ln -s "$REPO/bin/threads.sh" "$root/autodream/threads.sh"
+  injected="$parent/injected"
+  open_bin="$root/launch-bin/open"
+  cmux_bin="$root/launch-bin/cmux"
+  claude_bin="$root/launch-bin/claude"
+  printf '%s\n' '#!/bin/bash' 'exit 0' > "$open_bin"
+  printf '%s\n' '#!/bin/bash' 'printf "%s\\n" "$@" > "$MOCK_CMUX_ARGS"' 'while [ "$#" -gt 0 ]; do if [ "$1" = --command ]; then shift; /bin/bash -c "$1"; break; fi; shift; done' 'exit 1' > "$cmux_bin"
+  printf '%s\n' '#!/bin/bash' 'printf "%s\\n" "$@" > "$MOCK_CLAUDE_ARGS"' > "$claude_bin"
+  chmod +x "$open_bin" "$cmux_bin" "$claude_bin"
+  AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" OPEN_BIN="$open_bin" \
+    CMUX_BIN="$cmux_bin" CLAUDE_BIN="$claude_bin" MOCK_CMUX_ARGS="$parent/cmux.args" \
+    MOCK_CLAUDE_ARGS="$parent/claude.args" \
+    /bin/bash "$REPO/bin/threads.sh" explore > "$parent/explore.out" 2>&1
+  failed_cmux_exit=$?
+  assert_no_file "$injected" "shell values remain literal"
+  assert_file "$parent/claude.args" "quoted command reaches Claude"
+  assert_eq "$failed_cmux_exit" 1 "failed launch is visible"
+  thread_cleanup "$parent"
+}
+
 _run test_threads_eligibility_and_goal_fallback
 _run test_threads_missing_sidecar_is_unmeasured
 _run test_threads_runner_provenance_survives_worker_tampering
@@ -8328,6 +8403,8 @@ _run test_threads_install_links_entrypoint
 _run test_threads_render_failure_preserves_previous_page
 _run test_threads_html_payload_is_inert
 _run test_threads_render_runs_on_empty_night_and_cli_write
+_run test_threads_explore_launch_is_constrained
+_run test_threads_explore_quotes_paths_and_reports_launch_failure
 
 test_prune_worktrees_wiring(){
   echo "# prune: run.sh calls the helper only when roots are set, records the summary, and survives a failing helper"
