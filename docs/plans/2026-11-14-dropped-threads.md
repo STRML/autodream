@@ -350,7 +350,7 @@ Review Focus: F1–F12 compliance, concurrent updates, tool isolation, input inj
    - Modify/test: `tests/run-all.sh`
    - Modify/test: `tests/mock-claude.sh`
    - Modify: `README.md`
-   - Modify: `config.example`
+   - Modify: `example/config.example`
    - Modify: `CLAUDE.md`
    - Modify: `codemaps/architecture.md`
 
@@ -450,7 +450,7 @@ Review Focus: F1–F12 compliance, concurrent updates, tool isolation, input inj
    - [ ] **Commit.**
 
      ```bash
-     git add bin/run.sh bin/threads.sh prompts/PROMPT.md install.sh tests/run-all.sh tests/mock-claude.sh README.md config.example CLAUDE.md codemaps/architecture.md
+     git add bin/run.sh bin/threads.sh prompts/PROMPT.md install.sh tests/run-all.sh tests/mock-claude.sh README.md example/config.example CLAUDE.md codemaps/architecture.md
      git commit -m "feat: report and resume dropped threads with bounded backfill"
      ```
 
