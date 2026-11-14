@@ -82,6 +82,7 @@
 #   MOCK_THREADS_TAMPER=1    L1 rewrites the worklist and its findings path after the runner
 #                            has captured trusted thread provenance.
 #   MOCK_THREADS_L1_GOAL=<text>  goal written by a successful L1 answer for re-triage tests.
+#   MOCK_THREADS_L1_IDEAS=<json> deferred_ideas array written by L1 for thread tests.
 #   MOCK_CALL_LOG=<file>     append the L1 output path for every invocation of
 #                            this mock, one per line — lets a test prove the
 #                            model was (or was not) invoked for a given session
@@ -173,6 +174,16 @@ if [ "$line1" = "AUTODREAM_THREADS_LINKER" ]; then
       ;;
     attach_existing)
       jq -c --arg id "$MOCK_THREADS_CLOSE_ID" '.candidates[] | {hash:.hash,thread:$id,title:.goal,finished:false}' \
+        <<< "$threads_request"
+      exit 0
+      ;;
+    attach_ideas)
+      jq -c --arg id "$MOCK_THREADS_CLOSE_ID" '.candidates[] | {hash:.hash,thread:(if .kind == "idea" then $id else "new" end),title:.goal,finished:false}' \
+        <<< "$threads_request"
+      exit 0
+      ;;
+    reject_idea)
+      jq -c --arg reject_goal "$MOCK_THREADS_REJECT_GOAL" '.candidates[] | {hash:.hash,thread:(if .goal == $reject_goal then "t-ffffffff" else "new" end),title:.goal,finished:false}' \
         <<< "$threads_request"
       exit 0
       ;;
@@ -368,6 +379,10 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
   esac
   if [ -n "${MOCK_THREADS_L1_GOAL:-}" ] && [ -s "$out" ]; then
     jq --arg goal "$MOCK_THREADS_L1_GOAL" '.underlying_goal = $goal' "$out" > "$out.threads.tmp" \
+      && mv "$out.threads.tmp" "$out"
+  fi
+  if [ -n "${MOCK_THREADS_L1_IDEAS:-}" ] && [ -s "$out" ]; then
+    jq --argjson ideas "$MOCK_THREADS_L1_IDEAS" '.deferred_ideas = $ideas' "$out" > "$out.threads.tmp" \
       && mv "$out.threads.tmp" "$out"
   fi
   if [ -n "${MOCK_THREADS_TAMPER:-}" ] && [ -s "$out" ]; then

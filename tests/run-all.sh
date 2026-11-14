@@ -7663,6 +7663,13 @@ seed_thread_findings(){ # $1=root $2=session $3=goal $4=initiatives JSON $5=outc
     > "$(fdir "$1")/$h.json"
   printf '%s' "$h"
 }
+seed_thread_deferred_findings(){ # $1=root $2=session $3=goal $4=ideas JSON $5=outcome
+  local hash
+  hash=$(seed_thread_findings "$1" "$2" "$3" '[]' "$5")
+  jq --argjson ideas "$4" '.deferred_ideas = $ideas' "$(fdir "$1")/$hash.json" > "$(fdir "$1")/$hash.json.tmp" \
+    && mv "$(fdir "$1")/$hash.json.tmp" "$(fdir "$1")/$hash.json"
+  printf '%s' "$hash"
+}
 seed_thread_record(){ # $1=root $2=id $3=repo $4=goal $5=date $6=hash $7=path $8=outcome $9=status
   local done_by=""
   [ "$9" = closed_by_sam ] && done_by=sam
@@ -7975,6 +7982,125 @@ test_threads_retriaged_goal_replaces_source_link(){
   thread_cleanup "$root"
 }
 
+test_threads_deferred_ideas_are_independent_candidates(){
+  echo "# threads: deferred ideas from one source become separate candidates beside its work goal"
+  local root session hash ideas request work_threads idea_threads total_linker_calls source_refs unique_handles
+  local malformed_root malformed_session malformed_work malformed_ideas
+  root=$(setup_env)
+  session=$(mk_thread_session "$root" deferred "$REPO")
+  ideas='[{"idea":"prototype local search","quote":"I want to prototype local search later"},{"idea":"write a migration guide","quote":"I might write a migration guide next month"},{"idea":"compare storage engines","quote":"Let us compare storage engines after launch"}]'
+  hash=$(seed_thread_deferred_findings "$root" "$session" "ship the release" "$ideas" partially_achieved)
+  export MOCK_THREADS_MODE=good MOCK_THREADS_L1_IDEAS="$ideas" MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_THREADS_L1_IDEAS MOCK_CAPTURE_DIR
+  request="$root/cap/threads-stdin-1.txt"
+  work_threads=$(jq -sr '[.[] | select(.kind == "work")] | length' "$(thread_state "$root")")
+  idea_threads=$(jq -sr '[.[] | select(.kind == "idea")] | length' "$(thread_state "$root")")
+  total_linker_calls=$(thread_call_count "$root/cap")
+  source_refs=$(jq -sr --arg date "$DATE" --arg hash "$hash" --arg path "$session" \
+    '[.[] | select(.kind == "idea") | .sessions[] | select(.date == $date and .hash == $hash and .session_path == $path and .outcome == "partially_achieved")] | length' "$(thread_state "$root")")
+  unique_handles=$(thread_request_json "$request" | jq -r '[.candidates[].hash] | unique | length')
+  assert_eq "$work_threads" 1 "source still contributes its work goal"
+  assert_eq "$idea_threads" 3 "three deferred ideas remain distinct"
+  assert_eq "$total_linker_calls" 1 "ideas share the nightly request"
+  assert_eq "$source_refs" 3 "each idea keeps the original source reference"
+  assert_eq "$unique_handles" 4 "work and ideas receive distinct request handles"
+  thread_cleanup "$root"
+
+  malformed_root=$(setup_env)
+  malformed_session=$(mk_thread_session "$malformed_root" malformed-ideas "$REPO")
+  malformed_ideas=$(jq -cn '["bad",{idea:"overlong quote",quote:("x" * 200)}]')
+  seed_thread_deferred_findings "$malformed_root" "$malformed_session" "work survives bad ideas" "$malformed_ideas" partially_achieved >/dev/null
+  export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$malformed_root/cap"
+  run_dream "$malformed_root"
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  malformed_work=$(jq -sr '[.[] | select(.kind == "work" and .goal == "work survives bad ideas")] | length' "$(thread_state "$malformed_root")")
+  assert_eq "$malformed_work" 1 "a malformed optional idea entry does not suppress the work candidate"
+  thread_cleanup "$malformed_root"
+}
+
+test_threads_idea_retry_does_not_lose_rejected_sibling(){
+  echo "# threads: an accepted idea stays linked while a rejected sibling retries"
+  local root session ideas first_ideas second_ideas rejected_idea
+  root=$(setup_env)
+  session=$(mk_thread_session "$root" idea-retry "$REPO")
+  ideas='[{"idea":"first idea","quote":"I will revisit the first idea"},{"idea":"second idea","quote":"I will revisit the second idea"}]'
+  seed_thread_deferred_findings "$root" "$session" "retry work" "$ideas" partially_achieved >/dev/null
+  export MOCK_THREADS_MODE=reject_idea MOCK_THREADS_REJECT_GOAL="second idea" MOCK_THREADS_L1_IDEAS="$ideas" MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_THREADS_REJECT_GOAL MOCK_THREADS_L1_IDEAS
+  first_ideas=$(jq -sr '[.[] | select(.kind == "idea" and .goal == "first idea")] | length' "$(thread_state "$root")")
+  DATE=2020-01-03
+  STAMP=202001031200
+  export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  second_ideas=$(jq -sr '[.[] | select(.kind == "idea" and .goal == "first idea")] | length' "$(thread_state "$root")")
+  rejected_idea=$(jq -sr '[.[] | select(.kind == "idea" and .goal == "second idea") | .sessions[] | select(.date == "2020-01-02")] | length' "$(thread_state "$root")")
+  assert_eq "$first_ideas" 1 "accepted idea linked on the first call"
+  assert_eq "$second_ideas" 1 "accepted idea remains idempotent on retry"
+  assert_eq "$rejected_idea" 1 "rejected sibling remains pending and eventually links"
+  DATE=2020-01-02
+  STAMP=202001021200
+  thread_cleanup "$root"
+}
+
+test_threads_closed_idea_stays_closed(){
+  echo "# threads: a reworded idea attaches to its operator-closed thread"
+  local root first_session second_session first_ideas second_ideas idea_id status idea_threads closed_kind
+  root=$(setup_env)
+  first_session=$(mk_thread_session "$root" closed-idea-a "$REPO")
+  first_ideas='[{"idea":"add offline search","quote":"I want to add offline search when there is time"}]'
+  seed_thread_deferred_findings "$root" "$first_session" "closed idea work a" "$first_ideas" partially_achieved >/dev/null
+  export MOCK_THREADS_MODE=good MOCK_THREADS_L1_IDEAS="$first_ideas" MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_THREADS_L1_IDEAS MOCK_CAPTURE_DIR
+  idea_id=$(jq -sr '.[] | select(.kind == "idea") | .id' "$(thread_state "$root")")
+  AUTODREAM_DIR="$root/autodream" AUTODREAM_THREADS_STATE="$(thread_state "$root")" \
+    /bin/bash "$REPO/bin/threads.sh" close "$idea_id" >/dev/null 2>&1
+  DATE=2020-01-03
+  STAMP=202001031200
+  second_session=$(mk_thread_session "$root" closed-idea-b "$REPO")
+  second_ideas='[{"idea":"add search without a connection","quote":"I could add search without a connection later"}]'
+  seed_thread_deferred_findings "$root" "$second_session" "closed idea work b" "$second_ideas" partially_achieved >/dev/null
+  export MOCK_THREADS_MODE=attach_ideas MOCK_THREADS_CLOSE_ID="$idea_id" MOCK_THREADS_L1_IDEAS="$second_ideas" MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_THREADS_CLOSE_ID MOCK_THREADS_L1_IDEAS MOCK_CAPTURE_DIR
+  status=$(jq -sr --arg id "$idea_id" '.[] | select(.id == $id) | .status' "$(thread_state "$root")")
+  idea_threads=$(jq -sr '[.[] | select(.kind == "idea")] | length' "$(thread_state "$root")")
+  closed_kind=$(thread_request_json "$root/cap/threads-stdin-2.txt" | jq -r --arg id "$idea_id" '.threads[] | select(.id == $id) | .kind')
+  assert_eq "$status" closed_by_sam "closure is sticky"
+  assert_eq "$idea_threads" 1 "reworded duplicate idea attaches to the closed thread"
+  assert_eq "$closed_kind" idea "linker receives the closed thread kind"
+  DATE=2020-01-02
+  STAMP=202001021200
+  thread_cleanup "$root"
+}
+
+test_threads_idea_slots_are_reserved(){
+  echo "# threads: linked deferred ideas reach the report's reserved idea slots"
+  local root session ideas report report_rows idea_rows i id
+  root=$(setup_env)
+  for i in 1 2 3 4 5 6 7; do
+    id=$(printf 't-7100000%s' "$i")
+    seed_thread_report_record "$root" "$id" work 2019-12-20 open partially_achieved "/gone/$id.jsonl"
+  done
+  session=$(mk_thread_session "$root" idea-slots "$REPO")
+  ideas='[{"idea":"idea slot alpha","quote":"I could make alpha later"},{"idea":"idea slot beta","quote":"I could build beta later"},{"idea":"idea slot gamma","quote":"Maybe gamma after release"}]'
+  seed_thread_deferred_findings "$root" "$session" "a recent work goal" "$ideas" partially_achieved >/dev/null
+  export MOCK_THREADS_MODE=good MOCK_THREADS_L1_IDEAS="$ideas" MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_THREADS_L1_IDEAS MOCK_CAPTURE_DIR
+  report="$root/ideas-report.md"
+  AUTODREAM_DIR="$root/autodream" AUTODREAM_THREADS_STATE="$(thread_state "$root")" \
+    /bin/bash "$REPO/bin/threads.sh" report 2020-01-20 > "$report"
+  report_rows=$(grep -Ec '^- \*\*.*`t-[0-9a-f]{8}`' "$report")
+  idea_rows=$(grep -Ec 'idea slot (alpha|beta|gamma)' "$report")
+  assert_eq "$report_rows" 5 "recommendation limit remains five"
+  assert_eq "$idea_rows" 2 "ideas survive a larger work backlog"
+  thread_cleanup "$root"
+}
+
 test_threads_older_rebuild_only_links_missing_sources(){
   echo "# threads: an older rebuild skips existing links and preserves newer dates"
   local root session hash before calls after
@@ -8191,6 +8317,24 @@ test_threads_backfill_uses_sidecars_and_respects_budget(){
   assert_eq "$calls" 2 "budget is enforced"
   assert_eq "$plan_seen" true "plan precedes the first engine call"
   assert_grep "$output" '2020-01-01' "date without sidecars is named"
+  thread_cleanup "$root"
+}
+
+test_threads_backfill_does_not_retriage_ideas(){
+  echo "# threads: ordinary backfill reads old facets without re-triaging for ideas"
+  local root hash findings l1_calls old_missing_field_errors
+  root=$(setup_env)
+  hash=$(seed_thread_archive_date "$root" 2019-12-30 legacy-ideas "legacy goal" partially_achieved yes)
+  findings="$(fdir "$root" | sed 's|/findings/2020-01-02$|/findings/2019-12-30|')/$hash.json"
+  export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap" MOCK_CALL_LOG="$root/l1-calls.txt"
+  AUTODREAM_DIR="$root/autodream" AUTODREAM_THREADS_STATE="$(thread_state "$root")" \
+    /bin/bash "$REPO/bin/threads.sh" backfill 2019-12-30 2019-12-30 --max-calls 1 > "$root/backfill.out" 2>&1
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR MOCK_CALL_LOG
+  l1_calls=0
+  [ ! -f "$root/l1-calls.txt" ] || l1_calls=$(wc -l < "$root/l1-calls.txt" | tr -d ' ')
+  old_missing_field_errors=$(jq -s '[.[] | select(has("error"))] | length' "$findings")
+  assert_eq "$l1_calls" 0 "ordinary backfill does not call L1"
+  assert_eq "$old_missing_field_errors" 0 "historical findings without deferred_ideas remain valid"
   thread_cleanup "$root"
 }
 
@@ -8417,6 +8561,10 @@ _run test_threads_unreadable_index_prevents_write_and_render
 _run test_threads_concurrent_merges_preserve_cli_close
 _run test_threads_lock_exhaustion_is_bounded
 _run test_threads_retriaged_goal_replaces_source_link
+_run test_threads_deferred_ideas_are_independent_candidates
+_run test_threads_idea_retry_does_not_lose_rejected_sibling
+_run test_threads_closed_idea_stays_closed
+_run test_threads_idea_slots_are_reserved
 _run test_threads_older_rebuild_only_links_missing_sources
 _run test_threads_linker_cannot_write
 _run test_threads_empty_night_still_catches_up_and_reports
@@ -8425,6 +8573,7 @@ _run test_threads_auto_closed_threads_are_visible_and_reopenable
 _run test_threads_resume_quotes_injected_goal
 _run test_threads_resume_marks_missing_transcript
 _run test_threads_backfill_uses_sidecars_and_respects_budget
+_run test_threads_backfill_does_not_retriage_ideas
 _run test_threads_install_links_entrypoint
 _run test_threads_render_failure_preserves_previous_page
 _run test_threads_html_payload_is_inert
