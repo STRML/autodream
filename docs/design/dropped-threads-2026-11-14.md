@@ -239,6 +239,7 @@ cap 3) and a test. Ideas reach the linker as `kind: idea` candidates.
 | Session sidecar missing | Session not eligible | Real work skipped | `threads_unmeasured: N` |
 | Render fails | Old page kept | Stale page | Header time; `threads_render: failed` |
 | Thread text holds `</script>` or HTML | Escaped and set with `textContent` | Script injection | Not reachable; a test feeds it through |
+| A linked transcript no longer exists (3,500 of the archive's paths were missing on 2026-11-14) | Brief marks that session `transcript missing` and keeps its runner facts | New session reads a dead path | The brief and the dashboard both say which transcripts are gone |
 | Resume brief built from a goal holding instructions | Goal quoted as data; default permission mode | Injected session acts | Every tool call still asks Sam |
 
 Each row becomes a red E2E test in `tests/run-all.sh`, with a mock linker, before the
