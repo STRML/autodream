@@ -151,7 +151,7 @@ threads_list() {
       *) threads_error "unknown list option: $arg"; return 2 ;;
     esac
   done
-  if [ -n "$status_filter" ] && [ "$status_filter" != open ] && [ "$status_filter" != done ] && [ "$status_filter" != closed_by_sam ] && [ "$status_filter" != dropped ]; then
+  if [ -n "$status_filter" ] && [ "$status_filter" != "open" ] && [ "$status_filter" != "done" ] && [ "$status_filter" != "closed_by_sam" ] && [ "$status_filter" != "dropped" ]; then
     threads_error "invalid status: $status_filter"
     return 2
   fi
@@ -352,20 +352,21 @@ threads_call_linker() {
 }
 
 threads_validate_response() {
-  local candidates_file=$1 state_json=$2 response_file=$3 valid_file=$4 rejected_file=$5 unusable_file=$6
-  python3 - "$candidates_file" "$state_json" "$response_file" "$valid_file" "$rejected_file" "$unusable_file" <<'PY'
+  local candidates_file=$1 state_file=$2 response_file=$3 valid_file=$4 rejected_file=$5 unusable_file=$6
+  python3 - "$candidates_file" "$state_file" "$response_file" "$valid_file" "$rejected_file" "$unusable_file" <<'PY'
 import json
 import re
 import sys
 
-candidates_path, state_text, response_path, valid_path, rejected_path, unusable_path = sys.argv[1:]
+candidates_path, state_path, response_path, valid_path, rejected_path, unusable_path = sys.argv[1:]
 candidates = {}
 with open(candidates_path, encoding="utf-8") as stream:
     for line in stream:
         if line.strip():
             item = json.loads(line)
             candidates[item["handle"]] = item
-state = json.loads(state_text)
+with open(state_path, encoding="utf-8") as stream:
+    state = [json.loads(line) for line in stream if line.strip()]
 thread_ids = {item["id"] for item in state}
 parsed = []
 handle_counts = {}
@@ -444,7 +445,7 @@ PY
 }
 
 threads_write_linker_input() {
-  local date=$1 state_json=$2 candidates_json=$3 prompt=$4 request_json_file=$5 input_file=$6 cutoff request
+  local date=$1 state_json=$2 candidates_json=$3 prompt=$4 request_json_file=$5 input_file=$6 cutoff
   cutoff=$(pdate_shift "$date" -90 d) || return 1
   jq -cn --arg date "$date" --arg cutoff "$cutoff" --slurpfile state <(printf '%s\n' "$state_json") \
     --slurpfile candidates "$candidates_json" '
@@ -754,7 +755,7 @@ PY_SORT
       failed=1
       continue
     fi
-    if ! threads_validate_response "$group_candidates" "$state_json" "$response_file" "$valid_file" "$rejected_file" "$unusable_file"; then
+    if ! threads_validate_response "$group_candidates" "$state_file" "$response_file" "$valid_file" "$rejected_file" "$unusable_file"; then
       threads_error "could not validate linker output"
       failed=1
       continue
@@ -837,23 +838,23 @@ with open(state_path, encoding="utf-8") as stream:
     state = [json.loads(line) for line in stream if line.strip()]
 cutoff = datetime.date.fromisoformat(report_date) - datetime.timedelta(days=int(days))
 previous_cutoff = datetime.date.fromisoformat(previous_date) - datetime.timedelta(days=int(days)) if previous_date else None
-def dropped(item, edge):
+def dropped(item, edge, edge_cutoff):
     if item.get("status") != "open":
         return False
     sessions = [s for s in item.get("sessions", []) if s.get("date", "") <= edge]
     if not sessions:
         return False
     latest = max(sessions, key=lambda s: (s.get("date", ""), s.get("hash", "")))
-    return latest.get("outcome") in ("not_achieved", "partially_achieved", "unclear_from_transcript") and datetime.date.fromisoformat(latest["date"]) < cutoff
+    return latest.get("outcome") in ("not_achieved", "partially_achieved", "unclear_from_transcript") and datetime.date.fromisoformat(latest["date"]) < edge_cutoff
 
 eligible = []
 for original in state:
     sessions = [s for s in original.get("sessions", []) if s.get("date", "") <= report_date]
-    if not sessions or not dropped(original, report_date):
+    if not sessions or not dropped(original, report_date, cutoff):
         continue
     item = dict(original)
     item["_count"] = len(sessions)
-    item["_new"] = previous_cutoff is not None and not dropped(original, previous_date)
+    item["_new"] = previous_cutoff is not None and not dropped(original, previous_date, previous_cutoff)
     eligible.append(item)
 eligible.sort(key=lambda x: (not x["_new"], -x["_count"], x["id"]))
 ideas = [x for x in eligible if x.get("kind") == "idea"]
@@ -931,42 +932,128 @@ threads_resume() {
   exec "$claude_bin" --permission-mode default --append-system-prompt "$brief" "Resume thread $id. Read the available source transcripts listed in the brief and continue the unfinished goal."
 }
 
+threads_backfill_enabled_adapters() {
+  local accepted one want keep=""
+  accepted=$(adapters_list 2>/dev/null | tr '\n' ' ')
+  want=" $(printf '%s' "${AUTODREAM_ADAPTERS:-claude}" | tr ',' ' ') "
+  for one in $accepted; do
+    case "$want" in *" all "*|*" $one "*) keep="${keep:+$keep }$one" ;; esac
+  done
+  printf '%s' "$keep"
+}
+
+threads_backfill_adapter_roots() {
+  local source=$1 root_probe roots up var
+  if [ "$source" = "claude" ]; then
+    roots=${SESSION_ROOTS:-${PROJECTS_DIR:-}}
+    if [ -z "$roots" ]; then
+      for root_probe in "$THREADS_LIB_DIR/root-probe.sh" "$THREADS_LIB_DIR/../bin/root-probe.sh"; do
+        if [ -x "$root_probe" ]; then
+          roots=$("$root_probe" --consolidated 2>/dev/null) || roots=""
+          break
+        fi
+      done
+    fi
+    [ -n "$roots" ] || roots="$HOME/.claude/projects"
+    printf '%s\n' "$roots" | tr ':' '\n'
+    return 0
+  fi
+  up=$(printf '%s' "$source" | tr 'a-z-' 'A-Z_')
+  var="AUTODREAM_SESSION_ROOTS_$up"
+  roots=${!var:-}
+  if [ -n "$roots" ]; then
+    printf '%s\n' "$roots" | tr ':' '\n'
+    return 0
+  fi
+  adapter_manifest_get "$source" '.session_roots_default[]' 2>/dev/null || true
+}
+
+threads_backfill_index_paths() {
+  local from=$1 to=$2 key_file=$3 path_file=$4 source end_date root session hash date match cwd repo common
+  local enabled
+  enabled=" $(threads_backfill_enabled_adapters) "
+  date=$from
+  while [ ! "$to" \< "$date" ]; do
+    if [ -r "$AUTODREAM_DIR/findings/$date/sessions-source.txt" ]; then
+      while IFS="$(printf '\t')" read -r hash source; do
+        case "$hash" in
+          [0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef]) ;;
+          *) continue ;;
+        esac
+        case "$enabled" in *" $source "*) printf '%s\t%s\t%s\n' "$date" "$hash" "$source" >> "$key_file" ;; esac
+      done < "$AUTODREAM_DIR/findings/$date/sessions-source.txt"
+    fi
+    date=$(pdate_shift "$date" 1 d) || return 1
+  done
+  [ -s "$key_file" ] || return 0
+  end_date=$(pdate_shift "$to" 5 y) || end_date=$(pdate_shift "$to" 1 d) || return 1
+  for source in $enabled; do
+    while IFS= read -r root; do
+      [ -d "$root" ] || continue
+      while IFS= read -r -d '' session; do
+        case "$session" in *$'\t'*|*$'\n'*) continue ;; esac
+        hash=$(session_hash "$session") || continue
+        match=$(awk -F '\t' -v h="$hash" -v s="$source" '$2 == h && $3 == s { print $1 }' "$key_file")
+        [ -n "$match" ] || continue
+        cwd=$(adapter_run "$source" project "$session" 2>/dev/null </dev/null) || cwd=""
+        repo=""
+        if [ -n "$cwd" ] && [ -d "$cwd" ]; then
+          common=$(git -C "$cwd" rev-parse --git-common-dir 2>/dev/null) || common=""
+          if [ -n "$common" ]; then
+            case "$common" in /*) repo=$(dirname "$common") ;; *) repo=$(cd "$cwd/$common/.." 2>/dev/null && pwd -P) ;; esac
+          fi
+        fi
+        while IFS= read -r date; do
+          [ -n "$date" ] && printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$date" "$hash" "$source" "$session" "$cwd" "$repo" >> "$path_file"
+        done <<EOF_BACKFILL_DATES
+$(printf '%s\n' "$match")
+EOF_BACKFILL_DATES
+      done < <(adapter_run "$source" enumerate "$root" "$from" "$end_date" 2>/dev/null)
+    done < <(threads_backfill_adapter_roots "$source")
+  done
+  return 0
+}
+
 threads_backfill() {
-  local from=$1 to=$2 engine=$3 model=$4 max_calls=$5 tmp date day_dir map_file hash path source stats cwd repo nested count row
-  local planned actual skipped split_dates eligible prompt state candidates groups_dir groups_file all_file req_size batch_calls batch_rows remaining output
+  local from=$1 to=$2 engine=$3 model=$4 max_calls=$5 tmp date day_dir hash source path stats cwd repo nested count row_date
+  local planned actual skipped split_dates prompt state req_size batch_calls remaining output timeout_bin
   threads_valid_date "$from" && threads_valid_date "$to" && [ ! "$to" \< "$from" ] || { threads_error "invalid backfill date range"; return 2; }
   case "$max_calls" in ''|*[!0-9]*) threads_error "max calls must be a non-negative integer"; return 2 ;; esac
   max_calls=$((10#$max_calls))
   engine=${engine:-${AUTODREAM_THREADS_ENGINE:-claude}}
   model=${model:-${AUTODREAM_THREADS_MODEL:-claude-haiku-5-5}}
+  timeout_bin=${AUTODREAM_THREADS_TIMEOUT_BIN:-}
+  if [ -z "$timeout_bin" ]; then
+    timeout_bin=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)
+  fi
+  if [ -z "$timeout_bin" ] || [ ! -x "$timeout_bin" ]; then
+    threads_error "backfill requires a timeout binary (timeout or gtimeout)"
+    return 1
+  fi
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/threads-backfill.XXXXXX") || return 1
   planned=0; actual=0; skipped=""; split_dates=""; prompt=$(threads_prompt_path) || prompt=""
+  : > "$tmp/session-keys.tsv"
+  : > "$tmp/path-map.tsv"
+  threads_backfill_index_paths "$from" "$to" "$tmp/session-keys.tsv" "$tmp/path-map.tsv" || {
+    threads_error "could not enumerate adapter session roots for backfill"
+    threads_cleanup_tmp "$tmp"
+    return 1
+  }
   date=$from
   while [ ! "$to" \< "$date" ]; do
     day_dir="$AUTODREAM_DIR/findings/$date"
-    map_file="$day_dir/sessions-source.txt"
     day_rows="$tmp/$date.rows"
     : > "$day_rows"
-    if [ -r "$map_file" ]; then
-      while IFS="$(printf '\t')" read -r hash path source; do
-        [ -n "$hash" ] && [ -n "$path" ] || continue
-        stats="$day_dir/$hash.stats.json"
-        if [ ! -s "$stats" ] || ! jq -e 'type == "object" and (.nested|type == "boolean") and (.user_message_count|type == "number")' "$stats" >/dev/null 2>&1; then
-          skipped="${skipped}${date}\n"
-          continue
-        fi
-        nested=$(jq -r '.nested' "$stats"); count=$(jq -r '.user_message_count' "$stats")
-        cwd=$(jq -sr 'map(select(.cwd? != null) | .cwd) | last // empty' "$path" 2>/dev/null) || cwd=""
-        repo=""
-        if [ -n "$cwd" ] && [ -d "$cwd" ]; then
-          git_common=$(git -C "$cwd" rev-parse --git-common-dir 2>/dev/null) || git_common=""
-          if [ -n "$git_common" ]; then
-            case "$git_common" in /*) repo=$(dirname "$git_common") ;; *) repo=$(cd "$cwd/$git_common/.." 2>/dev/null && pwd -P) ;; esac
-          fi
-        fi
-        jq -cn --arg date "$date" --arg hash "$hash" --arg source "$source" --arg path "$path" --arg cwd "$cwd" --arg repo "$repo" --argjson nested "$nested" --argjson count "$count" '{date:$date,hash:$hash,source:$source,session_path:$path,cwd:$cwd,repo:$repo,nested:$nested,user_message_count:$count,measured:true}' >> "$day_rows"
-      done < "$map_file"
-    fi
+    while IFS="$(printf '\t')" read -r row_date hash source path cwd repo; do
+      [ "$row_date" = "$date" ] || continue
+      stats="$day_dir/$hash.stats.json"
+      if [ ! -s "$stats" ] || ! jq -e 'type == "object" and (.nested|type == "boolean") and (.user_message_count|type == "number")' "$stats" >/dev/null 2>&1; then
+        skipped="${skipped}${date}\n"
+        continue
+      fi
+      nested=$(jq -r '.nested' "$stats"); count=$(jq -r '.user_message_count' "$stats")
+      jq -cn --arg date "$date" --arg hash "$hash" --arg source "$source" --arg path "$path" --arg cwd "$cwd" --arg repo "$repo" --argjson nested "$nested" --argjson count "$count" '{date:$date,hash:$hash,source:$source,session_path:$path,cwd:$cwd,repo:$repo,nested:$nested,user_message_count:$count,measured:true}' >> "$day_rows"
+    done < "$tmp/path-map.tsv"
     if [ -s "$day_rows" ]; then
       state=$(threads_read_state) || state='[]'
       threads_collect_candidates "$day_rows" "$state" "$tmp/$date.candidates" >/dev/null 2>&1 || true

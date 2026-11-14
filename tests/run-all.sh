@@ -7729,7 +7729,7 @@ test_threads_one_call_across_repo_hints(){
   echo "# threads: one request spans Claude and OMP buckets and two canonical repos"
   local root repo_two repo_two_git claude_a claude_b state calls linked_harnesses linked_repos
   root=$(setup_env)
-  repo_two_git=$(mktemp -d /private/tmp/adt.XXXXXX) || { no "isolated repo fixture"; thread_cleanup "$root"; return 0; }
+  repo_two_git=$(mktemp -d "${TMPDIR:-/var/tmp}/adt.XXXXXX") || { no "isolated repo fixture"; thread_cleanup "$root"; return 0; }
   repo_two="$REPO/.thread-fixture.$$"
   if ! mkdir "$repo_two" 2>/dev/null; then
     no "isolated repo fixture"
@@ -8002,7 +8002,7 @@ seed_thread_archive_date(){ # $1=root $2=date $3=name $4=goal $5=outcome $6=side
     jq -cn '{nested:false,user_message_count:2}' \
       > "$root/autodream/findings/$date/$hash.stats.json"
   fi
-  printf '%s\t%s\tclaude\n' "$hash" "$session" >> "$root/autodream/findings/$date/sessions-source.txt"
+  printf '%s\tclaude\n' "$hash" >> "$root/autodream/findings/$date/sessions-source.txt"
   printf '%s\n' "$hash"
 }
 
@@ -8038,7 +8038,7 @@ test_threads_report_ranking_and_limit(){
   local root state report ids first new_id idea_rows recommendation_rows i id
   root=$(setup_env)
   state=$(thread_state "$root"); : > "$state"
-  new_id=t-10000001
+  new_id=t-10000009
   seed_thread_report_record "$root" "$new_id" work 2019-12-25 open partially_achieved /gone/new.jsonl
   for i in 2 3 4 5; do
     id=$(printf 't-1000000%s' "$i")
@@ -8146,9 +8146,9 @@ test_threads_resume_marks_missing_transcript(){
 
 test_threads_backfill_uses_sidecars_and_respects_budget(){
   echo "# threads: backfill uses archived sidecars without rollups and stops at the call budget"
-  local root from to no_sidecar first_date output calls plan_seen
+  local root from to no_sidecar first_hash first_date output calls plan_seen linked
   root=$(setup_env); from=2019-12-30; to=2020-01-02
-  seed_thread_archive_date "$root" 2019-12-30 backfill-first "first historical goal" partially_achieved yes >/dev/null
+  first_hash=$(seed_thread_archive_date "$root" 2019-12-30 backfill-first "first historical goal" partially_achieved yes)
   seed_thread_archive_date "$root" 2019-12-31 backfill-second "second historical goal" partially_achieved yes >/dev/null
   no_sidecar=$(seed_thread_archive_date "$root" 2020-01-01 backfill-unmeasured "unmeasured goal" partially_achieved no)
   output="$root/backfill.out"
@@ -8160,11 +8160,34 @@ test_threads_backfill_uses_sidecars_and_respects_budget(){
   calls=$(thread_call_count "$root/cap")
   plan_seen=$(cat "$root/plan-seen" 2>/dev/null)
   first_date=$(thread_request_json "$root/cap/threads-stdin-1.txt" | jq -r '.date // .report_date // empty')
+  linked=$(jq -sr --arg hash "$first_hash" '[.[].sessions[] | select(.hash == $hash)] | length' "$(thread_state "$root")")
   assert_eq "$([ -e "$root/autodream/findings/2019-12-30/rollup.tsv" ] && echo true || echo false)" false "pre-November archive is supported without rollup"
   assert_eq "$first_date" "$from" "oldest first"
   assert_eq "$calls" 2 "budget is enforced"
+  assert_eq "$([ "$calls" -gt 0 ] && echo true || echo false)" true "real two-column source map makes linker calls"
+  assert_eq "$linked" 1 "real-format backfill links the archived session"
   assert_eq "$plan_seen" true "plan precedes the first engine call"
   assert_grep "$output" '2020-01-01' "date without sidecars is named"
+  thread_cleanup "$root"
+}
+
+test_threads_backfill_requires_timeout_binary(){
+  echo "# threads: backfill fails clearly when neither timeout command is available"
+  local root bash_env rc
+  root=$(setup_env); bash_env="$root/no-timeout.bash-env"
+  cat > "$bash_env" <<'EOF_NO_TIMEOUT'
+command() {
+  if [ "${1:-}" = -v ]; then
+    case "${2:-}" in timeout|gtimeout) return 1 ;; esac
+  fi
+  builtin command "$@"
+}
+EOF_NO_TIMEOUT
+  BASH_ENV="$bash_env" AUTODREAM_DIR="$root/autodream" PROJECTS_DIR="$root/projects" \
+    /bin/bash "$REPO/bin/threads.sh" backfill 2019-12-30 2019-12-30 --max-calls 1 > "$root/no-timeout.out" 2>&1
+  rc=$?
+  assert_eq "$rc" 1 "missing timeout is a nonzero backfill failure"
+  assert_grep "$root/no-timeout.out" 'timeout binary.*timeout or gtimeout' "failure names both accepted commands"
   thread_cleanup "$root"
 }
 
@@ -8199,6 +8222,7 @@ _run test_threads_auto_closed_threads_are_visible_and_reopenable
 _run test_threads_resume_quotes_injected_goal
 _run test_threads_resume_marks_missing_transcript
 _run test_threads_backfill_uses_sidecars_and_respects_budget
+_run test_threads_backfill_requires_timeout_binary
 _run test_threads_install_links_entrypoint
 
 test_prune_worktrees_wiring(){
