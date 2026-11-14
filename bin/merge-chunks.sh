@@ -28,6 +28,7 @@
 #   findings         union, each tagged with its chunk, exact duplicates on (category, what)
 #                    dropped, most severe first, capped at 10 (the schema cap)
 #   other lists      order-preserving union, instructions_given capped at 3 (the schema cap)
+#   deferred_ideas   chunk-order union by verbatim quote, valid entries only, capped at 3
 #   meta             chunks (how many answered) and chunks_elided (how many the chunker dropped)
 set -u
 
@@ -84,6 +85,12 @@ jq -s --arg session "$session" --argjson elided "$elided" '
       outcome: ([$all[].outcome | select(type == "string" and length > 0)] | .[-1]),
       notable_initiatives: ([$all[].notable_initiatives | strs | .[]] | uniq_ordered),
       instructions_given: ([$all[].instructions_given | strs | .[]] | uniq_ordered | .[0:3]),
+      deferred_ideas: ([$all[].deferred_ideas | arr | .[]
+        | select(type == "object"
+          and (.idea | type == "string" and length > 0 and (contains("\n") | not))
+          and (.quote | type == "string" and length > 0 and length < 200))]
+        | reduce .[] as $idea ([]; if any(.[]; .quote == $idea.quote) then . else . + [$idea] end)
+        | .[0:3]),
       satisfaction_signals: {
         happy: sig($all; "happy"),
         satisfied: sig($all; "satisfied"),

@@ -6662,6 +6662,30 @@ test_chunking_reads_the_whole_conversation_in_chunks(){
   rm -rf "$root"
 }
 
+test_threads_chunked_triage_keeps_deferred_ideas(){
+  echo "# chunking: deferred ideas from later chunks survive the real runner merge"
+  local root; root=$(setup_env)
+  local f; f=$(mk_chunky "$root" big 60); local h; h=$(hash_of "$f"); local fd; fd=$(fdir "$root")
+  export MOCK_MODE=chunked; run_chunked "$root"; unset MOCK_MODE
+  local accepted_quotes; accepted_quotes=$(jq -r '[.deferred_ideas[].quote] | join("|")' "$fd/$h.json")
+  local idea_from_later_chunk_present; idea_from_later_chunk_present=$(jq -r '[.deferred_ideas[].quote] | index("quote-c") != null' "$fd/$h.json")
+  assert_eq "$accepted_quotes" "quote-a|quote-b|quote-c" "test_threads_chunked_triage_keeps_deferred_ideas: accepted quotes"
+  assert_eq "$idea_from_later_chunk_present" "true" "later chunks contribute"
+}
+
+test_l1_deferred_ideas_require_explicit_deferral(){
+  echo "# triage prompt: deferred ideas require explicit user evidence"
+  local prompt="$REPO/prompts/SESSION_TRIAGE.md"
+  local prompt_requires_user_quote=false prompt_allows_inference=true
+  grep -Fq 'Only include an idea if the user explicitly said they would defer it.' "$prompt" && prompt_requires_user_quote=true
+  grep -Fq 'Do not infer deferral from unfinished work or a possible future task.' "$prompt" && prompt_allows_inference=false
+  assert_eq "$prompt_requires_user_quote" "true" "test_l1_deferred_ideas_require_explicit_deferral: verbatim evidence required"
+  assert_eq "$prompt_allows_inference" "false" "empty beats inferred ideas"
+  local excludes_machinery=false
+  grep -Fq 'never from a `<task-notification>`, `<teammate-message>`' "$prompt" && grep -Fq 'A subagent or workflow transcript has no human in it; emit `[]` there.' "$prompt" && excludes_machinery=true
+  assert_eq "$excludes_machinery" "true" "harness machinery and subagent transcripts never yield deferred ideas"
+}
+
 test_chunking_leaves_a_transcript_that_fits_alone(){
   echo "# chunking: a transcript that fits in one worker is read by one worker, exactly as before"
   local root; root=$(setup_env)
@@ -7148,6 +7172,8 @@ test_chunking_an_omp_session_cuts_the_day_then_chunks_the_live_chain(){
 }
 
 _run test_chunking_reads_the_whole_conversation_in_chunks
+_run test_threads_chunked_triage_keeps_deferred_ideas
+_run test_l1_deferred_ideas_require_explicit_deferral
 _run test_chunking_leaves_a_transcript_that_fits_alone
 _run test_chunk_cap_drops_the_middle_and_counts_it
 _run test_chunk_cap_of_one_reads_one_chunk_never_the_whole_transcript

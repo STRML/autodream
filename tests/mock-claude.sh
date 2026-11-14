@@ -265,8 +265,10 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
       skills_invoked:[],models_used:[],notable_initiatives:["initiative-\($i)"],underlying_goal:"goal-\($i)",
       outcome:(if $i == $n then "fully_achieved" else "partially_achieved" end),
       satisfaction_signals:{happy:0,satisfied:1,dissatisfied:0,frustrated:0},instructions_given:[],
+      deferred_ideas:(if $i == 1 then null elif $i == 2 then [{idea:"idea-a",quote:"quote-a"},{idea:"idea-b",quote:"quote-b"},"bad",{idea:"too long",quote:("x" * 200)}] elif $i == 3 then [{idea:"duplicate",quote:"quote-a"},{idea:"idea-c",quote:"quote-c"},{idea:"idea-d",quote:"quote-d"}] else [] end),
       findings:[{category:"permission_prompt",severity:"low",what:"finding-from-chunk-\($i)",evidence_excerpt:"x",proposed_rule:"y"},
                 {category:"other",severity:"low",what:"shared across chunks",evidence_excerpt:"x",proposed_rule:"y"}]}' > "$out"
+    if [ "$1" -eq 1 ]; then jq 'del(.deferred_ideas)' "$out" > "$out.tmp" && mv "$out.tmp" "$out"; fi
   }
   if [ -n "$ci" ] && [ "$ci" = "${MOCK_FAIL_CHUNK:-0}" ] && { [ -z "${MOCK_FAIL_ONCE:-}" ] || [ ! -f "$out.failed" ]; }; then
     : > "$out.failed"
