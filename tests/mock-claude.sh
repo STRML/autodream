@@ -149,6 +149,13 @@ if [ "$line1" = "AUTODREAM_THREADS_LINKER" ]; then
     printf '%s' "$input" > "$MOCK_CAPTURE_DIR/threads-stdin-$threads_call.txt"
     printf '%s\n' "$@" > "$MOCK_CAPTURE_DIR/threads-args-$threads_call.txt"
   fi
+  if [ -n "${MOCK_BACKFILL_OUTPUT_FILE:-}" ]; then
+    if grep -q '^planned_calls:' "$MOCK_BACKFILL_OUTPUT_FILE" 2>/dev/null; then
+      printf 'true\n' > "$MOCK_BACKFILL_PLAN_SEEN"
+    else
+      printf 'false\n' > "$MOCK_BACKFILL_PLAN_SEEN"
+    fi
+  fi
   threads_good(){
     printf '%s\n' "$threads_request" | jq -c '.candidates[] | {hash:.hash,thread:"new",title:.goal,finished:false}'
   }
@@ -431,7 +438,9 @@ else
   # The open-questions marker is part of the real contract (PROMPT.md mandates it) and run.sh
   # treats its absence as a truncated report, so the good path emits it too, on stdout, ending
   # with the sentinel the runner strips, then the optional pin block.
-  printf '# Autodream — mock\n\nmock aggregate report\n\n<!-- autodream:open-questions=0 -->\n'
+  printf '# Autodream — mock\n\nmock aggregate report\n\n'
+  [ ! -r "$fdir/dropped-threads.md" ] || cat "$fdir/dropped-threads.md"
+  printf '\n<!-- autodream:open-questions=0 -->\n'
   echo "AUTODREAM_REPORT_END"
   if [ "$writes_pins" = 1 ]; then
     if [ "$mode" = "pins_unterminated" ]; then

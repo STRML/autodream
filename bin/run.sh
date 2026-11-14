@@ -2255,6 +2255,16 @@ threads_calls: 0"
   clean_work_bucket
 }
 
+write_threads_report_input() {
+  local reporter status
+  reporter=$(find_lib threads.sh) || reporter=""
+  [ -n "$reporter" ] || return 1
+  status=$(printf '%s\n' "$THREADS_SUMMARY" | sed -n 's/^threads_link: //p' | tail -1)
+  env AUTODREAM_DIR="$AUTODREAM_DIR" DREAMS_DIR="$DREAMS_DIR" \
+    AUTODREAM_THREADS_LINK_STATUS="${status:-failed}" /bin/bash "$reporter" report "$TARGET_DATE" \
+    > "$FINDINGS_DIR/dropped-threads.md" 2>> "$RUN_LOG"
+}
+
 # stdin: session_rows output -> one project<TAB>cwd row per project. A project gets a cwd
 # only when all its sessions agree on one usable cwd. An unusable "?" still counts as a
 # distinct cwd, so it makes the project ambiguous rather than vanishing. Anything looser
@@ -3725,6 +3735,7 @@ run() {
     THREAD_SOURCE_ROWS=$(thread_source_rows "$(pdate_shift "$TARGET_DATE" -13 d)" "$TARGET_DATE" 2>/dev/null) || THREAD_SOURCE_ROWS=""
     THREADS_REFRESH_KEYS=""
     run_threads_update
+    write_threads_report_input || printf '## Dropped threads\n\n> WARNING: dropped thread report could not be generated.\n' > "$FINDINGS_DIR/dropped-threads.md"
     # A zero-session night is not always an empty night. Every session can be
     # rejected for an unrepresentable path or dropped by collision handling, and
     # run-stats.txt is written on this path too. Without it the report said "no
@@ -3826,8 +3837,8 @@ run() {
       # L2 to name the dates for any non-empty value, so `none` was handed to it as
       # a date list to report.
       printf 'unassembled_dates: %s\n' "${UNASSEMBLED:-}"
-      printf '%s\n' "$THREADS_SUMMARY"
     } > "$FINDINGS_DIR/run-stats.txt" 2>/dev/null || true
+    printf '%s\n' "$THREADS_SUMMARY" >> "$FINDINGS_DIR/run-stats.txt" 2>/dev/null || true
     cat > "$REPORT_PATH" <<EOF
 # Autodream — $TARGET_DATE
 
@@ -3873,6 +3884,16 @@ None; no sessions were triaged on this date.
 <!-- autodream:open-questions=0 -->
 AUTODREAM_QUESTIONS_END
 EOF
+    if [ -s "$FINDINGS_DIR/dropped-threads.md" ]; then
+      awk -v section="$FINDINGS_DIR/dropped-threads.md" '
+        $0 == "AUTODREAM_QUESTIONS_BEGIN" {
+          while ((getline line < section) > 0) print line
+          close(section)
+          print ""
+        }
+        { print }
+      ' "$REPORT_PATH" > "$REPORT_PATH.threads" && mv "$REPORT_PATH.threads" "$REPORT_PATH"
+    fi
     # A question-free report still counts as a report. Without this the streak
     # store would keep yesterday's questions alive across an empty night, and a
     # question that reappeared two reports later would be called consecutive when
@@ -4405,7 +4426,6 @@ PY
   log "enforced mechanical skill fields from sidecars on $SKILLS_ENFORCED findings file(s); removed unmeasured skill fields from $SKILLS_DROPPED whose sidecar was missing, unreadable, or incomplete; $SKILLS_FAILED rewrite(s) failed"
 
   thread_refresh_accepted
-  run_threads_update
 
   # ---- Self-audit stats: runtime telemetry only the runner can see ----
   # The aggregator can't observe its own machinery — which sessions were autodream's
@@ -4606,7 +4626,6 @@ PY
     # window, which is the reading that matters — this is the key that gets a killed run
     # noticed the next morning instead of during an unrelated investigation two days on.
     printf 'unassembled_dates: %s\n' "${UNASSEMBLED:-}"
-    printf '%s\n' "$THREADS_SUMMARY"
     # Always emitted, even empty: a reader should never have to tell "no legacy reports"
     # apart from "this runner predates the key", which is the same ambiguity the epoch
     # exists to resolve.
@@ -4727,6 +4746,11 @@ PY
   printf 'triage_candidates: %s\n' "$TRIAGE_SUMMARY" >> "$FINDINGS_DIR/run-stats.txt"
 
   write_rollup
+
+  thread_refresh_accepted
+  run_threads_update
+  write_threads_report_input || printf '## Dropped threads\n\n> WARNING: dropped thread report could not be generated.\n' > "$FINDINGS_DIR/dropped-threads.md"
+  printf '%s\n' "$THREADS_SUMMARY" >> "$FINDINGS_DIR/run-stats.txt"
 
   # ---- Skills inventory and per-source facts (written for L2 to read) ----
   write_adapter_inputs
@@ -4886,6 +4910,7 @@ PY
       cd "$WORK_DIR" 2>/dev/null || true
       {
         printf "Findings directory to aggregate (literal absolute path): %s\n" "$FINDINGS_DIR"
+        printf "Dropped threads runner input (literal absolute path): %s/dropped-threads.md\n" "$FINDINGS_DIR"
         printf "Report destination (literal absolute path): %s\n\n" "$REPORT_PATH"
         cat "$AUTODREAM_DIR/PROMPT.md"
       } | env ${L2_ENVS[@]+"${L2_ENVS[@]}"} /bin/sh -c 'printf %s "$$" > "$0" 2>/dev/null; exec "$@"' "$L2_PIDFILE" ${L2_ARGV[@]+"${L2_ARGV[@]}"}
