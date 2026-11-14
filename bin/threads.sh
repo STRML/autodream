@@ -124,10 +124,11 @@ threads_is_dropped() {
 
 threads_annotate() {
   local as_of=$1
-  local thread last_seen outcome status
+  local thread latest last_seen outcome status
   jq -c '.[]' | while IFS= read -r thread; do
-    last_seen=$(printf '%s\n' "$thread" | jq -r '.last_seen')
-    outcome=$(printf '%s\n' "$thread" | jq -r '(.sessions | sort_by(.date) | last // {}).outcome // empty')
+    latest=$(printf '%s\n' "$thread" | jq -c '(.sessions | sort_by([.date, .hash]) | last) // {}')
+    last_seen=$(printf '%s\n' "$latest" | jq -r '.date // empty')
+    outcome=$(printf '%s\n' "$latest" | jq -r '.outcome // empty')
     status=$(printf '%s\n' "$thread" | jq -r '.status')
     if threads_is_dropped "$as_of" "$last_seen" "$status" "$outcome"; then
       printf '%s\n' "$thread" | jq -c '.status = "dropped"'
@@ -450,10 +451,9 @@ threads_write_linker_input() {
   jq -cn --arg date "$date" --arg cutoff "$cutoff" --slurpfile state <(printf '%s\n' "$state_json") \
     --slurpfile candidates "$candidates_json" '
       {date:$date,
-       threads:[$state[0][] | if (.status == "open" and .last_seen >= $cutoff)
-                then {id,title,repo,goal,last_seen}
-                elif (.status == "done" or .status == "closed_by_sam") then {id,title,repo}
-                else empty end],
+       threads:([$state[0][] | select(.status == "open" and .last_seen >= $cutoff) | {id,title,repo,goal,last_seen}] +
+                ([$state[0][] | select(.status == "done" or .status == "closed_by_sam") | {id,title,repo,last_seen}]
+                 | sort_by(.last_seen) | reverse | .[:200] | map({id,title,repo}))),
        candidates:$candidates[0]}
     ' > "$request_json_file" || return 1
   {
@@ -508,6 +508,14 @@ linked = rejected = close_refused = 0
 
 def source_key(session):
     return session.get("date"), session.get("hash")
+
+def refresh_last_seen(thread):
+    dates = [session.get("date", "") for session in thread.get("sessions", [])]
+    if dates:
+        thread["last_seen"] = max(dates)
+
+for item in state:
+    refresh_last_seen(item)
 
 def safe_title(value, fallback):
     if not isinstance(value, str):
@@ -565,7 +573,7 @@ for assignment in assignments:
                "outcome": candidate["outcome"]}
     thread.setdefault("sessions", []).append(session)
     thread["sessions"].sort(key=lambda item: (item.get("date", ""), item.get("hash", "")))
-    thread["last_seen"] = max([s.get("date", "") for s in thread["sessions"]] + [thread.get("last_seen", "")])
+    refresh_last_seen(thread)
     if assignment["finished"]:
         if (date, hash_value) < before_latest:
             close_refused += 1
@@ -577,6 +585,8 @@ for assignment in assignments:
             close_refused += 1
     linked += 1
 
+for item in state:
+    refresh_last_seen(item)
 state = [item for item in state if item.get("sessions") or item.get("status") != "open"]
 state.sort(key=lambda item: item["id"])
 with open(output_path, "w", encoding="utf-8") as output:

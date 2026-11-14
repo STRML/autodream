@@ -7686,6 +7686,52 @@ test_threads_eligibility_and_goal_fallback(){
   thread_cleanup "$root"
 }
 
+test_threads_closed_hints_are_capped_and_newest_first(){
+  echo "# threads: closed linker hints carry only the newest 200 dates"
+  local root session state req count first last fields
+  root=$(setup_env)
+  session=$(mk_thread_session "$root" closed-hints "$REPO")
+  seed_thread_findings "$root" "$session" "closed hint candidate" '[]' partially_achieved >/dev/null
+  state=$(thread_state "$root"); mkdir -p "$(dirname "$state")"
+  python3 - "$state" <<'PY_CLOSED_THREADS'
+import datetime
+import json
+import sys
+
+state_path = sys.argv[1]
+start = datetime.date(2000, 1, 1)
+with open(state_path, "w", encoding="utf-8") as stream:
+    for index in range(300):
+        stream.write(json.dumps({
+            "id": "t-%08x" % index,
+            "kind": "work",
+            "repo": "/repo/closed",
+            "title": "Closed thread %d" % index,
+            "goal": "historical goal",
+            "sessions": [{"date": (start + datetime.timedelta(days=index)).isoformat(),
+                          "hash": "%012x" % index,
+                          "session_path": "/sessions/%d.jsonl" % index,
+                          "outcome": "fully_achieved"}],
+            "status": "closed_by_sam",
+            "done_by": "sam",
+            "last_seen": (start + datetime.timedelta(days=index)).isoformat()
+        }, separators=(",", ":")) + "\n")
+PY_CLOSED_THREADS
+  export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  req="$root/cap/threads-stdin-1.txt"
+  count=$(thread_request_json "$req" | jq '.threads | length')
+  first=$(thread_request_json "$req" | jq -r '.threads[0].id')
+  last=$(thread_request_json "$req" | jq -r '.threads[-1].id')
+  fields=$(thread_request_json "$req" | jq -r '[.threads[] | (keys | sort | join(","))] | unique | join(";")')
+  assert_eq "$count" 200 "exactly 200 closed hints reach the linker"
+  assert_eq "$first" t-0000012b "newest closed thread is first"
+  assert_eq "$last" t-00000064 "oldest retained closed thread is last"
+  assert_eq "$fields" id,repo,title "closed hints expose only id, title, and repo"
+  thread_cleanup "$root"
+}
+
 test_threads_missing_sidecar_is_unmeasured(){
   echo "# threads: a missing stats sidecar is disclosed and excluded"
   local root session stats_stub
@@ -7968,6 +8014,42 @@ test_threads_older_rebuild_only_links_missing_sources(){
   after=$(jq -sr '.[0].last_seen' "$(thread_state "$root")")
   assert_eq "$calls" 0 "older rebuild is idempotent"
   assert_eq "$after" "$before" "history does not regress"
+  thread_cleanup "$root"
+}
+
+test_threads_reassignment_updates_dropped_status_and_report(){
+  echo "# threads: reassigning the newest session lowers last_seen for list and report"
+  local root session hash state today previous_date previous_stamp seen list_count report moved source_row
+  root=$(setup_env)
+  previous_date=$DATE; previous_stamp=$STAMP
+  DATE=$(pdate_shift "$(pdate_yesterday)" 1 d) || { no "current report date resolved"; thread_cleanup "$root"; return 0; }
+  today=$DATE
+  STAMP=$(pdate_fmt_epoch "$(pdate_epoch "$DATE")" +%Y%m%d1200) || { no "current report stamp resolved"; thread_cleanup "$root"; DATE=$previous_date; STAMP=$previous_stamp; return 0; }
+  session=$(mk_thread_session "$root" reassign-newest "$REPO")
+  hash=$(seed_thread_findings "$root" "$session" "reassigned current goal" '[]' partially_achieved)
+  state=$(thread_state "$root"); mkdir -p "$(dirname "$state")"
+  jq -cn --arg date "$(pdate_shift "$DATE" -8 d)" --arg current "$DATE" --arg hash "$hash" --arg path "$session" \
+    '{id:"t-77777777",kind:"work",repo:"/repo",title:"Surviving old work",goal:"old goal",
+      sessions:[{date:$date,hash:"aaaaaaaaaaaa",session_path:"/old/session.jsonl",outcome:"partially_achieved"},
+                {date:$current,hash:$hash,session_path:$path,outcome:"partially_achieved"}],
+      status:"open",done_by:null,last_seen:$current}' > "$state"
+  source_row=$(jq -cn --arg date "$DATE" --arg hash "$hash" --arg path "$session" --arg repo "$REPO" \
+    '{date:$date,hash:$hash,source:"claude",session_path:$path,cwd:$repo,repo:$repo,nested:false,user_message_count:2,measured:true}')
+  printf '%s\n' "$source_row" | env AUTODREAM_DIR="$root/autodream" AUTODREAM_CONFIG="$root/no-config" \
+    AUTODREAM_THREADS_STATE="$state" AUTODREAM_THREADS_ENGINE=claude AUTODREAM_THREADS_MODEL=claude-haiku-5-5 \
+    AUTODREAM_THREADS_TIMEOUT_BIN="$(command -v timeout)" AUTODREAM_ADAPTERS=claude \
+    THREADS_REFRESH_KEYS="$(printf '%s\t%s' "$DATE" "$hash")" CLAUDE_BIN="$MOCK" \
+    MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap" /bin/bash "$REPO/bin/threads.sh" update "$DATE" > "$root/update.out"
+  DATE=$previous_date; STAMP=$previous_stamp
+  moved=$(jq -sr --arg hash "$hash" '[.[] | select(any(.sessions[]; .hash == $hash)) | select(.id != "t-77777777")] | length' "$state")
+  seen=$(jq -sr '.[] | select(.id == "t-77777777") | .last_seen' "$state")
+  list_count=$(AUTODREAM_DIR="$root/autodream" "$REPO/bin/threads.sh" list --status dropped --json | jq '[.[] | select(.id == "t-77777777")] | length')
+  report="$root/dreams/$today.md"
+  AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" /bin/bash "$REPO/bin/threads.sh" report "$today" > "$report"
+  assert_eq "$moved" 1 "the newest source is actually reassigned away"
+  assert_eq "$seen" "$(pdate_shift "$today" -8 d)" "last_seen is recomputed from surviving sessions"
+  assert_eq "$list_count" 1 "list computes dropped from the surviving newest session"
+  assert_grep "$report" 't-77777777' "report agrees that the surviving session is dropped"
   thread_cleanup "$root"
 }
 
@@ -8313,6 +8395,7 @@ test_threads_install_links_entrypoint(){
 }
 
 _run test_threads_eligibility_and_goal_fallback
+_run test_threads_closed_hints_are_capped_and_newest_first
 _run test_threads_missing_sidecar_is_unmeasured
 _run test_threads_runner_provenance_survives_worker_tampering
 _run test_threads_one_call_across_repo_hints
@@ -8325,6 +8408,7 @@ _run test_threads_concurrent_merges_preserve_cli_close
 _run test_threads_lock_exhaustion_is_bounded
 _run test_threads_retriaged_goal_replaces_source_link
 _run test_threads_older_rebuild_only_links_missing_sources
+_run test_threads_reassignment_updates_dropped_status_and_report
 _run test_threads_linker_cannot_write
 _run test_threads_empty_night_still_catches_up_and_reports
 _run test_threads_report_ranking_and_limit
