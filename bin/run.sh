@@ -2255,6 +2255,23 @@ threads_calls: 0"
   clean_work_bucket
 }
 
+run_threads_dashboard() {
+  local renderer output status
+  renderer=$(find_lib threads.sh) || renderer=""
+  if [ -n "$renderer" ]; then
+    output=$(env AUTODREAM_DIR="$AUTODREAM_DIR" DREAMS_DIR="$DREAMS_DIR" \
+      /bin/bash "$renderer" render 2>> "$RUN_LOG") || true
+    status=$(printf '%s\n' "$output" | sed -n 's/^threads_render: //p' | tail -1)
+  else
+    status=failed
+  fi
+  case "$status" in ok|failed|skipped_unreadable) ;; *) status=failed ;; esac
+  THREADS_SUMMARY="${THREADS_SUMMARY}
+threads_render: $status"
+  [ "$status" != failed ] || log "WARNING: thread dashboard render failed; output was not replaced"
+  return 0
+}
+
 write_threads_report_input() {
   local reporter status
   reporter=$(find_lib threads.sh) || reporter=""
@@ -3736,6 +3753,7 @@ run() {
     THREADS_REFRESH_KEYS=""
     run_threads_update
     write_threads_report_input || printf '## Dropped threads\n\n> WARNING: dropped thread report could not be generated.\n' > "$FINDINGS_DIR/dropped-threads.md"
+    run_threads_dashboard
     # A zero-session night is not always an empty night. Every session can be
     # rejected for an unrepresentable path or dropped by collision handling, and
     # run-stats.txt is written on this path too. Without it the report said "no
@@ -4750,6 +4768,7 @@ PY
   thread_refresh_accepted
   run_threads_update
   write_threads_report_input || printf '## Dropped threads\n\n> WARNING: dropped thread report could not be generated.\n' > "$FINDINGS_DIR/dropped-threads.md"
+  run_threads_dashboard
   printf '%s\n' "$THREADS_SUMMARY" >> "$FINDINGS_DIR/run-stats.txt"
 
   # ---- Skills inventory and per-source facts (written for L2 to read) ----

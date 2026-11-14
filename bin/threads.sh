@@ -188,6 +188,44 @@ threads_search() {
   ' | if [ "$json" -eq 1 ]; then cat; else jq -r '.[] | "\(.id)\t\(.status)\t\(.kind)\t\(.repo)\t\(.title)"'; fi
 }
 
+threads_render() {
+  local renderer as_of output
+  output="${DREAMS_DIR:-${HOME:-}/.claude/dreams}/threads.html"
+  if ! threads_read_state >/dev/null; then
+    printf 'threads_render: skipped_unreadable\n'
+    return 1
+  fi
+  renderer=""
+  if [ -r "$THREADS_LIB_DIR/threads-render.py" ]; then
+    renderer="$THREADS_LIB_DIR/threads-render.py"
+  elif [ -r "$THREADS_DIR/threads-render.py" ]; then
+    renderer="$THREADS_DIR/threads-render.py"
+  fi
+  if [ -z "$renderer" ]; then
+    threads_error "threads-render.py was not found"
+    printf 'threads_render: failed\n'
+    return 1
+  fi
+  as_of=$(pdate_shift "$(pdate_yesterday)" 1 d) || {
+    threads_error "cannot determine dashboard date"
+    printf 'threads_render: failed\n'
+    return 1
+  }
+  if [ -r "$THREADS_LIB_DIR/threads-template.html" ]; then
+    AUTODREAM_THREADS_TEMPLATE="$THREADS_LIB_DIR/threads-template.html" \
+      python3 "$renderer" "$STATE" "$output" --as-of "$as_of"
+  else
+    python3 "$renderer" "$STATE" "$output" --as-of "$as_of"
+  fi
+  if [ "$?" -eq 0 ]; then
+    printf 'threads_render: ok\n'
+    return 0
+  fi
+  threads_error "dashboard render failed"
+  printf 'threads_render: failed\n'
+  return 1
+}
+
 threads_set_status() {
   local id=$1 status=$2 current_state next_file rc=0
   case "$id" in t-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) threads_error "invalid thread id: $id"; return 2 ;; esac
@@ -221,6 +259,7 @@ threads_set_status() {
   unlink "$next_file" 2>/dev/null || true
   threads_release_lock
   trap - EXIT HUP INT TERM
+  if [ "$rc" -eq 0 ]; then threads_render || true; fi
   return "$rc"
 }
 
@@ -1018,6 +1057,7 @@ threads_usage() {
     'Usage: threads.sh list [--status STATUS] [--kind KIND] [--repo PATH] [--json]' \
     '       threads.sh search QUERY [--json]' \
     '       threads.sh update DATE' \
+    '       threads.sh render' \
     '       threads.sh report DATE' \
     '       threads.sh resume ID [--launch]' \
     '       threads.sh backfill FROM TO [--engine E] [--model M] [--max-calls N]' \
@@ -1031,6 +1071,11 @@ case "${1:-}" in
     shift
     [ "$#" -eq 1 ] || { threads_usage; exit 2; }
     threads_update "$1"
+    ;;
+  render)
+    shift
+    [ "$#" -eq 0 ] || { threads_usage; exit 2; }
+    threads_render
     ;;
   report)
     shift

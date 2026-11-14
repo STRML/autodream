@@ -8179,6 +8179,131 @@ test_threads_install_links_entrypoint(){
   thread_cleanup "$root"
 }
 
+threads_html_inspect(){
+  python3 - "$@" <<'PY_THREADS_INSPECT'
+import json
+import re
+import sys
+from html.parser import HTMLParser
+
+class Document(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.tags = []
+        self.events = []
+        self.payload = []
+        self.in_payload = False
+    def handle_starttag(self, tag, attrs):
+        self.tags.append(tag)
+        attrs = dict(attrs)
+        if any(name.lower().startswith("on") for name in attrs): self.events.append(tag)
+        if tag == "script" and attrs.get("id") == "threads-data": self.in_payload = True
+    def handle_endtag(self, tag):
+        if tag == "script" and self.in_payload: self.in_payload = False
+    def handle_data(self, data):
+        if self.in_payload: self.payload.append(data)
+
+def read_document(path):
+    parser = Document()
+    parser.feed(open(path, encoding="utf-8").read())
+    return parser
+
+path = sys.argv[1]
+html = open(path, encoding="utf-8").read()
+doc = read_document(path)
+raw_json = "".join(doc.payload)
+payload = json.loads(raw_json)
+unexpected = 0
+if len(sys.argv) > 2:
+    baseline = read_document(sys.argv[2])
+    unexpected = int(doc.tags != baseline.tags)
+unsafe_sinks = re.findall(r"\b(?:innerHTML|outerHTML|insertAdjacentHTML|document\.write)\b", html)
+print(json.dumps({
+    "payload": payload,
+    "raw_json_less_than_count": raw_json.count("<"),
+    "unexpected_html_nodes": unexpected,
+    "unsafe_dom_sinks": len(unsafe_sinks) + len(doc.events),
+    "invalid_id_commands": 0 if re.search(r"\^t-\[0-9a-f\]\{8\}\$", html) else 1,
+}))
+PY_THREADS_INSPECT
+}
+
+test_threads_render_failure_preserves_previous_page(){
+  echo "# threads: failed dashboard rendering preserves the prior page and reports failure"
+  local root page before after template
+  root=$(setup_env)
+  page="$root/dreams/threads.html"
+  printf 'previous dashboard\n' > "$page"
+  before=$(cat "$page")
+  template="$root/bad-template.html"
+  printf '<html>missing data marker</html>\n' > "$template"
+  AUTODREAM_THREADS_TEMPLATE="$template" run_dream "$root"
+  after=$(cat "$page")
+  assert_eq "$after" "$before" "failed render preserves page"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^threads_render: failed$' "failure disclosed"
+  assert_grep "$root/run.out" 'thread dashboard render failed' "the renderer failure was reached"
+  thread_cleanup "$root"
+}
+
+test_threads_html_payload_is_inert(){
+  echo "# threads: hostile state renders as inert JSON and text"
+  local root hostile state page baseline result
+  root=$(setup_env)
+  state=$(thread_state "$root"); mkdir -p "$(dirname "$state")"
+  page="$root/dreams/threads.html"
+  hostile='</script><img src=x onerror="alert(1)"> "quoted" '\'' ; $(touch /tmp/adt21-pwned)'$'\001'
+  python3 - "$state" "$hostile" <<'PY_THREADS_HOSTILE'
+import json
+import sys
+path, goal = sys.argv[1:]
+thread = {
+    "id": "t-40000001", "kind": "work", "repo": "/repo/\" onerror=\"alert(2)",
+    "title": "hostile </script><svg onload=alert(3)>", "goal": goal,
+    "sessions": [{"date": "2020-01-01", "hash": "aaaaaaaaaaaa",
+                  "session_path": "/tmp/$(touch /tmp/adt21-command).jsonl",
+                  "outcome": "partially_achieved"}],
+    "status": "open", "done_by": None, "last_seen": "2020-01-01",
+}
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(thread, stream, ensure_ascii=True, separators=(",", ":"))
+    stream.write("\n")
+with open(path + ".goal", "w", encoding="utf-8") as stream:
+    stream.write(goal)
+PY_THREADS_HOSTILE
+  baseline="$root/baseline/threads.html"
+  AUTODREAM_DIR="$root/autodream" AUTODREAM_THREADS_STATE="$root/empty/threads.jsonl" \
+    DREAMS_DIR="$root/baseline" /bin/bash "$REPO/bin/threads.sh" render >/dev/null 2>&1
+  AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
+    /bin/bash "$REPO/bin/threads.sh" render > "$root/render.out" 2>&1
+  result=$(threads_html_inspect "$page" "$baseline")
+  assert_eq "$(printf '%s' "$result" | jq -r '.payload.threads[0].goal')" "$hostile" "text survives encoding"
+  assert_eq "$(printf '%s' "$result" | jq -r .raw_json_less_than_count)" 0 "script terminators escaped"
+  assert_eq "$(printf '%s' "$result" | jq -r .unexpected_html_nodes)" 0 "payload creates no HTML elements"
+  assert_eq "$(printf '%s' "$result" | jq -r .unsafe_dom_sinks)" 0 "dynamic text uses textContent"
+  assert_eq "$(printf '%s' "$result" | jq -r .invalid_id_commands)" 0 "copy commands require valid IDs"
+  assert_eq "$(printf '%s' "$result" | jq -r '.payload.generated_at | length > 0')" true "generation time is embedded"
+  thread_cleanup "$root"
+}
+
+test_threads_render_runs_on_empty_night_and_cli_write(){
+  echo "# threads: dashboard renders on an empty night and refreshes after a CLI close"
+  local root page state generated status
+  root=$(setup_env)
+  run_dream "$root"
+  page="$root/dreams/threads.html"
+  assert_file "$page" "empty night writes dashboard"
+  state=$(thread_state "$root"); mkdir -p "$(dirname "$state")"
+  jq -cn '{id:"t-50000001",kind:"work",repo:"/repo",title:"CLI refresh",goal:"verify refresh",sessions:[{date:"2020-01-01",hash:"aaaaaaaaaaaa",session_path:"/archive/a.jsonl",outcome:"partially_achieved"}],status:"open",done_by:null,last_seen:"2020-01-01"}' > "$state"
+  AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
+    /bin/bash "$REPO/bin/threads.sh" close t-50000001 > "$root/close.out" 2>&1
+  result=$(threads_html_inspect "$page")
+  status=$(printf '%s' "$result" | jq -r '.payload.threads[0].status')
+  generated=$(printf '%s' "$result" | jq -r '.payload.generated_at')
+  assert_eq "$status" closed_by_sam "CLI write refreshes page"
+  [ -n "$generated" ] && ok "generation time is present" || no "generation time is present"
+  thread_cleanup "$root"
+}
+
 _run test_threads_eligibility_and_goal_fallback
 _run test_threads_missing_sidecar_is_unmeasured
 _run test_threads_runner_provenance_survives_worker_tampering
@@ -8200,6 +8325,9 @@ _run test_threads_resume_quotes_injected_goal
 _run test_threads_resume_marks_missing_transcript
 _run test_threads_backfill_uses_sidecars_and_respects_budget
 _run test_threads_install_links_entrypoint
+_run test_threads_render_failure_preserves_previous_page
+_run test_threads_html_payload_is_inert
+_run test_threads_render_runs_on_empty_night_and_cli_write
 
 test_prune_worktrees_wiring(){
   echo "# prune: run.sh calls the helper only when roots are set, records the summary, and survives a failing helper"
