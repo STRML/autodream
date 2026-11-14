@@ -63,7 +63,7 @@ threads_read_state() {
       (.repo | type == "string") and
       (.title | type == "string") and
       (.goal | type == "string") and
-      (.sessions | type == "array") and
+      (.sessions | type == "array" and all(.[]; type == "object" and (.date | type == "string") and (.hash | type == "string"))) and
       (.status | type == "string" and ( . == "open" or . == "done" or . == "closed_by_sam")) and
       (.done_by == null or (.done_by | type == "string")) and
       (.last_seen | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))
@@ -554,7 +554,8 @@ for assignment in assignments:
         if thread is None:
             rejected += 1
             continue
-    before_last_seen = max([s.get("date", "") for s in thread.get("sessions", [])] + [thread.get("last_seen", "")])
+    before_latest = max([source_key(s) for s in thread.get("sessions", [])] + [(thread.get("last_seen", ""), "")])
+    before_last_seen = before_latest[0]
     if date >= before_last_seen:
         thread["goal"] = candidate["goal"]
         thread["title"] = safe_title(assignment.get("title"), candidate["goal"])
@@ -566,7 +567,9 @@ for assignment in assignments:
     thread["sessions"].sort(key=lambda item: (item.get("date", ""), item.get("hash", "")))
     thread["last_seen"] = max([s.get("date", "") for s in thread["sessions"]] + [thread.get("last_seen", "")])
     if assignment["finished"]:
-        if candidate["outcome"] in ("fully_achieved", "mostly_achieved"):
+        if (date, hash_value) < before_latest:
+            close_refused += 1
+        elif candidate["outcome"] in ("fully_achieved", "mostly_achieved"):
             if thread["status"] == "open":
                 thread["status"] = "done"
                 thread["done_by"] = "linker"
@@ -602,6 +605,7 @@ threads_emit_stats() {
   printf 'threads_close_refused: %s\n' "$5"
   printf 'threads_unmeasured: %s\n' "$6"
   printf 'threads_calls: %s\n' "$7"
+  printf 'threads_unassigned: %s\n' "${9:-0}"
   [ -z "${8:-}" ] || printf 'threads_skipped: %s\n' "$8"
 }
 
@@ -617,7 +621,7 @@ threads_warn_unreadable() {
 threads_update() {
   local date=$1 tmp source_file state_json state_file candidates_file unmeasured prompt engine model timeout_s max_input timeout_bin
   local all_candidates groups_dir groups_file request_list request_candidates group_candidates request_json input_file response_file valid_file rejected_file unusable_file assignments_file
-  local failed=0 rejected=0 close_refused=0 linked=0 calls=0 skipped="" link_status=not_needed size unusable index group rc merge_rejected
+  local failed=0 rejected=0 close_refused=0 linked=0 calls=0 skipped="" link_status=not_needed size unusable index group rc merge_rejected call_budget candidate_count unassigned
   threads_valid_date "$date" || { threads_error "invalid update date: $date"; return 2; }
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/threads-update.XXXXXX" 2>/dev/null) || {
     threads_emit_stats ok failed 0 0 0 0 0
@@ -663,6 +667,9 @@ PY_SORT
     threads_emit_stats ok failed 0 0 0 "$unmeasured" 0
     return 0
   fi
+  candidate_count=$(wc -l < "$candidates_file" | tr -d ' ')
+  case "$candidate_count" in ''|*[!0-9]*) candidate_count=0 ;; esac
+  unassigned=$candidate_count
   if [ ! -s "$candidates_file" ]; then
     threads_cleanup_tmp "$tmp"
     threads_emit_stats ok not_needed 0 0 0 "$unmeasured" 0
@@ -670,6 +677,11 @@ PY_SORT
   fi
 
   link_status=ok
+  call_budget=${AUTODREAM_THREADS_CALL_BUDGET:-}
+  if [ -n "$call_budget" ]; then
+    case "$call_budget" in ''|*[!0-9]*) threads_error "AUTODREAM_THREADS_CALL_BUDGET must be a non-negative integer"; failed=1 ;; esac
+    [ "$failed" -eq 1 ] || call_budget=$((10#$call_budget))
+  fi
   engine=${AUTODREAM_THREADS_ENGINE:-claude}
   model=${AUTODREAM_THREADS_MODEL:-claude-haiku-5-5}
   timeout_s=${AUTODREAM_THREADS_TIMEOUT:-300}
@@ -705,7 +717,7 @@ PY_SORT
   fi
   if [ "$failed" -eq 1 ]; then
     threads_cleanup_tmp "$tmp"
-    threads_emit_stats ok failed 0 0 0 "$unmeasured" 0
+    threads_emit_stats ok failed 0 0 0 "$unmeasured" 0 "" "$unassigned"
     return 0
   fi
 
@@ -715,7 +727,7 @@ PY_SORT
   threads_prepare_requests "$candidates_file" "$groups_dir" "$groups_file" "$all_candidates" || {
     threads_error "could not build linker candidate groups"
     threads_cleanup_tmp "$tmp"
-    threads_emit_stats ok failed 0 0 0 "$unmeasured" 0
+    threads_emit_stats ok failed 0 0 0 "$unmeasured" 0 "" "$unassigned"
     return 0
   }
   request_list="$tmp/requests-to-call.txt"
@@ -733,6 +745,10 @@ PY_SORT
   index=0
   while IFS= read -r group; do
     [ -n "$group" ] || continue
+    if [ -n "$call_budget" ] && [ "$calls" -ge "$call_budget" ]; then
+      skipped=budget
+      break
+    fi
     index=$((index + 1))
     request_candidates="$group"
     request_json="$tmp/request-$index.json"
@@ -776,7 +792,7 @@ PY_SORT
       threads_error "cannot create thread state directory"
       link_status=failed
       threads_cleanup_tmp "$tmp"
-      threads_emit_stats ok "$link_status" 0 "$rejected" "$close_refused" "$unmeasured" "$calls"
+      threads_emit_stats ok "$link_status" 0 "$rejected" "$close_refused" "$unmeasured" "$calls" "$skipped" "$unassigned"
       return 0
     }
     if ! threads_acquire_lock; then
@@ -786,7 +802,7 @@ PY_SORT
         threads_release_lock
         threads_warn_unreadable "$date"
         threads_cleanup_tmp "$tmp"
-        threads_emit_stats unreadable failed 0 "$rejected" 0 "$unmeasured" "$calls"
+        threads_emit_stats unreadable failed 0 "$rejected" 0 "$unmeasured" "$calls" "$skipped" "$unassigned"
         return 0
       fi
       rc=0
@@ -806,12 +822,14 @@ PY_SORT
       threads_release_lock
     fi
   fi
+  unassigned=$((candidate_count - linked))
+  [ "$unassigned" -ge 0 ] || unassigned=0
   threads_cleanup_tmp "$tmp"
-  threads_emit_stats ok "$link_status" "$linked" "$rejected" "$close_refused" "$unmeasured" "$calls" "$skipped"
+  threads_emit_stats ok "$link_status" "$linked" "$rejected" "$close_refused" "$unmeasured" "$calls" "$skipped" "$unassigned"
 }
 
 threads_report() {
-  local date=$1 state previous report_file next_date
+  local date=$1 state previous report_file next_date state_file report_rc
   threads_valid_date "$date" || { threads_error "invalid report date: $date"; return 2; }
   threads_valid_days "$DROPPED_DAYS" || { threads_error "invalid AUTODREAM_THREADS_DROPPED_DAYS"; return 2; }
   DROPPED_DAYS=$((10#$DROPPED_DAYS))
@@ -819,6 +837,8 @@ threads_report() {
     printf '## Dropped threads\n\n> WARNING: thread index is unreadable; no recommendations are available.\n'
     return 0
   fi
+  state_file=$(mktemp "${TMPDIR:-/tmp}/threads-report.XXXXXX") || return 1
+  printf '%s\n' "$state" > "$state_file" || { threads_cleanup_tmp "$state_file"; return 1; }
   previous=""
   for report_file in "${DREAMS_DIR:-$HOME/.claude/dreams}"/????-??-??.md; do
     [ -f "$report_file" ] || continue
@@ -828,14 +848,15 @@ threads_report() {
       [ -n "$previous" ] && [ ! "$previous" \< "$next_date" ] || previous=$next_date
     fi
   done
-  python3 - "$date" "$previous" "$DROPPED_DAYS" "${AUTODREAM_THREADS_LINK_STATUS:-ok}" "$STATE" <<'PY_REPORT'
+  python3 - "$date" "$previous" "$DROPPED_DAYS" "${AUTODREAM_THREADS_LINK_STATUS:-ok}" "${AUTODREAM_THREADS_UNASSIGNED:-0}" "$state_file" <<'PY_REPORT'
 import datetime
 import json
 import sys
 
-report_date, previous_date, days, link_status, state_path = sys.argv[1:]
+report_date, previous_date, days, link_status, unassigned, state_path = sys.argv[1:]
 with open(state_path, encoding="utf-8") as stream:
-    state = [json.loads(line) for line in stream if line.strip()]
+    state = json.load(stream)
+unassigned = int(unassigned)
 cutoff = datetime.date.fromisoformat(report_date) - datetime.timedelta(days=int(days))
 previous_cutoff = datetime.date.fromisoformat(previous_date) - datetime.timedelta(days=int(days)) if previous_date else None
 def dropped(item, edge, edge_cutoff):
@@ -864,6 +885,10 @@ closed = [x for x in state if x.get("status") == "done" and x.get("done_by") == 
 print("## Dropped threads\n")
 if link_status == "failed":
     print("> WARNING: thread linking failed tonight; this section uses the last saved index.\n")
+if unassigned > 0:
+    noun = "session" if unassigned == 1 else "sessions"
+    verb = "remains" if unassigned == 1 else "remain"
+    print("> NOTE: %d eligible %s %s unlinked and will be retried by catch-up.\n" % (unassigned, noun, verb))
 if selected:
     for item in selected:
         print("- **%s** `%s` (%s sessions): %s" % (item.get("title", item["id"]), item["id"], item["_count"], item.get("goal", "")))
@@ -874,6 +899,9 @@ if closed:
     for item in sorted(closed, key=lambda x: x["id"]):
         print("- **%s** `%s`" % (item.get("title", item["id"]), item["id"]))
 PY_REPORT
+  report_rc=$?
+  threads_cleanup_tmp "$state_file"
+  return "$report_rc"
 }
 
 threads_resume_brief() {
@@ -988,7 +1016,7 @@ threads_backfill_index_paths() {
   [ -s "$key_file" ] || return 0
   end_date=$(pdate_shift "$to" 5 y) || end_date=$(pdate_shift "$to" 1 d) || return 1
   for source in $enabled; do
-    while IFS= read -r root; do
+    while IFS= read -r root || [ -n "$root" ]; do
       [ -d "$root" ] || continue
       while IFS= read -r -d '' session; do
         case "$session" in *$'\t'*|*$'\n'*) continue ;; esac
@@ -1047,11 +1075,11 @@ threads_backfill() {
     while IFS="$(printf '\t')" read -r row_date hash source path cwd repo; do
       [ "$row_date" = "$date" ] || continue
       stats="$day_dir/$hash.stats.json"
-      if [ ! -s "$stats" ] || ! jq -e 'type == "object" and (.nested|type == "boolean") and (.user_message_count|type == "number")' "$stats" >/dev/null 2>&1; then
+      if [ ! -s "$stats" ] || ! jq -e 'type == "object" and ((.nested|type == "boolean") or (.isSidechain|type == "boolean")) and (.user_message_count|type == "number")' "$stats" >/dev/null 2>&1; then
         skipped="${skipped}${date}\n"
         continue
       fi
-      nested=$(jq -r '.nested' "$stats"); count=$(jq -r '.user_message_count' "$stats")
+      nested=$(jq -r 'if (.nested|type) == "boolean" then .nested else .isSidechain end' "$stats"); count=$(jq -r '.user_message_count' "$stats")
       jq -cn --arg date "$date" --arg hash "$hash" --arg source "$source" --arg path "$path" --arg cwd "$cwd" --arg repo "$repo" --argjson nested "$nested" --argjson count "$count" '{date:$date,hash:$hash,source:$source,session_path:$path,cwd:$cwd,repo:$repo,nested:$nested,user_message_count:$count,measured:true}' >> "$day_rows"
     done < "$tmp/path-map.tsv"
     if [ -s "$day_rows" ]; then
@@ -1083,12 +1111,13 @@ threads_backfill() {
       req_size=$(LC_ALL=C wc -c < "$tmp/$date.input" 2>/dev/null | tr -d ' '); case "$req_size" in ''|*[!0-9]*) req_size=0 ;; esac
       if [ "$req_size" -gt "${AUTODREAM_THREADS_MAX_INPUT:-65536}" ]; then batch_calls=$(awk 'NF { n++ } END { print n+0 }' "$tmp/$date.groups.txt"); fi
       if [ "$batch_calls" -le "$remaining" ]; then
-        THREADS_REFRESH_KEYS="" AUTODREAM_THREADS_ENGINE="$engine" AUTODREAM_THREADS_MODEL="$model" \
+        THREADS_REFRESH_KEYS="" AUTODREAM_THREADS_ENGINE="$engine" AUTODREAM_THREADS_MODEL="$model" AUTODREAM_THREADS_CALL_BUDGET="$remaining" \
           /bin/bash "$THREADS_SRC" update "$date" < "$day_rows" > "$tmp/$date.out" 2> "$tmp/$date.err"
         output=$(cat "$tmp/$date.out" 2>/dev/null)
         calls=$(printf '%s\n' "$output" | sed -n 's/^threads_calls: //p' | tail -1)
         case "$calls" in ''|*[!0-9]*) calls=0 ;; esac
         actual=$((actual + calls)); remaining=$((remaining - calls))
+        [ "$(printf '%s\n' "$output" | sed -n 's/^threads_skipped: //p' | tail -1)" != budget ] || skipped="${skipped}${date}\n"
       else
         skipped="${skipped}${date}\n"
       fi

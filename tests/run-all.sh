@@ -7987,9 +7987,9 @@ test_threads_linker_cannot_write(){
   thread_cleanup "$root"
 }
 
-seed_thread_archive_date(){ # $1=root $2=date $3=name $4=goal $5=outcome $6=sidecar yes|no
-  local root="$1" date="$2" name="$3" session hash epoch stamp
-  session=$(mk_thread_session "$root" "$name" "$REPO")
+seed_thread_archive_date(){ # $1=root $2=date $3=name $4=goal $5=outcome $6=sidecar yes|no [$7=cwd]
+  local root="$1" date="$2" name="$3" session hash epoch stamp cwd="${7:-$REPO}"
+  session=$(mk_thread_session "$root" "$name" "$cwd")
   epoch=$(pdate_epoch "$date") || return 1
   stamp=$(pdate_fmt_epoch "$epoch" +%Y%m%d1200) || return 1
   touch -t "$stamp" "$session"
@@ -8078,6 +8078,39 @@ test_threads_auto_closed_threads_are_visible_and_reopenable(){
   AUTODREAM_DIR="$root/autodream" /bin/bash "$REPO/bin/threads.sh" reopen "$closed" >/dev/null 2>&1
   status=$(jq -sr '.[0].status' "$(thread_state "$root")")
   assert_eq "$status" open "operator can correct false done"
+  thread_cleanup "$root"
+}
+
+test_threads_older_finished_session_does_not_close_newer_open_thread(){
+  echo "# threads: an older completed session cannot close a thread with a newer unfinished session"
+  local root session hash status
+  root=$(setup_env)
+  session=$(mk_thread_session "$root" old-finished "$REPO")
+  hash=$(seed_thread_findings "$root" "$session" "older completed goal" '[]' fully_achieved)
+  seed_thread_record "$root" t-66666666 "$REPO" "newer unfinished goal" 2020-01-03 bbbbbbbbbbbb /newer/session.jsonl partially_achieved open
+  export MOCK_THREADS_MODE=finished_existing MOCK_THREADS_CLOSE_ID=t-66666666 MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_THREADS_CLOSE_ID MOCK_CAPTURE_DIR
+  status=$(jq -sr '.[] | select(.id == "t-66666666") | .status' "$(thread_state "$root")")
+  assert_eq "$status" open "only the newest session can close its thread"
+  thread_cleanup "$root"
+}
+
+test_threads_counts_assignments_omitted_by_linker(){
+  echo "# threads: omitted linker assignments remain pending and are disclosed"
+  local root first second stats section
+  root=$(setup_env)
+  first=$(mk_thread_session "$root" assignment-first "$REPO")
+  second=$(mk_thread_session "$root" assignment-second "$REPO")
+  seed_thread_findings "$root" "$first" "first assignment goal" '[]' partially_achieved >/dev/null
+  seed_thread_findings "$root" "$second" "second assignment goal" '[]' partially_achieved >/dev/null
+  export MOCK_THREADS_MODE=omit_last MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  stats="$(fdir "$root")/run-stats.txt"
+  section="$(fdir "$root")/dropped-threads.md"
+  assert_grep "$stats" '^threads_unassigned: 1$' "one missing assignment is counted"
+  assert_grep "$section" '1 eligible session remains unlinked' "the stale-index note names the pending session count"
   thread_cleanup "$root"
 }
 
@@ -8191,14 +8224,91 @@ EOF_NO_TIMEOUT
   thread_cleanup "$root"
 }
 
+test_threads_backfill_accepts_claude_isSidechain_sidecar(){
+  echo "# threads: backfill reads the claude isSidechain sidecar shape"
+  local root hash output calls
+  root=$(setup_env)
+  hash=$(seed_thread_archive_date "$root" 2019-12-30 claude-sidecar "claude sidecar goal" partially_achieved yes)
+  printf '{"isSidechain":false,"user_message_count":2}\n' > "$root/autodream/findings/2019-12-30/$hash.stats.json"
+  output="$root/backfill-is-sidechain.out"
+  export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
+  AUTODREAM_DIR="$root/autodream" PROJECTS_DIR="$root/projects" CLAUDE_BIN="$MOCK" \
+    /bin/bash "$REPO/bin/threads.sh" backfill 2019-12-30 2019-12-30 --max-calls 1 > "$output" 2>&1
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  calls=$(thread_call_count "$root/cap")
+  assert_eq "$calls" 1 "a real-shaped claude sidecar makes one linker call"
+  assert_grep "$output" '^actual_calls: 1$' "the eligible historical session is measured and linked"
+  thread_cleanup "$root"
+}
+
+test_threads_backfill_reads_unterminated_manifest_root(){
+  echo "# threads: backfill reads the final root from adapter_manifest_get without a newline"
+  local root home session hash out calls
+  root=$(setup_env); home="$root/home"
+  session="$home/.omp/agent/sessions/project/20200102_session.jsonl"
+  mkdir -p "$(dirname "$session")"
+  jq -cn --arg cwd "$REPO" '{type:"session",cwd:$cwd}' > "$session"
+  touch -t 201912301200 "$session"
+  hash=$(hash_of "$session")
+  mkdir -p "$root/autodream/findings/2019-12-30"
+  jq -cn '{underlying_goal:"OMP root goal",outcome:"partially_achieved",findings:[]}' > "$root/autodream/findings/2019-12-30/$hash.json"
+  jq -cn '{nested:false,user_message_count:2}' > "$root/autodream/findings/2019-12-30/$hash.stats.json"
+  printf '%s\tomp\n' "$hash" > "$root/autodream/findings/2019-12-30/sessions-source.txt"
+  out="$root/omp-backfill.out"
+  export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
+  HOME="$home" AUTODREAM_ADAPTERS=omp AUTODREAM_DIR="$root/autodream" CLAUDE_BIN="$MOCK" \
+    /bin/bash "$REPO/bin/threads.sh" backfill 2019-12-30 2019-12-30 --max-calls 1 > "$out" 2>&1
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  calls=$(thread_call_count "$root/cap")
+  assert_eq "$calls" 1 "OMP session root is enumerated from the manifest"
+  assert_grep "$out" '^actual_calls: 1$' "the final manifest root reaches backfill"
+  thread_cleanup "$root"
+}
+
+test_threads_backfill_budget_uses_grown_index_request(){
+  echo "# threads: backfill enforces max-calls after earlier dates grow the index"
+  local root repo_base repo_a repo_b repo_link_a repo_link_b large output calls actual
+  root=$(setup_env); repo_base=$(mktemp -d "$HOME/.cache/ccad-threads-budget.XXXXXX") || return 1
+  repo_a="$repo_base/a"; repo_b="$repo_base/b"
+  mkdir -p "$repo_a" "$repo_b"
+  git -C "$repo_a" init -q --template=/dev/null
+  git -C "$repo_b" init -q --template=/dev/null
+  large=$(python3 -c 'print("x" * 80)')
+  seed_thread_archive_date "$root" 2019-12-30 budget-first "$large" partially_achieved yes "$REPO" >/dev/null
+  seed_thread_archive_date "$root" 2019-12-31 budget-second-a "second goal a" partially_achieved yes "$repo_a" >/dev/null
+  seed_thread_archive_date "$root" 2019-12-31 budget-second-b "second goal b" partially_achieved yes "$repo_b" >/dev/null
+  output="$root/backfill-budget.out"
+  export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
+  AUTODREAM_THREADS_MAX_INPUT=1600 AUTODREAM_DIR="$root/autodream" PROJECTS_DIR="$root/projects" CLAUDE_BIN="$MOCK" \
+    /bin/bash "$REPO/bin/threads.sh" backfill 2019-12-30 2019-12-31 --max-calls 2 > "$output" 2>&1
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  calls=$(thread_call_count "$root/cap")
+  actual=$(sed -n 's/^actual_calls: //p' "$output" | tail -1)
+  assert_eq "$calls" 2 "engine calls never exceed the live max-calls budget"
+  assert_eq "$actual" 2 "actual_calls reports the calls made after context growth"
+  python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1])' "$repo_base"
+  thread_cleanup "$root"
+}
+
 test_threads_install_links_entrypoint(){
-  echo "# threads: install links a working threads CLI beside the runtime helpers"
-  local root parent target installed
+  echo "# threads: install links a working threads CLI and linker prompt beside the runtime helpers"
+  local root parent target installed hash output links
   root=$(setup_env); parent="$root/home/.claude"; target="$parent/autodream"
   HOME="$root/home" /bin/bash "$REPO/install.sh" --no-schedule --no-review --no-skill "$parent" > "$root/install.out" 2>&1
+  hash=aaaaaaaaaaaa
+  mkdir -p "$target/findings/2020-01-02"
+  printf '{"underlying_goal":"installed update","outcome":"partially_achieved","findings":[]}\n' > "$target/findings/2020-01-02/$hash.json"
+  output="$root/installed-update.out"
+  export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
+  printf '{"date":"2020-01-02","hash":"%s","source":"claude","session_path":"/archive/installed.jsonl","cwd":"%s","repo":"%s","nested":false,"user_message_count":2,"measured":true}\n' "$hash" "$REPO" "$REPO" |
+    HOME="$root/home" AUTODREAM_DIR="$target" CLAUDE_BIN="$MOCK" "$target/threads.sh" update 2020-01-02 > "$output" 2>&1
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
   installed=false
   if [ -x "$target/threads.sh" ] && AUTODREAM_DIR="$target" /bin/bash "$target/threads.sh" list >/dev/null 2>&1; then installed=true; fi
+  if [ -s "$target/threads.jsonl" ]; then links=$(jq -sr '[.[].sessions[]] | length' "$target/threads.jsonl"); else links=0; fi
   assert_eq "$installed" true "installed symlink resolves helpers"
+  assert_eq "$links" 1 "installed update finds the linked prompt and runs the mock linker"
+  assert_grep "$output" '^threads_link: ok$' "installed layout reports a successful update"
   thread_cleanup "$root"
 }
 
@@ -8219,10 +8329,15 @@ _run test_threads_linker_cannot_write
 _run test_threads_empty_night_still_catches_up_and_reports
 _run test_threads_report_ranking_and_limit
 _run test_threads_auto_closed_threads_are_visible_and_reopenable
+_run test_threads_older_finished_session_does_not_close_newer_open_thread
+_run test_threads_counts_assignments_omitted_by_linker
 _run test_threads_resume_quotes_injected_goal
 _run test_threads_resume_marks_missing_transcript
 _run test_threads_backfill_uses_sidecars_and_respects_budget
 _run test_threads_backfill_requires_timeout_binary
+_run test_threads_backfill_accepts_claude_isSidechain_sidecar
+_run test_threads_backfill_reads_unterminated_manifest_root
+_run test_threads_backfill_budget_uses_grown_index_request
 _run test_threads_install_links_entrypoint
 
 test_prune_worktrees_wiring(){
