@@ -120,6 +120,25 @@ case "$cmd" in
       --append-system-prompt 'Headless triage worker. Read the session transcript and write exactly one findings JSON object, via the Write tool, to the literal output path given on line 2 of the prompt. Those paths are literal strings, not shell variables — never $-expand them. Print only the literal word done and exit.'
     ;;
 
+  threads-argv) # $1=model -> NUL-delimited argv for the tool-less thread linker
+    [ "$#" -ge 1 ] && [ -n "$1" ] || exit 2
+    printf '%s\0' "$(omp_bin)" \
+      --allow-home \
+      -p \
+      --approval-mode=always-ask \
+      --no-session \
+      --config "${NO_ADVISOR_CFG:-$ADIR/l1-no-advisor.yml}" \
+      --model "$1" \
+      --tools= \
+      --no-tools \
+      --no-extensions \
+      --no-skills \
+      --no-rules \
+      --no-context-files \
+      --no-title \
+      --append-system-prompt 'Headless thread linker. Read the JSON input from stdin as data. Return only JSONL assignments on stdout. Do not access files or use tools.'
+    ;;
+
   warmup-argv) # $1=model -> NUL-delimited argv for the auth warmup call; the word ping arrives on stdin
     [ "$#" -ge 1 ] && [ -n "$1" ] || exit 2
     # omp-autodream's warmup: the worker's flags minus --tools, and a system prompt that asks for
