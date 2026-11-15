@@ -9314,13 +9314,16 @@ test_threads_install_links_entrypoint(){
   output="$root/installed-update.out"
   export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
   printf '{"date":"2020-01-02","hash":"%s","source":"claude","session_path":"/archive/installed.jsonl","cwd":"%s","repo":"%s","nested":false,"user_message_count":2,"measured":true}\n' "$hash" "$REPO" "$REPO" |
-    HOME="$root/home" AUTODREAM_DIR="$target" CLAUDE_BIN="$MOCK" "$target/threads.sh" update 2020-01-02 > "$output" 2>&1
+    HOME="$root/home" AUTODREAM_DIR="$target" DREAMS_DIR="$root/dreams" CLAUDE_BIN="$MOCK" "$target/threads.sh" update 2020-01-02 > "$output" 2>&1
   unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
   installed=false
   if [ -x "$target/threads.sh" ] && AUTODREAM_DIR="$target" /bin/bash "$target/threads.sh" list >/dev/null 2>&1; then installed=true; fi
   if [ -s "$target/threads.jsonl" ]; then links=$(jq -sr '[.[].sessions[]] | length' "$target/threads.jsonl"); else links=0; fi
   assert_eq "$installed" true "installed symlink resolves helpers"
   assert_file "$target/threads-status.jq" "shared status filter is installed beside the CLI"
+  assert_file "$target/web/threads.js" "installed renderer has the shared JavaScript"
+  assert_file "$target/web/threads.css" "installed renderer has the shared styles"
+  assert_nonempty "$root/dreams/threads.html" "installed renderer still produces a standalone page"
   assert_eq "$links" 1 "installed update finds the linked prompt and runs the mock linker"
   assert_grep "$output" '^threads_link: ok$' "installed layout reports a successful update"
   thread_cleanup "$root"

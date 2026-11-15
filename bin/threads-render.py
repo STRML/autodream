@@ -121,7 +121,16 @@ def render(state_path, output_path, as_of_text):
     marker = "__THREADS_JSON__"
     if template.count(marker) != 1:
         raise ValueError("template must contain one data marker")
-    page = template.replace(marker, json_text)
+    replacements = {marker: json_text}
+    renderer_dir = Path(__file__).resolve().parent
+    assets = renderer_dir.parent / "web"
+    if not assets.is_dir():
+        assets = renderer_dir / "web"
+    for marker, name in (("__THREADS_JS__", "threads.js"), ("__THREADS_CSS__", "threads.css")):
+        if template.count(marker) != 1:
+            raise ValueError("template must contain one " + marker + " marker")
+        replacements[marker] = (assets / name).read_text(encoding="utf-8")
+    page = re.sub(r"__THREADS_(?:JSON|JS|CSS)__", lambda match: replacements[match[0]], template)
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     temp_path = None

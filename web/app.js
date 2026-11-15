@@ -185,6 +185,15 @@ function renderLately(data) {
         `? ${measured(outcomes.unmeasured)} unmeasured`, 'project-outcomes'));
       const latestGoal = project.latest_goal ?? project.sessions[0]?.goal;
       row.append(node('p', measured(latestGoal), 'project-goal'));
+      for (const thread of data.thread_links || []) {
+        if (!/^t-[0-9a-f]{8}$/.test(thread.id) || !thread.sessions.some(source =>
+          source.date === night.date && project.sessions.some(session => session.hash === source.hash))) continue;
+        const link = node('a', thread.title);
+        link.href = '#threads/' + thread.id;
+        const threadLink = node('p');
+        threadLink.append(link);
+        row.append(threadLink);
+      }
       const details = node('details');
       details.append(node('summary', `Sessions (${project.session_count ?? project.sessions.length})`));
       const list = node('ul', undefined, 'sessions');
@@ -214,9 +223,70 @@ function renderDream(data) {
   content.append(article);
 }
 
+let threadRenderer;
+const threadActionStates = new Map();
+let currentView = 'lately';
+let threadFetches = 0;
+function drawThreads(data, seq, selectedId) {
+  for (const [id, state] of threadActionStates) {
+    if (state.settledAt !== undefined && seq > state.settledAt) threadActionStates.delete(id);
+  }
+  const content = document.getElementById('content');
+  if (threadRenderer && content.contains(threadRenderer.element)) threadRenderer.update(data);
+  else threadRenderer = mountThreads(content, data, performThreadAction,
+    id => threadActionStates.get(id));
+  if (selectedId && /^t-[0-9a-f]{8}$/.test(selectedId)) threadRenderer.select(selectedId);
+}
+
+async function refreshThreads() {
+  const request = viewRequest;
+  const seq = ++threadFetches;
+  const response = await fetch('/api/threads', {credentials: 'same-origin'});
+  if (!response.ok) return;
+  const data = await response.json();
+  if (request === viewRequest && currentView === 'threads') drawThreads(data, seq);
+}
+
+async function performThreadAction(id, action) {
+  const existing = threadActionStates.get(id);
+  if (existing?.pending || existing?.requiresRefresh) return;
+  threadActionStates.set(id, {action, pending: true, requiresRefresh: false});
+  threadRenderer?.render();
+  try {
+    const response = await fetch('/api/threads/' + encodeURIComponent(id) + '/' + action, {
+      method: 'POST', credentials: 'same-origin', headers: {'X-Autodream': '1'}
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      threadActionStates.set(id, {
+        action, pending: false, requiresRefresh: data.error === 'timeout',
+        message: data.message || 'Action failed', brief: data.brief || ''
+      });
+      return;
+    }
+    threadActionStates.set(id, {
+      action, pending: false, requiresRefresh: true, settledAt: threadFetches,
+      message: 'Action succeeded. Refresh to read the updated threads.'
+    });
+    if (currentView === 'threads') {
+      try { await refreshThreads(); } catch (_) {}
+    }
+  } catch (_) {
+    threadActionStates.set(id, {
+      action, pending: false, requiresRefresh: true,
+      message: 'The outcome is unknown. Refresh before trying again.'
+    });
+  } finally {
+    const state = threadActionStates.get(id);
+    if (state?.pending) threadActionStates.set(id, {...state, pending: false});
+    if (threadRenderer && document.getElementById('content').contains(threadRenderer.element)) threadRenderer.render();
+  }
+}
+
 let viewRequest = 0;
 async function loadView(view, date) {
   const request = ++viewRequest;
+  currentView = view;
   const status = document.getElementById('status');
   status.textContent = 'Loading…';
   for (const link of document.querySelectorAll('nav a')) {
@@ -224,12 +294,20 @@ async function loadView(view, date) {
     else link.removeAttribute('aria-current');
   }
   try {
-    const path = view === 'dreams' ? '/api/dreams' + (date ? '/' + encodeURIComponent(date) : '') : '/api/lately?days=7';
+    const path = view === 'threads' ? '/api/threads' : view === 'dreams' ? '/api/dreams' + (date ? '/' + encodeURIComponent(date) : '') : '/api/lately?days=7';
+    const seq = view === 'threads' ? ++threadFetches : 0;
     const response = await fetch(path, {credentials: 'same-origin'});
     if (!response.ok) throw new Error(response.status === 401 ? 'Run autodream-web open to sign in.' : 'Could not read this view. Reload to retry.');
     const data = await response.json();
+    if (view === 'lately') {
+      try {
+        const threads = await fetch('/api/threads', {credentials: 'same-origin'});
+        if (threads.ok) data.thread_links = (await threads.json()).threads;
+      } catch (_) {}
+    }
     if (request !== viewRequest) return;
-    if (view !== 'dreams') renderLately(data);
+    if (view === 'threads') drawThreads(data, seq, date);
+    else if (view !== 'dreams') renderLately(data);
     else if (date) renderDream(data);
     else {
       const content = document.getElementById('content');
@@ -253,7 +331,7 @@ async function loadView(view, date) {
 
 function navigate() {
   const [view, date] = location.hash.slice(1).split('/');
-  loadView(view === 'dreams' ? view : 'lately', date);
+  loadView(['dreams', 'threads'].includes(view) ? view : 'lately', date);
 }
 window.addEventListener('hashchange', navigate);
 document.addEventListener('DOMContentLoaded', navigate);

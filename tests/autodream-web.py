@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 import concurrent.futures
+import contextlib
+import io
+import fcntl
+import shutil
 from datetime import date, timedelta
 import http.client
 import hashlib
@@ -17,9 +21,12 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from unittest import mock
 import urllib.error
 import urllib.request
+from urllib.parse import quote
 import plistlib
 
 
@@ -61,6 +68,8 @@ class WebTests(unittest.TestCase):
         (web / "index.html").write_text("<!doctype html><p>" + PRIVATE_GOAL + "</p>")
         (web / "app.js").write_text("console.log('fixture');")
         (web / "app.css").write_text("body { color: black; }")
+        (web / "threads.js").write_text("// shared fixture")
+        (web / "threads.css").write_text(".thread-view {}")
         (self.install / "threads.jsonl").write_text(PRIVATE_GOAL)
 
     def run_command(self, *args, env=None):
@@ -196,7 +205,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(plist["ThrottleInterval"], 60)
         self.assertEqual(plist_env["CMUX_BIN"], str(tools / "cmux"))
         self.assertEqual(plist_env["CLAUDE_BIN"], str(tools / "claude"))
-        self.assertEqual(plist_env["AUTODREAM_WEB_PORT"], "8765")
+        self.assertEqual(plist_env["AUTODREAM_WEB_PORT"], "47823")
 
     def test_web_port_in_use_warns_once_and_exits_zero(self):
         self.start_server()
@@ -264,7 +273,7 @@ class WebTests(unittest.TestCase):
                                          headers=request_headers, method=method)
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         try:
-            response = opener.open(request, timeout=3)
+            response = opener.open(request, timeout=12)
         except urllib.error.HTTPError as error:
             response = error
         with response:
@@ -280,7 +289,7 @@ class WebTests(unittest.TestCase):
 
     def test_web_requires_cookie(self):
         self.start_server()
-        for path in ("/", "/web/app.js", "/web/app.css", "/api/lately", "/threads.jsonl"):
+        for path in ("/", "/web/app.js", "/web/app.css", "/api/lately", "/api/threads", "/web/threads.js", "/web/threads.css", "/threads.jsonl"):
             with self.subTest(path=path):
                 response = self.request("GET", path)
                 self.assertEqual(response.status, 401)
@@ -368,29 +377,178 @@ class WebTests(unittest.TestCase):
         with module.make_server(config, 0) as server:
             self.assertEqual(server.server_address[0], "127.0.0.1")
 
-    def test_web_post_requires_session_origin_and_custom_header(self):
+    def seed_actions(self):
+        self.thread = {"id": "t-00000001", "kind": "work", "repo": str(self.root),
+                       "title": "Title <repo>", "goal": "Goal $(touch unwanted)",
+                       "status": "open", "done_by": None, "last_seen": "2020-01-01",
+                       "sessions": [{"date": "2020-01-01", "hash": "0123456789ab",
+                                     "outcome": "not_achieved"}]}
+        self.state_path = self.install / "threads.jsonl"
+        self.state_path.write_text(json.dumps(self.thread) + "\n")
+        tools = self.root / "tools"
+        tools.mkdir()
+        self.creates = self.root / "workspace-creates"
+        cmux = tools / "cmux"
+        cmux.write_text("#!/bin/sh\nprintf 'create\\n' >> '" + str(self.creates) + "'\n")
+        cmux.chmod(0o755)
+        claude = tools / "claude"
+        claude.write_text("#!/bin/sh\nexit 99\n")
+        claude.chmod(0o755)
+        for name in ("jq", "python3", "timeout"):
+            executable = shutil.which(name)
+            if executable:
+                (tools / name).symlink_to(executable)
+        self.env.update(CMUX_BIN=str(cmux), CLAUDE_BIN=str(claude),
+                        PATH=str(tools) + ":/usr/bin:/bin",
+                        DREAMS_DIR=str(self.root / "dreams"),
+                        AUTODREAM_THREADS_STATE=str(self.state_path),
+                        AUTODREAM_CONFIG=str(self.install / "no-config"))
         self.start_server()
-        cookie = self.login()
-        path = "/api/threads/t-12345678/close"
-        self.assertEqual(self.request("POST", path, origin=self.origin,
-                                     headers={"X-Autodream": "1"}).status, 401)
-        for origin, marker in ((None, "1"), ("http://evil.example", "1"),
-                               (self.origin + "/", "1"), (self.origin, None),
-                               (self.origin, "0")):
-            headers = {} if marker is None else {"X-Autodream": marker}
-            response = self.request("POST", path, cookie=cookie, origin=origin, headers=headers)
-            self.assertEqual(response.status, 403)
-        response = self.request("POST", path, cookie=cookie, origin=self.origin,
-                                headers={"X-Autodream": "1"})
-        self.assertEqual(response.status, 404)
-        self.assertEqual((self.install / "threads.jsonl").read_text(), PRIVATE_GOAL)
-        self.assertEqual(self.request("OPTIONS", path, host="evil.example").status, 421)
+        self.cookie = self.login()
+
+    def action(self, action, ident="t-00000001", **kwargs):
+        return self.request("POST", "/api/threads/" + ident + "/" + action,
+                            cookie=self.cookie, origin=self.origin,
+                            headers={"X-Autodream": "1"}, **kwargs)
+
+    def test_web_actions_require_origin_and_header(self):
+        self.seed_actions()
+        before = self.state_path.read_bytes()
+        for action in ("close", "reopen", "resume"):
+            path = "/api/threads/t-00000001/" + action
+            self.assertEqual(self.request("POST", path, origin=self.origin,
+                headers={"X-Autodream": "1"}).status, 401)
+            self.assertEqual(self.request("POST", path, cookie=self.cookie,
+                origin=self.origin, host="evil.example", headers={"X-Autodream": "1"}).status, 421)
+            for origin, marker in ((None, "1"), ("http://evil.example", "1"),
+                                   (self.origin + "/", "1"), (self.origin, None),
+                                   (self.origin, "0")):
+                response = self.request("POST", path, cookie=self.cookie, origin=origin,
+                    headers={} if marker is None else {"X-Autodream": marker})
+                self.assertEqual(response.status, 403)
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertFalse(self.creates.exists())
+        self.assertEqual(self.action("close").status, 200, "thread action routes are absent")
+
+    def test_web_validates_action_paths(self):
+        self.seed_actions()
+        before = self.state_path.read_bytes()
+        shell_side_effect = self.root / "unwanted"
+        injected_id = "t-00000001;touch%20" + quote(str(shell_side_effect), safe="")
+        for ident in ("bad", "t-0000000g", injected_id, "%24(touch%20unwanted)"):
+            self.assertEqual(self.action("close", ident).status, 400)
+        self.assertEqual(self.action("close", "t-ffffffff").status, 404)
+        self.assertEqual(self.action("delete").status, 404)
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertFalse(shell_side_effect.exists())
+        self.assertFalse(self.creates.exists())
+
+    def test_web_close_reopen_use_real_threads_cli(self):
+        self.seed_actions()
+        listing = self.request("GET", "/api/threads", cookie=self.cookie)
+        self.assertEqual(listing.status, 200, "thread list route is absent")
+        row = json.loads(listing.text)["threads"][0]
+        self.assertEqual((row["status"], row["display_status"]), ("dropped", "dropped"))
+        self.assertEqual(row["title"], self.thread["title"])
+        for action, stored_status in (("close", "closed_by_sam"), ("reopen", "open")):
+            response = self.action(action)
+            self.assertEqual(response.status, 200, response.text)
+            self.assertEqual(json.loads(response.text), {"ok": True, "id": self.thread["id"], "action": action})
+            stored = json.loads(self.state_path.read_text())
+            self.assertEqual(stored["status"], stored_status)
+            self.assertEqual(stored.get("done_by"), "sam" if action == "close" else None)
+            derived = json.loads(self.request("GET", "/api/threads", cookie=self.cookie).text)["threads"][0]
+            self.assertEqual(derived["display_status"], "closed_by_sam" if action == "close" else "dropped")
+        self.assertFalse(self.creates.exists())
+
+    def test_web_busy_thread_lock_returns_409(self):
+        self.seed_actions()
+        before = self.state_path.read_bytes()
+        with Path(str(self.state_path) + ".flock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            response = self.action("close")
+        self.assertEqual(response.status, 409, response.text)
+        self.assertEqual(json.loads(response.text), {"ok": False, "error": "busy", "message": "busy, retry"})
+        self.assertEqual(self.state_path.read_bytes(), before)
+        self.assertFalse(self.creates.exists())
+
+    def test_web_resume_twice_is_refused(self):
+        self.seed_actions()
+        before = self.state_path.read_bytes()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            responses = list(pool.map(lambda _: self.action("resume"), range(2)))
+        self.assertEqual(sorted(r.status for r in responses), [200, 409])
+        refused = next(r for r in responses if r.status == 409)
+        self.assertEqual(json.loads(refused.text), {"ok": False, "error": "already_resuming", "message": "Already resuming"})
+        self.assertEqual(self.creates.read_text().splitlines(), ["create"])
+        self.assertEqual(self.state_path.read_bytes(), before)
+
+    def test_web_resume_cmux_down_returns_brief(self):
+        self.seed_actions()
+        expected = subprocess.run(["/bin/bash", str(REPO / "bin/threads.sh"), "resume", self.thread["id"]],
+                                  env=self.env, capture_output=True, text=True, timeout=10).stdout.strip()
+        (self.root / "tools/cmux").unlink()
+        response = self.action("resume")
+        self.assertEqual(response.status, 503, response.text)
+        self.assertEqual(json.loads(response.text), {"ok": False, "error": "cmux_unavailable",
+                         "message": "cmux is unavailable", "brief": expected})
+        self.assertFalse(self.creates.exists())
+
+    def test_web_action_deadlines_and_subprocess_errors(self):
+        self.seed_actions()
+        module = self.load_module()
+        server = module.make_server({"autodream_dir": self.install,
+                                     "web_dir": self.install / "web"}, 0)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        self.origin = server.origin
+        before = self.state_path.read_bytes()
+        try:
+            with mock.patch.object(module, "run_bounded") as run:
+                for action, deadline in (("close", 30), ("reopen", 30), ("resume", 20)):
+                    run.side_effect = subprocess.TimeoutExpired("threads.sh", deadline)
+                    response = self.action(action)
+                    self.assertEqual(response.status, 504)
+                    error = json.loads(response.text)
+                    self.assertFalse(error["ok"])
+                    self.assertEqual(error["error"], "timeout")
+                    self.assertIn("outcome is unknown", error["message"])
+                    self.assertIn("Refresh", error["message"])
+                    argv = ["/bin/bash", str(REPO / "bin/threads.sh"), action, self.thread["id"]]
+                    if action == "resume":
+                        argv.append("--launch")
+                    self.assertEqual(run.call_args.args, (argv,))
+                    self.assertEqual(run.call_args.kwargs["timeout"], deadline)
+                run.side_effect = None
+                for rc, stderr, status, error in (
+                        (75, "", 409, "busy"), (76, "", 409, "already_resuming"),
+                        (69, "threads: claude CLI is unavailable", 503, "launch_failed"),
+                        (70, "threads: cmux workspace creation failed", 503, "launch_failed"),
+                        (1, "unexpected CLI failure", 503, "command_failed")):
+                    run.return_value = subprocess.CompletedProcess([], rc, "Copyable brief", stderr)
+                    response = self.action("resume")
+                    self.assertEqual(response.status, status)
+                    data = json.loads(response.text)
+                    self.assertEqual(data["error"], error)
+                    if rc in (69, 70):
+                        self.assertEqual(data["brief"], "Copyable brief")
+                run.side_effect = OSError("cannot execute")
+                response = self.action("close")
+                self.assertEqual(response.status, 503)
+                self.assertEqual(json.loads(response.text)["error"], "command_unavailable")
+            self.assertEqual(self.state_path.read_bytes(), before)
+            self.assertFalse(self.creates.exists())
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=3)
 
     def test_web_static_routes_are_fixed(self):
         self.start_server()
         cookie = self.login()
         for path, content_type in (("/", "text/html"), ("/web/app.js", "text/javascript"),
-                                   ("/web/app.css", "text/css")):
+                                   ("/web/app.css", "text/css"), ("/web/threads.js", "text/javascript"),
+                                   ("/web/threads.css", "text/css")):
             response = self.request("GET", path, cookie=cookie)
             self.assertEqual(response.status, 200)
             self.assertIn(content_type, response.headers["Content-Type"])
@@ -509,6 +667,33 @@ class WebTests(unittest.TestCase):
                                  "open", "--print"], env=env, capture_output=True,
                                 text=True, timeout=10)
         self.assertEqual(linked.stdout, configured.stdout)
+
+    def test_web_open_discovers_running_server_port_without_config(self):
+        self.start_server()
+        port_file = self.install / "web-port"
+        self.assertEqual(port_file.read_text().strip(), str(self.port))
+        self.assertEqual(stat.S_IMODE(port_file.stat().st_mode), 0o600)
+        (self.install / "config").write_text("AUTODREAM_WEB_PORT=1\n")
+        opened = self.run_command("open", "--print")
+        self.assertEqual(opened.returncode, 0, opened.stderr)
+        token = (self.install / "web-token").read_text().strip()
+        self.assertEqual(opened.stdout.strip(), self.origin + "/login?t=" + token)
+
+    def test_web_open_falls_back_to_service_started_before_web_port(self):
+        self.start_server()
+        (self.install / "web-port").unlink()
+        module = self.load_module()
+        module.PRE_RECORD_PORT = self.port
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            closed = probe.getsockname()[1]
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"AUTODREAM_DIR": str(self.install),
+                                          "AUTODREAM_WEB_PORT": str(closed)}), \
+                mock.patch.object(sys, "argv", ["autodream-web.py", "open", "--print"]), \
+                contextlib.redirect_stdout(out):
+            self.assertIsNone(module.main())
+        self.assertEqual(out.getvalue().strip(), self.origin + "/login?t=" + self.token)
 
     def test_web_token_creation_is_exclusive_and_persistent(self):
         module = self.load_module()

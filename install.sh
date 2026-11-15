@@ -398,8 +398,8 @@ install_web_agent() {
     return 0
   fi
   [ "$DRY" = 1 ] || mkdir -p "$la_dir"
-  web_port="${AUTODREAM_WEB_PORT-${cfg_port:-8765}}"
-  [ -n "$web_port" ] || web_port=8765
+  web_port="${AUTODREAM_WEB_PORT-${cfg_port:-47823}}"
+  [ -n "$web_port" ] || web_port=47823
   path_xml=$(xml_escape "$path_val")
   home_xml=$(xml_escape "$HOME")
   target_xml=$(xml_escape "$TARGET")

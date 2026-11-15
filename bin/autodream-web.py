@@ -35,12 +35,14 @@ STATIC_ROUTES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/web/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/web/app.css": ("app.css", "text/css; charset=utf-8"),
+    "/web/threads.js": ("threads.js", "text/javascript; charset=utf-8"),
+    "/web/threads.css": ("threads.css", "text/css; charset=utf-8"),
 }
 
 
-def run_bounded(argv, *, timeout=10, input=None):
+def run_bounded(argv, *, timeout=10, input=None, env=None):
     return subprocess.run(argv, input=input, capture_output=True, text=True,
-                          timeout=timeout, shell=False)
+                          timeout=timeout, shell=False, env=env)
 
 
 def load_or_create_token(path):
@@ -89,6 +91,10 @@ def token_matches(candidate, expected):
 
 def identity_proof(token, nonce):
     return hmac.new(token.encode("ascii"), nonce.encode("ascii"), hashlib.sha256).hexdigest()
+
+
+# A service started before web-port existed may still serve the old default.
+PRE_RECORD_PORT = 8765
 
 
 def verify_service(port, token):
@@ -242,6 +248,11 @@ class AutodreamHandler(BaseHTTPRequestHandler):
                 if len(values) != 1 or not re.fullmatch(r"[0-9]+", values[0]):
                     raise ValueError("invalid days")
                 data = self.server.data.lately(int(values[0]))
+            elif target.path == "/api/threads":
+                rows = self.thread_rows()
+                if rows is None:
+                    return
+                data = dict(threads=rows)
             elif target.path == "/api/dreams":
                 data = self.server.data.dream_dates()
             elif target.path.startswith("/api/dreams/"):
@@ -258,8 +269,69 @@ class AutodreamHandler(BaseHTTPRequestHandler):
         except OSError:
             self.respond(503, "Artifacts unavailable; retry\n")
 
+    def respond_json(self, status, data):
+        self.respond(status, json.dumps(data, allow_nan=False),
+                     content_type="application/json; charset=utf-8")
+
+    def action_error(self, status, error, message, **details):
+        self.respond_json(status, dict(ok=False, error=error, message=message, **details))
+
+    def thread_rows(self):
+        rows = self.server.data.threads()
+        if rows is None:
+            self.action_error(503, "threads_unavailable", "Could not read threads; refresh to retry")
+            return None
+        return [dict(row, display_status=row["status"]) for row in rows]
+
     def do_POST(self):
-        self.respond(404, "Not found\n")
+        path = urlsplit(self.path).path
+        match = re.fullmatch(r"/api/threads/([^/]+)/([^/]+)", path)
+        if match is None or match[2] not in {"close", "reopen", "resume"}:
+            self.action_error(404, "not_found", "Unknown thread action")
+            return
+        ident, action = match.groups()
+        if not re.fullmatch(r"t-[0-9a-f]{8}", ident):
+            self.action_error(400, "invalid_id", "Invalid thread id")
+            return
+        rows = self.thread_rows()
+        if rows is None:
+            return
+        if not any(row["id"] == ident for row in rows):
+            self.action_error(404, "not_found", "Unknown thread id")
+            return
+        argv = ["/bin/bash", str(Path(__file__).resolve().with_name("threads.sh")), action, ident]
+        if action == "resume":
+            argv.append("--launch")
+        try:
+            root = self.server.data.root
+            result = run_bounded(argv, timeout=20 if action == "resume" else 30,
+                env=dict(os.environ, AUTODREAM_DIR=str(root),
+                         AUTODREAM_CONFIG=str(root / "config"),
+                         AUTODREAM_THREADS_STATE=str(root / "threads.jsonl")))
+        except subprocess.TimeoutExpired:
+            self.action_error(504, "timeout", "The outcome is unknown. Refresh before trying again.")
+            return
+        except OSError:
+            self.action_error(503, "command_unavailable", "threads.sh is unavailable")
+            return
+        self.action_result(result, ident, action)
+
+    def action_result(self, result, ident, action):
+        if result.returncode == 0:
+            self.respond_json(200, dict(ok=True, id=ident, action=action))
+            return
+        lock_failure = any(line.startswith(("threads: lock is held or unavailable at ",
+            "threads: a writer from an older version holds ")) for line in result.stderr.splitlines())
+        if result.returncode == 75 or (result.returncode == 1 and lock_failure):
+            self.action_error(409, "busy", "busy, retry")
+        elif result.returncode == 76:
+            self.action_error(409, "already_resuming", "Already resuming")
+        elif action == "resume" and result.returncode in {69, 70}:
+            message = "cmux is unavailable" if "threads: cmux is unavailable" in result.stderr.splitlines() else "Session launch failed"
+            error = "cmux_unavailable" if message == "cmux is unavailable" else "launch_failed"
+            self.action_error(503, error, message, brief=result.stdout.strip())
+        else:
+            self.action_error(503, "command_failed", "Thread action failed; refresh to check state")
 
 
 def make_server(config, port):
@@ -275,6 +347,26 @@ def make_server(config, port):
     server.canonical_host = f"127.0.0.1:{server.server_port}"
     server.origin = "http://" + server.canonical_host
     return server
+
+
+def record_port(install, port):
+    fd, temporary = tempfile.mkstemp(prefix=".web-port-", dir=install)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="ascii") as stream:
+            fd = -1
+            stream.write(str(port) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, Path(install) / "web-port")
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def warn_port_in_use(install, port):
@@ -298,13 +390,15 @@ def main():
     args = parser.parse_args()
     install = Path(os.environ.get("AUTODREAM_DIR", Path.home() / ".claude/autodream"))
     port = args.port if args.command == "serve" and args.port is not None else int(
-        os.environ.get("AUTODREAM_WEB_PORT", "8765"))
+        os.environ.get("AUTODREAM_WEB_PORT", "47823"))
     if not 0 <= port <= 65535:
         parser.error("port must be between 0 and 65535")
     if args.command == "open":
         token = load_or_create_token(install / "web-token")
-        if not verify_service(port, token):
-            print(f"autodream-web: port {port} is not this autodream-web", file=sys.stderr)
+        candidates = list(dict.fromkeys((port, PRE_RECORD_PORT)))
+        port = next((candidate for candidate in candidates if verify_service(candidate, token)), None)
+        if port is None:
+            print(f"autodream-web: port {candidates[0]} is not this autodream-web", file=sys.stderr)
             return 1
         url = f"http://127.0.0.1:{port}/login?t={token}"
         if args.print_url:
@@ -325,6 +419,11 @@ def main():
             raise
         warn_port_in_use(install, port)
         return
+    try:
+        record_port(install, server.server_port)
+    except BaseException:
+        server.server_close()
+        raise
     with server:
         print(server.origin, flush=True)
         server.serve_forever()

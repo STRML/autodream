@@ -106,7 +106,7 @@ last 7 nights take 0.14 s. No on-disk cache.
 
 - `install.sh` provisions `<nightly label>-web` like the review agent, skipped when the
   nightly label is refused, with opt-out `--no-web` / `AUTODREAM_WEB=0`.
-- Port `AUTODREAM_WEB_PORT` (default 8765). A taken port posts `notify.sh --warning` once
+- Port `AUTODREAM_WEB_PORT` (default 47823; 8765 collided with another local dev server on the first install). A taken port posts `notify.sh --warning` once
   and the agent exits 0, so launchd stops instead of respawning forever.
 - Every subprocess has a timeout. A Close that hits the flock's 3-second retry budget
   answers "busy, retry" (409), never a silent no-op.
