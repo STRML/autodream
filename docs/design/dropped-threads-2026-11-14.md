@@ -251,7 +251,8 @@ work references do not seed ideas.
 |---|---|---|---|
 | Nothing triaged tonight (early return, `bin/run.sh:3677`) | Catch-up and render still run on that path | Section missing | Report section from the current index |
 | No eligible sessions tonight | No linker call; dropped set recomputed | none | `threads_linked: 0` |
-| Linker engine down, refusing or timed out | Index untouched; next night catches up | Stale links for a day | `threads_link: failed`, report notes the index is a night behind |
+| One repo group oversized, refused, timed out, or unusable | Merge validated assignments from other groups once; failed group's candidates stay pending | Some links are stale until catch-up | `threads_link: partial`, `threads_groups_failed: N`, report says some groups failed |
+| Every repo group fails | Index untouched; next night catches up | Stale links for a day | `threads_link: failed`, `threads_groups_failed: N`, report notes the index is a night behind |
 | One assignment malformed, unknown id, or unknown hash | That assignment dropped, the rest kept | Wrong link | `threads_rejected: N` |
 | Linker marks finished but outcome not achieved | Link kept, close ignored | False done | `threads_close_refused: N` |
 | Linker auto-closes a thread wrongly | Thread listed under "closed tonight" | Silent false done | Visible in the report; `reopen` fixes it |

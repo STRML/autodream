@@ -8735,6 +8735,66 @@ test_threads_counts_assignments_omitted_by_linker(){
   thread_cleanup "$root"
 }
 
+thread_group_publish_fixture(){
+  local root=$1 huge=$2 name session hash goal
+  : > "$root/group-rows.jsonl"
+  for name in alpha beta gamma; do
+    session=$(mk_thread_session "$root" "group-$name" "$REPO")
+    goal="$name goal"
+    [ "$name" != beta ] || [ "$huge" != yes ] || goal=$(python3 -c 'print("x" * 3000)')
+    hash=$(seed_thread_findings "$root" "$session" "$goal" '[]' partially_achieved)
+    jq -cn --arg date "$DATE" --arg hash "$hash" --arg path "$session" \
+      --arg cwd "$REPO" --arg repo "/repo/$name" \
+      '{date:$date,hash:$hash,source:"claude",session_path:$path,cwd:$cwd,repo:$repo,nested:false,user_message_count:2,measured:true}' \
+      >> "$root/group-rows.jsonl"
+  done
+}
+
+test_threads_publishes_good_groups_when_one_is_oversized(){
+  echo "# threads: an oversized group leaves only its own candidates pending"
+  local root cap report
+  root=$(setup_env)
+  thread_group_publish_fixture "$root" yes
+  cap=$(( $(wc -c < "$REPO/prompts/THREAD_LINKER.md") + 800 ))
+  MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_THREADS_MAX_INPUT="$cap" \
+    AUTODREAM_DIR="$root/autodream" CLAUDE_BIN="$MOCK" \
+    /bin/bash "$REPO/bin/threads.sh" update "$DATE" < "$root/group-rows.jsonl" > "$root/update.out"
+  assert_eq "$(thread_call_count "$root/cap")" 2 "the two bounded groups reach the linker"
+  assert_eq "$(thread_index_count "$root")" 2 "both good groups publish their links"
+  assert_eq "$(jq -sr '[.[].repo] | sort | join(",")' "$(thread_state "$root")")" '/repo/alpha,/repo/gamma' "oversized group stays pending"
+  assert_grep "$root/update.out" '^threads_link: partial$' "mixed result is partial"
+  assert_grep "$root/update.out" '^threads_groups_failed: 1$' "one failed group is counted"
+  assert_grep "$root/update.out" '^threads_unassigned: 1$' "oversized group remains unassigned"
+  report="$root/dropped-threads.md"
+  AUTODREAM_DIR="$root/autodream" AUTODREAM_THREADS_LINK_STATUS=partial AUTODREAM_THREADS_UNASSIGNED=1 \
+    /bin/bash "$REPO/bin/threads.sh" report "$DATE" > "$report"
+  assert_grep "$report" 'some groups failed' "report warns that some groups failed"
+  MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/catchup-cap" AUTODREAM_DIR="$root/autodream" CLAUDE_BIN="$MOCK" \
+    /bin/bash "$REPO/bin/threads.sh" update "$DATE" < "$root/group-rows.jsonl" > "$root/catchup.out"
+  assert_eq "$(thread_call_count "$root/catchup-cap")" 1 "catch-up retries only the failed group"
+  assert_eq "$(thread_index_count "$root")" 3 "catch-up publishes the pending group"
+  thread_cleanup "$root"
+}
+
+test_threads_all_failed_groups_preserve_index(){
+  echo "# threads: no successful group leaves the index unchanged"
+  local root cap before
+  root=$(setup_env)
+  thread_group_publish_fixture "$root" no
+  seed_thread_record "$root" t-11111111 /repo/existing 'existing goal' 2020-01-01 aaaaaaaaaaaa /old/session.jsonl partially_achieved open
+  before=$(cat "$(thread_state "$root")")
+  cap=$(( $(wc -c < "$REPO/prompts/THREAD_LINKER.md") + 1 ))
+  MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_THREADS_MAX_INPUT="$cap" \
+    AUTODREAM_DIR="$root/autodream" CLAUDE_BIN="$MOCK" \
+    /bin/bash "$REPO/bin/threads.sh" update "$DATE" < "$root/group-rows.jsonl" > "$root/update.out"
+  assert_eq "$(thread_call_count "$root/cap")" 0 "oversized groups make no engine calls"
+  assert_eq "$(cat "$(thread_state "$root")")" "$before" "all-failed update preserves index bytes"
+  assert_grep "$root/update.out" '^threads_link: failed$' "all-failed result is failed"
+  assert_grep "$root/update.out" '^threads_groups_failed: 3$' "all three failed groups are counted"
+  assert_grep "$root/update.out" '^threads_unassigned: 3$' "all candidates remain pending"
+  thread_cleanup "$root"
+}
+
 test_threads_resume_quotes_injected_goal(){
   echo "# threads: resume fences transcript text and launches with ordinary approvals in the repo"
   local root state brief launch permission cwd inside evidence argsfile
@@ -9409,6 +9469,8 @@ _run test_threads_report_ranking_and_limit
 _run test_threads_auto_closed_threads_are_visible_and_reopenable
 _run test_threads_older_finished_session_does_not_close_newer_open_thread
 _run test_threads_counts_assignments_omitted_by_linker
+_run test_threads_publishes_good_groups_when_one_is_oversized
+_run test_threads_all_failed_groups_preserve_index
 _run test_threads_resume_quotes_injected_goal
 _run test_threads_resume_marks_missing_transcript
 _run test_threads_backfill_uses_sidecars_and_respects_budget

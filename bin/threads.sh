@@ -937,6 +937,7 @@ threads_emit_stats() {
   printf 'threads_close_refused: %s\n' "$5"
   printf 'threads_unmeasured: %s\n' "$6"
   printf 'threads_calls: %s\n' "$7"
+  printf 'threads_groups_failed: %s\n' "${10:-0}"
   printf 'threads_unassigned: %s\n' "${9:-0}"
   [ -z "${8:-}" ] || printf 'threads_skipped: %s\n' "$8"
 }
@@ -953,7 +954,7 @@ threads_warn_unreadable() {
 threads_update() {
   local date=$1 tmp source_file state_json state_file candidates_file unmeasured prompt engine model timeout_s max_input timeout_bin
   local all_candidates groups_dir groups_file request_list request_candidates group_candidates request_json input_file response_file valid_file rejected_file unusable_file assignments_file
-  local failed=0 rejected=0 close_refused=0 linked=0 calls=0 skipped="" link_status=not_needed size unusable index group rc merge_rejected call_budget candidate_count unassigned
+  local failed=0 rejected=0 close_refused=0 linked=0 calls=0 skipped="" link_status=not_needed size unusable index group rc merge_rejected call_budget candidate_count unassigned groups_failed=0 groups_succeeded=0
   threads_valid_date "$date" || { threads_error "invalid update date: $date"; return 2; }
   if ! command -v python3 >/dev/null 2>&1; then
     threads_error "python3 is required for thread locking"
@@ -1042,7 +1043,7 @@ PY_SORT
   engine=${AUTODREAM_THREADS_ENGINE:-claude}
   model=${AUTODREAM_THREADS_MODEL:-claude-haiku-5-5}
   timeout_s=${AUTODREAM_THREADS_TIMEOUT:-300}
-  max_input=${AUTODREAM_THREADS_MAX_INPUT:-65536}
+  max_input=${AUTODREAM_THREADS_MAX_INPUT:-262144}
   case "$timeout_s" in ''|*[!0-9]*) threads_error "AUTODREAM_THREADS_TIMEOUT must be a positive integer"; failed=1 ;; esac
   case "$max_input" in ''|*[!0-9]*) threads_error "AUTODREAM_THREADS_MAX_INPUT must be a positive integer"; failed=1 ;; esac
   if [ "$failed" -eq 0 ]; then
@@ -1115,41 +1116,49 @@ PY_SORT
     rejected_file="$tmp/rejected-$index.txt"
     unusable_file="$tmp/unusable-$index.txt"
     group_candidates="$tmp/group-candidates-$index.jsonl"
-    threads_select_candidate_rows "$request_candidates" "$candidates_file" "$group_candidates" || { failed=1; continue; }
-    threads_write_linker_input "$date" "$state_json" "$request_candidates" "$prompt" "$request_json" "$input_file" || { failed=1; continue; }
+    threads_select_candidate_rows "$request_candidates" "$candidates_file" "$group_candidates" || { groups_failed=$((groups_failed + 1)); continue; }
+    threads_write_linker_input "$date" "$state_json" "$request_candidates" "$prompt" "$request_json" "$input_file" || { groups_failed=$((groups_failed + 1)); continue; }
     size=$(LC_ALL=C wc -c < "$input_file" | tr -d ' ')
     if [ "$size" -gt "$max_input" ]; then
       threads_error "repo-hint request is $size bytes, over AUTODREAM_THREADS_MAX_INPUT=$max_input"
-      failed=1
+      groups_failed=$((groups_failed + 1))
       continue
     fi
     calls=$((calls + 1))
     if ! threads_call_linker "$input_file" "$response_file" "$engine" "$model" "$timeout_bin" "$timeout_s"; then
-      failed=1
+      groups_failed=$((groups_failed + 1))
       continue
     fi
     if ! threads_validate_response "$group_candidates" "$state_file" "$response_file" "$valid_file" "$rejected_file" "$unusable_file"; then
       threads_error "could not validate linker output"
-      failed=1
+      groups_failed=$((groups_failed + 1))
       continue
     fi
     rejected=$(($(cat "$rejected_file" 2>/dev/null || echo 0) + rejected))
     unusable=$(cat "$unusable_file" 2>/dev/null || echo 1)
     if [ "$unusable" = 1 ]; then
       threads_error "linker returned no usable JSON assignments"
-      failed=1
+      groups_failed=$((groups_failed + 1))
       continue
     fi
-    cat "$valid_file" >> "$assignments_file" || failed=1
+    if cat "$assignments_file" "$valid_file" > "$tmp/assignments-next.jsonl" &&
+       mv "$tmp/assignments-next.jsonl" "$assignments_file"; then
+      groups_succeeded=$((groups_succeeded + 1))
+    else
+      groups_failed=$((groups_failed + 1))
+    fi
   done < "$request_list"
-  [ "$failed" -eq 0 ] || link_status=failed
+  if [ "$groups_failed" -gt 0 ]; then
+    link_status=failed
+    [ "$groups_succeeded" -eq 0 ] || link_status=partial
+  fi
 
-  if [ -s "$assignments_file" ] && [ "$failed" -eq 0 ]; then
+  if [ -s "$assignments_file" ]; then
     mkdir -p "$(dirname "$STATE")" || {
       threads_error "cannot create thread state directory"
       link_status=failed
       threads_cleanup_tmp "$tmp"
-      threads_emit_stats ok "$link_status" 0 "$rejected" "$close_refused" "$unmeasured" "$calls" "$skipped" "$unassigned"
+      threads_emit_stats ok "$link_status" 0 "$rejected" "$close_refused" "$unmeasured" "$calls" "$skipped" "$unassigned" "$groups_failed"
       return 0
     }
     if ! threads_acquire_lock; then
@@ -1159,7 +1168,7 @@ PY_SORT
         threads_release_lock
         threads_warn_unreadable "$date"
         threads_cleanup_tmp "$tmp"
-        threads_emit_stats unreadable failed 0 "$rejected" 0 "$unmeasured" "$calls" "$skipped" "$unassigned"
+        threads_emit_stats unreadable failed 0 "$rejected" 0 "$unmeasured" "$calls" "$skipped" "$unassigned" "$groups_failed"
         return 0
       fi
       rc=0
@@ -1182,7 +1191,7 @@ PY_SORT
   unassigned=$((candidate_count - linked))
   [ "$unassigned" -ge 0 ] || unassigned=0
   threads_cleanup_tmp "$tmp"
-  threads_emit_stats ok "$link_status" "$linked" "$rejected" "$close_refused" "$unmeasured" "$calls" "$skipped" "$unassigned"
+  threads_emit_stats ok "$link_status" "$linked" "$rejected" "$close_refused" "$unmeasured" "$calls" "$skipped" "$unassigned" "$groups_failed"
 }
 
 threads_report() {
@@ -1242,6 +1251,8 @@ closed = [x for x in state if x.get("status") == "done" and x.get("done_by") == 
 print("## Dropped threads\n")
 if link_status == "failed":
     print("> WARNING: thread linking failed tonight; this section uses the last saved index.\n")
+elif link_status == "partial":
+    print("> WARNING: some groups failed tonight; this section uses the updated index.\n")
 if unassigned > 0:
     noun = "session" if unassigned == 1 else "sessions"
     verb = "remains" if unassigned == 1 else "remain"
@@ -1462,7 +1473,7 @@ threads_backfill() {
         threads_prepare_requests "$tmp/$date.candidates" "$tmp/$date.groups" "$tmp/$date.groups.txt" "$tmp/$date.all.json" || true
         threads_write_linker_input "$date" "$state" "$tmp/$date.all.json" "$prompt" "$tmp/$date.request.json" "$tmp/$date.input" || true
         req_size=$(LC_ALL=C wc -c < "$tmp/$date.input" 2>/dev/null | tr -d ' '); case "$req_size" in ''|*[!0-9]*) req_size=0 ;; esac
-        if [ "$req_size" -gt "${AUTODREAM_THREADS_MAX_INPUT:-65536}" ]; then
+        if [ "$req_size" -gt "${AUTODREAM_THREADS_MAX_INPUT:-262144}" ]; then
           batch_calls=$(awk 'NF { n++ } END { print n+0 }' "$tmp/$date.groups.txt")
           split_dates="${split_dates}${date}\n"
         else
@@ -1483,7 +1494,7 @@ threads_backfill() {
     if [ -s "$day_rows" ] && [ -s "$tmp/$date.candidates" ]; then
       batch_calls=1
       req_size=$(LC_ALL=C wc -c < "$tmp/$date.input" 2>/dev/null | tr -d ' '); case "$req_size" in ''|*[!0-9]*) req_size=0 ;; esac
-      if [ "$req_size" -gt "${AUTODREAM_THREADS_MAX_INPUT:-65536}" ]; then batch_calls=$(awk 'NF { n++ } END { print n+0 }' "$tmp/$date.groups.txt"); fi
+      if [ "$req_size" -gt "${AUTODREAM_THREADS_MAX_INPUT:-262144}" ]; then batch_calls=$(awk 'NF { n++ } END { print n+0 }' "$tmp/$date.groups.txt"); fi
       if [ "$batch_calls" -le "$remaining" ]; then
         THREADS_REFRESH_KEYS="" AUTODREAM_THREADS_ENGINE="$engine" AUTODREAM_THREADS_MODEL="$model" AUTODREAM_THREADS_CALL_BUDGET="$remaining" \
           /bin/bash "$THREADS_SRC" update "$date" < "$day_rows" > "$tmp/$date.out" 2> "$tmp/$date.err"
