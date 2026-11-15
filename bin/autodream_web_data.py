@@ -1,6 +1,8 @@
 """Read-only artifact summaries for the local web server."""
 import copy
-from datetime import date as calendar_date, timedelta
+import csv
+from datetime import date as calendar_date, datetime, timedelta, timezone
+import hashlib
 import json
 import math
 import os
@@ -14,6 +16,118 @@ DATE = re.compile(r'^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
 FINDING = re.compile(r'^[0-9a-f]{12}\.json$')
 OUTCOMES = {'fully_achieved', 'mostly_achieved', 'partially_achieved',
             'not_achieved', 'unclear_from_transcript'}
+
+ALLOWED_RUN_STATS = frozenset("""sessions_found_raw sessions_triaged sessions_top_level sessions_nested
+self_sessions_excluded gated l1_rounds_used l1_rounds_max l1_timed_out
+l1_missing_after_retries l1_findings_with_error l1_elapsed_seconds
+stats_sidecars_unparseable overlap_measured overlap_events network_down_seconds
+network_deferred network_down_seconds_l2 network_deferred_l2 l1_served_mismatch
+l1_served_unmeasured l1_cost_usd_estimate l1_cost_unmeasured l1_chunk_calls
+l1_chunks_elided threads_linked threads_unassigned threads_unmeasured""".split())
+RUN_FLAGS = {'overlap_measured', 'network_deferred', 'network_deferred_l2'}
+
+
+def read_allowed_run_stats(path):
+    result = dict.fromkeys(sorted(ALLOWED_RUN_STATS))
+    try:
+        for line in Path(path).read_text(encoding='utf-8').splitlines():
+            key, separator, value = line.partition(':')
+            if not separator or key not in ALLOWED_RUN_STATS:
+                continue
+            value = value.strip()
+            result[key] = None
+            if key in RUN_FLAGS:
+                result[key] = {'yes': True, 'no': False}.get(value)
+            elif re.fullmatch(r'[0-9]+(?:\.[0-9]+)?', value):
+                number = float(value) if '.' in value else int(value)
+                result[key] = measurement(number)
+    except (OSError, ValueError, UnicodeError):
+        return dict.fromkeys(sorted(ALLOWED_RUN_STATS))
+    if result['overlap_measured'] is not True:
+        result['overlap_events'] = None
+    return result
+
+
+def read_categories(path):
+    try:
+        with Path(path).open(encoding='utf-8', newline='') as stream:
+            reader = csv.DictReader(stream, delimiter='\t')
+            if reader.fieldnames != ['category', 'severity', 'sessions', 'findings', 'example_hashes']:
+                return None
+            rows, seen = [], set()
+            for row in reader:
+                pair = (row.get('category'), row.get('severity'))
+                if None in row or not all(pair) or pair in seen:
+                    return None
+                if not all(re.fullmatch(r'[0-9]+', row.get(key) or '') for key in ('sessions', 'findings')):
+                    return None
+                seen.add(pair)
+                rows.append(dict(category=pair[0], severity=pair[1],
+                                 sessions=int(row['sessions']), findings=int(row['findings'])))
+            return rows
+    except (OSError, ValueError, UnicodeError, csv.Error):
+        return None
+
+
+def night_sessions(directory, unreadable):
+    worklist = directory / 'sessions.txt'
+    if worklist.exists():
+        try:
+            lines = worklist.read_bytes().split(b'\n')
+        except OSError:
+            unreadable.add('sessions.txt')
+        else:
+            return sorted({hashlib.sha1(line).hexdigest()[:12] for line in lines if line})
+    return sorted(path.name[:-len('.json')] for path in directory.glob('*.json')
+                  if FINDING.fullmatch(path.name))
+
+
+def pending_is_nested(sidecar):
+    try:
+        stats = json.loads(sidecar.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return False
+    return isinstance(stats, dict) and any(stats.get(key) is True for key in ('nested', 'isSidechain'))
+
+
+def build_night_stats(date, directory):
+    run = read_allowed_run_stats(directory / 'run-stats.txt')
+    activity = dict(user_messages=[], tool_calls=[], duration_minutes=[])
+    outcomes = []
+    degraded, unreadable = [], set()
+    for session in night_sessions(directory, unreadable):
+        path = directory / (session + '.json')
+        if not path.exists():
+            if not pending_is_nested(directory / (session + '.stats.json')):
+                for values in activity.values():
+                    values.append(None)
+                outcomes.append(None)
+            continue
+        finding = read_object(path, degraded, unreadable)
+        if finding.get('skipped') == 'below_noise_gate':
+            continue
+        stats = read_object(path.with_name(path.stem + '.stats.json'), degraded, unreadable)
+        provenance = [stats[key] for key in ('nested', 'isSidechain') if key in stats]
+        if any(value is True for value in provenance):
+            continue
+        known_top_level = bool(provenance) and all(type(value) is bool for value in provenance)
+        for key, source in (('user_messages', 'user_message_count'),
+                            ('tool_calls', 'tool_call_count'), ('duration_minutes', 'duration_minutes')):
+            activity[key].append(measurement(stats.get(source)) if known_top_level else None)
+        outcome = finding.get('outcome')
+        outcomes.append(outcome if known_top_level and date >= '2026-07-17' and
+                        isinstance(outcome, str) and outcome in OUTCOMES else None)
+    unreadable.update(name for name in ('run-stats.txt', 'categories.tsv')
+                      if (directory / name).exists() and not os.access(directory / name, os.R_OK))
+    totals = {key: sum(values) if values and all(value is not None for value in values) else None
+              for key, values in activity.items()}
+    measured_outcomes = bool(outcomes) and None not in outcomes
+    return dict(date=date, run=run,
+                sessions=dict(top_level=run.get('sessions_top_level'), nested=run.get('sessions_nested')),
+                activity=totals,
+                outcomes={key: outcomes.count(key) if measured_outcomes else None for key in sorted(OUTCOMES)},
+                categories=read_categories(directory / 'categories.tsv'),
+                degraded=['Could not read ' + name + '.' for name in sorted(unreadable)])
 
 
 def valid_date(value):
@@ -262,7 +376,7 @@ class NightCache:
     def fingerprint(self, date):
         directory = self.root / 'findings' / date
         paths = [directory / name for name in ('pin-projects.tsv', 'session-cwds.tsv',
-                                                'categories.tsv', 'run-stats.txt')]
+                                                'categories.tsv', 'run-stats.txt', 'sessions.txt')]
         paths.append(self.dreams / (date + '.md'))
         paths.extend(path for path in directory.glob('*.json')
                      if FINDING.fullmatch(path.name) or re.fullmatch(r'[0-9a-f]{12}\.stats\.json', path.name))
@@ -316,6 +430,112 @@ class NightCache:
             elif not summary['degraded']:
                 self._nights[date] = (key, copy.deepcopy(summary))
             return summary
+
+    def stats_night(self, date, threads):
+        if not valid_date(date):
+            raise ValueError('invalid stats date')
+        with self._lock:
+            key = (self.fingerprint(date), self._threads_key, threads is None)
+            cache_key = (date, 'stats')
+            cached = self._nights.get(cache_key)
+            if cached and cached[0] == key:
+                return copy.deepcopy(cached[1])
+            night = build_night_stats(date, self.root / 'findings' / date)
+            night['finished_that_day'] = None if threads is None else sum(
+                row.get('status') == 'done' and row.get('last_seen') == date for row in threads)
+            after = self.fingerprint(date)
+            thread_after = fingerprint_files([self.root / 'threads.jsonl'])
+            if after != key[0] or (threads is not None and thread_after != self._threads_key[1]):
+                night['degraded'].append('artifacts changed while reading; retry')
+            elif not night['degraded']:
+                self._nights[cache_key] = (key, copy.deepcopy(night))
+            return night
+
+    def stats(self):
+        dates = set(self.dream_dates()['dates'])
+        dates.update(path.name for path in (self.root / 'findings').glob('*')
+                     if path.is_dir() and valid_date(path.name))
+        with self._lock:
+            threads = self.threads()
+            return dict(nights=[self.stats_night(date, threads) for date in sorted(dates)])
+
+    def read_run_lock(self, date, now):
+        if not valid_date(date):
+            raise ValueError('invalid run date')
+        lock = self.root / 'locks' / ('run-' + date + '.lock')
+        row = dict(date=date, state='starting', pid=None, started_at=None,
+                   elapsed_seconds=None)
+        before = fingerprint_files([lock / 'pid', lock / 'start'])
+        try:
+            pid_text = (lock / 'pid').read_text(encoding='utf-8').strip()
+        except (OSError, UnicodeError):
+            return row
+        if not pid_text:
+            return row
+        row['state'] = 'stale'
+        if not re.fullmatch(r'[0-9]{1,10}', pid_text) or int(pid_text) <= 0:
+            return row
+        pid = int(pid_text)
+        row['pid'] = pid
+        try:
+            os.kill(pid, 0)
+        except (OSError, OverflowError):
+            return row
+        try:
+            saved = ' '.join((lock / 'start').read_text(encoding='utf-8').split())
+        except (OSError, UnicodeError):
+            saved = ''
+        current = None
+        try:
+            result = subprocess.run(['ps', '-o', 'lstart=', '-p', str(pid)],
+                                    capture_output=True, text=True, timeout=2, shell=False)
+            if result.returncode == 0:
+                current = ' '.join(result.stdout.split()) or None
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
+        if saved and current is None:
+            return dict(row, state='unverified')
+        if saved and current != saved:
+            return row
+        if fingerprint_files([lock / 'pid', lock / 'start']) != before:
+            return dict(row, state='starting', pid=None)
+        row['state'] = 'running'
+        if current:
+            try:
+                started = datetime.strptime(current, '%a %b %d %H:%M:%S %Y').astimezone(timezone.utc)
+                row['started_at'] = started.isoformat().replace('+00:00', 'Z')
+                row['elapsed_seconds'] = max(0, int(now - started.timestamp()))
+            except (ValueError, OverflowError, OSError):
+                pass
+        return row
+
+    def read_last_log_line(self, date):
+        if not valid_date(date):
+            raise ValueError('invalid run date')
+        try:
+            with (self.root / 'logs' / ('run-' + date + '.log')).open('rb') as stream:
+                position = stream.seek(0, os.SEEK_END)
+                tail = b''
+                while position and tail.count(b'\n') < 2:
+                    size = min(position, 8192)
+                    position -= size
+                    stream.seek(position)
+                    tail = stream.read(size) + tail
+                lines = tail.splitlines()
+                return lines[-1].decode('utf-8', errors='replace') if lines else None
+        except OSError:
+            return None
+
+    def progress(self, now):
+        runs = []
+        for lock in sorted((self.root / 'locks').glob('run-*.lock'), reverse=True):
+            date = lock.name[4:-5]
+            if not lock.is_dir() or not valid_date(date):
+                continue
+            row = self.read_run_lock(date, now)
+            row['last_log_line'] = self.read_last_log_line(date)
+            runs.append(row)
+        return dict(runs=runs)
 
     def dream_dates(self):
         return {'dates': sorted((path.stem for path in self.dreams.glob('*.md')

@@ -248,6 +248,10 @@ class AutodreamHandler(BaseHTTPRequestHandler):
                 if len(values) != 1 or not re.fullmatch(r"[0-9]+", values[0]):
                     raise ValueError("invalid days")
                 data = self.server.data.lately(int(values[0]))
+            elif target.path == "/api/stats":
+                data = self.server.data.stats()
+            elif target.path == "/api/progress":
+                data = self.server.data.progress(time.time())
             elif target.path == "/api/threads":
                 rows = self.thread_rows()
                 if rows is None:

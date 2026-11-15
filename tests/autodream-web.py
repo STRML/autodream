@@ -18,6 +18,7 @@ import re
 import selectors
 import socket
 import stat
+import time
 import subprocess
 import sys
 import tempfile
@@ -287,9 +288,145 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status, 303)
         return response.headers["Set-Cookie"].split(";", 1)[0]
 
+    def progress_locks(self):
+        locks = self.install / "locks"
+        locks.mkdir()
+        current = time.strftime("%a %b %d %H:%M:%S %Y", time.localtime())
+        try:
+            current = subprocess.run(["ps", "-o", "lstart=", "-p", str(os.getpid())],
+                                     capture_output=True, text=True, check=True, timeout=2).stdout
+        except PermissionError:
+            tools = self.root / "process-fixture"
+            tools.mkdir()
+            ps = tools / "ps"
+            ps.write_text("#!/bin/sh\nprintf '%s\\n' '" + current + "'\n")
+            ps.chmod(0o755)
+            self.env["PATH"] = str(tools) + os.pathsep + os.environ["PATH"]
+        exited = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
+                                capture_output=True, text=True, check=True, timeout=2)
+        for day, pid, start in (("2026-11-14", str(os.getpid()), current),
+                                ("2026-11-13", exited.stdout.strip(), current),
+                                ("2026-11-12", str(os.getpid()), "Mon Jan  1 00:00:00 2001"),
+                                ("2026-11-11", None, None),
+                                ("2026-11-10", str(os.getpid()), None),
+                                ("2026-11-09", "-1", current)):
+            lock = locks / ("run-" + day + ".lock")
+            lock.mkdir()
+            if pid is not None:
+                (lock / "pid").write_text(pid + "\n")
+            if start is not None:
+                (lock / "start").write_text(start)
+        (locks / "run-2026-02-30.lock").mkdir()
+        (locks / "run-2026-11-08.lock.stale-1").mkdir()
+        return locks
+
+    def test_web_progress_checks_pid_and_start(self):
+        locks = self.progress_locks()
+        before = self.tree_snapshot(locks)
+        self.start_server()
+        response = self.request("GET", "/api/progress", cookie=self.login())
+        self.assertEqual(response.status, 200, "progress route is absent")
+        rows = {row["date"]: row for row in json.loads(response.text)["runs"]}
+        self.assertEqual(len(rows), 6)
+        self.assertEqual(rows["2026-11-14"]["state"], "running")
+        self.assertGreaterEqual(rows["2026-11-14"]["elapsed_seconds"], 0)
+        self.assertLess(rows["2026-11-14"]["elapsed_seconds"], 120)
+        self.assertRegex(rows["2026-11-14"]["started_at"], r"T.*Z$")
+        for day in ("2026-11-13", "2026-11-12", "2026-11-09"):
+            self.assertEqual(rows[day]["state"], "stale")
+            self.assertIsNone(rows[day]["elapsed_seconds"])
+        self.assertEqual(rows["2026-11-11"]["state"], "starting")
+        self.assertIsNone(rows["2026-11-11"]["elapsed_seconds"])
+        self.assertEqual(rows["2026-11-10"]["state"], "running", "live pid fallback lost")
+        self.assertEqual(self.tree_snapshot(locks), before, "Progress must never mutate locks")
+
+    def test_web_progress_bounds_process_start_lookup(self):
+        lock = self.install / "locks/run-2026-11-14.lock"
+        lock.mkdir(parents=True)
+        (lock / "pid").write_text(str(os.getpid()))
+        (lock / "start").write_text("recorded start")
+        tools = self.root / "slow-process-fixture"
+        tools.mkdir()
+        ps = tools / "ps"
+        ps.write_text("#!/bin/sh\nexec python3 -c 'import time; time.sleep(5)'\n")
+        ps.chmod(0o755)
+        self.env["PATH"] = str(tools) + os.pathsep + os.environ["PATH"]
+        self.start_server()
+        cookie = self.login()
+        for recorded, expected in ((True, "unverified"), (False, "running")):
+            if not recorded:
+                (lock / "start").unlink()
+            before = self.tree_snapshot(lock)
+            started = time.monotonic()
+            response = self.request("GET", "/api/progress", cookie=cookie)
+            elapsed = time.monotonic() - started
+            self.assertEqual(response.status, 200)
+            self.assertLess(elapsed, 4, "the process-start probe must be bounded to two seconds")
+            row = json.loads(response.text)["runs"][0]
+            self.assertEqual(row["state"], expected)
+            self.assertIsNone(row["elapsed_seconds"])
+            self.assertEqual(self.tree_snapshot(lock), before)
+
+    def test_web_progress_never_infers_phase(self):
+        self.progress_locks()
+        logs = self.install / "logs"
+        logs.mkdir()
+        old_line = 'L2 aggregation attempt 1/3... <img src=x onerror="window.pwned=1">'
+        path = logs / "run-2026-11-13.log"
+        path.write_text("Earlier line\n" + old_line + "\n")
+        self.start_server()
+        cookie = self.login()
+        response = self.request("GET", "/api/progress", cookie=cookie)
+        self.assertEqual(response.status, 200, "progress route is absent")
+        rows = {row["date"]: row for row in json.loads(response.text)["runs"]}
+        self.assertTrue(all("phase" not in row for row in rows.values()))
+        self.assertEqual(rows["2026-11-13"]["state"], "stale")
+        self.assertEqual(rows["2026-11-13"]["last_log_line"], old_line)
+        self.assertIsNone(rows["2026-11-14"]["last_log_line"])
+        path.write_text("New last line")
+        refreshed = json.loads(self.request("GET", "/api/progress", cookie=cookie).text)
+        self.assertEqual(next(row for row in refreshed["runs"] if row["date"] ==
+                              "2026-11-13")["last_log_line"], "New last line")
+
+    def test_web_stats_exposes_only_allowed_keys(self):
+        allowed = set("""sessions_found_raw sessions_triaged sessions_top_level sessions_nested
+self_sessions_excluded gated l1_rounds_used l1_rounds_max l1_timed_out
+l1_missing_after_retries l1_findings_with_error l1_elapsed_seconds
+stats_sidecars_unparseable overlap_measured overlap_events network_down_seconds
+network_deferred network_down_seconds_l2 network_deferred_l2 l1_served_mismatch
+l1_served_unmeasured l1_cost_usd_estimate l1_cost_unmeasured l1_chunk_calls
+l1_chunks_elided threads_linked threads_unassigned threads_unmeasured""".split())
+        day = self.install / "findings/2026-11-14"
+        day.mkdir(parents=True)
+        (day / "run-stats.txt").write_text(
+            "sessions_triaged: 12\nsessions_top_level: 2\nsessions_nested: 10\n"
+            "l1_cost_usd_estimate: 0.1250\noverlap_measured: no\noverlap_events: 0\n"
+            "login_claude: account=account-canary\nlogin_omp: account=account-canary\n"
+            "unknown_future_key: 123\naccount: account-canary\n"
+            "gated: account-canary\nl1_chunk_calls: NaN\n")
+        self.start_server()
+        cookie = self.login()
+        self.assertEqual(self.request("GET", "/api/stats").status, 401)
+        self.assertEqual(self.request("GET", "/api/stats", cookie=cookie, host="evil.example").status, 421)
+        response = self.request("GET", "/api/stats", cookie=cookie)
+        self.assertEqual(response.status, 200, "stats route is absent")
+        self.assertEqual(response.headers["Content-Security-Policy"], EXPECTED_CSP)
+        night = json.loads(response.text)["nights"][0]
+        self.assertLessEqual(set(night["run"]), allowed)
+        self.assertEqual(night["run"]["sessions_triaged"], 12)
+        self.assertEqual(night["run"]["l1_cost_usd_estimate"], 0.125)
+        self.assertEqual(night["sessions"], {"top_level": 2, "nested": 10})
+        self.assertIsNone(night["run"].get("gated"))
+        self.assertIsNone(night["run"].get("overlap_events"), "unmeasured overlap must be a gap")
+        for secret in ("login_claude", "login_omp", "account-canary", "unknown_future_key"):
+            self.assertNotIn(secret, response.text)
+        (day / "run-stats.txt").write_text("sessions_triaged: 21\n")
+        refreshed = json.loads(self.request("GET", "/api/stats", cookie=cookie).text)
+        self.assertEqual(refreshed["nights"][0]["run"]["sessions_triaged"], 21)
+
     def test_web_requires_cookie(self):
         self.start_server()
-        for path in ("/", "/web/app.js", "/web/app.css", "/api/lately", "/api/threads", "/web/threads.js", "/web/threads.css", "/threads.jsonl"):
+        for path in ("/", "/web/app.js", "/web/app.css", "/api/lately", "/api/threads", "/api/progress", "/api/stats", "/web/threads.js", "/web/threads.css", "/threads.jsonl"):
             with self.subTest(path=path):
                 response = self.request("GET", path)
                 self.assertEqual(response.status, 401)

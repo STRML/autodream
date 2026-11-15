@@ -47,6 +47,125 @@ class DataTests(unittest.TestCase):
         return subprocess.run(['git', *map(str, args)], check=True, capture_output=True,
                               text=True, timeout=10).stdout.strip()
 
+    def stats_night(self, date='2026-11-14'):
+        self.assertTrue(callable(getattr(self.cache, 'stats', None)), 'nightly statistics are absent')
+        return next(night for night in self.cache.stats()['nights'] if night['date'] == date)
+
+    def test_web_stats_reads_unavailable_threads_once(self):
+        for day in range(10, 15):
+            (self.root / 'findings' / ('2026-11-' + str(day))).mkdir(exist_ok=True)
+        with patch.object(self.cache, 'threads', return_value=None) as read:
+            result = self.cache.stats()
+        self.assertEqual(read.call_count, 1, 'failed thread lookups must not repeat per night')
+        self.assertEqual(len(result['nights']), 5)
+        self.assertTrue(all(night['finished_that_day'] is None for night in result['nights']))
+
+    def test_web_stats_preserves_missing_measurements(self):
+        self.finding(stats={'tool_call_count': 0, 'user_message_count': None})
+        (self.day / 'run-stats.txt').write_text('l1_timed_out: 0\nl1_elapsed_seconds: unknown\n')
+        night = self.stats_night()
+        self.assertIsNone(night['run'].get('sessions_triaged'))
+        self.assertIsNone(night['run'].get('l1_elapsed_seconds'))
+        self.assertEqual(night['run']['l1_timed_out'], 0)
+        self.assertEqual(night['activity']['tool_calls'], 0)
+        self.assertIsNone(night['activity']['user_messages'])
+        self.assertIsNone(night['categories'])
+        (self.day / 'categories.tsv').write_text('category\tseverity\tsessions\tfindings\texample_hashes\nx\tall\tbad\t1\tx\n')
+        self.assertIsNone(self.stats_night()['categories'])
+        self.finding('111111111111', stats=False)
+        night = self.stats_night()
+        self.assertTrue(all(value is None for value in night['activity'].values()),
+                        'a missing sidecar must not silently reduce activity')
+        self.assertTrue(all(value is None for value in night['outcomes'].values()))
+        self.finding('111111111111', stats={'nested': True, 'tool_call_count': 900})
+        self.assertEqual(self.stats_night()['activity']['tool_calls'], 0, 'workers must not inflate activity')
+        old = self.root / 'findings/2026-07-16'
+        self.finding(day=old)
+        self.assertTrue(all(value is None for value in self.stats_night('2026-07-16')['outcomes'].values()))
+        self.finding('222222222222', outcome='unknown')
+        self.assertTrue(all(value is None for value in self.stats_night()['outcomes'].values()))
+
+    def worklist(self, *paths):
+        import hashlib
+        (self.day / 'sessions.txt').write_text(''.join(path + '\n' for path in paths))
+        return [hashlib.sha1(path.encode()).hexdigest()[:12] for path in paths]
+
+    def test_web_stats_ignore_sidecars_outside_the_worklist(self):
+        done, = self.worklist('/sessions/done.jsonl')
+        self.finding(done)
+        stale = dict(nested=False, user_message_count=9, tool_call_count=9, duration_minutes=9)
+        (self.day / '111111111111.stats.json').write_text(json.dumps(stale))
+        night = self.stats_night()
+        self.assertEqual(night['activity'], dict(user_messages=4, tool_calls=3, duration_minutes=8),
+                         'a sidecar left by an earlier run must not erase a completed night')
+
+    def test_web_stats_pending_nested_worker_leaves_totals_measured(self):
+        top, worker = self.worklist('/sessions/top.jsonl', '/sessions/top/subagents/agent-1.jsonl')
+        self.finding(top)
+        (self.day / (worker + '.stats.json')).write_text(json.dumps(dict(nested=True, isSidechain=True)))
+        night = self.stats_night()
+        self.assertEqual(night['activity']['tool_calls'], 3)
+        self.assertEqual(night['outcomes']['partially_achieved'], 1)
+
+    def test_web_stats_pending_top_level_session_is_unmeasured(self):
+        done, pending = self.worklist('/sessions/done.jsonl', '/sessions/pending.jsonl')
+        self.finding(done)
+        (self.day / (pending + '.stats.json')).write_text(json.dumps(dict(nested=False)))
+        night = self.stats_night()
+        self.assertTrue(all(value is None for value in night['activity'].values()))
+        self.assertTrue(all(value is None for value in night['outcomes'].values()))
+
+    def test_web_stats_unreadable_file_is_degraded_and_not_cached(self):
+        self.finding()
+        run_stats = self.day / 'run-stats.txt'
+        run_stats.write_text('l1_timed_out: 2\n')
+        run_stats.chmod(0)
+        try:
+            if os.access(run_stats, os.R_OK):
+                self.skipTest('running as a user that ignores file modes')
+            night = self.stats_night()
+            self.assertIsNone(night['run']['l1_timed_out'])
+            self.assertIn('Could not read run-stats.txt.', night['degraded'])
+        finally:
+            run_stats.chmod(0o644)
+        night = self.stats_night()
+        self.assertEqual(night['run']['l1_timed_out'], 2, 'a failed read must not be cached')
+        self.assertEqual(night['degraded'], [])
+
+    def test_web_stats_categories_do_not_double_count(self):
+        categories = self.day / 'categories.tsv'
+        categories.write_text('category\tseverity\tsessions\tfindings\texample_hashes\n'
+            'buggy_code_shipped\tall\t2\t3\ta,b\n'
+            'buggy_code_shipped\thigh\t1\t1\ta\n'
+            'buggy_code_shipped\tmedium\t2\t2\ta,b\n')
+        night = self.stats_night()
+        rows = night['categories']
+        self.assertEqual(next(row['sessions'] for row in rows if row['severity'] == 'all'), 2)
+        self.assertEqual(next(row['sessions'] for row in rows if row['severity'] == 'high'), 1)
+        self.assertEqual(sum(row['sessions'] for row in rows if row['severity'] == 'all'), 2)
+        categories.write_text(categories.read_text().replace('all\t2\t3', 'all\t4\t5'))
+        self.assertEqual(next(row['sessions'] for row in self.stats_night()['categories']
+                              if row['severity'] == 'all'), 4, 'in-place changes must invalidate the cache')
+        categories.unlink()
+        self.assertIsNone(self.stats_night()['categories'])
+
+    def test_web_finished_that_day_uses_last_seen(self):
+        rows = [dict(id='t-' + str(i).zfill(8), kind='work', repo='/repo', goal='Goal',
+                     title='Title', status=status, last_seen=day, sessions=[])
+                for i, (status, day) in enumerate((('done', '2026-11-14'),
+                    ('done', '2026-11-14'), ('done', '2026-11-13'),
+                    ('closed_by_sam', '2026-11-14'), ('open', '2026-11-14')), 1)]
+        state = self.root / 'threads.jsonl'
+        state.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        night = self.stats_night()
+        self.assertEqual(night['finished_that_day'], 2)
+        self.assertNotIn('dropped_over_time', night)
+        rows[0]['status'] = 'open'
+        state.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        self.assertEqual(self.stats_night()['finished_that_day'], 1, 'thread changes must invalidate stats')
+        state.write_text('{broken')
+        self.assertIsNone(self.stats_night()['finished_that_day'])
+
     def test_web_lately_excludes_nested_and_folds_repos(self):
         common = Path(self.git('-C', REPO, 'rev-parse', '--git-common-dir')).resolve()
         main = common.parent

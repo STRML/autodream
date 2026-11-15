@@ -4,6 +4,9 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 import pwd
+import selectors
+import socket
+import urllib.request
 from pathlib import Path
 import shutil
 import subprocess
@@ -15,22 +18,31 @@ import unittest
 REPO = Path(__file__).resolve().parents[1]
 
 
+def find_chrome():
+    home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    shells = sorted((home / 'Library/Caches/ms-playwright').glob(
+        'chromium_headless_shell-*/chrome-headless-shell-*/chrome-headless-shell'))
+    shells += sorted((home / '.cache/puppeteer/chrome-headless-shell').glob(
+        '*/*/chrome-headless-shell'))
+    configured = os.environ.get('CHROME_BIN')
+    if configured:
+        return configured if Path(configured).is_file() else None
+    chrome = next((p for p in (
+        shutil.which('chrome-headless-shell'), *map(str, shells),
+        shutil.which('chromium'), shutil.which('chromium-browser'),
+        shutil.which('google-chrome'),
+        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
+        if p and Path(p).is_file()), None)
+    return chrome
+
+
 class BrowserTests(unittest.TestCase):
-    def run_browser(self, script, standalone=None):
+    def run_browser(self, script, standalone=None, live_backend=False):
         app = REPO / 'web/app.js'
         self.assertTrue(app.is_file(), 'safe DOM renderer has not been implemented')
-        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
-        shells = sorted((home / 'Library/Caches/ms-playwright').glob(
-            'chromium_headless_shell-*/chrome-headless-shell-*/chrome-headless-shell'))
-        shells += sorted((home / '.cache/puppeteer/chrome-headless-shell').glob(
-            '*/*/chrome-headless-shell'))
-        chrome = os.environ.get('CHROME_BIN') or next((p for p in (
-            shutil.which('chrome-headless-shell'), *map(str, shells),
-            shutil.which('chromium'), shutil.which('chromium-browser'),
-            shutil.which('google-chrome'),
-            '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
-            if p and Path(p).is_file()), None)
-        self.assertIsNotNone(chrome, 'Chrome/Chromium is required for real DOM tests')
+        chrome = find_chrome()
+        if chrome is None:
+            self.skipTest('no Chrome')
         with tempfile.TemporaryDirectory(prefix='browser.') as root:
             root = Path(root)
             (root / 'app.js').write_text(app.read_text())
@@ -56,7 +68,64 @@ document.body.dataset.result = 'PASS';
 } catch (error) { document.body.dataset.result = 'FAIL: ' + error.message; }
 })();
 ''')
-            handler = partial(SimpleHTTPRequestHandler, directory=str(root))
+            backend = None
+            origin = None
+            token = None
+            def start_backend():
+                nonlocal backend, origin, token
+                install = root / 'backend'
+                install.mkdir(exist_ok=True)
+                lock = install / 'locks/run-2026-11-14.lock'
+                lock.mkdir(parents=True, exist_ok=True)
+                (lock / 'pid').write_text('-1')
+                logs = install / 'logs'
+                logs.mkdir(exist_ok=True)
+                (logs / 'run-2026-11-14.log').write_text('<img src=x onerror="window.pwned=1">')
+                backend = subprocess.Popen(['/bin/bash', str(REPO / 'bin/autodream-web'),
+                    'serve', '--port', '0'], env=dict(os.environ, AUTODREAM_DIR=str(install),
+                    AUTODREAM_CONFIG=str(install / 'no-config')), stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, text=True)
+                with selectors.DefaultSelector() as selector:
+                    selector.register(backend.stdout, selectors.EVENT_READ)
+                    if not selector.select(timeout=5):
+                        raise RuntimeError('backend did not start')
+                    origin = backend.stdout.readline().strip()
+                token = (install / 'web-token').read_text().strip()
+            def stop_backend():
+                if backend is not None:
+                    if backend.poll() is None:
+                        backend.kill()
+                    backend.wait(timeout=5)
+                    backend.stdout.close()
+            class Handler(SimpleHTTPRequestHandler):
+                def do_GET(self):
+                    if live_backend and self.path.startswith('/control/'):
+                        if self.path == '/control/kill':
+                            stop_backend()
+                        elif self.path == '/control/restart':
+                            start_backend()
+                        self.send_response(200)
+                        self.end_headers()
+                        return
+                    if live_backend and self.path == '/api/progress':
+                        request = urllib.request.Request(origin + self.path,
+                            headers={'Cookie': 'autodream_session=' + token})
+                        try:
+                            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=3) as response:
+                                data = response.read()
+                        except OSError:
+                            self.connection.shutdown(socket.SHUT_RDWR)
+                            self.connection.close()
+                            return
+                        self.send_response(200)
+                        self.send_header('Content-Type', 'application/json')
+                        self.end_headers()
+                        self.wfile.write(data)
+                        return
+                    super().do_GET()
+            if live_backend:
+                start_backend()
+            handler = partial(Handler, directory=str(root))
             server = ThreadingHTTPServer(('127.0.0.1', 0), handler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -74,6 +143,73 @@ document.body.dataset.result = 'PASS';
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=3)
+                stop_backend()
+
+    def test_web_server_killed_shows_unreachable(self):
+        self.run_browser('''await new Promise(resolve => document.addEventListener('DOMContentLoaded', resolve, {once:true}));
+const originalInterval = window.setInterval;
+let poll;
+window.setInterval = (callback, milliseconds) => {
+  check(milliseconds === 5000, 'Progress must poll every five seconds');
+  poll = callback;
+  return 1;
+};
+window.clearInterval = () => { poll = undefined; };
+let calls = 0;
+const hostile = '<img src=x onerror="window.pwned=1">';
+const realFetch = window.fetch;
+window.fetch = (...args) => { calls++; return realFetch(...args); };
+await fetch('/control/kill');
+await loadView('progress');
+check(document.getElementById('status').textContent === 'server not reachable', 'missing unreachable indicator');
+check(poll, 'failed requests must still retry');
+await fetch('/control/restart');
+await poll();
+check(document.getElementById('status').textContent === '', 'restart must reconnect');
+const content = document.getElementById('content');
+check(content.textContent.includes('stale'), 'stale ownership missing');
+check(content.textContent.includes(hostile), 'last log line must be text');
+check(!content.querySelector('img,script') && !window.pwned, 'log executed as markup');
+check(!content.textContent.includes('phase'), 'phase must not be inferred');
+const before = calls;
+Object.defineProperty(document, 'hidden', {configurable:true,get:() => true});
+await poll();
+check(calls === before, 'hidden Progress must not poll');
+window.setInterval = originalInterval;
+''', live_backend=True)
+
+    def test_web_stats_charts_keep_unmeasured_gaps(self):
+        self.run_browser('''await new Promise(resolve => document.addEventListener('DOMContentLoaded', resolve, {once:true}));
+check(typeof renderStats === 'function', 'Stats charts are absent');
+const nights = ['2026-11-10','2026-11-11','2026-11-12','2026-11-14'].map((date, i) => ({
+  date,run:{l1_timed_out:i === 1 ? null : 0},sessions:{top_level:2,nested:3},
+  activity:{user_messages:i === 1 ? null : i,tool_calls:2,duration_minutes:3},
+  outcomes:{fully_achieved:i === 1 ? null : 1},finished_that_day:2,
+  categories:i === 1 ? null : [{category:'<img src=x onerror="window.pwned=1">',severity:'all',sessions:2,findings:2},
+    {category:'<img src=x onerror="window.pwned=1">',severity:'high',sessions:1,findings:1}]
+}));
+renderStats({nights});
+const content = document.getElementById('content');
+check(content.textContent.includes('Finished that day'), 'finished label missing');
+check(content.textContent.includes('done threads whose last_seen is that day'), 'finished definition missing');
+check(!content.textContent.includes('dropped_over_time'), 'invented historical status series');
+check(content.querySelectorAll('svg').length > 0, 'inline SVG charts missing');
+for (const svg of content.querySelectorAll('svg')) {
+  check(svg.getAttribute('aria-label') && svg.getAttribute('role') === 'img', 'accessible chart label missing');
+  check(svg.querySelector('title'), 'chart title missing');
+}
+const activity = Array.from(content.querySelectorAll('svg')).find(s => s.getAttribute('aria-label').includes('User messages'));
+check(activity, 'activity chart missing');
+check(activity.querySelectorAll('circle').length === 3, 'null must not plot as zero');
+check(activity.querySelector('circle[data-value="0"]'), 'measured zero missing');
+check(!activity.querySelector('path[d*="L"],polyline'), 'line crossed a null or absent night');
+const category = Array.from(content.querySelectorAll('svg')).find(s => s.getAttribute('aria-label').includes('Category findings'));
+check(category && Array.from(category.querySelectorAll('circle')).every(p => p.dataset.value === '2'),
+  'category charts must use severity=all, without double counting');
+check(!content.querySelector('img,script') && !window.pwned, 'category label became markup');
+renderStats({nights:[]});
+check(content.textContent.includes('No nightly statistics'), 'empty state missing');
+''')
 
     def test_web_hostile_markdown_and_goal_are_inert(self):
         hostile = '<img src=x onerror="window.pwned=1"><script>window.pwned=2</script>'
@@ -591,6 +727,10 @@ check(root.textContent.includes('Copied'), 'copy result missing');
 
 
 if __name__ == '__main__':
+    if os.environ.get('CI') or find_chrome() is None:
+        print('SKIP: CI browser checks are local only' if os.environ.get('CI') else 'SKIP: no Chrome')
+        print('passed: 0   failed: 0')
+        sys.exit(0)
     result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(BrowserTests))
     print(f'passed: {result.testsRun - len(result.failures) - len(result.errors)}   failed: {len(result.failures) + len(result.errors)}')
     sys.exit(not result.wasSuccessful())

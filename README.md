@@ -118,6 +118,20 @@ for one install, or set `AUTODREAM_WEB=0` in the environment or config to keep
 the dashboard disabled across installs. The service restarts after failures and
 stays stopped after a successful exit, including when another process owns its port.
 
+| View | Shows |
+|---|---|
+| Lately | Recent projects and top-level sessions |
+| Dreams | The nightly report archive |
+| Threads | Dropped work and ideas, with Resume, Close and Reopen |
+| Progress | Live lock ownership and elapsed time, refreshed every 5 seconds |
+| Stats | Nightly activity, outcomes, category findings and pipeline health |
+
+Progress shows the last log line as text. A lost connection shows “server not reachable”
+and retries while Progress is visible. Stats uses gaps for missing measurements.
+“Finished that day” counts current done threads whose `last_seen` is that day;
+reopening a thread changes the count. See [CLAUDE.md](CLAUDE.md#local-web-dashboard)
+for data and security details.
+
 launchd starts the job with no login shell, so the plist carries a fixed PATH. Install builds it
 from the directories of `claude`, `git` and `bash`, plus the CLI of every enabled adapter (`omp`
 when `--adapters` includes it, or `OMP_BIN` from the config), and the L2 engine's (`--l2-engine`). A directory under a temp location is
