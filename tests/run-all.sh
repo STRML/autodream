@@ -8139,7 +8139,14 @@ test_threads_later_work_can_complete_idea(){
     fi
     thread_review_update "$root"
     assert_eq "$(thread_call_count "$root/cap")" 2 "$case_row attached work stays idempotent"
+    if [ "$outcome" = partially_achieved ]; then
+      : > "$root/rows.jsonl"
+      thread_review_row "$root" 222222222222 "finish cache" fully_achieved '[]' 2020-01-03
+      mode=finished_existing
+      expected=done
+    fi
     THREADS_REFRESH_KEYS=$(printf '%s\t%s' 2020-01-03 222222222222) MOCK_THREADS_CLOSE_ID="$idea_id" thread_review_update "$root" "$mode"
+    assert_eq "$(jq -sr '.[0].status' "$(thread_state "$root")")" "$expected" "$case_row refreshed work can complete the idea"
     assert_eq "$(jq -sr '.[0].sessions | length' "$(thread_state "$root")")" 2 "$case_row refresh replaces work membership"
     assert_eq "$(jq -sc '.[0].sessions[0]' "$(thread_state "$root")")" "$original" "$case_row preserves originating deferral"
     thread_cleanup "$root"
@@ -8170,22 +8177,78 @@ test_threads_refresh_preserves_existing_ideas(){
   done
 }
 
+test_threads_preledger_index_freezes_original_ideas(){
+  local root ledger shape before hash=111111111111
+  for ledger in missing other_source; do
+    for shape in handled legacy; do
+      root=$(setup_env)
+      thread_review_row "$root" "$hash" "ship service" partially_achieved '[{"idea":"cache later","quote":"Later add caching"}]'
+      if [ "$ledger" = other_source ]; then
+        thread_review_row "$root" 222222222222 "" not_achieved '[{"idea":"index later","quote":"Later add index"}]'
+      fi
+      thread_review_update "$root"
+      jq -c 'if .kind == "idea" then del(.sessions[].kind, .sessions[].goal, .sessions[].quote) else . end' "$(thread_state "$root")" > "$root/old-index.jsonl"
+      mv "$root/old-index.jsonl" "$(thread_state "$root")"
+      if [ "$shape" = legacy ]; then
+        jq -c 'if .kind == "idea" then del(.sessions[].candidate_handle) else . end' "$(thread_state "$root")" > "$root/legacy.jsonl"
+        mv "$root/legacy.jsonl" "$(thread_state "$root")"
+      fi
+      if [ "$ledger" = missing ]; then
+        /usr/bin/trash "$root/autodream/threads-idea-offers.tsv"
+      else
+        awk -F '\t' '$2 != "111111111111"' "$root/autodream/threads-idea-offers.tsv" > "$root/other.tsv"
+        mv "$root/other.tsv" "$root/autodream/threads-idea-offers.tsv"
+      fi
+      before=$(jq -sc '[.[] | select(.kind == "idea")]' "$(thread_state "$root")")
+      : > "$root/rows.jsonl"
+      thread_review_row "$root" "$hash" "revise service" partially_achieved '[{"idea":"reworded cache","quote":"Cache after launch"},{"idea":"new sibling","quote":"Also add metrics"}]'
+      THREADS_REFRESH_KEYS=$(printf '%s\t%s' "$DATE" "$hash") thread_review_update "$root"
+      assert_eq "$(thread_request_json "$root/cap/threads-stdin-2.txt" | jq '[.candidates[] | select(.kind == "idea")] | length')" 0 "$ledger $shape upgrade suppresses changed ideas"
+      thread_review_update "$root"
+      assert_eq "$(thread_call_count "$root/cap")" 2 "$ledger $shape catch-up has no new offers"
+      assert_eq "$(jq -sc '[.[] | select(.kind == "idea")]' "$(thread_state "$root")")" "$before" "$ledger $shape upgrade preserves indexed ideas"
+      assert_eq "$(awk -F '\t' '$2 == "111111111111" {n++} END {print n+0}' "$root/autodream/threads-idea-offers.tsv")" 1 "$ledger $shape upgrade seeds source ledger"
+      thread_cleanup "$root"
+    done
+  done
+}
+
 test_threads_idea_offers_survive_linker_failure(){
-  local root before
+  local root before original mode
+  for mode in fail_refusal reject_idea; do
+    root=$(setup_env)
+    thread_review_row "$root" 111111111111 "" not_achieved '[{"idea":"cache later","quote":"Later add cache"},{"idea":"index later","quote":"Later add index"}]'
+    MOCK_THREADS_REJECT_GOAL="index later" thread_review_update "$root" "$mode"
+    assert_eq "$(wc -l < "$root/autodream/threads-idea-offers.tsv" 2>/dev/null | tr -d ' ')" 2 "$mode preserves every first-offer handle"
+    before=$(cat "$root/autodream/threads-idea-offers.tsv" 2>/dev/null)
+    original=$(thread_request_json "$root/cap/threads-stdin-1.txt" | jq -c --arg mode "$mode" '[.candidates[] | select($mode == "fail_refusal" or .goal == "index later")]')
+    : > "$root/rows.jsonl"
+    thread_review_row "$root" 111111111111 "" not_achieved '[{"idea":"changed cache","quote":"Cache after launch"}]'
+    THREADS_REFRESH_KEYS=$(printf '%s\t%s' "$DATE" 111111111111) thread_review_update "$root"
+    assert_eq "$(thread_call_count "$root/cap")" 2 "$mode retries after reworded triage"
+    assert_eq "$(thread_request_json "$root/cap/threads-stdin-2.txt" | jq -c '.candidates')" "$original" "$mode retries original handles and payloads"
+    assert_eq "$(cat "$root/autodream/threads-idea-offers.tsv" 2>/dev/null)" "$before" "$mode catch-up preserves first-offer ledger"
+    assert_eq "$(jq -s 'length' "$(thread_state "$root")")" 2 "$mode original offers remain retryable"
+    thread_review_update "$root"
+    assert_eq "$(thread_call_count "$root/cap")" 2 "$mode successful retry is idempotent"
+    thread_cleanup "$root"
+  done
+}
+
+test_threads_idea_ledger_roundtrips_escaped_text(){
+  local root ideas expected
   root=$(setup_env)
-  thread_review_row "$root" 111111111111 "" not_achieved '[{"idea":"cache later","quote":"Later add cache"},{"idea":"index later","quote":"Later add index"}]'
+  ideas='[{"idea":"cache\t\"résumé\" later","quote":"Later\tadd \"résumé\"\nwith a second\u2028line\n"}]'
+  thread_review_row "$root" 111111111111 "" not_achieved "$ideas"
   thread_review_update "$root" fail_refusal
-  assert_eq "$(wc -l < "$root/autodream/threads-idea-offers.tsv" 2>/dev/null | tr -d ' ')" 2 "failed linker preserves every first-offer handle"
-  before=$(cat "$root/autodream/threads-idea-offers.tsv" 2>/dev/null)
+  assert_eq "$(wc -l < "$root/autodream/threads-idea-offers.tsv" | tr -d ' ')" 1 "escaped payload stays one ledger row"
+  expected=$(thread_request_json "$root/cap/threads-stdin-1.txt" | jq -ac '.candidates | map({goal,quote})')
+  assert_eq "$expected" '[{"goal":"cache \"r\u00e9sum\u00e9\" later","quote":"Later\tadd \"r\u00e9sum\u00e9\"\nwith a second\u2028line\n"}]' "first offer retains quote controls and cleans goal"
   : > "$root/rows.jsonl"
-  thread_review_row "$root" 111111111111 "" not_achieved '[{"idea":"changed cache","quote":"Cache after launch"}]'
+  thread_review_row "$root" 111111111111 "" not_achieved '[]'
   thread_review_update "$root"
-  assert_eq "$(thread_call_count "$root/cap")" 1 "failed first offer still suppresses changed handles"
-  assert_eq "$(cat "$root/autodream/threads-idea-offers.tsv" 2>/dev/null)" "$before" "catch-up preserves first-offer ledger"
-  : > "$root/rows.jsonl"
-  thread_review_row "$root" 111111111111 "" not_achieved '[{"idea":"cache later","quote":"Later add cache"},{"idea":"index later","quote":"Later add index"}]'
-  thread_review_update "$root"
-  assert_eq "$(jq -s 'length' "$(thread_state "$root")")" 2 "original failed handles remain retryable"
+  assert_eq "$(thread_request_json "$root/cap/threads-stdin-2.txt" | jq -ac '.candidates | map({goal,quote})')" "$expected" "ledger round-trips tabs newlines quotes and Unicode"
+  assert_eq "$(jq -sr '.[0].goal' "$(thread_state "$root")")" 'cache "résumé" later' "round-tripped idea is indexed"
   thread_cleanup "$root"
 }
 
@@ -8894,7 +8957,7 @@ thread_review_backfill(){
 }
 
 test_threads_backfill_respects_idea_offer_ledger(){
-  local root hash findings ideas before date=2019-12-30
+  local root hash findings ideas original date=2019-12-30
   root=$(setup_env)
   hash=$(seed_thread_archive_date "$root" "$date" idea-ledger "" not_achieved yes)
   findings="$root/autodream/findings/$date/$hash.json"
@@ -8906,17 +8969,13 @@ test_threads_backfill_respects_idea_offer_ledger(){
   assert_no_file "$root/autodream/threads-idea-offers.tsv" "zero budget leaves idea offers unrecorded"
   MOCK_THREADS_REJECT_GOAL="index later" thread_review_backfill "$root" "$date" 1 reject_idea
   assert_eq "$(jq -s 'length' "$(thread_state "$root")")" 1 "backfill indexes one idea while its sibling remains pending"
-  before=$(cat "$(thread_state "$root")")
+  original=$(thread_request_json "$root/cap/threads-stdin-1.txt" | jq -c '[.candidates[] | select(.goal == "index later")]')
   jq '.deferred_ideas = [{idea:"reworded cache",quote:"Cache after launch"}]' "$findings" > "$root/ideas.json"
   mv "$root/ideas.json" "$findings"
   thread_review_backfill "$root" "$date" 1
-  assert_grep "$root/backfill.out" '^planned_calls: 0$' "backfill planner suppresses changed handles"
-  assert_eq "$(thread_call_count "$root/cap")" 1 "backfill never calls linker for changed handles"
-  assert_eq "$(cat "$(thread_state "$root")")" "$before" "backfill preserves original idea"
-  jq --argjson ideas "$ideas" '.deferred_ideas = $ideas' "$findings" > "$root/ideas.json"
-  mv "$root/ideas.json" "$findings"
-  thread_review_backfill "$root" "$date" 1
+  assert_grep "$root/backfill.out" '^planned_calls: 1$' "backfill plans the original pending sibling after rewording"
   assert_eq "$(thread_call_count "$root/cap")" 2 "backfill retries recorded unlinked sibling"
+  assert_eq "$(thread_request_json "$root/cap/threads-stdin-2.txt" | jq -c '.candidates')" "$original" "backfill retry retains original text and handle"
   assert_eq "$(jq -s 'length' "$(thread_state "$root")")" 2 "backfill indexes both original siblings"
   chmod 000 "$root/autodream/threads-idea-offers.tsv"
   thread_review_backfill "$root" "$date" 1
@@ -9321,6 +9380,8 @@ _run test_threads_retriaged_goal_replaces_source_link
 _run test_threads_catchup_retries_unlinked_idea_siblings
 _run test_threads_later_work_can_complete_idea
 _run test_threads_refresh_preserves_existing_ideas
+_run test_threads_preledger_index_freezes_original_ideas
+_run test_threads_idea_ledger_roundtrips_escaped_text
 _run test_threads_idea_offers_survive_linker_failure
 _run test_threads_idea_offer_ledger_unterminated_row
 _run test_threads_idea_offer_failures_preserve_index

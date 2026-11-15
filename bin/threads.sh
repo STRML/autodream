@@ -90,17 +90,26 @@ threads_read_idea_offers() {
     return 1
   fi
   if ! python3 - "$IDEA_OFFERS" <<'PY_OFFERS'
+import json
 import re
 import sys
 
 try:
-    with open(sys.argv[1], encoding="ascii") as stream:
-        rows = stream.read().splitlines()
-except (OSError, UnicodeError):
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        rows = [line.rstrip("\n") for line in stream]
+    handles = set()
+    for line in rows:
+        date, hash_value, handle, goal, quote = line.split("\t")
+        if (not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", date)
+                or not re.fullmatch(r"[0-9a-f]{12}", hash_value)
+                or not re.fullmatch(re.escape(date + ":" + hash_value) + r":idea:[0-9a-f]{40}", handle)
+                or handle in handles
+                or not isinstance(json.loads(goal), str) or not json.loads(goal).strip()
+                or not isinstance(json.loads(quote), str)):
+            sys.exit(1)
+        handles.add(handle)
+except (OSError, UnicodeError, ValueError):
     sys.exit(1)
-for line in rows:
-    if not re.fullmatch(r"(\d{4}-\d{2}-\d{2})\t([0-9a-f]{12})\t\1:\2:idea:[0-9a-f]{40}", line):
-        sys.exit(1)
 sys.stdout.write("".join(line + "\n" for line in rows))
 PY_OFFERS
   then
@@ -441,10 +450,45 @@ ${THREADS_REFRESH_KEYS:-}
 EOF_REFRESH
 }
 
+threads_indexed_ideas() {
+  local state_file=$1 output_file=$2
+  python3 - "$state_file" "$output_file" <<'PY_INDEXED_IDEAS'
+import hashlib
+import json
+import sys
+
+state_path, output_path = sys.argv[1:]
+state = json.load(open(state_path, encoding="utf-8"))
+seen = set()
+with open(output_path, "w", encoding="utf-8") as output:
+    for thread in state:
+        if thread["kind"] != "idea":
+            continue
+        for session in thread["sessions"]:
+            handle = session.get("candidate_handle")
+            legacy = handle is None
+            if not (session.get("kind") == "idea" or ":idea:" in (handle or "")
+                    or (session.get("kind") is None and handle is None)):
+                continue
+            if not handle:
+                digest = hashlib.sha1(thread["id"].encode("utf-8")).hexdigest()
+                handle = "%s:%s:idea:%s" % (session["date"], session["hash"], digest)
+            if handle in seen:
+                continue
+            seen.add(handle)
+            item = dict(date=session["date"], hash=session["hash"], handle=handle,
+                        goal=session.get("goal", thread["goal"]), quote=session.get("quote", ""), indexed=True, legacy=legacy)
+            output.write(json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n")
+PY_INDEXED_IDEAS
+}
+
 threads_collect_candidates() {
   local source_file=$1 state_json=$2 candidates_file=$3 offers_file=$4 unmeasured=0
   local seen_file="$candidates_file.seen" line date hash source path cwd repo nested count measured
-  local findings facet goal outcome handle linked refresh idea_file digest ledgered offer_row
+  local findings facet goal outcome handle linked refresh idea_file digest ledgered indexed valid_findings
+  local indexed_file="$candidates_file.indexed" state_file="$candidates_file.state"
+  printf '%s\n' "$state_json" > "$state_file" || return 1
+  threads_indexed_ideas "$state_file" "$indexed_file" || return 1
   : > "$candidates_file" || return 1
   : > "$seen_file" || return 1
   while IFS= read -r line; do
@@ -477,23 +521,27 @@ threads_collect_candidates() {
     grep -Fqx "$handle" "$seen_file" && continue
     printf '%s\n' "$handle" >> "$seen_file"
     findings="$AUTODREAM_DIR/findings/$date/$hash.json"
-    jq -s -e 'length == 1 and (.[0] | type == "object" and (.findings | type == "array") and (has("error") | not) and (.no_engine != true))' \
-      "$findings" >/dev/null 2>&1 || continue
-    facet=$(jq -c '
-      def clean: gsub("[\\x00-\\x1F\\x7F]"; " ") | gsub("\\s+"; " ") | gsub("^\\s+|\\s+$"; "");
-      . as $f
-      | (if (($f.underlying_goal | type) == "string" and ($f.underlying_goal | clean | length) > 0)
-         then {goal:($f.underlying_goal | clean), kind:"work"}
-         else
-           (if ($f.notable_initiatives | type) == "array" then $f.notable_initiatives[0]
-            elif ($f.notable_initiatives | type) == "string" then $f.notable_initiatives
-            else empty end) as $idea
-           | if ($idea | type) == "string" and ($idea | clean | length) > 0
-             then {goal:($idea | clean), kind:"work"} else empty end
-         end)
-      + {outcome:(if ($f.outcome | type) == "string" then $f.outcome else "" end)}
-      | select(.outcome | IN("fully_achieved", "mostly_achieved", "partially_achieved", "not_achieved", "unclear_from_transcript"))
-    ' "$findings" 2>/dev/null) || facet=""
+    facet=""
+    valid_findings=no
+    if jq -s -e 'length == 1 and (.[0] | type == "object" and (.findings | type == "array") and (has("error") | not) and (.no_engine != true))' \
+      "$findings" >/dev/null 2>&1; then
+      valid_findings=yes
+      facet=$(jq -c '
+        def clean: gsub("[\\x00-\\x1F\\x7F]"; " ") | gsub("\\s+"; " ") | gsub("^\\s+|\\s+$"; "");
+        . as $f
+        | (if (($f.underlying_goal | type) == "string" and ($f.underlying_goal | clean | length) > 0)
+           then {goal:($f.underlying_goal | clean), kind:"work"}
+           else
+             (if ($f.notable_initiatives | type) == "array" then $f.notable_initiatives[0]
+              elif ($f.notable_initiatives | type) == "string" then $f.notable_initiatives
+              else empty end) as $idea
+             | if ($idea | type) == "string" and ($idea | clean | length) > 0
+               then {goal:($idea | clean), kind:"work"} else empty end
+           end)
+        + {outcome:(if ($f.outcome | type) == "string" then $f.outcome else "" end)}
+        | select(.outcome | IN("fully_achieved", "mostly_achieved", "partially_achieved", "not_achieved", "unclear_from_transcript"))
+      ' "$findings" 2>/dev/null) || facet=""
+    fi
     goal=$(printf '%s\n' "$facet" | jq -r '.goal')
     outcome=$(printf '%s\n' "$facet" | jq -r '.outcome')
     refresh=$(threads_refresh_has "$date" "$hash" && echo yes || echo no)
@@ -515,30 +563,48 @@ threads_collect_candidates() {
       ($1 "") == (d "") && ("x" $2) == ("x" h) { found = 1 }
       END { print found ? "yes" : "no" }' "$offers_file") || return 1
     idea_file="$candidates_file.ideas"
-    jq -c '
-      def clean: gsub("[\\x00-\\x1F\\x7F]"; " ") | gsub("\\s+"; " ") | gsub("^\\s+|\\s+$"; "");
-      def identity: [.idea,.quote] | map(clean | ascii_downcase);
-      [.deferred_ideas | if type == "array" then .[] else empty end
-       | select(type == "object"
-         and (.idea | type == "string" and length > 0 and length <= 120 and (contains("\n") | not))
-         and (.quote | type == "string" and length > 0 and length < 200))
-       | select(.idea | clean | length > 0)]
-      | reduce .[] as $idea ([]; if any(.[]; identity == ($idea | identity)) then . else . + [$idea] end)
-      | .[:3][] | {goal:(.idea | clean),quote:.quote}
-    ' "$findings" 2>/dev/null > "$idea_file" || : > "$idea_file"
+    if [ "$ledgered" = yes ]; then
+      jq -Rnc --arg d "$date" --arg h "$hash" --slurpfile indexed "$indexed_file" '
+        inputs | split("\t") | select(.[0] == $d and .[1] == $h)
+        | {handle:.[2],goal:(.[3] | fromjson),quote:(.[4] | fromjson)}
+        | select(. as $idea | any($indexed[];
+            .handle == $idea.handle or (.legacy and .date == $d and .hash == $h
+              and .goal == $idea.goal and .quote == $idea.quote)) | not)
+      ' "$offers_file" > "$idea_file" || return 1
+    else
+      jq -c --arg d "$date" --arg h "$hash" 'select(.date == $d and .hash == $h)' \
+        "$indexed_file" > "$idea_file" || return 1
+      if [ ! -s "$idea_file" ] && [ "$valid_findings" = yes ]; then
+        jq -c '
+          def clean: gsub("[\\x00-\\x1F\\x7F]"; " ") | gsub("\\s+"; " ") | gsub("^\\s+|\\s+$"; "");
+          def identity: [.idea,.quote] | map(clean | ascii_downcase);
+          [.deferred_ideas | if type == "array" then .[] else empty end
+           | select(type == "object"
+             and (.idea | type == "string" and length > 0 and length <= 120 and (contains("\n") | not))
+             and (.quote | type == "string" and length > 0 and length < 200))
+           | select(.idea | clean | length > 0)]
+          | reduce .[] as $idea ([]; if any(.[]; identity == ($idea | identity)) then . else . + [$idea] end)
+          | .[:3][] | {goal:(.idea | clean),quote:.quote}
+        ' "$findings" 2>/dev/null > "$idea_file" || : > "$idea_file"
+      fi
+    fi
     while IFS= read -r line; do
       [ -n "$line" ] || continue
-      digest=$(printf '%s\n' "$line" | jq -c '
-        def clean: gsub("[\\x00-\\x1F\\x7F]"; " ") | gsub("\\s+"; " ") | gsub("^\\s+|\\s+$"; "");
-        [.goal,.quote] | map(clean | ascii_downcase)
-      ' | python3 -c 'import hashlib,sys; print(hashlib.sha1(sys.stdin.buffer.read()).hexdigest())') || continue
-      handle="$date:$hash:idea:$digest"
-      offer_row=$(printf '%s\t%s\t%s' "$date" "$hash" "$handle")
-      if [ "$ledgered" = yes ]; then
-        grep -Fqx "$offer_row" "$offers_file" || continue
-      else
-        printf '%s\n' "$offer_row" >> "$offers_file" || return 1
+      handle=$(printf '%s\n' "$line" | jq -r '.handle // empty')
+      indexed=$(printf '%s\n' "$line" | jq -r '.indexed // false')
+      if [ -z "$handle" ]; then
+        digest=$(printf '%s\n' "$line" | jq -c '
+          def clean: gsub("[\\x00-\\x1F\\x7F]"; " ") | gsub("\\s+"; " ") | gsub("^\\s+|\\s+$"; "");
+          [.goal,.quote] | map(clean | ascii_downcase)
+        ' | python3 -c 'import hashlib,sys; print(hashlib.sha1(sys.stdin.buffer.read()).hexdigest())') || continue
+        handle="$date:$hash:idea:$digest"
       fi
+      if [ "$ledgered" != yes ]; then
+        jq -rnc --arg d "$date" --arg h "$hash" --arg handle "$handle" --argjson idea "$line" '
+          [$d,$h,$handle,($idea.goal | tojson),($idea.quote | tojson)] | join("\t")
+        ' >> "$offers_file" || return 1
+      fi
+      [ "$indexed" != true ] || continue
       if printf '%s\n' "$state_json" | jq -e --arg handle "$handle" \
         'any(.[]; any(.sessions[]?; .candidate_handle == $handle))' >/dev/null 2>&1; then
         continue
@@ -551,6 +617,8 @@ threads_collect_candidates() {
     unlink "$idea_file" 2>/dev/null || true
   done < "$source_file"
   unlink "$seen_file" 2>/dev/null || true
+  unlink "$indexed_file" 2>/dev/null || true
+  unlink "$state_file" 2>/dev/null || true
   printf '%s' "$unmeasured"
 }
 
@@ -788,7 +856,11 @@ for assignment in assignments:
     hash_value = candidate["hash"]
     target = by_id.get(assignment["thread"])
     same_idea_source = (target is not None and target["kind"] == "idea"
-                       and any(source_key(s) == (date, hash_value) for s in target.get("sessions", [])))
+                       and any(source_key(s) == (date, hash_value)
+                               and (s.get("kind") == "idea"
+                                    or ":idea:" in (s.get("candidate_handle") or "")
+                                    or (s.get("kind") is None and s.get("candidate_handle") is None))
+                               for s in target.get("sessions", [])))
     for item in state:
         if candidate["kind"] != "work":
             continue
@@ -819,6 +891,8 @@ for assignment in assignments:
         thread["repo"] = candidate["repo"]
     session = {"date": date, "hash": hash_value, "session_path": candidate["session_path"],
                "outcome": candidate["outcome"], "candidate_handle": candidate["handle"]}
+    if candidate["kind"] == "idea":
+        session.update(kind="idea", goal=candidate["goal"], quote=candidate["quote"])
     thread.setdefault("sessions", []).append(session)
     thread["sessions"].sort(key=lambda item: (item.get("date", ""), item.get("hash", "")))
     refresh_last_seen(thread)

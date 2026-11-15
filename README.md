@@ -436,16 +436,20 @@ Each eligible session can contribute one work candidate and up to three explicit
 deferred idea candidates. Ideas retain their source transcript reference and use a
 separate candidate handle derived from the normalized (idea, quote) pair. Ordinary
 catch-up retries rejected or omitted handles from the first offer. The runner records
-all first-offer handles for each (date, hash) in `threads-idea-offers.tsv` before calling
-the linker, under the index lock with an atomic rename. Re-triage replaces only work
-candidates and leaves existing ideas and their sources untouched. Reworded ideas have
+all first-offer handles and their idea text and quote for each (date, hash) in
+`threads-idea-offers.tsv` before calling the linker, under the index lock with an
+atomic rename. Its five TSV columns are date, hash, handle, idea text, and quote;
+the text fields are JSON strings so tabs and newlines round-trip. Re-triage replaces
+only work candidates and leaves existing ideas and their sources untouched. Reworded ideas have
 new handles and are suppressed on both re-triage and later catch-up. Sessions with no
-ledger rows can still contribute their first ideas. An unreadable or malformed ledger
-skips linking and reports `threads_state: unreadable`.
+ledger rows are seeded from indexed idea deferrals when present; otherwise they
+can contribute their first ideas. Retries read the original payload from the ledger.
+An unreadable or malformed ledger skips linking and reports `threads_state: unreadable`.
 
 Work candidates can attach to an idea thread and complete it with an achieved outcome
-and `finished:true` when their (date, hash) is absent from that thread's sources. The
-originating session's completed work can attach while the idea stays open. The thread
+and `finished:true` when their (date, hash) is absent from that thread's deferring
+sessions. The originating session's completed work can attach while the idea stays
+open. The thread
 keeps kind `idea`. An idea candidate's finished flag is refused and counted
 in `threads_close_refused`. Closed idea threads remain closed when later sessions
 describe the idea differently.
