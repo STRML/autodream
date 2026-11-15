@@ -954,7 +954,7 @@ threads_warn_unreadable() {
 threads_update() {
   local date=$1 tmp source_file state_json state_file candidates_file unmeasured prompt engine model timeout_s max_input timeout_bin
   local all_candidates groups_dir groups_file request_list request_candidates group_candidates request_json input_file response_file valid_file rejected_file unusable_file assignments_file
-  local failed=0 rejected=0 close_refused=0 linked=0 calls=0 skipped="" link_status=not_needed size unusable index group rc merge_rejected call_budget candidate_count unassigned groups_failed=0 published=0
+  local failed=0 rejected=0 close_refused=0 linked=0 calls=0 skipped="" link_status=not_needed size unusable index group rc merge_rejected call_budget candidate_count unassigned groups_failed=0 published=0 wrote_state=0
   threads_valid_date "$date" || { threads_error "invalid update date: $date"; return 2; }
   if ! command -v python3 >/dev/null 2>&1; then
     threads_error "python3 is required for thread locking"
@@ -1182,7 +1182,8 @@ PY_SORT
           threads_error "could not atomically write thread state"
           linked=0
         else
-          published=1
+          wrote_state=1
+          [ "${linked:-0}" -eq 0 ] || published=1
         fi
       else
         threads_error "could not merge thread assignments"
@@ -1191,9 +1192,14 @@ PY_SORT
       threads_release_lock || { link_status=failed; linked=0; }
     fi
   fi
-  if [ "$published" -eq 1 ]; then
+  # ok: every group ran and the merged state was written (even if nothing was new);
+  # partial: a group failed but this run published links; failed: nothing published.
+  if [ "$wrote_state" -eq 1 ] && [ "$groups_failed" -eq 0 ]; then
     link_status=ok
-    [ "$groups_failed" -eq 0 ] || link_status=partial
+  elif [ "$published" -eq 1 ]; then
+    link_status=partial
+  elif [ "$link_status" != not_needed ]; then
+    link_status=failed
   fi
   unassigned=$((candidate_count - linked))
   [ "$unassigned" -ge 0 ] || unassigned=0

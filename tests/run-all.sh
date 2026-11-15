@@ -8468,6 +8468,7 @@ test_threads_concurrent_idea_link_keeps_one_source(){
     thread_review_update "$root" ideas_during_call
   assert_eq "$(jq -sr '[.[] | select(.kind == "idea") | .sessions[]] | length' "$(thread_state "$root")")" 1 "concurrent update retains exactly one idea source"
   assert_grep "$root/update.out" '^threads_linked: 0$' "stale idea assignment cannot change the indexed source"
+  assert_grep "$root/update.out" '^threads_link: ok$' "a clean run with nothing new to link is ok, not a failure"
   thread_review_update "$root"
   assert_eq "$(thread_call_count "$root/cap")" 1 "concurrent idea stays idempotent on rerun"
   thread_cleanup "$root"
