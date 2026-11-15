@@ -112,7 +112,7 @@ run only; put `AUTODREAM_REVIEW_AGENT=0` in `~/.claude/autodream/config` (or the
 a re-install from provisioning it again.
 
 Install also provisions a local web dashboard LaunchAgent, `<label>-web`, on
-`127.0.0.1:8765`. Run `~/.claude/autodream/autodream-web open` to sign in from
+`127.0.0.1:47823`. Run `~/.claude/autodream/autodream-web open` to sign in from
 this Mac. Set `AUTODREAM_WEB_PORT` to change the port. Use `./install.sh --no-web`
 for one install, or set `AUTODREAM_WEB=0` in the environment or config to keep
 the dashboard disabled across installs. The service restarts after failures and

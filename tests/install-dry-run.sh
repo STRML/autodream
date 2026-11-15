@@ -28,6 +28,7 @@ new_sandbox() {
   printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s"\n' "$CALLS" > "$SANDBOX/shim/launchctl"
   printf '#!/bin/bash\nexit 0\n' > "$SANDBOX/bin/cmux"
   printf '#!/bin/bash\nexit 0\n' > "$SANDBOX/bin/claude"
+  printf '[ "$1" = print ] && exit 113\nexit 0\n' >> "$SANDBOX/shim/launchctl"
   chmod +x "$SANDBOX/shim/launchctl" "$SANDBOX/bin/cmux" "$SANDBOX/bin/claude"
 }
 run_install() { # args are installer args
@@ -43,7 +44,7 @@ BEFORE=$(tree_of)
 run_install --dry-run "$SANDBOX/target"; rc=$?
 assert_eq "$rc" "0" "the dry run succeeds"
 assert_eq "$(tree_of)" "$BEFORE" "the filesystem is byte-for-byte the same afterwards"
-assert_eq "$(wc -c < "$CALLS" | tr -d ' ')" "0" "launchctl was never invoked"
+assert_eq "$(sed '/^print /d' "$CALLS")" "" "launchctl only reads job ownership"
 assert_grep "$SANDBOX/install.out" "DRY RUN" "it says it is a dry run"
 assert_grep "$SANDBOX/install.out" "[dry-run] link $SANDBOX/target/autodream/run.sh -> $REPO/bin/run.sh" "it lists the links it would make"
 for f in bin/triage-dream.sh bin/dream-grounding.sh; do

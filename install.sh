@@ -308,12 +308,61 @@ xml_escape() {
   printf '%s' "$1" | sed 's/\&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
 }
 
+web_arguments_owned() {
+  case "$1" in /*/python3|/*/python3.[0-9]*) ;; *) return 1 ;; esac
+  case "$2" in */autodream-web.py) ;; *) return 1 ;; esac
+  [ "$3" = serve ] || return 1
+  local script_dir target_dir
+  script_dir=$(cd "$(dirname "$2")" 2>/dev/null && pwd -P) || return 1
+  target_dir=$(cd "$TARGET" 2>/dev/null && pwd -P) || return 1
+  [ "$script_dir" = "$target_dir" ]
+}
+
+web_plist_owned() {
+  local plist="$1" executable script verb
+  executable=$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$plist" 2>/dev/null) || return 1
+  script=$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:1' "$plist" 2>/dev/null) || return 1
+  verb=$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:2' "$plist" 2>/dev/null) || return 1
+  web_arguments_owned "$executable" "$script" "$verb"
+}
+
+web_agent_conflict() {
+  local label="$1" destination="$2" plist found loaded executable script verb
+  if { [ -e "$destination" ] || [ -L "$destination" ]; } && ! web_plist_owned "$destination"; then
+    return 0
+  fi
+  for plist in "$HOME/Library/LaunchAgents/"*.plist; do
+    [ -e "$plist" ] || continue
+    found=$(/usr/libexec/PlistBuddy -c 'Print :Label' "$plist" 2>/dev/null) || continue
+    [ "$found" = "$label" ] || continue
+    web_plist_owned "$plist" || return 0
+  done
+  if loaded=$(launchctl print "gui/$(id -u)/$label" 2>/dev/null); then
+    executable=$(printf '%s\n' "$loaded" | web_loaded_argument 1)
+    script=$(printf '%s\n' "$loaded" | web_loaded_argument 2)
+    verb=$(printf '%s\n' "$loaded" | web_loaded_argument 3)
+    web_arguments_owned "$executable" "$script" "$verb" || return 0
+  else
+    [ "$?" -eq 113 ] || return 0
+  fi
+  return 1
+}
+
+web_loaded_argument() {
+  awk -v ordinal="$1" '
+    /^[[:space:]]*arguments = \{$/ {args=1; next}
+    args && /^[[:space:]]*\}/ {exit}
+    args {sub(/^[[:space:]]+/, ""); if (++n == ordinal) {print; exit}}
+  '
+}
+
 install_web_agent() {
-  local label="$1" path_val="$2" cmux_bin="$3" claude_bin="$4"
-  local la_dir="$HOME/Library/LaunchAgents" domain="gui/$(id -u)"
+  local label="$1" path_val="$2" cmux_bin="$3" claude_bin="$4" dreams_xml="$5"
+  local la_dir="$HOME/Library/LaunchAgents" domain
+  domain="gui/$(id -u)"
   local real_la_dir="$la_dir" web_label="${label}-web" cfg_web="" cfg_port=""
   local web_off="" python_bin="" web_port="" plist_path=""
-  local path_xml home_xml target_xml dreams_xml python_xml cmux_xml claude_xml port_xml
+  local path_xml home_xml target_xml python_xml cmux_xml claude_xml port_xml
   [ "$DRY" = 1 ] && la_dir="$DRY_SCRATCH"
   cfg_web=$(cfg_get AUTODREAM_WEB)
   cfg_port=$(cfg_get AUTODREAM_WEB_PORT)
@@ -335,6 +384,10 @@ install_web_agent() {
     fi
   fi
   plist_path="$real_la_dir/$web_label.plist"
+  if web_agent_conflict "$web_label" "$plist_path"; then
+    echo "  ! web LaunchAgent skipped: ownership conflict for $web_label ($plist_path)"
+    return 0
+  fi
   if [ -n "$web_off" ]; then
     lctl bootout "$domain/$web_label" 2>/dev/null || true
     if [ "$DRY" = 1 ]; then
@@ -345,12 +398,11 @@ install_web_agent() {
     return 0
   fi
   [ "$DRY" = 1 ] || mkdir -p "$la_dir"
-  web_port="${AUTODREAM_WEB_PORT-${cfg_port:-8765}}"
-  [ -n "$web_port" ] || web_port=8765
+  web_port="${AUTODREAM_WEB_PORT-${cfg_port:-47823}}"
+  [ -n "$web_port" ] || web_port=47823
   path_xml=$(xml_escape "$path_val")
   home_xml=$(xml_escape "$HOME")
   target_xml=$(xml_escape "$TARGET")
-  dreams_xml=$(xml_escape "$TARGET_PARENT/dreams")
   python_xml=$(xml_escape "$python_bin")
   cmux_xml=$(xml_escape "$cmux_bin")
   claude_xml=$(xml_escape "$claude_bin")
@@ -426,7 +478,7 @@ ephemeral_dir() { # $1=dir -> 0 when it lives under a temp location
 # `export KEY=value`, quotes and later assignments all read as they will at run time.
 cfg_get() { # $1=variable name
   [ -f "$TARGET/config" ] || return 0
-  bash -c 'unset "$2"; . "$1" >/dev/null 2>&1; v="$2"; printf "%s" "${!v:-}"' _ "$TARGET/config" "$1"
+  AUTODREAM_DIR="$TARGET" bash -c 'unset "$2"; . "$1" >/dev/null 2>&1; v="$2"; printf "%s" "${!v:-}"' _ "$TARGET/config" "$1"
 }
 
 # The directories of the CLIs the nightly runs, one per line: every enabled adapter's, and the L2
@@ -527,6 +579,10 @@ install_schedule() {
   done < <(adapter_bin_dirs "$clean_path")
   local path_val="${path_dirs:+$path_dirs:}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
+  local reports_dir dreams_xml
+  reports_dir="${DREAMS_DIR-$(cfg_get DREAMS_DIR)}"
+  dreams_xml=$(xml_escape "${reports_dir:-$TARGET_PARENT/dreams}")
+
   local target_plist="$la_dir/$label.plist"
   local domain
   domain="gui/$(id -u)"
@@ -559,7 +615,7 @@ install_schedule() {
         <key>PATH</key><string>$path_val</string>
         <key>HOME</key><string>$HOME</string>
         <key>AUTODREAM_DIR</key><string>$TARGET</string>
-        <key>DREAMS_DIR</key><string>$TARGET_PARENT/dreams</string>
+        <key>DREAMS_DIR</key><string>$dreams_xml</string>
     </dict>
     <key>StandardOutPath</key>
     <string>$TARGET/logs/launchd.out.log</string>
@@ -673,7 +729,7 @@ PLIST
     echo "  ! claude binary not usable (config [${cfg_claude}], PATH [${CLAUDE_BIN_ABS}]); review LaunchAgent will abort every trigger"
   fi
   CLAUDE_BIN_XML=$(printf '%s' "$eff_claude" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
-  install_web_agent "$label" "$path_val" "$CMUX_FOUND" "$eff_claude" || return $?
+  install_web_agent "$label" "$path_val" "$CMUX_FOUND" "$eff_claude" "$dreams_xml" || return $?
   local review_label="${label}-review"
   if [ -n "$review_off" ] || [ -z "$CMUX_FOUND" ] || [ -z "$eff_claude" ]; then
     if [ -n "$review_off" ]; then
@@ -730,7 +786,7 @@ PLIST
         <key>PATH</key><string>$path_val</string>
         <key>HOME</key><string>$HOME</string>
         <key>AUTODREAM_DIR</key><string>$TARGET</string>
-        <key>DREAMS_DIR</key><string>$TARGET_PARENT/dreams</string>
+        <key>DREAMS_DIR</key><string>$dreams_xml</string>
         <key>AUTODREAM_TRIAGE_SURFACE</key><string>cmux</string>
         <key>CMUX_BIN</key><string>${CMUX_FOUND_XML}</string>
         <key>CLAUDE_BIN</key><string>${CLAUDE_BIN_XML}</string>

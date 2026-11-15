@@ -148,6 +148,12 @@ function outcomeLabel(value) {
     unclear_from_transcript: '? unclear'})[value] || '—';
 }
 
+function appendNotices(parent, data) {
+  for (const notice of new Set([...(data.notices || []), ...(data.degraded || [])])) {
+    parent.append(node('p', notice, 'notice'));
+  }
+}
+
 function renderLately(data) {
   const content = document.getElementById('content');
   content.replaceChildren(node('h1', 'Lately'), node('p', 'Your last ' + data.days + ' days in AI.', 'intro'));
@@ -158,22 +164,25 @@ function renderLately(data) {
     const newest = node('a', 'Newest dream: ' + data.newest_dream.date);
     newest.href = '#dreams/' + data.newest_dream.date;
     content.append(newest, node('p', 'Open questions: ' + measured(data.newest_dream.open_questions)));
+    appendNotices(content, data.newest_dream);
   }
   if (!data.timeline.length) content.append(node('p', 'No recent session artifacts. Dreams keeps the report archive.'));
   for (const night of data.timeline) {
     const section = node('section');
     section.append(node('h2', night.date));
-    for (const notice of night.notices || []) section.append(node('p', notice, 'notice'));
-    if (!night.projects.length) section.append(node('p', 'No top-level sessions.'));
+    appendNotices(section, night);
+    if (!night.projects.length) section.append(node('p', night.degraded?.length ?
+      'Session summary is incomplete.' : 'No top-level sessions.'));
     for (const project of night.projects) {
       const row = node('article', undefined, 'project-row');
       row.append(node('h3', project.repo || project.project));
       const outcomes = project.outcomes || {};
       row.append(node('p', `${project.session_count ?? project.sessions.length} sessions · ` +
-        `✓ ${outcomes.fully_or_mostly ?? 0} fully/mostly · ` +
-        `◐ ${outcomes.partially ?? 0} partially · ` +
-        `✗ ${outcomes.not_achieved ?? 0} not achieved · ` +
-        `? ${outcomes.unclear ?? 0} unclear`, 'project-outcomes'));
+        `✓ ${measured(outcomes.fully_or_mostly)} fully/mostly · ` +
+        `◐ ${measured(outcomes.partially)} partially · ` +
+        `✗ ${measured(outcomes.not_achieved)} not achieved · ` +
+        `? ${measured(outcomes.unclear)} unclear · ` +
+        `? ${measured(outcomes.unmeasured)} unmeasured`, 'project-outcomes'));
       const latestGoal = project.latest_goal ?? project.sessions[0]?.goal;
       row.append(node('p', measured(latestGoal), 'project-goal'));
       for (const thread of data.thread_links || []) {
@@ -209,62 +218,72 @@ function renderDream(data) {
   back.href = '#dreams';
   const article = node('article');
   article.append(renderMarkdown(data.markdown));
-  content.replaceChildren(back, node('p', data.date + ' · Open questions: ' + measured(data.open_questions), 'summary'), article);
+  content.replaceChildren(back, node('p', data.date + ' · Open questions: ' + measured(data.open_questions), 'summary'));
+  appendNotices(content, data);
+  content.append(article);
 }
 
 let threadRenderer;
+const threadActionStates = new Map();
+let currentView = 'lately';
 async function renderThreads(data, selectedId) {
   const request = viewRequest;
   if (!data) {
     const response = await fetch('/api/threads', {credentials: 'same-origin'});
     if (!response.ok) throw new Error('Could not read threads. Refresh to retry.');
     data = await response.json();
-    if (request !== viewRequest) return;
+    if (request !== viewRequest) return false;
   }
   const content = document.getElementById('content');
   if (threadRenderer && content.contains(threadRenderer.element)) threadRenderer.update(data);
-  else threadRenderer = mountThreads(content, data, performThreadAction);
+  else threadRenderer = mountThreads(content, data, performThreadAction,
+    id => threadActionStates.get(id));
   if (selectedId && /^t-[0-9a-f]{8}$/.test(selectedId)) threadRenderer.select(selectedId);
+  return true;
 }
 
-async function performThreadAction(id, action, button) {
-  if (button.disabled) return;
-  button.disabled = true;
-  let requiresRefresh = false;
-  const label = button.textContent;
-  const results = button.parentElement.querySelector('.action-result');
-  results.replaceChildren();
+function clearSettledActions(request) {
+  for (const [id, state] of threadActionStates) {
+    if (state.settledAt !== undefined && request > state.settledAt) threadActionStates.delete(id);
+  }
+}
+
+async function performThreadAction(id, action) {
+  const existing = threadActionStates.get(id);
+  if (existing?.pending || existing?.requiresRefresh) return;
+  threadActionStates.set(id, {action, pending: true, requiresRefresh: false});
+  threadRenderer?.render();
   try {
     const response = await fetch('/api/threads/' + encodeURIComponent(id) + '/' + action, {
       method: 'POST', credentials: 'same-origin', headers: {'X-Autodream': '1'}
     });
     const data = await response.json();
     if (!response.ok || !data.ok) {
-      requiresRefresh = data.error === 'timeout';
-      button.textContent = requiresRefresh ? 'Refresh to check state' : data.message || 'Action failed';
-      results.append(node('span', data.message || 'Action failed'));
-      if (data.brief) {
-        const brief = node('textarea', data.brief);
-        brief.readOnly = true;
-        brief.setAttribute('aria-label', 'Resume brief to copy');
-        results.append(brief);
-      }
+      threadActionStates.set(id, {
+        action, pending: false, requiresRefresh: data.error === 'timeout',
+        message: data.message || 'Action failed', brief: data.brief || ''
+      });
       return;
     }
-    button.textContent = label;
-    try {
-      if (document.getElementById('content').contains(button)) await renderThreads();
-    } catch (_) {
-      requiresRefresh = true;
-      button.textContent = 'Refresh to check state';
-      results.textContent = 'Action succeeded. Refresh to read the updated threads.';
+    const settledAt = viewRequest;
+    let rendered = false;
+    if (currentView === 'threads') {
+      try { rendered = await renderThreads(); } catch (_) { rendered = false; }
     }
+    if (rendered || currentView !== 'threads') threadActionStates.delete(id);
+    else threadActionStates.set(id, {
+      action, pending: false, requiresRefresh: true, settledAt,
+      message: 'Action succeeded. Refresh to read the updated threads.'
+    });
   } catch (_) {
-    requiresRefresh = true;
-    button.textContent = 'Refresh to check state';
-    results.textContent = 'The outcome is unknown. Refresh before trying again.';
+    threadActionStates.set(id, {
+      action, pending: false, requiresRefresh: true,
+      message: 'The outcome is unknown. Refresh before trying again.'
+    });
   } finally {
-    button.disabled = requiresRefresh;
+    const state = threadActionStates.get(id);
+    if (state?.pending) threadActionStates.set(id, {...state, pending: false});
+    if (threadRenderer && document.getElementById('content').contains(threadRenderer.element)) threadRenderer.render();
   }
 }
 
@@ -389,9 +408,8 @@ function renderProgress(data) {
 
 let progressTimer;
 let progressPending = false;
-let activeView;
 async function pollProgress() {
-  if (document.hidden || activeView !== 'progress' || progressPending) return;
+  if (document.hidden || currentView !== 'progress' || progressPending) return;
   progressPending = true;
   try { await loadView('progress'); }
   finally { progressPending = false; }
@@ -400,7 +418,7 @@ async function pollProgress() {
 let viewRequest = 0;
 async function loadView(view, date) {
   const request = ++viewRequest;
-  activeView = view;
+  currentView = view;
   if (view === 'progress' && !progressTimer) progressTimer = window.setInterval(pollProgress, 5000);
   if (view !== 'progress' && progressTimer) {
     window.clearInterval(progressTimer);
@@ -418,13 +436,18 @@ async function loadView(view, date) {
     if (!response.ok) throw new Error(response.status === 401 ? 'Run autodream-web open to sign in.' : 'Could not read this view. Reload to retry.');
     const data = await response.json();
     if (view === 'lately') {
-      const threads = await fetch('/api/threads', {credentials: 'same-origin'});
-      if (threads.ok) data.thread_links = (await threads.json()).threads;
+      try {
+        const threads = await fetch('/api/threads', {credentials: 'same-origin'});
+        if (threads.ok) data.thread_links = (await threads.json()).threads;
+      } catch (_) {}
     }
     if (request !== viewRequest) return;
     if (view === 'stats') renderStats(data);
     else if (view === 'progress') renderProgress(data);
-    else if (view === 'threads') await renderThreads(data, date);
+    else if (view === 'threads') {
+      clearSettledActions(request);
+      await renderThreads(data, date);
+    }
     else if (view !== 'dreams') renderLately(data);
     else if (date) renderDream(data);
     else {
