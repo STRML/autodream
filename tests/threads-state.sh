@@ -193,6 +193,90 @@ test_threads_report_without_index_is_empty() {
   assert_eq "$report" "$(printf '## Dropped threads\n\nNo dropped threads are currently eligible.')" "fresh install report renders an empty section without a warning"
 }
 
+test_threads_report_removes_all_status_temps() {
+  local dir="$TMP/report-temp-cleanup" report status_files
+  mkdir -p "$dir/dreams" "$dir/tmp"
+  seed "$dir"
+  report=$(TMPDIR="$dir/tmp" AUTODREAM_DIR="$dir" DREAMS_DIR="$dir/dreams" "$THREADS" report "$AS_OF")
+  status_files=$(find "$dir/tmp" -name 'threads-report-status.*' -type f -print)
+  case "$report" in *'Dropped threads'*) ok "report succeeds before cleaning status temp" ;; *) no "report succeeds before cleaning status temp" ;; esac
+  assert_eq "$status_files" "" "report removes its annotated state temp"
+}
+
+test_threads_direct_renderer_derives_dropped_status() {
+  local dir="$TMP/render-raw-dropped" status
+  mkdir -p "$dir"
+  jq -nc '{id:"t-10000001",kind:"work",repo:"/repo",title:"unfinished in 2020",goal:"continue",sessions:[{date:"2020-01-01",hash:"a",outcome:"not_achieved"}],status:"open",done_by:null,last_seen:"2020-01-01"}' > "$dir/threads.jsonl"
+  python3 "$REPO/bin/threads-render.py" "$dir/threads.jsonl" "$dir/threads.html" --as-of 2026-11-15 >/dev/null 2>&1
+  status=$(python3 - "$dir/threads.html" <<'PY'
+import json, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+start = text.index("<script id=\"threads-data\" type=\"application/json\">")
+start = text.index(">", start) + 1
+end = text.index("</script>", start)
+threads = json.loads(text[start:end])["threads"]
+print(threads[0]["display_status"])
+PY
+)
+  assert_eq "$status" dropped "standalone renderer derives dropped status from raw JSONL"
+}
+
+test_threads_status_jq_is_bounded_at_all_entry_points() {
+  local dir="$TMP/status-timeout" shim real_sleep real_jq output rc calls
+  seed "$dir"
+  shim="$TMP/status-timeout-bin"; mkdir -p "$shim"
+  real_sleep=$(command -v sleep)
+  real_jq=$(command -v jq)
+  cat > "$shim/timeout" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$1" >> "$STATUS_TIMEOUT_CALLS"
+shift
+"$@" &
+pid=$!
+("$REAL_SLEEP" 0.1; kill -TERM "$pid" 2>/dev/null) &
+watchdog=$!
+wait "$pid"
+rc=$?
+kill "$watchdog" 2>/dev/null
+wait "$watchdog" 2>/dev/null
+[ "$rc" -ne 143 ] || exit 124
+exit "$rc"
+EOF
+  cat > "$shim/jq" <<'EOF'
+#!/bin/bash
+case " $* " in
+  *" -f "*) exec "$REAL_SLEEP" 5 ;;
+esac
+exec "$REAL_JQ" "$@"
+EOF
+  chmod +x "$shim/timeout" "$shim/jq"
+  REAL_SLEEP="$real_sleep" REAL_JQ="$real_jq" STATUS_TIMEOUT_CALLS="$dir/calls" \
+    PATH="$shim:$PATH" AUTODREAM_DIR="$dir" "$THREADS" list --json > "$dir/list.out" 2>&1
+  rc=$?
+  assert_eq "$rc" 1 "list fails when status jq exceeds its bound"
+  grep -q 'timed out' "$dir/list.out" && ok "list reports status timeout clearly" || no "list reports status timeout clearly"
+  REAL_SLEEP="$real_sleep" REAL_JQ="$real_jq" STATUS_TIMEOUT_CALLS="$dir/calls" \
+    PATH="$shim:$PATH" AUTODREAM_DIR="$dir" DREAMS_DIR="$dir/dreams" "$THREADS" render > "$dir/render.out" 2>&1
+  rc=$?
+  assert_nonzero "$rc" "dashboard render fails when status jq exceeds its bound"
+  grep -q 'timed out' "$dir/render.out" && ok "dashboard reports status timeout clearly" || no "dashboard reports status timeout clearly"
+  REAL_SLEEP="$real_sleep" REAL_JQ="$real_jq" STATUS_TIMEOUT_CALLS="$dir/calls" \
+    PATH="$shim:$PATH" AUTODREAM_DIR="$dir" DREAMS_DIR="$dir/dreams" "$THREADS" report "$AS_OF" > "$dir/report.out" 2>&1
+  rc=$?
+  assert_eq "$rc" 1 "report fails when status jq exceeds its bound"
+  grep -q 'timed out' "$dir/report.out" && ok "report reports status timeout clearly" || no "report reports status timeout clearly"
+  REAL_SLEEP="$real_sleep" REAL_JQ="$real_jq" STATUS_TIMEOUT_CALLS="$dir/calls" \
+    PATH="$shim:$PATH" python3 "$REPO/bin/threads-render.py" "$dir/threads.jsonl" "$dir/direct.html" --as-of "$AS_OF" > "$dir/direct.out" 2>&1
+  rc=$?
+  assert_nonzero "$rc" "standalone renderer fails when status jq exceeds its bound"
+  grep -q 'timed out' "$dir/direct.out" && ok "standalone renderer reports status timeout clearly" || no "standalone renderer reports status timeout clearly"
+  calls=$(cat "$dir/calls" 2>/dev/null)
+  assert_eq "$calls" "10
+10
+10
+10" "each status jq call uses the ten-second bound"
+}
+
 test_threads_render_missing_index_uses_empty_validated_state() {
   local dir="$TMP/fresh-render" rc output
   mkdir -p "$dir/dreams"
@@ -423,6 +507,9 @@ for test_name in \
   test_threads_missing_state_is_empty \
   test_threads_empty_state_is_empty \
   test_threads_report_without_index_is_empty \
+  test_threads_report_removes_all_status_temps \
+  test_threads_direct_renderer_derives_dropped_status \
+  test_threads_status_jq_is_bounded_at_all_entry_points \
   test_threads_render_missing_index_uses_empty_validated_state \
   test_threads_renderer_reads_validated_state_from_stdin \
   test_threads_dashboard_singular_session_label \

@@ -189,15 +189,22 @@ threads_status_output() {
   fi
   input=$STATE
   [ -e "$STATE" ] || input=/dev/null
-  if jq -crs \
+  threads_status_jq -crs \
     --arg mode "$mode" --arg as_of "$as_of" --arg previous_as_of "$previous_as_of" \
     --argjson dropped_days "$DROPPED_DAYS" --arg status_filter "$status_filter" \
     --arg kind_filter "$kind_filter" --arg repo_filter "$repo_filter" \
-    --arg query "$query" --arg json "$json" -f "$THREADS_STATUS_JQ" \
-    "$input" 2>/dev/null; then
-    return 0
-  fi
-  threads_error "malformed state at $STATE"
+    --arg query "$query" --arg json "$json" -f "$THREADS_STATUS_JQ" "$input"
+}
+
+threads_status_jq() {
+  local rc
+  tmo 10 jq "$@" 2>/dev/null
+  rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  case "$rc" in
+    124|137|143) threads_error "status calculation timed out after 10 seconds" ;;
+    *) threads_error "status calculation failed (jq exited $rc)" ;;
+  esac
   return 1
 }
 
@@ -267,11 +274,10 @@ threads_render_unlocked() {
     printf 'threads_render: failed\n'
     return 1
   }
-  annotated=$(printf '%s\n' "$state" | jq -c \
+  annotated=$(printf '%s\n' "$state" | threads_status_jq \
     --arg mode render --arg as_of "$as_of" --arg previous_as_of "" \
     --argjson dropped_days "$DROPPED_DAYS" --arg status_filter "" --arg kind_filter "" \
     --arg repo_filter "" --arg query "" --arg json 1 -f "$THREADS_STATUS_JQ") || {
-      threads_error "could not annotate dashboard state"
       printf 'threads_render: failed\n'
       return 1
     }
@@ -918,13 +924,15 @@ PY
 }
 
 threads_cleanup_tmp() {
-  local path=$1
-  if command -v trash >/dev/null 2>&1; then
-    trash "$path" >/dev/null 2>&1 && return 0
-  fi
-  [ -e "$path" ] || return 0
-  find "$path" -depth -type f -exec unlink {} \; 2>/dev/null
-  find "$path" -depth -type d -exec rmdir {} \; 2>/dev/null
+  local path
+  for path in "$@"; do
+    if command -v trash >/dev/null 2>&1; then
+      trash "$path" >/dev/null 2>&1 && continue
+    fi
+    [ -e "$path" ] || continue
+    find "$path" -depth -type f -exec unlink {} \; 2>/dev/null
+    find "$path" -depth -type d -exec rmdir {} \; 2>/dev/null
+  done
 }
 
 threads_emit_stats() {
@@ -1226,12 +1234,11 @@ threads_report() {
     fi
   done
   status_file=$(mktemp "${TMPDIR:-/tmp}/threads-report-status.XXXXXX") || { threads_cleanup_tmp "$state_file"; return 1; }
-  if ! printf '%s\n' "$state" | jq -c \
+  if ! printf '%s\n' "$state" | threads_status_jq \
     --arg mode report --arg as_of "$date" --arg previous_as_of "$previous" \
     --argjson dropped_days "$DROPPED_DAYS" --arg status_filter "" --arg kind_filter "" \
     --arg repo_filter "" --arg query "" --arg json 1 -f "$THREADS_STATUS_JQ" > "$status_file"; then
     threads_cleanup_tmp "$state_file" "$status_file"
-    threads_error "could not annotate report thread state"
     return 1
   fi
   python3 - "$date" "${AUTODREAM_THREADS_LINK_STATUS:-ok}" "${AUTODREAM_THREADS_UNASSIGNED:-0}" "$status_file" <<'PY_REPORT'
