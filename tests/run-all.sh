@@ -7766,7 +7766,7 @@ PY_CLOSED_THREADS
   assert_eq "$count" 200 "exactly 200 closed hints reach the linker"
   assert_eq "$first" t-0000012b "newest closed thread is first"
   assert_eq "$last" t-00000064 "oldest retained closed thread is last"
-  assert_eq "$fields" id,repo,title "closed hints expose only id, title, and repo"
+  assert_eq "$fields" id,kind,repo,title "closed hints retain their kind and expose only index fields"
   thread_cleanup "$root"
 }
 
@@ -7806,6 +7806,80 @@ test_threads_runner_provenance_survives_worker_tampering(){
   assert_eq "$stored_path" "$real_session" "runner path wins"
   assert_eq "$stored_repo" "$real_repo" "runner repo wins"
   assert_eq "$forged_count" 0 "forged worklist entry excluded"
+  thread_cleanup "$root"
+}
+
+test_threads_split_new_assignments_with_matching_titles_merge(){
+  echo "# threads: same-day new assignments with normalized matching titles share one thread"
+  local root first_hash second_hash count sessions expected_id actual_id merged_sessions existing_count large_goal state rows
+  root=$(setup_env)
+  first_hash=111111111111; second_hash=222222222222
+  large_goal=$(python3 -c 'print("backup goal " * 24)')
+  mkdir -p "$(fdir "$root")"
+  jq -cn --arg goal "$large_goal first" '{underlying_goal:$goal,outcome:"partially_achieved",findings:[]}' > "$(fdir "$root")/$first_hash.json"
+  jq -cn --arg goal "$large_goal second" '{underlying_goal:$goal,outcome:"partially_achieved",findings:[]}' > "$(fdir "$root")/$second_hash.json"
+  state=$(thread_state "$root")
+  jq -cn '{id:"t-abcdef12",kind:"work",repo:"/repo/existing",title:"  FETCH three backup files from remote host via an lftp command?!  ",goal:"existing goal",sessions:[{date:"2019-12-31",hash:"eeeeeeeeeeee",session_path:"/old/session.jsonl",outcome:"partially_achieved"}],status:"open",done_by:null,last_seen:"2019-12-31"}' > "$state"
+  rows="$root/thread-rows.jsonl"
+  jq -cn --arg date "$DATE" --arg hash "$first_hash" '{date:$date,hash:$hash,source:"claude",session_path:"/sessions/first.jsonl",cwd:"/repo/alpha",repo:"/repo/alpha",nested:false,user_message_count:2,measured:true}' > "$rows"
+  jq -cn --arg date "$DATE" --arg hash "$second_hash" '{date:$date,hash:$hash,source:"claude",session_path:"/sessions/second.jsonl",cwd:"/repo/beta",repo:"/repo/beta",nested:false,user_message_count:2,measured:true}' >> "$rows"
+  export MOCK_THREADS_MODE=duplicate_split MOCK_CAPTURE_DIR="$root/cap"
+  AUTODREAM_THREADS_MAX_INPUT=2100 AUTODREAM_DIR="$root/autodream" AUTODREAM_THREADS_STATE="$state" \
+    AUTODREAM_THREADS_TIMEOUT_BIN=/usr/bin/timeout CLAUDE_BIN="$MOCK" \
+    /bin/bash "$REPO/bin/threads.sh" update "$DATE" < "$rows" > "$root/update.out" 2>&1
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  count=$(thread_index_count "$root")
+  sessions=$(jq -sr '[.[].sessions[]] | length' "$(thread_state "$root")")
+  expected_id=$(printf '%s' "$(thread_request_json "$root/cap/threads-stdin-1.txt" | jq -r '.candidates[0].hash')" | shasum -a 1 | cut -c1-8)
+  expected_id="t-$expected_id"
+  actual_id=$(jq -sr --arg existing t-abcdef12 '[.[] | select(.id != $existing) | .id] | first // empty' "$(thread_state "$root")")
+  merged_sessions=$(jq -sr --arg id "$expected_id" '[.[] | select(.id == $id) | .sessions[]] | length' "$(thread_state "$root")")
+  existing_count=$(jq -sr '[.[] | select(.id == "t-abcdef12")] | length' "$(thread_state "$root")")
+  assert_eq "$(thread_call_count "$root/cap")" 2 "repo-hint split makes two linker calls"
+  assert_eq "$count" 2 "matching new titles merge without folding into the existing thread"
+  assert_eq "$sessions" 3 "both new sources and the existing source remain linked"
+  assert_eq "$actual_id" "$expected_id" "the first new thread id is retained"
+  assert_eq "$merged_sessions" 2 "the merged thread keeps both new source sessions"
+  assert_eq "$existing_count" 1 "the older matching thread is preserved separately"
+  thread_cleanup "$root"
+}
+
+test_threads_request_sends_full_details_only_for_recent_open_threads(){
+  echo "# threads: older open hints omit goal and last_seen from linker requests"
+  local root session state day_ten day_forty_five day_hundred request_json recent_keys older_keys absent_count
+  root=$(setup_env)
+  session=$(mk_thread_session "$root" request-shape "$REPO")
+  seed_thread_findings "$root" "$session" "request shape candidate" '[]' partially_achieved >/dev/null
+  state=$(thread_state "$root")
+  day_ten=$(pdate_shift "$DATE" -10 d)
+  day_forty_five=$(pdate_shift "$DATE" -45 d)
+  day_hundred=$(pdate_shift "$DATE" -100 d)
+  python3 - "$state" "$day_ten" "$day_forty_five" "$day_hundred" <<'PY_THREADS_AGE'
+import json
+import sys
+path, ten, forty_five, hundred = sys.argv[1:]
+rows = []
+for index, (age, date) in enumerate(((10, ten), (45, forty_five), (100, hundred)), 1):
+    rows.append({"id": "t-%08x" % index, "kind": "work", "repo": "/repo/age",
+                 "title": "Age %d" % age, "goal": "Goal %d" % age,
+                 "sessions": [{"date": date, "hash": "%012x" % index,
+                               "session_path": "/sessions/%d.jsonl" % index,
+                               "outcome": "partially_achieved"}],
+                 "status": "open", "done_by": None, "last_seen": date})
+with open(path, "w", encoding="utf-8") as stream:
+    for row in rows:
+        stream.write(json.dumps(row, separators=(",", ":")) + "\n")
+PY_THREADS_AGE
+  export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  request_json=$(thread_request_json "$root/cap/threads-stdin-1.txt")
+  recent_keys=$(printf '%s\n' "$request_json" | jq -r '.threads[] | select(.id == "t-00000001") | keys | sort | join(",")')
+  older_keys=$(printf '%s\n' "$request_json" | jq -r '.threads[] | select(.id == "t-00000002") | keys | sort | join(",")')
+  absent_count=$(printf '%s\n' "$request_json" | jq '[.threads[] | select(.id == "t-00000003")] | length')
+  assert_eq "$recent_keys" "goal,id,kind,last_seen,repo,title" "10-day open thread includes goal and last_seen"
+  assert_eq "$older_keys" "id,kind,repo,title" "45-day open thread sends compact hint fields"
+  assert_eq "$absent_count" 0 "100-day open thread is omitted"
   thread_cleanup "$root"
 }
 
@@ -8563,7 +8637,11 @@ test_threads_backfill_budget_uses_grown_index_request(){
   seed_thread_archive_date "$root" 2019-12-31 budget-second-b "second goal b" partially_achieved yes "$repo_b" >/dev/null
   output="$root/backfill-budget.out"
   export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
-  AUTODREAM_THREADS_MAX_INPUT=1600 AUTODREAM_DIR="$root/autodream" PROJECTS_DIR="$root/projects" CLAUDE_BIN="$MOCK" \
+  # The cap leaves 649 bytes of request beside the linker prompt, so day 1 fits in one call and
+  # day 2 splits only after day 1 grows the index. Relative to the prompt, so a prompt edit cannot
+  # silently turn day 1 into an unsplittable oversized request.
+  local cap; cap=$(( $(wc -c < "$REPO/prompts/THREAD_LINKER.md") + 649 ))
+  AUTODREAM_THREADS_MAX_INPUT=$cap AUTODREAM_DIR="$root/autodream" PROJECTS_DIR="$root/projects" CLAUDE_BIN="$MOCK" \
     /bin/bash "$REPO/bin/threads.sh" backfill 2019-12-30 2019-12-31 --max-calls 2 > "$output" 2>&1
   unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
   calls=$(thread_call_count "$root/cap")
@@ -8958,6 +9036,8 @@ _run test_threads_eligibility_and_goal_fallback
 _run test_threads_closed_hints_are_capped_and_newest_first
 _run test_threads_missing_sidecar_is_unmeasured
 _run test_threads_runner_provenance_survives_worker_tampering
+_run test_threads_split_new_assignments_with_matching_titles_merge
+_run test_threads_request_sends_full_details_only_for_recent_open_threads
 _run test_threads_one_call_across_repo_hints
 _run test_threads_no_eligible_sessions_makes_no_call
 _run test_threads_linker_failures_preserve_state_and_catch_up

@@ -182,6 +182,16 @@ if [ "$line1" = "AUTODREAM_THREADS_LINKER" ]; then
         <<< "$threads_request"
       exit 0
       ;;
+    duplicate_split)
+      if [ "${threads_call:-1}" -eq 1 ]; then
+        title='Fetch three backup files from remote host via an lftp command'
+      else
+        title='  fetch   three backup files from remote host via an lftp command!!!  '
+      fi
+      jq -c --arg title "$title" '.candidates[] | {hash:.hash,thread:"new",title:$title,finished:false}' \
+        <<< "$threads_request"
+      exit 0
+      ;;
     reject_idea)
       jq -c --arg reject_goal "$MOCK_THREADS_REJECT_GOAL" '.candidates[] | {hash:.hash,thread:(if .goal == $reject_goal then "t-ffffffff" else "new" end),title:.goal,finished:false}' \
         <<< "$threads_request"

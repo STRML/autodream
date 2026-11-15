@@ -636,12 +636,15 @@ PY
 }
 
 threads_write_linker_input() {
-  local date=$1 state_json=$2 candidates_json=$3 prompt=$4 request_json_file=$5 input_file=$6 cutoff
-  cutoff=$(pdate_shift "$date" -90 d) || return 1
-  jq -cn --arg date "$date" --arg cutoff "$cutoff" --slurpfile state <(printf '%s\n' "$state_json") \
+  local date=$1 state_json=$2 candidates_json=$3 prompt=$4 request_json_file=$5 input_file=$6 cutoff30 cutoff90
+  cutoff30=$(pdate_shift "$date" -30 d) || return 1
+  cutoff90=$(pdate_shift "$date" -90 d) || return 1
+  jq -cn --arg date "$date" --arg cutoff30 "$cutoff30" --arg cutoff90 "$cutoff90" --slurpfile state <(printf '%s\n' "$state_json") \
     --slurpfile candidates "$candidates_json" '
       {date:$date,
-       threads:([$state[0][] | select(.status == "open" and .last_seen >= $cutoff) | {id,kind,title,repo,goal,last_seen}] +
+       threads:([$state[0][] | select(.status == "open" and .last_seen >= $cutoff30) | {id,kind,title,repo,goal,last_seen}] +
+                 ([$state[0][] | select(.status == "open" and .last_seen < $cutoff30 and .last_seen >= $cutoff90)
+                   | {id,kind,title,repo}] ) +
                  ([$state[0][] | select(.status == "done" or .status == "closed_by_sam") | {id,kind,title,repo,last_seen}]
                   | sort_by(.last_seen) | reverse | .[:200] | map({id,kind,title,repo}))),
        candidates:$candidates[0]}
@@ -701,6 +704,7 @@ for candidate in candidates.values():
         refreshed_sources.add(key)
 assignments = [json.loads(line) for line in open(assignments_path, encoding="utf-8") if line.strip()]
 by_id = {item["id"]: item for item in state}
+created_ids = set()
 linked = rejected = close_refused = 0
 
 def source_key(session):
@@ -730,6 +734,12 @@ def safe_title(value, fallback):
         value = fallback
     value = "".join(char for char in value if unicodedata.category(char) != "Cc")[:120].strip()
     return value or fallback[:120]
+
+def normalized_title(value):
+    title = re.sub(r"\s+", " ", value.casefold()).strip()
+    while title and unicodedata.category(title[-1]).startswith("P"):
+        title = title[:-1].rstrip()
+    return title
 
 def new_id(candidate):
     seed = candidate["handle"]
@@ -767,6 +777,7 @@ for assignment in assignments:
                      "done_by": None, "last_seen": date}
             state.append(thread)
             by_id[ident] = thread
+            created_ids.add(ident)
     else:
         ident = assignment["thread"]
         thread = by_id.get(ident)
@@ -795,6 +806,29 @@ for assignment in assignments:
         else:
             close_refused += 1
     linked += 1
+
+folded = {}
+merged_state = []
+for thread in state:
+    if thread["id"] not in created_ids:
+        merged_state.append(thread)
+        continue
+    key = (thread.get("kind", "work"), normalized_title(thread["title"]))
+    primary = folded.get(key)
+    if primary is None:
+        folded[key] = thread
+        merged_state.append(thread)
+        continue
+    seen_sessions = {session.get("candidate_handle", source_key(session))
+                     for session in primary.get("sessions", [])}
+    for session in thread.get("sessions", []):
+        session_key = session.get("candidate_handle", source_key(session))
+        if session_key not in seen_sessions:
+            primary.setdefault("sessions", []).append(session)
+            seen_sessions.add(session_key)
+    primary["sessions"].sort(key=lambda item: (item.get("date", ""), item.get("hash", "")))
+    refresh_last_seen(primary)
+state = merged_state
 
 for item in state:
     refresh_last_seen(item)
