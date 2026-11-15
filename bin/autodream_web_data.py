@@ -228,6 +228,7 @@ def build_night_summary(date, paths):
         'partially': {'partially_achieved'},
         'not_achieved': {'not_achieved'},
         'unclear': {'unclear_from_transcript'},
+        'unmeasured': {None},
     }
     for group in rows.values():
         sessions = group['sessions']
@@ -348,5 +349,6 @@ class NightCache:
         newest = None
         if dates:
             dream = self.read_dream(dates[0])
-            newest = dict(date=dates[0], open_questions=dream['open_questions'])
+            newest = dict(date=dates[0], open_questions=dream['open_questions'],
+                          degraded=dream.get('degraded', []))
         return dict(days=days, timeline=timeline, threads=counts, newest_dream=newest)

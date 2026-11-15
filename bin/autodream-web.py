@@ -4,6 +4,9 @@ import datetime
 import errno
 import fcntl
 import hmac
+import hashlib
+import html
+import http.client
 import json
 from http.cookies import SimpleCookie, CookieError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,6 +18,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from urllib.parse import parse_qs, urlsplit
 
@@ -85,6 +89,41 @@ def token_matches(candidate, expected):
     return hmac.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8"))
 
 
+def identity_proof(token, nonce):
+    return hmac.new(token.encode("ascii"), nonce.encode("ascii"), hashlib.sha256).hexdigest()
+
+
+def verify_service(port, token):
+    nonce = secrets.token_hex(16)
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+    try:
+        connection.request("GET", "/api/identify?nonce=" + nonce)
+        response = connection.getresponse()
+        proof = response.read(65)
+        return response.status == 200 and hmac.compare_digest(
+            proof, identity_proof(token, nonce).encode("ascii"))
+    except (OSError, http.client.HTTPException):
+        return False
+    finally:
+        connection.close()
+
+
+def open_browser(executable, url, install):
+    page = Path(install) / "web-login.html"
+    fd, temporary = tempfile.mkstemp(prefix=".web-login-", dir=install)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write('<!doctype html><meta name="referrer" content="no-referrer">'
+                         '<meta http-equiv="refresh" content="0;url=' + html.escape(url, quote=True) + '">')
+        os.replace(temporary, page)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    result = run_bounded([executable, page.absolute().as_uri()])
+    if result.returncode:
+        raise ValueError("browser opener failed; use autodream-web open --print")
+
+
 class AutodreamHandler(BaseHTTPRequestHandler):
     def setup(self):
         super().setup()
@@ -120,7 +159,7 @@ class AutodreamHandler(BaseHTTPRequestHandler):
             return False
         if not self.check_host():
             return False
-        if self.command == "GET" and urlsplit(self.path).path == "/login":
+        if self.command == "GET" and urlsplit(self.path).path in ("/login", "/api/identify"):
             return True
         if not self.require_session():
             return False
@@ -165,11 +204,19 @@ class AutodreamHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         target = urlsplit(self.path)
+        if target.path == "/api/identify":
+            nonces = parse_qs(target.query, keep_blank_values=True).get("nonce", [])
+            if len(nonces) != 1 or not re.fullmatch(r"[0-9a-f]{32}", nonces[0]):
+                self.respond(400, "Invalid nonce\n")
+                return
+            self.respond(200, identity_proof(self.server.token, nonces[0]))
+            return
         if target.path == "/login":
             tokens = parse_qs(target.query).get("t", [])
             if len(tokens) != 1 or not token_matches(tokens[0], self.server.token):
                 self.respond(401, "Run autodream-web open to sign in.\n")
                 return
+            self.server.login_page.unlink(missing_ok=True)
             self.respond(303, headers={
                 "Location": "/",
                 "Set-Cookie": f"{COOKIE_NAME}={self.server.token}; HttpOnly; SameSite=Strict; Path=/",
@@ -291,6 +338,7 @@ def make_server(config, port):
     server.data = NightCache(config["autodream_dir"], config.get("dreams_dir",
         os.environ.get("DREAMS_DIR", Path.home() / ".claude/dreams")))
     server.token = token
+    server.login_page = Path(config["autodream_dir"]) / "web-login.html"
     server.web_dir = Path(config["web_dir"])
     server.canonical_host = f"127.0.0.1:{server.server_port}"
     server.origin = "http://" + server.canonical_host
@@ -323,6 +371,9 @@ def main():
         parser.error("port must be between 0 and 65535")
     if args.command == "open":
         token = load_or_create_token(install / "web-token")
+        if not verify_service(port, token):
+            print(f"autodream-web: port {port} is not this autodream-web", file=sys.stderr)
+            return 1
         url = f"http://127.0.0.1:{port}/login?t={token}"
         if args.print_url:
             print(url)
@@ -330,9 +381,7 @@ def main():
         executable = shutil.which("open" if sys.platform == "darwin" else "xdg-open")
         if executable is None:
             raise ValueError("browser opener unavailable; use autodream-web open --print")
-        result = run_bounded([executable, url])
-        if result.returncode:
-            raise ValueError("browser opener failed; use autodream-web open --print")
+        open_browser(executable, url, install)
         return
     web_dir = install / "web"
     if not web_dir.is_dir():
@@ -351,7 +400,7 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        sys.exit(main())
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         print(f"autodream-web: {type(error).__name__}: startup or local command failed", file=sys.stderr)
         sys.exit(1)

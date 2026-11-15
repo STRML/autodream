@@ -148,6 +148,12 @@ function outcomeLabel(value) {
     unclear_from_transcript: '? unclear'})[value] || '—';
 }
 
+function appendNotices(parent, data) {
+  for (const notice of new Set([...(data.notices || []), ...(data.degraded || [])])) {
+    parent.append(node('p', notice, 'notice'));
+  }
+}
+
 function renderLately(data) {
   const content = document.getElementById('content');
   content.replaceChildren(node('h1', 'Lately'), node('p', 'Your last ' + data.days + ' days in AI.', 'intro'));
@@ -158,22 +164,25 @@ function renderLately(data) {
     const newest = node('a', 'Newest dream: ' + data.newest_dream.date);
     newest.href = '#dreams/' + data.newest_dream.date;
     content.append(newest, node('p', 'Open questions: ' + measured(data.newest_dream.open_questions)));
+    appendNotices(content, data.newest_dream);
   }
   if (!data.timeline.length) content.append(node('p', 'No recent session artifacts. Dreams keeps the report archive.'));
   for (const night of data.timeline) {
     const section = node('section');
     section.append(node('h2', night.date));
-    for (const notice of night.notices || []) section.append(node('p', notice, 'notice'));
-    if (!night.projects.length) section.append(node('p', 'No top-level sessions.'));
+    appendNotices(section, night);
+    if (!night.projects.length) section.append(node('p', night.degraded?.length ?
+      'Session summary is incomplete.' : 'No top-level sessions.'));
     for (const project of night.projects) {
       const row = node('article', undefined, 'project-row');
       row.append(node('h3', project.repo || project.project));
       const outcomes = project.outcomes || {};
       row.append(node('p', `${project.session_count ?? project.sessions.length} sessions · ` +
-        `✓ ${outcomes.fully_or_mostly ?? 0} fully/mostly · ` +
-        `◐ ${outcomes.partially ?? 0} partially · ` +
-        `✗ ${outcomes.not_achieved ?? 0} not achieved · ` +
-        `? ${outcomes.unclear ?? 0} unclear`, 'project-outcomes'));
+        `✓ ${measured(outcomes.fully_or_mostly)} fully/mostly · ` +
+        `◐ ${measured(outcomes.partially)} partially · ` +
+        `✗ ${measured(outcomes.not_achieved)} not achieved · ` +
+        `? ${measured(outcomes.unclear)} unclear · ` +
+        `? ${measured(outcomes.unmeasured)} unmeasured`, 'project-outcomes'));
       const latestGoal = project.latest_goal ?? project.sessions[0]?.goal;
       row.append(node('p', measured(latestGoal), 'project-goal'));
       for (const thread of data.thread_links || []) {
@@ -209,7 +218,9 @@ function renderDream(data) {
   back.href = '#dreams';
   const article = node('article');
   article.append(renderMarkdown(data.markdown));
-  content.replaceChildren(back, node('p', data.date + ' · Open questions: ' + measured(data.open_questions), 'summary'), article);
+  content.replaceChildren(back, node('p', data.date + ' · Open questions: ' + measured(data.open_questions), 'summary'));
+  appendNotices(content, data);
+  content.append(article);
 }
 
 let threadRenderer;

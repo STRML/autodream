@@ -28,6 +28,7 @@ new_sandbox() { # -> sets SANDBOX, FAKE_HOME, LA, CALLS; fake cmux and claude un
   printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s"\n' "$CALLS" > "$SANDBOX/shim/launchctl"
   printf '#!/bin/bash\nexit 0\n' > "$SANDBOX/bin/cmux"
   printf '#!/bin/bash\nexit 0\n' > "$SANDBOX/bin/claude"
+  printf '[ "$1" = print ] && exit 113\nexit 0\n' >> "$SANDBOX/shim/launchctl"
   chmod +x "$SANDBOX/shim/launchctl" "$SANDBOX/bin/cmux" "$SANDBOX/bin/claude"
 }
 run_install() { # runs the installer into $SANDBOX/target
