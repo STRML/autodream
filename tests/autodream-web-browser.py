@@ -110,6 +110,40 @@ for (const tag of ['h1','strong','em','ul','li','blockquote','pre','code','table
   check(content.querySelector(tag), 'missing allowed markdown ' + tag);
 ''')
 
+    def test_web_degraded_summaries_and_dreams_display_every_warning(self):
+        warnings = ['0123456789ab: nesting not measured',
+                    '111111111111.json: project not measured',
+                    'artifacts changed while reading; retry',
+                    '<img src=x onerror="window.pwned=1">']
+        self.run_browser('''const warnings = ''' + json.dumps(warnings) + ''';
+renderLately({days:7,timeline:[{date:'2026-11-14',projects:[],
+notices:['An existing notice'],degraded:warnings}],threads:null,newest_dream:null});
+const content = document.getElementById('content');
+for (const warning of [...warnings, 'An existing notice'])
+  check(content.textContent.includes(warning), 'hidden warning: ' + warning);
+check(!content.textContent.includes('No top-level sessions.'), 'dropped rows claimed complete');
+check(!content.querySelector('img') && !window.pwned, 'warning became markup');
+renderDream({date:'2026-11-14',markdown:'# Partial report',open_questions:null,
+notices:['Dream notice'],degraded:['report changed while reading; retry',warnings[3]]});
+for (const warning of ['report changed while reading; retry',warnings[3],'Dream notice'])
+  check(content.textContent.includes(warning), 'hidden dream warning: ' + warning);
+check(!content.querySelector('img') && !window.pwned, 'dream warning became markup');
+''')
+
+    def test_web_outcomes_distinguish_unmeasured_from_unclear_and_zero(self):
+        self.run_browser('''renderLately({days:7,timeline:[{date:'2026-11-14',projects:[{
+repo:'repo',session_count:4,outcomes:{fully_or_mostly:0,partially:0,not_achieved:0,
+unclear:1,unmeasured:3},sessions:[]}]}],threads:null,newest_dream:null});
+const content = document.getElementById('content');
+check(content.textContent.includes('? 3 unmeasured'), 'unknown outcomes disappeared');
+check(content.textContent.includes('? 1 unclear'), 'unclear outcomes must stay distinct');
+check(content.textContent.includes('✓ 0'), 'measured zero must survive');
+renderLately({days:7,timeline:[{date:'2026-11-14',projects:[{
+repo:'repo',session_count:1,sessions:[]}]}],threads:null,newest_dream:null});
+check(content.textContent.includes('✓ —'), 'absent outcome counts must stay unmeasured');
+check(!content.textContent.includes('✓ 0'), 'absent counts became zero');
+''')
+
     def test_web_legacy_measurements_are_not_zero(self):
         self.run_browser('''renderLately({days:7,timeline:[{date:'2026-07-16',projects:[{
 project:'-legacy',repo:'-legacy',sessions:[{hash:'0123456789ab',goal:null,outcome:null,

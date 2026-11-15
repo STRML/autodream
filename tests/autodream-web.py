@@ -2,6 +2,10 @@
 import concurrent.futures
 from datetime import date, timedelta
 import http.client
+import hashlib
+import hmac
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import threading
 import importlib.util
 import json
 import os
@@ -78,6 +82,8 @@ class WebTests(unittest.TestCase):
             calls.write_text("")
         launchctl = shim / "launchctl"
         launchctl.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + str(calls) + "\"\n")
+        with launchctl.open("a") as stream:
+            stream.write('[ "$1" = print ] && exit 113\nexit 0\n')
         launchctl.chmod(0o755)
         for name in ("cmux", "claude"):
             if name in without_tools:
@@ -111,6 +117,9 @@ class WebTests(unittest.TestCase):
                 entries.append((str(path.relative_to(root)), "dir", None))
         return sorted(entries)
 
+    # Drives install.sh's launchd path, which needs macOS tools. Linux CI skips it; the macOS
+    # launchd workflow runs it, and tests/install-web-agent.sh covers the same rules there.
+    @unittest.skipUnless(sys.platform == "darwin", "install.sh's launchd path runs on macOS only")
     def test_install_web_agent_ownership_and_options(self):
         result, _, launch_agents, calls, tools = self.run_install(str(self.root / "target"))
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -146,7 +155,8 @@ class WebTests(unittest.TestCase):
         dry, _, _, _, _ = self.run_install("--dry-run", str(self.root / "dry-target"))
         self.assertEqual(dry.returncode, 0, dry.stderr)
         dry_after = self.tree_snapshot(self.root)
-        self.assertEqual(dry_after, dry_before)
+        self.assertEqual([entry for entry in dry_after if entry[0] != 'launchctl-calls'],
+                         [entry for entry in dry_before if entry[0] != 'launchctl-calls'])
 
         no_web, _, _, _, _ = self.run_install("--no-web", str(self.root / "target"))
         self.assertEqual(no_web.returncode, 0, no_web.stderr)
@@ -392,15 +402,90 @@ class WebTests(unittest.TestCase):
         (self.install / "web/app.js").unlink()
         self.assertEqual(self.request("GET", "/web/app.js", cookie=cookie).status, 404)
 
+    def test_web_open_refuses_foreign_service_without_sending_token(self):
+        module = self.load_module()
+        token = module.load_or_create_token(self.install / "web-token")
+        requests = []
+        shim = self.root / "blocked-opener"
+        shim.mkdir()
+        marker = self.root / "opener-called"
+        opener = shim / ("open" if sys.platform == "darwin" else "xdg-open")
+        opener.write_text("#!/bin/sh\ntouch '" + str(marker) + "'\n")
+        opener.chmod(0o755)
+
+        class Foreign(BaseHTTPRequestHandler):
+            def do_GET(handler):
+                requests.append((handler.path, str(handler.headers)))
+                handler.send_response(200)
+                handler.end_headers()
+                handler.wfile.write(b"0" * 64)
+
+            def log_message(*args):
+                pass
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), Foreign) as server:
+            worker = threading.Thread(target=server.serve_forever, daemon=True)
+            worker.start()
+            env = dict(self.env, AUTODREAM_WEB_PORT=str(server.server_port),
+                       PATH=str(shim) + os.pathsep + os.environ['PATH'])
+            try:
+                for args in (("open", "--print"), ("open",)):
+                    result = self.run_command(*args, env=env)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(f"port {server.server_port} is not this autodream-web", result.stderr)
+                    self.assertNotIn(token, result.stdout + result.stderr)
+            finally:
+                server.shutdown()
+                worker.join()
+        self.assertFalse(marker.exists(), "foreign service must never invoke the browser")
+        self.assertEqual(len(requests), 2)
+        for path, headers in requests:
+            self.assertRegex(path, r"^/api/identify\?nonce=[0-9a-f]{32}$")
+            self.assertNotIn(token, path + headers)
+
+    def test_web_identity_challenge_and_private_browser_handoff(self):
+        self.start_server()
+        nonce = "1234567890abcdef" * 2
+        proof = self.request("GET", "/api/identify?nonce=" + nonce)
+        self.assertEqual(proof.status, 200)
+        self.assertEqual(proof.text, hmac.new(self.token.encode(), nonce.encode(), hashlib.sha256).hexdigest())
+        self.assertIsNone(proof.headers.get("Set-Cookie"))
+        for query in ("", "?nonce=x", "?nonce=" + nonce + "&nonce=" + nonce):
+            self.assertEqual(self.request("GET", "/api/identify" + query).status, 400)
+        self.assertEqual(self.request("GET", "/api/identify?nonce=" + nonce, host="evil.example").status, 421)
+        self.assertEqual(self.request("HEAD", "/api/identify?nonce=" + nonce).status, 401)
+        shim = self.root / "opener"
+        shim.mkdir()
+        capture = self.root / "handoff.json"
+        opener = shim / ("open" if sys.platform == "darwin" else "xdg-open")
+        opener.write_text("#!" + sys.executable + "\n" +
+                          "import json, pathlib, stat, sys, urllib.parse\n" +
+                          "p = pathlib.Path(urllib.parse.unquote(urllib.parse.urlsplit(sys.argv[1]).path))\n" +
+                          "pathlib.Path(" + repr(str(capture)) + ").write_text(json.dumps({" +
+                          "'argv': sys.argv, 'html': p.read_text(), 'mode': stat.S_IMODE(p.stat().st_mode)}))\n")
+        opener.chmod(0o755)
+        result = self.run_command("open", env=dict(self.env, AUTODREAM_WEB_PORT=str(self.port),
+                                  PATH=str(shim) + os.pathsep + os.environ["PATH"]))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        handoff = json.loads(capture.read_text())
+        self.assertNotIn(self.token, " ".join(handoff["argv"]))
+        self.assertEqual(handoff["mode"], 0o600)
+        self.assertIn(self.origin + "/login?t=" + self.token, handoff["html"])
+        self.assertIn('http-equiv="refresh"', handoff["html"])
+        self.assertFalse(Path(urllib.parse.unquote(urllib.parse.urlsplit(handoff["argv"][1]).path)).exists())
+
     def test_web_open_uses_config_and_environment_precedence(self):
-        (self.install / "config").write_text("AUTODREAM_WEB_PORT=12345\n")
+        self.start_server()
+        (self.install / "config").write_text(f"AUTODREAM_WEB_PORT={self.port}\n")
         configured = self.run_command("open", "--print")
         self.assertEqual(configured.returncode, 0, configured.stderr)
         token = (self.install / "web-token").read_text().strip()
-        self.assertEqual(configured.stdout.strip(), "http://127.0.0.1:12345/login?t=" + token)
-        env = dict(self.env, AUTODREAM_WEB_PORT="23456")
-        overridden = self.run_command("open", "--print", env=env)
-        self.assertEqual(overridden.stdout.strip(), "http://127.0.0.1:23456/login?t=" + token)
+        self.assertEqual(configured.stdout.strip(), self.origin + "/login?t=" + token)
+        (self.install / "config").write_text("AUTODREAM_WEB_PORT=0\n")
+        overridden = self.run_command("open", "--print", env=dict(self.env, AUTODREAM_WEB_PORT=str(self.port)))
+        self.assertEqual(overridden.returncode, 0, overridden.stderr)
+        self.assertEqual(overridden.stdout, configured.stdout)
+        (self.install / "config").write_text(f"AUTODREAM_WEB_PORT={self.port}\n")
         for name in ("autodream-web", "autodream-web.py", "lib-install-dir.sh", "portable.sh"):
             (self.install / name).symlink_to(REPO / "bin" / name)
         env = dict(self.env)
@@ -411,11 +496,13 @@ class WebTests(unittest.TestCase):
         self.assertEqual(linked.stdout, configured.stdout)
 
     def test_web_token_creation_is_exclusive_and_persistent(self):
-        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
-            results = list(executor.map(lambda _: self.run_command("open", "--print"), range(6)))
-        self.assertEqual([result.returncode for result in results], [0] * 6)
-        self.assertEqual(len({result.stdout for result in results}), 1)
+        module = self.load_module()
         path = self.install / "web-token"
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+            results = list(executor.map(lambda _: module.load_or_create_token(path), range(6)))
+        self.assertEqual(len(set(results)), 1)
+        self.start_server()
+        self.env['AUTODREAM_WEB_PORT'] = str(self.port)
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         path.chmod(0o644)
         self.assertEqual(self.run_command("open", "--print").returncode, 0)
@@ -512,7 +599,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(project["repo"], str(repo.resolve()))
         self.assertEqual(project["session_count"], 2)
         self.assertEqual(project["outcomes"], {
-            "fully_or_mostly": 1, "partially": 1, "not_achieved": 0, "unclear": 0})
+            "fully_or_mostly": 1, "partially": 1, "not_achieved": 0, "unclear": 0, "unmeasured": 0})
         self.assertEqual(project["latest_goal"], "Latest goal")
         self.assertEqual(project["sessions"][0]["goal"], "Latest goal")
 

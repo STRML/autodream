@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
+unset DREAMS_DIR
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
@@ -23,7 +24,15 @@ new_sandbox() {
   mkdir -p "$LA" "$SANDBOX/shim" "$SANDBOX/bin"
   CALLS="$SANDBOX/launchctl-calls"
   : > "$CALLS"
-  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\n' "$CALLS" > "$SANDBOX/shim/launchctl"
+  cat > "$SANDBOX/shim/launchctl" <<SH
+#!/bin/sh
+printf '%s\\n' "\$*" >> "$CALLS"
+if [ "\$1" = print ]; then
+  [ -f "$SANDBOX/print-error" ] && exit 1
+  [ -f "$SANDBOX/loaded" ] && cat "$SANDBOX/loaded" && exit 0
+  exit 113
+fi
+SH
   for name in cmux claude; do printf '#!/bin/sh\nexit 0\n' > "$SANDBOX/bin/$name"; done
   chmod +x "$SANDBOX/shim/launchctl" "$SANDBOX/bin/cmux" "$SANDBOX/bin/claude"
 }
@@ -76,6 +85,85 @@ run_install --no-review "$SANDBOX/target"; rc=$?
 assert_eq "$rc" "0" "the review opt-out install succeeds"
 [ -f "$LA/$(nightly_label)-web.plist" ] && ok "review opt-out keeps the web plist" || no "review opt-out keeps the web plist"
 [ -f "$LA/$(nightly_label)-review.plist" ] && no "review opt-out leaves no review plist" || ok "review opt-out leaves no review plist"
+
+test_foreign_web_agents_are_untouched() {
+  local kind option destination before foreign
+  for kind in filename label loaded unknown; do
+    for option in enabled disabled dry; do
+      new_sandbox
+      run_install "$SANDBOX/target"
+      NIGHTLY=$(nightly_label)
+      destination="$LA/$NIGHTLY-web.plist"
+      rm -f "$destination"
+      foreign="$LA/foreign.plist"
+      case "$kind" in
+        filename) foreign="$destination" ;;
+        loaded) foreign="$SANDBOX/loaded" ;;
+        unknown) foreign="$SANDBOX/print-error" ;;
+      esac
+      if [ "$kind" = unknown ]; then
+        printf 'ownership query failed\n' > "$foreign"
+      elif [ "$kind" = loaded ]; then
+        printf 'arguments = {\n /usr/bin/python3\n /elsewhere/autodream-web.py\n serve\n}\n' > "$foreign"
+      else
+        python3 - "$foreign" "$NIGHTLY" "$kind" <<'FIXTURE'
+import plistlib, sys
+with open(sys.argv[1], 'wb') as f:
+    plistlib.dump({'Label': sys.argv[2] + ('-other' if sys.argv[3] == 'filename' else '-web'),
+                  'ProgramArguments': ['/usr/bin/python3', '/elsewhere/autodream-web.py', 'serve']}, f)
+FIXTURE
+      fi
+      before=$(cat "$foreign")
+      : > "$CALLS"
+      case "$option" in
+        enabled) run_install "$SANDBOX/target" ;;
+        disabled) run_install --no-web "$SANDBOX/target" ;;
+        dry) run_install --dry-run "$SANDBOX/target" ;;
+      esac
+      assert_eq "$?" 0 "$kind/$option: install skips the foreign web agent"
+      assert_eq "$(cat "$foreign" 2>/dev/null)" "$before" "$kind/$option: foreign file is unchanged"
+      if grep -E "^(bootout .*[/]$NIGHTLY-web|bootstrap .*[/]$NIGHTLY-web.plist)$" "$CALLS" >/dev/null; then
+        no "$kind/$option: foreign job is never mutated"
+      else
+        ok "$kind/$option: foreign job is never mutated"
+      fi
+      assert_grep "$SANDBOX/install.out" 'web LaunchAgent skipped: ownership conflict' "$kind/$option: explains refusal"
+    done
+  done
+}
+_run() { "$@"; }
+test_owned_loaded_web_agent_is_reinstalled() {
+  new_sandbox
+  run_install "$SANDBOX/target"
+  NIGHTLY=$(nightly_label)
+  printf 'arguments = {\n /usr/bin/python3\n %s/target/autodream/autodream-web.py\n serve\n}\n' "$SANDBOX" > "$SANDBOX/loaded"
+  : > "$CALLS"
+  run_install "$SANDBOX/target"
+  assert_grep "$CALLS" "bootout gui/$(id -u)/$NIGHTLY-web" "owned loaded service can be replaced"
+  : > "$CALLS"
+  run_install --no-web "$SANDBOX/target"
+  assert_no_file "$LA/$NIGHTLY-web.plist" "owned loaded service can be removed"
+  assert_grep "$CALLS" "bootout gui/$(id -u)/$NIGHTLY-web" "owned loaded service can be unloaded"
+}
+test_web_reports_directory_precedence() {
+  new_sandbox
+  mkdir -p "$SANDBOX/target/autodream"
+  printf 'export DREAMS_DIR="%s/reports & archive"\n' "$SANDBOX" > "$SANDBOX/target/autodream/config"
+  run_install "$SANDBOX/target"
+  NIGHTLY=$(nightly_label)
+  local plist="$LA/$NIGHTLY-web.plist" reports
+  reports=$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:DREAMS_DIR' "$plist")
+  assert_eq "$reports" "$SANDBOX/reports & archive" "config reports directory reaches the web agent"
+  DREAMS_DIR="$SANDBOX/env-reports" run_install "$SANDBOX/target"
+  reports=$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:DREAMS_DIR' "$plist")
+  assert_eq "$reports" "$SANDBOX/env-reports" "environment reports directory wins over config"
+  DREAMS_DIR='' run_install "$SANDBOX/target"
+  reports=$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:DREAMS_DIR' "$plist")
+  assert_eq "$reports" "$SANDBOX/target/dreams" "an empty environment keeps the installed runner default"
+}
+_run test_web_reports_directory_precedence
+_run test_owned_loaded_web_agent_is_reinstalled
+_run test_foreign_web_agents_are_untouched
 
 printf '\npassed: %s   failed: %s\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

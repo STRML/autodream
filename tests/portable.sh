@@ -75,6 +75,9 @@ fallback_out=$(printf 'piped\n' | PATH="$nt" /bin/bash -c '. "$1"; tmo 5 cat' _ 
 eq "$fallback_out" "piped" "tmo without a timeout binary keeps the caller's stdin"
 closed_out=$(PATH="$nt" /bin/bash -c '. "$1"; tmo 5 cat 0<&-; echo "rc=$?"' _ "$REPO/bin/portable.sh" 0<&-)
 eq "$closed_out" "rc=0" "tmo without a timeout binary still runs when the caller closed stdin"
+fallback_err=$(PATH="$nt" /bin/bash -c '. "$1"; tmo 5 /bin/bash -c '\''echo child-error >&2; exit 7'\''; rc=$?; echo caller-error >&2; exit "$rc"' _ "$REPO/bin/portable.sh" 2>&1) && fallback_rc=0 || fallback_rc=$?
+eq "$fallback_rc" 7 "fallback preserves a failing command status"
+eq "$fallback_err" "$(printf 'child-error\ncaller-error')" "fallback preserves child and caller stderr"
 rm -rf "$nt"
 g=$(mktemp -d "${TMPDIR:-/tmp}/portable.XXXXXX")
 git init -q "$g" 2>/dev/null

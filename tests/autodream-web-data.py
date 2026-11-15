@@ -120,12 +120,23 @@ class DataTests(unittest.TestCase):
                          'Claude and OMP buckets for one cwd must fold into the same repo')
         self.assertEqual(repo['session_count'], 2)
         self.assertEqual(repo['outcomes'], {
-            'fully_or_mostly': 1, 'partially': 1, 'not_achieved': 0, 'unclear': 0})
+            'fully_or_mostly': 1, 'partially': 1, 'not_achieved': 0, 'unclear': 0, 'unmeasured': 0})
         self.assertEqual(repo['latest_goal'], 'Most recent goal')
         fallback = next(project for project in summary['projects'] if project['repo'] == '~')
         self.assertEqual(fallback['sessions'][0]['outcome'], 'unclear_from_transcript')
         self.assertEqual(len(self.sessions(summary)), 3,
                          'temporary and scratchpad sessions must stay out of Lately')
+
+    def test_web_unmeasured_outcomes_are_counted_separately(self):
+        for i, outcome in enumerate([None, 'invalid', [], 'fully_achieved', 'mostly_achieved',
+                                     'partially_achieved', 'not_achieved', 'unclear_from_transcript']):
+            self.finding(f'{i:012x}', outcome=outcome)
+        summary = self.data.build_night_summary('2026-11-14', {'findings_dir': self.day})
+        project = summary['projects'][0]
+        self.assertEqual(project['session_count'], 8)
+        self.assertEqual(project['outcomes'], {'fully_or_mostly': 2, 'partially': 1,
+                         'not_achieved': 1, 'unclear': 1, 'unmeasured': 3})
+        self.assertEqual(sum(project['outcomes'].values()), project['session_count'])
 
     def test_web_missing_session_values_do_not_create_night_notices(self):
         self.finding(underlying_goal=None, notable_initiatives=[], outcome='unknown',
@@ -199,6 +210,8 @@ class DataTests(unittest.TestCase):
             return count
         with patch.object(self.data, 'read_open_questions', side_effect=change_report):
             changed = self.cache.read_dream('2026-11-14')
+            newest = self.cache.lately()['newest_dream']
+            self.assertIn('report changed while reading; retry', newest.get('degraded', []))
         self.assertIsNone(changed['open_questions'], 'a changing report must degrade its measurement')
         self.assertTrue(changed['degraded'])
         self.assertEqual(self.cache.read_dream('2026-11-14')['open_questions'], 0)

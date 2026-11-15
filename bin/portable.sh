@@ -72,7 +72,7 @@ tmo() {
   elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$s" "$@"; return $?; fi
   # A background job gets /dev/null as stdin before any explicit redirect applies, so save the
   # caller's stdin on fd 3 first and hand that to the job.
-  exec 3<&0 2>/dev/null || exec 3</dev/null
+  { exec 3<&0; } 2>/dev/null || exec 3</dev/null
   "$@" <&3 & pid=$!
   exec 3<&-
   ( sleep "$s"; pkill -P "$pid" 2>/dev/null; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 & wd=$!

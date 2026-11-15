@@ -37,6 +37,7 @@ new_sandbox() { # sets SANDBOX FAKE_HOME LA CALLS; fake launchctl, cmux and clau
   mkdir -p "$LA" "$SANDBOX/shim" "$SANDBOX/bin"
   CALLS="$SANDBOX/launchctl-calls"; : > "$CALLS"
   printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s"\n' "$CALLS" > "$SANDBOX/shim/launchctl"
+  printf '[ "$1" = print ] && exit 113\nexit 0\n' >> "$SANDBOX/shim/launchctl"
   chmod +x "$SANDBOX/shim/launchctl"
   fake "$SANDBOX/bin/cmux"; fake "$SANDBOX/bin/claude"
 }
