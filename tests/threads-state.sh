@@ -328,10 +328,28 @@ test_threads_old_lock_directory_does_not_block() {
   local dir="$TMP/old-lock"
   seed "$dir"
   mkdir "$dir/threads.jsonl.lock"
+  touch -t 202001010000 "$dir/threads.jsonl.lock"
   AUTODREAM_DIR="$dir" /bin/bash "$THREADS" close t-00000001 >/dev/null 2>&1
-  assert_eq "$?" 0 "old lock directory does not block a write"
+  assert_eq "$?" 0 "a stale old lock directory does not block a write"
   [ -d "$dir/threads.jsonl.lock" ] && ok "old directory is left untouched" || no "old directory is left untouched"
   [ -f "$dir/threads.jsonl.flock" ] && ok "new lock uses a persistent plain file" || no "new lock uses a persistent plain file"
+}
+
+test_threads_fresh_old_lock_directory_blocks_during_upgrade() {
+  local dir="$TMP/old-lock-live" before output rc
+  seed "$dir"
+  mkdir "$dir/threads.jsonl.lock"
+  before=$(cat "$dir/threads.jsonl")
+  output=$(AUTODREAM_DIR="$dir" /bin/bash "$THREADS" close t-00000001 2>&1); rc=$?
+  assert_eq "$rc" 1 "a writer from the older version still holding its lock blocks the write"
+  assert_eq "$(cat "$dir/threads.jsonl")" "$before" "state is untouched while the old writer runs"
+  case "$output" in *"older version"*) ok "the refusal names the old writer" ;; *) no "the refusal names the old writer" ;; esac
+}
+
+test_threads_status_write_sets_no_signal_trap() {
+  # With a kernel flock, process death releases the lock. A trap that released it and let bash
+  # continue would publish a stale copy after another writer took the lock.
+  if grep -q 'trap ' "$THREADS"; then no "threads.sh installs no signal trap"; else ok "threads.sh installs no signal trap"; fi
 }
 
 test_threads_missing_python_refuses_writes() {
@@ -373,6 +391,8 @@ for test_name in \
   test_threads_flock_excludes_until_release \
   test_threads_sigkill_releases_flock_immediately \
   test_threads_old_lock_directory_does_not_block \
+  test_threads_fresh_old_lock_directory_blocks_during_upgrade \
+  test_threads_status_write_sets_no_signal_trap \
   test_threads_missing_python_refuses_writes; do
   "$test_name"
 done

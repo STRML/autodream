@@ -98,11 +98,25 @@ for attempt in range(4):
             sys.exit(1)
         time.sleep(1)
 '; then
-    return 0
+    threads_legacy_lock_live || return 0
+    threads_release_lock
+    threads_error "a writer from an older version holds $STATE.lock"
+    return 1
   fi
   threads_release_lock
   threads_error "lock is held or unavailable at $LOCK"
   return 1
+}
+
+# Before the flock, writers locked with a directory at $STATE.lock. During an upgrade one can
+# still be running. Its holds last seconds, so a directory younger than 5 minutes is a live
+# writer; an older one is debris from a killed run and is ignored, never removed.
+threads_legacy_lock_live() {
+  local legacy="$STATE.lock" mtime now
+  [ -d "$legacy" ] || return 1
+  mtime=$(pstat_mtime "$legacy") || return 0
+  now=$(date +%s)
+  [ $((now - mtime)) -lt 300 ]
 }
 
 threads_release_lock() {
@@ -337,15 +351,13 @@ threads_set_status() {
   case "$id" in t-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) threads_error "invalid thread id: $id"; return 2 ;; esac
   mkdir -p "$(dirname "$STATE")" || { threads_error "cannot create state directory"; return 1; }
   threads_acquire_lock || return 1
-  trap 'threads_release_lock' EXIT HUP INT TERM
-  current_state=$(threads_read_state) || { threads_release_lock; trap - EXIT HUP INT TERM; return 1; }
+  current_state=$(threads_read_state) || { threads_release_lock; return 1; }
   if ! printf '%s\n' "$current_state" | jq -e --arg id "$id" 'any(.[]; .id == $id)' >/dev/null; then
     threads_error "unknown thread id: $id"
     threads_release_lock
-    trap - EXIT HUP INT TERM
     return 1
   fi
-  next_file=$(mktemp "${TMPDIR:-/tmp}/threads-next.XXXXXX") || { threads_release_lock; trap - EXIT HUP INT TERM; return 1; }
+  next_file=$(mktemp "${TMPDIR:-/tmp}/threads-next.XXXXXX") || { threads_release_lock; return 1; }
   if ! printf '%s\n' "$current_state" | jq -c --arg id "$id" --arg status "$status" '
     map(if .id == $id then
       if $status == "closed_by_sam" then .status = $status | .done_by = "sam"
@@ -355,7 +367,6 @@ threads_set_status() {
   ' | jq -c '.[]' > "$next_file"; then
     unlink "$next_file" 2>/dev/null || true
     threads_release_lock
-    trap - EXIT HUP INT TERM
     return 1
   fi
   if ! threads_write_state "$next_file"; then
@@ -364,7 +375,6 @@ threads_set_status() {
   fi
   unlink "$next_file" 2>/dev/null || true
   threads_release_lock || rc=1
-  trap - EXIT HUP INT TERM
   if [ "$rc" -eq 0 ]; then threads_render || true; fi
   return "$rc"
 }
