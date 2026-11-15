@@ -176,6 +176,15 @@ function renderLately(data) {
         `? ${outcomes.unclear ?? 0} unclear`, 'project-outcomes'));
       const latestGoal = project.latest_goal ?? project.sessions[0]?.goal;
       row.append(node('p', measured(latestGoal), 'project-goal'));
+      for (const thread of data.thread_links || []) {
+        if (!/^t-[0-9a-f]{8}$/.test(thread.id) || !thread.sessions.some(source =>
+          source.date === night.date && project.sessions.some(session => session.hash === source.hash))) continue;
+        const link = node('a', thread.title);
+        link.href = '#threads/' + thread.id;
+        const threadLink = node('p');
+        threadLink.append(link);
+        row.append(threadLink);
+      }
       const details = node('details');
       details.append(node('summary', `Sessions (${project.session_count ?? project.sessions.length})`));
       const list = node('ul', undefined, 'sessions');
@@ -203,6 +212,62 @@ function renderDream(data) {
   content.replaceChildren(back, node('p', data.date + ' · Open questions: ' + measured(data.open_questions), 'summary'), article);
 }
 
+let threadRenderer;
+async function renderThreads(data, selectedId) {
+  const request = viewRequest;
+  if (!data) {
+    const response = await fetch('/api/threads', {credentials: 'same-origin'});
+    if (!response.ok) throw new Error('Could not read threads. Refresh to retry.');
+    data = await response.json();
+    if (request !== viewRequest) return;
+  }
+  const content = document.getElementById('content');
+  if (threadRenderer && content.contains(threadRenderer.element)) threadRenderer.update(data);
+  else threadRenderer = mountThreads(content, data, performThreadAction);
+  if (selectedId && /^t-[0-9a-f]{8}$/.test(selectedId)) threadRenderer.select(selectedId);
+}
+
+async function performThreadAction(id, action, button) {
+  if (button.disabled) return;
+  button.disabled = true;
+  let requiresRefresh = false;
+  const label = button.textContent;
+  const results = button.parentElement.querySelector('.action-result');
+  results.replaceChildren();
+  try {
+    const response = await fetch('/api/threads/' + encodeURIComponent(id) + '/' + action, {
+      method: 'POST', credentials: 'same-origin', headers: {'X-Autodream': '1'}
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      requiresRefresh = data.error === 'timeout';
+      button.textContent = requiresRefresh ? 'Refresh to check state' : data.message || 'Action failed';
+      results.append(node('span', data.message || 'Action failed'));
+      if (data.brief) {
+        const brief = node('textarea', data.brief);
+        brief.readOnly = true;
+        brief.setAttribute('aria-label', 'Resume brief to copy');
+        results.append(brief);
+      }
+      return;
+    }
+    button.textContent = label;
+    try {
+      if (document.getElementById('content').contains(button)) await renderThreads();
+    } catch (_) {
+      requiresRefresh = true;
+      button.textContent = 'Refresh to check state';
+      results.textContent = 'Action succeeded. Refresh to read the updated threads.';
+    }
+  } catch (_) {
+    requiresRefresh = true;
+    button.textContent = 'Refresh to check state';
+    results.textContent = 'The outcome is unknown. Refresh before trying again.';
+  } finally {
+    button.disabled = requiresRefresh;
+  }
+}
+
 let viewRequest = 0;
 async function loadView(view, date) {
   const request = ++viewRequest;
@@ -213,12 +278,17 @@ async function loadView(view, date) {
     else link.removeAttribute('aria-current');
   }
   try {
-    const path = view === 'dreams' ? '/api/dreams' + (date ? '/' + encodeURIComponent(date) : '') : '/api/lately?days=7';
+    const path = view === 'threads' ? '/api/threads' : view === 'dreams' ? '/api/dreams' + (date ? '/' + encodeURIComponent(date) : '') : '/api/lately?days=7';
     const response = await fetch(path, {credentials: 'same-origin'});
     if (!response.ok) throw new Error(response.status === 401 ? 'Run autodream-web open to sign in.' : 'Could not read this view. Reload to retry.');
     const data = await response.json();
+    if (view === 'lately') {
+      const threads = await fetch('/api/threads', {credentials: 'same-origin'});
+      if (threads.ok) data.thread_links = (await threads.json()).threads;
+    }
     if (request !== viewRequest) return;
-    if (view !== 'dreams') renderLately(data);
+    if (view === 'threads') await renderThreads(data, date);
+    else if (view !== 'dreams') renderLately(data);
     else if (date) renderDream(data);
     else {
       const content = document.getElementById('content');
@@ -242,7 +312,7 @@ async function loadView(view, date) {
 
 function navigate() {
   const [view, date] = location.hash.slice(1).split('/');
-  loadView(view === 'dreams' ? view : 'lately', date);
+  loadView(['dreams', 'threads'].includes(view) ? view : 'lately', date);
 }
 window.addEventListener('hashchange', navigate);
 document.addEventListener('DOMContentLoaded', navigate);

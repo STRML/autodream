@@ -303,15 +303,31 @@ test_threads_renderer_reads_validated_state_from_stdin() {
   assert_eq "$output" 1 "renderer uses the supplied state snapshot"
 }
 
-test_threads_dashboard_singular_session_label() {
-  local output
-  output=$(python3 - "$REPO/templates/threads.html" <<'PY'
+test_threads_renderer_embeds_shared_assets() {
+  local dir="$TMP/shared-assets" output
+  seed "$dir"
+  AUTODREAM_DIR="$dir" DREAMS_DIR="$dir/dreams" "$THREADS" render >/dev/null 2>&1
+  output=$(python3 - "$dir/dreams/threads.html" "$REPO/web" <<'PY_ASSETS'
+from html.parser import HTMLParser
+from pathlib import Path
 import sys
-template = open(sys.argv[1], encoding="utf-8").read()
-print("ok" if 'thread.sessions.length === 1 ? " session" : " sessions"' in template else "missing")
-PY
+class Assets(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.external = []
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if (tag == "script" and "src" in attrs) or (tag == "link" and "href" in attrs):
+            self.external.append(tag)
+page = Path(sys.argv[1]).read_text()
+assets = Path(sys.argv[2])
+parser = Assets()
+parser.feed(page)
+print("ok" if not parser.external and all((assets / name).read_text() in page
+      for name in ("threads.js", "threads.css")) else "missing")
+PY_ASSETS
 )
-  assert_eq "$output" ok "dashboard uses singular session for one linked session"
+  assert_eq "$output" ok "standalone page embeds the shared assets without external dependencies"
 }
 
 test_threads_resume_missing_index_is_clean() {
@@ -512,7 +528,7 @@ for test_name in \
   test_threads_status_jq_is_bounded_at_all_entry_points \
   test_threads_render_missing_index_uses_empty_validated_state \
   test_threads_renderer_reads_validated_state_from_stdin \
-  test_threads_dashboard_singular_session_label \
+  test_threads_renderer_embeds_shared_assets \
   test_threads_resume_missing_index_is_clean \
   test_threads_rejects_null_session_as_unreadable_state \
   test_threads_renderer_rejects_malformed_session_record \
