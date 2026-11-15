@@ -366,7 +366,7 @@ def main():
     args = parser.parse_args()
     install = Path(os.environ.get("AUTODREAM_DIR", Path.home() / ".claude/autodream"))
     port = args.port if args.command == "serve" and args.port is not None else int(
-        os.environ.get("AUTODREAM_WEB_PORT", "8765"))
+        os.environ.get("AUTODREAM_WEB_PORT", "47823"))
     if not 0 <= port <= 65535:
         parser.error("port must be between 0 and 65535")
     if args.command == "open":

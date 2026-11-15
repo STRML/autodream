@@ -203,7 +203,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(plist["ThrottleInterval"], 60)
         self.assertEqual(plist_env["CMUX_BIN"], str(tools / "cmux"))
         self.assertEqual(plist_env["CLAUDE_BIN"], str(tools / "claude"))
-        self.assertEqual(plist_env["AUTODREAM_WEB_PORT"], "8765")
+        self.assertEqual(plist_env["AUTODREAM_WEB_PORT"], "47823")
 
     def test_web_port_in_use_warns_once_and_exits_zero(self):
         self.start_server()
