@@ -232,13 +232,20 @@ async function renderThreads(data, selectedId) {
     const response = await fetch('/api/threads', {credentials: 'same-origin'});
     if (!response.ok) throw new Error('Could not read threads. Refresh to retry.');
     data = await response.json();
-    if (request !== viewRequest) return;
+    if (request !== viewRequest) return false;
   }
   const content = document.getElementById('content');
   if (threadRenderer && content.contains(threadRenderer.element)) threadRenderer.update(data);
   else threadRenderer = mountThreads(content, data, performThreadAction,
     id => threadActionStates.get(id));
   if (selectedId && /^t-[0-9a-f]{8}$/.test(selectedId)) threadRenderer.select(selectedId);
+  return true;
+}
+
+function clearSettledActions(request) {
+  for (const [id, state] of threadActionStates) {
+    if (state.settledAt !== undefined && request > state.settledAt) threadActionStates.delete(id);
+  }
 }
 
 async function performThreadAction(id, action) {
@@ -258,17 +265,16 @@ async function performThreadAction(id, action) {
       });
       return;
     }
+    const settledAt = viewRequest;
+    let rendered = false;
     if (currentView === 'threads') {
-      try {
-        await renderThreads();
-      } catch (_) {
-        threadActionStates.set(id, {
-          action, pending: false, requiresRefresh: true,
-          message: 'Action succeeded. Refresh to read the updated threads.'
-        });
-      }
+      try { rendered = await renderThreads(); } catch (_) { rendered = false; }
     }
-    if (!threadActionStates.get(id)?.requiresRefresh) threadActionStates.delete(id);
+    if (rendered || currentView !== 'threads') threadActionStates.delete(id);
+    else threadActionStates.set(id, {
+      action, pending: false, requiresRefresh: true, settledAt,
+      message: 'Action succeeded. Refresh to read the updated threads.'
+    });
   } catch (_) {
     threadActionStates.set(id, {
       action, pending: false, requiresRefresh: true,
@@ -303,7 +309,10 @@ async function loadView(view, date) {
       } catch (_) {}
     }
     if (request !== viewRequest) return;
-    if (view === 'threads') await renderThreads(data, date);
+    if (view === 'threads') {
+      clearSettledActions(request);
+      await renderThreads(data, date);
+    }
     else if (view !== 'dreams') renderLately(data);
     else if (date) renderDream(data);
     else {
