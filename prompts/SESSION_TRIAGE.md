@@ -55,7 +55,7 @@ Alongside findings, emit three judgment facets about the session as a whole, plu
 - `outcome` — judged from the transcript's end state: `fully_achieved`, `mostly_achieved`, `partially_achieved`, `not_achieved`, or `unclear_from_transcript`. When genuinely ambiguous, use `unclear_from_transcript` — never guess.
 - `satisfaction_signals` — **RETIRED 2026-07-28 after its pilot week; always emit all zeros.** Do not attempt to score user sentiment. The field stays in the schema so existing consumers don't hit a missing key, but its value is no longer read. It fired in only 8% of sessions and was wrong in most of those: spot-checking six non-zero cases against their transcripts found one grounded reading, four that scored harness scaffolding as human sentiment (`<task-notification>` blocks, `<teammate-message>` traffic, a bare "Yes", a slash-command invocation), and one on a subagent transcript, which has no human in it to have a feeling. The user role in a transcript carries far more machinery than speech, so sentiment read from it is mostly machinery.
 - `instructions_given` — up to 3 one-line paraphrases of explicit STANDING instructions the user stated ("always run tests after edits", "use fish syntax", "never push to main directly"). Standing directives only — not one-off task requests. Empty array when there are none.
-- `deferred_ideas` — up to 3 ideas the user explicitly put off. Only include an idea if the user explicitly said they would defer it. Do not infer deferral from unfinished work or a possible future task. Each item has a one-line `idea` description and a nonempty, verbatim `quote` from the user under 200 characters. Emit `[]` when none qualifies. The quote must come from something the human typed: never from a `<task-notification>`, `<teammate-message>`, slash-command expansion, hook output, or a parent agent's prompt to a subagent. A subagent or workflow transcript has no human in it; emit `[]` there.
+- `deferred_ideas` — up to 3 ideas the user explicitly put off. Only include an idea if the user explicitly said they would defer it. Do not infer deferral from unfinished work or a possible future task. Each item has a one-line `idea` description of at most 120 characters and a nonempty, verbatim `quote` from the user under 200 characters. Emit `[]` when none qualifies. The quote must come from something the human typed: never from a `<task-notification>`, `<teammate-message>`, slash-command expansion, hook output, or a parent agent's prompt to a subagent. A subagent or workflow transcript has no human in it; emit `[]` there.
 
 For a trivial session (a handful of turns, no substantive work), emit the facets without deliberation: `underlying_goal: null`, `outcome: "unclear_from_transcript"`, all-zero `satisfaction_signals`, empty `instructions_given`.
 
@@ -82,7 +82,7 @@ carry the field; ignore it there too.
   "outcome": "fully_achieved|mostly_achieved|partially_achieved|not_achieved|unclear_from_transcript",
   "satisfaction_signals": {"happy": 0, "satisfied": 0, "dissatisfied": 0, "frustrated": 0},
   "instructions_given": ["up to 3 one-line paraphrases of explicit standing instructions"],
-  "deferred_ideas": [{"idea": "one line", "quote": "verbatim user words, under 200 chars"}],
+  "deferred_ideas": [{"idea": "one line, at most 120 characters", "quote": "verbatim user words, under 200 chars"}],
   "findings": [
     {
       "category": "missed_skill",

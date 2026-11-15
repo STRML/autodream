@@ -182,6 +182,14 @@ if [ "$line1" = "AUTODREAM_THREADS_LINKER" ]; then
         <<< "$threads_request"
       exit 0
       ;;
+    finish_ideas)
+      jq -c --arg id "$MOCK_THREADS_CLOSE_ID" '.candidates[] | {hash:.hash,thread:(if .kind == "idea" then $id else "new" end),title:.goal,finished:true}' <<< "$threads_request"
+      exit 0
+      ;;
+    same_title|same_title_finished)
+      jq -c --arg mode "$threads_mode" '.candidates[] | {hash:.hash,thread:"new",title:(if .hash | contains("222222222222") then "  deploy   SERVICE!!! " else "Deploy service" end),finished:($mode == "same_title_finished" or .outcome == "fully_achieved" or .outcome == "mostly_achieved")}' <<< "$threads_request"
+      exit 0
+      ;;
     duplicate_split)
       if [ "${threads_call:-1}" -eq 1 ]; then
         title='Fetch three backup files from remote host via an lftp command'
@@ -294,7 +302,7 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
       skills_invoked:[],models_used:[],notable_initiatives:["initiative-\($i)"],underlying_goal:"goal-\($i)",
       outcome:(if $i == $n then "fully_achieved" else "partially_achieved" end),
       satisfaction_signals:{happy:0,satisfied:1,dissatisfied:0,frustrated:0},instructions_given:[],
-      deferred_ideas:(if $i == 1 then null elif $i == 2 then [{idea:"idea-a",quote:"quote-a"},{idea:"idea-b",quote:"quote-b"},"bad",{idea:"too long",quote:("x" * 200)}] elif $i == 3 then [{idea:"duplicate",quote:"quote-a"},{idea:"idea-c",quote:"quote-c"},{idea:"idea-d",quote:"quote-d"}] else [] end),
+      deferred_ideas:(if $i == 1 then null elif $i == 2 then [{idea:"idea-a",quote:"quote-a"},{idea:"idea-b",quote:"quote-b"},"bad",{idea:"too long",quote:("x" * 200)}] elif $i == 3 then [{idea:"idea-a",quote:"quote-a"},{idea:"idea-c",quote:"quote-c"},{idea:"idea-d",quote:"quote-d"}] else [] end),
       findings:[{category:"permission_prompt",severity:"low",what:"finding-from-chunk-\($i)",evidence_excerpt:"x",proposed_rule:"y"},
                 {category:"other",severity:"low",what:"shared across chunks",evidence_excerpt:"x",proposed_rule:"y"}]}' > "$out"
     if [ "$1" -eq 1 ]; then jq 'del(.deferred_ideas)' "$out" > "$out.tmp" && mv "$out.tmp" "$out"; fi

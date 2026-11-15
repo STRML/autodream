@@ -434,8 +434,8 @@ files instead of loading their contents into the launch prompt.
 
 Each eligible session can contribute one work candidate and up to three explicitly
 deferred idea candidates. Ideas retain their source transcript reference and use a
-separate candidate handle derived from the quoted evidence, so accepting one candidate
-does not mark its siblings processed. Closed idea threads remain closed when later
+separate candidate handle derived from the normalized (idea, quote) pair, so accepting
+one candidate does not mark its siblings processed. Closed idea threads remain closed when later
 sessions describe the idea differently.
 
 The linker settings are `AUTODREAM_THREADS_ENGINE` (default `claude`),
