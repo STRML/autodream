@@ -116,6 +116,53 @@ test_threads_report_without_index_is_empty() {
   assert_eq "$report" "$(printf '## Dropped threads\n\nNo dropped threads are currently eligible.')" "fresh install report renders an empty section without a warning"
 }
 
+test_threads_render_missing_index_uses_empty_validated_state() {
+  local dir="$TMP/fresh-render" rc output
+  mkdir -p "$dir/dreams"
+  AUTODREAM_DIR="$dir" DREAMS_DIR="$dir/dreams" \
+    /bin/bash "$THREADS" render >/dev/null 2>&1
+  rc=$?
+  output=$(python3 - "$dir/dreams/threads.html" <<'PY'
+import sys
+print("empty" if '"threads":[]' in open(sys.argv[1], encoding="utf-8").read() else "nonempty")
+PY
+)
+  assert_eq "$rc" 0 "missing index renders successfully"
+  assert_eq "$output" 'empty' "missing index reaches the renderer as an empty state value"
+}
+
+test_threads_renderer_reads_validated_state_from_stdin() {
+  local dir="$TMP/render-stdin" output rc
+  mkdir -p "$dir"
+  printf '%s\n' '[{"id":"t-12345678","kind":"work","repo":"","title":"stdin thread","goal":"continue","sessions":[],"status":"open","done_by":null,"last_seen":"2020-01-01"}]' |
+    python3 "$REPO/bin/threads-render.py" - "$dir/threads.html" --as-of "$AS_OF" >/dev/null 2>&1
+  rc=$?
+  output=$(grep -c 'stdin thread' "$dir/threads.html" 2>/dev/null || true)
+  assert_eq "$rc" 0 "renderer accepts the already validated state on stdin"
+  assert_eq "$output" 1 "renderer uses the supplied state snapshot"
+}
+
+test_threads_dashboard_singular_session_label() {
+  local output
+  output=$(python3 - "$REPO/templates/threads.html" <<'PY'
+import sys
+template = open(sys.argv[1], encoding="utf-8").read()
+print("ok" if 'thread.sessions.length === 1 ? " session" : " sessions"' in template else "missing")
+PY
+)
+  assert_eq "$output" ok "dashboard uses singular session for one linked session"
+}
+
+test_threads_resume_missing_index_is_clean() {
+  local dir="$TMP/fresh-resume" output rc
+  mkdir -p "$dir"
+  output=$(AUTODREAM_DIR="$dir" "$THREADS" resume t-12345678 2>&1)
+  rc=$?
+  assert_eq "$rc" 1 "missing index reports an unknown thread"
+  case "$output" in *"unknown thread id"*) ok "missing index produces a clean resume error" ;; *) no "missing index produces a clean resume error ($output)" ;; esac
+  case "$output" in *"Traceback"*) no "missing index resume has no traceback" ;; *) ok "missing index resume has no traceback" ;; esac
+}
+
 test_threads_rejects_null_session_as_unreadable_state() {
   local dir="$TMP/null-session" output rc
   mkdir -p "$dir"
@@ -124,6 +171,17 @@ test_threads_rejects_null_session_as_unreadable_state() {
   rc=$?
   assert_eq "$rc" 1 "malformed session element is rejected by the state reader"
   case "$output" in *"malformed state"*) ok "malformed session is reported as unreadable state" ;; *) no "malformed session is reported as unreadable state ($output)" ;; esac
+}
+
+test_threads_renderer_rejects_malformed_session_record() {
+  local dir="$TMP/render-bad-session" output rc
+  mkdir -p "$dir"
+  printf '%s\n' '{"id":"t-12345678","kind":"work","repo":"","title":"broken","goal":"broken","sessions":[{"date":"2020-01-01"}],"status":"open","done_by":null,"last_seen":"2020-01-01"}' > "$dir/threads.jsonl"
+  output=$(python3 "$REPO/bin/threads-render.py" "$dir/threads.jsonl" "$dir/threads.html" --as-of "$AS_OF" 2>&1)
+  rc=$?
+  assert_eq "$rc" 1 "renderer rejects session missing its hash"
+  case "$output" in *"invalid thread"*) ok "renderer identifies malformed session state" ;; *) no "renderer identifies malformed session state ($output)" ;; esac
+  case "$output" in *"Traceback"*) no "renderer malformed-state error has no traceback" ;; *) ok "renderer malformed-state error has no traceback" ;; esac
 }
 
 test_threads_invalid_and_unknown_ids_are_refused() {
@@ -180,7 +238,12 @@ for test_name in \
   test_threads_list_computes_dropped \
   test_threads_missing_state_is_empty \
   test_threads_report_without_index_is_empty \
+  test_threads_render_missing_index_uses_empty_validated_state \
+  test_threads_renderer_reads_validated_state_from_stdin \
+  test_threads_dashboard_singular_session_label \
+  test_threads_resume_missing_index_is_clean \
   test_threads_rejects_null_session_as_unreadable_state \
+  test_threads_renderer_rejects_malformed_session_record \
   test_threads_invalid_and_unknown_ids_are_refused \
   test_threads_search_treats_metacharacters_literally \
   test_threads_dropped_days_accepts_leading_zero \

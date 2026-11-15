@@ -8261,11 +8261,11 @@ test_threads_resume_marks_missing_transcript(){
 
 test_threads_backfill_uses_sidecars_and_respects_budget(){
   echo "# threads: backfill uses archived sidecars without rollups and stops at the call budget"
-  local root from to no_sidecar first_hash first_date output calls plan_seen linked
+  local root from to first_hash first_date output calls plan_seen linked
   root=$(setup_env); from=2019-12-30; to=2020-01-02
   first_hash=$(seed_thread_archive_date "$root" 2019-12-30 backfill-first "first historical goal" partially_achieved yes)
   seed_thread_archive_date "$root" 2019-12-31 backfill-second "second historical goal" partially_achieved yes >/dev/null
-  no_sidecar=$(seed_thread_archive_date "$root" 2020-01-01 backfill-unmeasured "unmeasured goal" partially_achieved no)
+  seed_thread_archive_date "$root" 2019-12-30 backfill-unmeasured "unmeasured goal" partially_achieved no >/dev/null
   output="$root/backfill.out"
   export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap" \
     MOCK_BACKFILL_OUTPUT_FILE="$output" MOCK_BACKFILL_PLAN_SEEN="$root/plan-seen"
@@ -8282,7 +8282,30 @@ test_threads_backfill_uses_sidecars_and_respects_budget(){
   assert_eq "$([ "$calls" -gt 0 ] && echo true || echo false)" true "real two-column source map makes linker calls"
   assert_eq "$linked" 1 "real-format backfill links the archived session"
   assert_eq "$plan_seen" true "plan precedes the first engine call"
-  assert_grep "$output" '2020-01-01' "date without sidecars is named"
+  assert_grep "$output" '^unmeasured_sessions: 1$' "an unparseable or missing sidecar counts its session"
+  assert_nogrep "$output" '^skipped_dates:' "one unmeasured session does not make a linked date skipped"
+  thread_cleanup "$root"
+}
+
+test_threads_backfill_skipped_dates_have_no_linker_call(){
+  echo "# threads: backfill lists budget and no-candidate dates only when their linker call is skipped"
+  local root linked_hash budget_date linked_date output calls dates
+  root=$(setup_env); budget_date=2019-12-30; linked_date=2019-12-31
+  seed_thread_archive_date "$root" "$budget_date" backfill-budget "budget goal" partially_achieved yes >/dev/null
+  linked_hash=$(seed_thread_archive_date "$root" "$linked_date" backfill-already-linked "already linked goal" partially_achieved yes)
+  seed_thread_record "$root" t-abcddcba "$REPO" "already linked goal" "$linked_date" "$linked_hash" "/archive/already-linked.jsonl" partially_achieved open
+  output="$root/backfill-skipped.out"
+  export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
+  AUTODREAM_DIR="$root/autodream" PROJECTS_DIR="$root/projects" CLAUDE_BIN="$MOCK" \
+    /bin/bash "$REPO/bin/threads.sh" backfill "$budget_date" "$linked_date" --max-calls 0 > "$output" 2>&1
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  calls=$(thread_call_count "$root/cap")
+  dates=$(sed -n '/^skipped_dates:$/,$p' "$output" | sed '1d' | tr '\n' ' ')
+  assert_eq "$calls" 0 "zero budget makes no linker calls"
+  assert_grep "$output" '^skipped_dates:$' "dates without linker calls are grouped"
+  assert_grep "$output" "$budget_date" "budget-blocked candidate date is listed"
+  assert_grep "$output" "$linked_date" "date with no remaining candidates is listed"
+  assert_eq "$dates" "- $budget_date - $linked_date " "only the two dates without calls are listed"
   thread_cleanup "$root"
 }
 
@@ -8618,6 +8641,7 @@ _run test_threads_counts_assignments_omitted_by_linker
 _run test_threads_resume_quotes_injected_goal
 _run test_threads_resume_marks_missing_transcript
 _run test_threads_backfill_uses_sidecars_and_respects_budget
+_run test_threads_backfill_skipped_dates_have_no_linker_call
 _run test_threads_backfill_requires_timeout_binary
 _run test_threads_backfill_accepts_claude_isSidechain_sidecar
 _run test_threads_backfill_reads_unterminated_manifest_root
