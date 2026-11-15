@@ -85,13 +85,34 @@ class DataTests(unittest.TestCase):
         self.finding('222222222222', outcome='unknown')
         self.assertTrue(all(value is None for value in self.stats_night()['outcomes'].values()))
 
-    def test_web_stats_session_without_findings_is_unmeasured(self):
-        self.finding()
-        sidecar = dict(nested=False, user_message_count=5, tool_call_count=6, duration_minutes=7)
-        (self.day / '111111111111.stats.json').write_text(json.dumps(sidecar))
+    def worklist(self, *paths):
+        import hashlib
+        (self.day / 'sessions.txt').write_text(''.join(path + '\n' for path in paths))
+        return [hashlib.sha1(path.encode()).hexdigest()[:12] for path in paths]
+
+    def test_web_stats_ignore_sidecars_outside_the_worklist(self):
+        done, = self.worklist('/sessions/done.jsonl')
+        self.finding(done)
+        stale = dict(nested=False, user_message_count=9, tool_call_count=9, duration_minutes=9)
+        (self.day / '111111111111.stats.json').write_text(json.dumps(stale))
         night = self.stats_night()
-        self.assertTrue(all(value is None for value in night['activity'].values()),
-                        'an untriaged session must not leave a partial activity total')
+        self.assertEqual(night['activity'], dict(user_messages=4, tool_calls=3, duration_minutes=8),
+                         'a sidecar left by an earlier run must not erase a completed night')
+
+    def test_web_stats_pending_nested_worker_leaves_totals_measured(self):
+        top, worker = self.worklist('/sessions/top.jsonl', '/sessions/top/subagents/agent-1.jsonl')
+        self.finding(top)
+        (self.day / (worker + '.stats.json')).write_text(json.dumps(dict(nested=True, isSidechain=True)))
+        night = self.stats_night()
+        self.assertEqual(night['activity']['tool_calls'], 3)
+        self.assertEqual(night['outcomes']['partially_achieved'], 1)
+
+    def test_web_stats_pending_top_level_session_is_unmeasured(self):
+        done, pending = self.worklist('/sessions/done.jsonl', '/sessions/pending.jsonl')
+        self.finding(done)
+        (self.day / (pending + '.stats.json')).write_text(json.dumps(dict(nested=False)))
+        night = self.stats_night()
+        self.assertTrue(all(value is None for value in night['activity'].values()))
         self.assertTrue(all(value is None for value in night['outcomes'].values()))
 
     def test_web_stats_unreadable_file_is_degraded_and_not_cached(self):

@@ -2,6 +2,7 @@
 import copy
 import csv
 from datetime import date as calendar_date, datetime, timedelta, timezone
+import hashlib
 import json
 import math
 import os
@@ -68,20 +69,39 @@ def read_categories(path):
         return None
 
 
+def night_sessions(directory, unreadable):
+    worklist = directory / 'sessions.txt'
+    if worklist.exists():
+        try:
+            lines = worklist.read_bytes().split(b'\n')
+        except OSError:
+            unreadable.add('sessions.txt')
+        else:
+            return sorted({hashlib.sha1(line).hexdigest()[:12] for line in lines if line})
+    return sorted(path.name[:-len('.json')] for path in directory.glob('*.json')
+                  if FINDING.fullmatch(path.name))
+
+
+def pending_is_nested(sidecar):
+    try:
+        stats = json.loads(sidecar.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return False
+    return isinstance(stats, dict) and any(stats.get(key) is True for key in ('nested', 'isSidechain'))
+
+
 def build_night_stats(date, directory):
     run = read_allowed_run_stats(directory / 'run-stats.txt')
     activity = dict(user_messages=[], tool_calls=[], duration_minutes=[])
     outcomes = []
     degraded, unreadable = [], set()
-    hashes = {path.name[:-len('.json')] for path in directory.glob('*.json') if FINDING.fullmatch(path.name)}
-    hashes.update(path.name[:-len('.stats.json')] for path in directory.glob('*.stats.json')
-                  if FINDING.fullmatch(path.name[:-len('.stats.json')] + '.json'))
-    for session in sorted(hashes):
+    for session in night_sessions(directory, unreadable):
         path = directory / (session + '.json')
         if not path.exists():
-            for values in activity.values():
-                values.append(None)
-            outcomes.append(None)
+            if not pending_is_nested(directory / (session + '.stats.json')):
+                for values in activity.values():
+                    values.append(None)
+                outcomes.append(None)
             continue
         finding = read_object(path, degraded, unreadable)
         if finding.get('skipped') == 'below_noise_gate':
@@ -356,7 +376,7 @@ class NightCache:
     def fingerprint(self, date):
         directory = self.root / 'findings' / date
         paths = [directory / name for name in ('pin-projects.tsv', 'session-cwds.tsv',
-                                                'categories.tsv', 'run-stats.txt')]
+                                                'categories.tsv', 'run-stats.txt', 'sessions.txt')]
         paths.append(self.dreams / (date + '.md'))
         paths.extend(path for path in directory.glob('*.json')
                      if FINDING.fullmatch(path.name) or re.fullmatch(r'[0-9a-f]{12}\.stats\.json', path.name))
