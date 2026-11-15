@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -33,21 +34,6 @@ def valid_thread(item):
     )
 
 
-def display_status(item, as_of, dropped_days):
-    if item["status"] != "open":
-        return item["status"]
-    newest = max(item["sessions"], key=lambda row: (row.get("date", ""), row.get("hash", "")), default={})
-    outcome = newest.get("outcome", "") if isinstance(newest, dict) else ""
-    if outcome not in {"not_achieved", "partially_achieved", "unclear_from_transcript"}:
-        return "open"
-    cutoff = as_of - datetime.timedelta(days=dropped_days)
-    try:
-        last_seen = datetime.date.fromisoformat(item["last_seen"])
-    except ValueError:
-        raise ValueError("thread has an invalid last_seen date")
-    return "dropped" if last_seen < cutoff else "open"
-
-
 def template_path(renderer_dir):
     installed = os.environ.get("AUTODREAM_THREADS_TEMPLATE")
     options = ([Path(installed)] if installed else []) + [
@@ -60,11 +46,46 @@ def template_path(renderer_dir):
     raise FileNotFoundError("threads.html template was not found")
 
 
+def derive_display_status(state, as_of_text):
+    renderer_dir = Path(__file__).resolve().parent
+    portable_path = renderer_dir / "portable.sh"
+    status_path = renderer_dir / "threads-status.jq"
+    if not portable_path.is_file() or not status_path.is_file():
+        raise ValueError("threads status dependencies were not found")
+    dropped_days_text = os.environ.get("AUTODREAM_THREADS_DROPPED_DAYS", "7")
+    if not re.fullmatch(r"[0-9]{1,9}", dropped_days_text) or int(dropped_days_text) < 1:
+        raise ValueError("invalid AUTODREAM_THREADS_DROPPED_DAYS")
+    script = (
+        '. "$1" || exit 1; '
+        'tmo 10 jq -c --arg mode render --arg as_of "$2" '
+        '--arg previous_as_of "" --argjson dropped_days "$3" '
+        '--arg status_filter "" --arg kind_filter "" --arg repo_filter "" '
+        '--arg query "" --arg json 1 -f "$4" "$5"'
+    )
+    # A file, never stdin: with no timeout binary, tmo backgrounds jq, and a background job's
+    # stdin is /dev/null, so piped state would vanish and jq would exit 0 with no output.
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as state_file:
+        json.dump(state, state_file, ensure_ascii=False)
+        state_file.flush()
+        result = subprocess.run(
+            ["/bin/bash", "-c", script, "threads-status", str(portable_path), as_of_text,
+             dropped_days_text, str(status_path), state_file.name],
+            stdin=subprocess.DEVNULL, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+    if result.returncode:
+        if result.returncode in {124, 137, 143}:
+            raise ValueError("status calculation timed out after 10 seconds")
+        raise ValueError("status calculation failed")
+    try:
+        annotated = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise ValueError("status calculation returned invalid JSON") from error
+    return annotated
+
+
 def render(state_path, output_path, as_of_text):
-    as_of = datetime.date.fromisoformat(as_of_text)
-    dropped_days = int(os.environ.get("AUTODREAM_THREADS_DROPPED_DAYS", "7"), 10)
-    if dropped_days < 1:
-        raise ValueError("AUTODREAM_THREADS_DROPPED_DAYS must be positive")
+    datetime.date.fromisoformat(as_of_text)
     if state_path == "-":
         state = json.load(sys.stdin)
         if not isinstance(state, list):
@@ -78,12 +99,13 @@ def render(state_path, output_path, as_of_text):
                 state.append(json.loads(line))
     else:
         state = []
+    if any(not valid_thread(item) for item in state):
+        raise ValueError("state contains an invalid thread")
+    if any("display_status" not in item for item in state if isinstance(item, dict)):
+        state = derive_display_status(state, as_of_text)
     threads = []
     for item in state:
-        if not valid_thread(item):
-            raise ValueError("state contains an invalid thread")
         item = dict(item)
-        item["display_status"] = display_status(item, as_of, dropped_days)
         threads.append(item)
     ids = [item["id"] for item in threads]
     if len(ids) != len(set(ids)):
