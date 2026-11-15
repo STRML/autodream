@@ -4,6 +4,7 @@ import datetime
 import json
 import os
 import re
+import shlex
 import sys
 import tempfile
 from pathlib import Path
@@ -35,7 +36,7 @@ def valid_thread(item):
 def display_status(item, as_of, dropped_days):
     if item["status"] != "open":
         return item["status"]
-    newest = max(item["sessions"], key=lambda row: row.get("date", ""), default={})
+    newest = max(item["sessions"], key=lambda row: (row.get("date", ""), row.get("hash", "")), default={})
     outcome = newest.get("outcome", "") if isinstance(newest, dict) else ""
     if outcome not in {"not_achieved", "partially_achieved", "unclear_from_transcript"}:
         return "open"
@@ -90,6 +91,7 @@ def render(state_path, output_path, as_of_text):
     payload = {
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "as_of": as_of_text,
+        "cli": shlex.quote(os.environ.get("AUTODREAM_THREADS_CLI", "threads.sh")),
         "threads": threads,
     }
     json_text = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).replace("<", r"\u003c")

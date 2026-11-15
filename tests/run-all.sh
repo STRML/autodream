@@ -16,6 +16,8 @@ REPO=$(cd "$HERE/.." && pwd)
 . "$REPO/bin/portable.sh"
 # shellcheck source=/dev/null
 . "$HERE/lib-tmp.sh"; suite_tmp runall
+export HOME="$SUITE_TMP/home" DREAMS_DIR="$SUITE_TMP/dreams"
+mkdir -p "$HOME" "$DREAMS_DIR"
 RUN="$REPO/bin/run.sh"
 MOCK="$HERE/mock-claude.sh"
 # run.sh puts ~/.local/bin on PATH, where the real shared-memory CLI lives, so a
@@ -8283,13 +8285,15 @@ test_threads_backfill_uses_sidecars_and_respects_budget(){
   assert_eq "$linked" 1 "real-format backfill links the archived session"
   assert_eq "$plan_seen" true "plan precedes the first engine call"
   assert_grep "$output" '^unmeasured_sessions: 1$' "an unparseable or missing sidecar counts its session"
+  assert_grep "$output" '^unmeasured_dates:$' "unmeasured dates are grouped"
+  assert_grep "$output" '^- 2019-12-30$' "date with unmeasured sessions is named"
   assert_nogrep "$output" '^skipped_dates:' "one unmeasured session does not make a linked date skipped"
   thread_cleanup "$root"
 }
 
 test_threads_backfill_skipped_dates_have_no_linker_call(){
   echo "# threads: backfill lists budget and no-candidate dates only when their linker call is skipped"
-  local root linked_hash budget_date linked_date output calls dates
+  local root linked_hash budget_date linked_date output calls dates rerun
   root=$(setup_env); budget_date=2019-12-30; linked_date=2019-12-31
   seed_thread_archive_date "$root" "$budget_date" backfill-budget "budget goal" partially_achieved yes >/dev/null
   linked_hash=$(seed_thread_archive_date "$root" "$linked_date" backfill-already-linked "already linked goal" partially_achieved yes)
@@ -8304,8 +8308,12 @@ test_threads_backfill_skipped_dates_have_no_linker_call(){
   assert_eq "$calls" 0 "zero budget makes no linker calls"
   assert_grep "$output" '^skipped_dates:$' "dates without linker calls are grouped"
   assert_grep "$output" "$budget_date" "budget-blocked candidate date is listed"
-  assert_grep "$output" "$linked_date" "date with no remaining candidates is listed"
-  assert_eq "$dates" "- $budget_date - $linked_date " "only the two dates without calls are listed"
+  assert_nogrep "$output" "$linked_date" "date with no remaining candidates is not listed"
+  assert_eq "$dates" "- $budget_date " "only the date blocked by budget is listed"
+  rerun="$root/backfill-complete.out"
+  AUTODREAM_DIR="$root/autodream" PROJECTS_DIR="$root/projects" CLAUDE_BIN="$MOCK" \
+    /bin/bash "$REPO/bin/threads.sh" backfill "$linked_date" "$linked_date" --max-calls 1 > "$rerun" 2>&1
+  assert_nogrep "$rerun" '^skipped_dates:' "completed date is not reported as skipped on rerun"
   thread_cleanup "$root"
 }
 
@@ -8373,11 +8381,11 @@ test_threads_backfill_reads_unterminated_manifest_root(){
 test_threads_backfill_budget_uses_grown_index_request(){
   echo "# threads: backfill enforces max-calls after earlier dates grow the index"
   local root repo_base repo_a repo_b repo_link_a repo_link_b large output calls actual
-  root=$(setup_env); repo_base=$(mktemp -d "$HOME/.cache/ccad-threads-budget.XXXXXX") || return 1
+  root=$(setup_env); repo_base=$(mktemp -d "$REPO/.threads-budget.XXXXXX") || return 1
   repo_a="$repo_base/a"; repo_b="$repo_base/b"
   mkdir -p "$repo_a" "$repo_b"
-  git -C "$repo_a" init -q --template=/dev/null
-  git -C "$repo_b" init -q --template=/dev/null
+  git init -q --template=/dev/null --separate-git-dir="$repo_a/.git-meta" "$repo_a"
+  git init -q --template=/dev/null --separate-git-dir="$repo_b/.git-meta" "$repo_b"
   large=$(python3 -c 'print("x" * 80)')
   seed_thread_archive_date "$root" 2019-12-30 budget-first "$large" partially_achieved yes "$REPO" >/dev/null
   seed_thread_archive_date "$root" 2019-12-31 budget-second-a "second goal a" partially_achieved yes "$repo_a" >/dev/null
@@ -8391,6 +8399,8 @@ test_threads_backfill_budget_uses_grown_index_request(){
   actual=$(sed -n 's/^actual_calls: //p' "$output" | tail -1)
   assert_eq "$calls" 2 "engine calls never exceed the live max-calls budget"
   assert_eq "$actual" 2 "actual_calls reports the calls made after context growth"
+  assert_grep "$output" '^skipped_dates:$' "partially processed date with budget skips is listed"
+  assert_grep "$output" '^- 2019-12-31$' "date skipped after linking one group is named"
   python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1])' "$repo_base"
   thread_cleanup "$root"
 }
@@ -8487,6 +8497,7 @@ test_threads_html_payload_is_inert(){
   echo "# threads: hostile state renders as inert JSON and text"
   local root hostile state page baseline result
   root=$(setup_env)
+  ln -s "$REPO/bin/threads.sh" "$root/autodream/threads.sh"
   state=$(thread_state "$root"); mkdir -p "$(dirname "$state")"
   page="$root/dreams/threads.html"
   hostile='</script><img src=x onerror="alert(1)"> "quoted" '\'' ; $(touch /tmp/adt21-pwned)'$'\001'
@@ -8519,6 +8530,7 @@ PY_THREADS_HOSTILE
   assert_eq "$(printf '%s' "$result" | jq -r .unexpected_html_nodes)" 0 "payload creates no HTML elements"
   assert_eq "$(printf '%s' "$result" | jq -r .unsafe_dom_sinks)" 0 "dynamic text uses textContent"
   assert_eq "$(printf '%s' "$result" | jq -r .invalid_id_commands)" 0 "copy commands require valid IDs"
+  assert_eq "$(printf '%s' "$result" | jq -r '.payload.cli')" "$(python3 -c 'import shlex,sys; print(shlex.quote(sys.argv[1]))' "$root/autodream/threads.sh")" "dashboard embeds the shell-quoted install CLI path"
   assert_eq "$(printf '%s' "$result" | jq -r '.payload.generated_at | length > 0')" true "generation time is embedded"
   thread_cleanup "$root"
 }
@@ -8539,6 +8551,47 @@ test_threads_render_runs_on_empty_night_and_cli_write(){
   generated=$(printf '%s' "$result" | jq -r '.payload.generated_at')
   assert_eq "$status" closed_by_sam "CLI write refreshes page"
   [ -n "$generated" ] && ok "generation time is present" || no "generation time is present"
+  thread_cleanup "$root"
+}
+
+test_threads_render_holds_lock_until_page_is_replaced(){
+  echo "# threads: CLI status write keeps the lock through dashboard replacement"
+  local root state renderer_started release_renderer close_pid attempts result status close_rc
+  root=$(setup_env)
+  state=$(thread_state "$root"); mkdir -p "$(dirname "$state")" "$root/renderer-bin"
+  jq -cn '{id:"t-50000002",kind:"work",repo:"/repo",title:"serialized",goal:"serialize render",sessions:[{date:"2020-01-01",hash:"aaaaaaaaaaaa",session_path:"/archive/a.jsonl",outcome:"partially_achieved"}],status:"open",done_by:null,last_seen:"2020-01-01"}' > "$state"
+  renderer_started="$root/renderer-started"; release_renderer="$root/release-renderer"
+  cat > "$root/renderer-bin/python3" <<'EOF_RENDER_GATE'
+#!/bin/bash
+case "$1" in
+  */threads-render.py)
+    renderer=$1
+    : > "$MOCK_RENDER_STARTED"
+    while [ ! -e "$MOCK_RENDER_RELEASE" ]; do sleep 0.05; done
+    shift
+    exec /usr/bin/python3 "$renderer" "$@"
+    ;;
+esac
+exec /usr/bin/python3 "$@"
+EOF_RENDER_GATE
+  chmod +x "$root/renderer-bin/python3"
+  MOCK_RENDER_STARTED="$renderer_started" MOCK_RENDER_RELEASE="$release_renderer" \
+    PATH="$root/renderer-bin:$PATH" AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
+    /bin/bash "$REPO/bin/threads.sh" close t-50000002 > "$root/close-render.out" 2>&1 &
+  close_pid=$!
+  attempts=0
+  while [ ! -e "$renderer_started" ] && [ "$attempts" -lt 100 ]; do sleep 0.05; attempts=$((attempts + 1)); done
+  assert_file "$renderer_started" "close reaches dashboard rendering"
+  assert_eq "$([ -d "$(thread_state "$root").lock" ] && echo true || echo false)" true "state lock remains held during dashboard rendering"
+  if [ ! -e "$renderer_started" ]; then cat "$root/close-render.out"; fi
+  : > "$release_renderer"
+  wait "$close_pid"
+  close_rc=$?
+  assert_eq "$close_rc" 0 "CLI close completes after rendering is released"
+  if [ ! -f "$root/dreams/threads.html" ]; then cat "$root/close-render.out"; fi
+  result=$(threads_html_inspect "$root/dreams/threads.html")
+  status=$(printf '%s' "$result" | jq -r '.payload.threads[0].status')
+  assert_eq "$status" closed_by_sam "rendered page contains the committed status"
   thread_cleanup "$root"
 }
 
@@ -8583,6 +8636,7 @@ test_threads_explore_launch_is_constrained(){
   assert_eq "$bash_permission" "$installed_threads_permission" "CLI scope"
   assert_eq "$inlined" false "prompt points to files"
   assert_grep "$root/claude.args" "$root/autodream/threads.jsonl" "prompt references the index path"
+  assert_grep "$root/claude.args" "Threads CLI: $root/autodream/threads.sh" "system prompt names the scoped CLI path"
   assert_grep "$root/claude.args" "$root/dreams/threads.html" "prompt references the dashboard path"
   assert_eq "$launch_rc" 0 "explore launch succeeds"
   prompt_words=0
@@ -8615,6 +8669,36 @@ test_threads_explore_quotes_paths_and_reports_launch_failure(){
   assert_file "$parent/claude.args" "quoted command reaches Claude"
   assert_eq "$failed_cmux_exit" 1 "failed launch is visible"
   thread_cleanup "$parent"
+}
+
+test_threads_explore_resolves_claude_from_path_and_checks_before_open(){
+  echo "# threads: explore resolves Claude from PATH and checks all launch tools before opening"
+  local root open_bin cmux_bin path_claude opened marker rc
+  root=$(setup_env); mkdir -p "$root/path-bin"
+  ln -s "$REPO/bin/threads.sh" "$root/autodream/threads.sh"
+  open_bin="$root/open"; cmux_bin="$root/cmux"; path_claude="$root/path-bin/claude"
+  printf '%s\n' '#!/bin/bash' ': > "$MOCK_OPEN_MARKER"' > "$open_bin"
+  printf '%s\n' '#!/bin/bash' 'while [ "$#" -gt 0 ]; do if [ "$1" = --command ]; then shift; /bin/bash -c "$1"; exit $?; fi; shift; done' > "$cmux_bin"
+  printf '%s\n' '#!/bin/bash' 'printf "%s\\n" "$@" > "$MOCK_CLAUDE_ARGS"' > "$path_claude"
+  chmod +x "$open_bin" "$cmux_bin" "$path_claude"
+  MOCK_OPEN_MARKER="$root/opened" MOCK_CLAUDE_ARGS="$root/path-claude.args" \
+    PATH="$root/path-bin:/usr/bin:/bin" HOME="$root/home" AUTODREAM_DIR="$root/autodream" \
+    DREAMS_DIR="$root/dreams" OPEN_BIN="$open_bin" CMUX_BIN="$cmux_bin" CLAUDE_BIN=claude \
+    /bin/bash "$REPO/bin/threads.sh" explore > "$root/path-explore.out" 2>&1
+  rc=$?
+  assert_eq "$rc" 0 "bare claude name resolves from PATH"
+  assert_file "$root/opened" "dashboard opens with every prerequisite available"
+  assert_grep "$root/path-claude.args" '^--permission-mode$' "PATH-resolved Claude launches"
+
+  rm -f "$root/opened" "$root/path-claude.args"
+  MOCK_OPEN_MARKER="$root/opened" HOME="$root/home" AUTODREAM_DIR="$root/autodream" \
+    DREAMS_DIR="$root/dreams" OPEN_BIN="$open_bin" CMUX_BIN="$root/missing-cmux" \
+    CLAUDE_BIN="$root/missing-claude" PATH="$root/empty-path" \
+    /bin/bash "$REPO/bin/threads.sh" explore > "$root/missing-explore.out" 2>&1
+  rc=$?
+  assert_eq "$rc" 1 "missing launch prerequisite fails"
+  assert_no_file "$root/opened" "missing prerequisite leaves dashboard unopened"
+  thread_cleanup "$root"
 }
 
 _run test_threads_eligibility_and_goal_fallback
@@ -8650,8 +8734,10 @@ _run test_threads_install_links_entrypoint
 _run test_threads_render_failure_preserves_previous_page
 _run test_threads_html_payload_is_inert
 _run test_threads_render_runs_on_empty_night_and_cli_write
+_run test_threads_render_holds_lock_until_page_is_replaced
 _run test_threads_explore_launch_is_constrained
 _run test_threads_explore_quotes_paths_and_reports_launch_failure
+_run test_threads_explore_resolves_claude_from_path_and_checks_before_open
 
 test_prune_worktrees_wiring(){
   echo "# prune: run.sh calls the helper only when roots are set, records the summary, and survives a failing helper"

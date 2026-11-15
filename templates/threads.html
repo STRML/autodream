@@ -94,8 +94,8 @@ function copyCommand(command, button, label) {
 function commandsFor(thread) {
   if (!/^t-[0-9a-f]{8}$/.test(thread.id)) return null;
   return {
-    resume: "~/.claude/autodream/threads.sh resume " + thread.id,
-    close: "~/.claude/autodream/threads.sh close " + thread.id
+    resume: data.cli + " resume " + thread.id,
+    close: data.cli + " close " + thread.id
   };
 }
 

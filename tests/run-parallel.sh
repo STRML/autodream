@@ -23,6 +23,26 @@ N=$((10#$N))
 # Short on purpose: the suite's sandbox paths sit under TMPDIR, and some fixtures embed them in lines
 # that are cut at a fixed length, so every character here is a character those lines lose.
 OUT=$(mktemp -d "${TMPDIR:-/tmp}/rp.XXXXXX")
+REAL_DREAMS="${HOME:-}/.claude/dreams"
+snapshot_real_dreams() {
+  python3 - "$REAL_DREAMS" <<'PY_DREAMS_SNAPSHOT'
+import os
+import sys
+root = sys.argv[1]
+if not os.path.lexists(root):
+    print("absent")
+else:
+    for current, dirs, files in os.walk(root):
+        for name in ["."] + dirs + files:
+            path = current if name == "." else os.path.join(current, name)
+            info = os.lstat(path)
+            print("%s\t%s\t%s" % (os.path.relpath(path, root), info.st_mtime_ns, info.st_size))
+PY_DREAMS_SNAPSHOT
+}
+dreams_before=$(snapshot_real_dreams)
+SENTINEL_HOME="$OUT/sentinel-home"
+mkdir -p "$SENTINEL_HOME/.claude/dreams"
+export HOME="$SENTINEL_HOME" DREAMS_DIR="$SENTINEL_HOME/.claude/dreams"
 pids=()
 # Each shard runs in a process group of its own (set -m), and Ctrl-C or TERM sends TERM to every
 # group. Without that the shards keep running: they inherit an ignored SIGINT from the background,
@@ -59,5 +79,14 @@ done
 
 echo
 echo "----------------------------------------"
+dreams_after=$(snapshot_real_dreams)
+if [ "$dreams_before" = "$dreams_after" ]; then
+  pass=$((pass + 1))
+  echo "  ok   - tests leave real $REAL_DREAMS unchanged with a sentinel HOME"
+else
+  fail=$((fail + 1))
+  bad=1
+  echo "  FAIL - tests created or modified files under real $REAL_DREAMS"
+fi
 echo "passed: $pass   failed: $fail   ($N shards, $((SECONDS - start))s)"
 [ "$bad" -eq 0 ] && [ "$fail" -eq 0 ]

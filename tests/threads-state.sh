@@ -5,6 +5,9 @@ REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 THREADS="$REPO/bin/threads.sh"
 PORTABLE="$REPO/bin/portable.sh"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/adt12.XXXXXX") || exit 1
+export HOME="$TMP/home"
+export DREAMS_DIR="$TMP/dreams"
+mkdir -p "$HOME" "$DREAMS_DIR"
 PASS=0
 FAIL=0
 . "$PORTABLE"
@@ -107,6 +110,35 @@ test_threads_missing_state_is_empty() {
   mkdir -p "$dir"
   count=$(AUTODREAM_DIR="$dir" "$THREADS" list --json | jq 'length')
   assert_eq "$count" 0 "missing index reads as empty"
+}
+
+test_threads_empty_state_is_empty() {
+  local dir="$TMP/zero-byte" output rc
+  mkdir -p "$dir"
+  : > "$dir/threads.jsonl"
+  output=$(AUTODREAM_DIR="$dir" "$THREADS" list --json 2>/dev/null)
+  rc=$?
+  assert_eq "$rc" 0 "zero-byte index is readable"
+  assert_eq "$(printf '%s' "$output" | jq 'length')" 0 "zero-byte index reads as empty"
+}
+
+test_threads_renderer_uses_hash_tie_breaker() {
+  local dir="$TMP/render-tie" cli_status page_status
+  mkdir -p "$dir"
+  jq -cn '{id:"t-00000009",kind:"work",repo:"/repo",title:"tie",goal:"tie",sessions:[{date:"2000-01-01",hash:"a",outcome:"not_achieved"},{date:"2000-01-01",hash:"z",outcome:"achieved"}],status:"open",done_by:null,last_seen:"2000-01-01"}' > "$dir/threads.jsonl"
+  cli_status=$(AUTODREAM_DIR="$dir" "$THREADS" list --json | jq -r '.[0].status')
+  AUTODREAM_DIR="$dir" DREAMS_DIR="$dir/dreams" "$THREADS" render >/dev/null 2>&1
+  page_status=$(python3 - "$dir/dreams/threads.html" <<'PY'
+import json, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+start = text.index("<script id=\"threads-data\" type=\"application/json\">")
+start = text.index(">", start) + 1
+end = text.index("</script>", start)
+print(json.loads(text[start:end])["threads"][0]["display_status"])
+PY
+)
+  assert_eq "$cli_status" open "CLI selects the higher hash on a same-day tie"
+  assert_eq "$page_status" "$cli_status" "dashboard uses the CLI same-day tie order"
 }
 
 test_threads_report_without_index_is_empty() {
@@ -237,6 +269,7 @@ for test_name in \
   test_threads_cli_refuses_unreadable_state \
   test_threads_list_computes_dropped \
   test_threads_missing_state_is_empty \
+  test_threads_empty_state_is_empty \
   test_threads_report_without_index_is_empty \
   test_threads_render_missing_index_uses_empty_validated_state \
   test_threads_renderer_reads_validated_state_from_stdin \
@@ -244,6 +277,7 @@ for test_name in \
   test_threads_resume_missing_index_is_clean \
   test_threads_rejects_null_session_as_unreadable_state \
   test_threads_renderer_rejects_malformed_session_record \
+  test_threads_renderer_uses_hash_tie_breaker \
   test_threads_invalid_and_unknown_ids_are_refused \
   test_threads_search_treats_metacharacters_literally \
   test_threads_dropped_days_accepts_leading_zero \
