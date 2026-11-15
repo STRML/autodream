@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import selectors
+import socket
 import stat
 import subprocess
 import sys
@@ -13,6 +14,7 @@ import tempfile
 import unittest
 import urllib.error
 import urllib.request
+import plistlib
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -60,6 +62,148 @@ class WebTests(unittest.TestCase):
         return subprocess.run(["/bin/bash", str(COMMAND), *args],
                               env=env or self.env, capture_output=True, text=True,
                               timeout=15)
+
+    def run_install(self, *args, env_extra=None, without_tools=()):
+        home = self.root / "installer-home"
+        shim = self.root / "installer-shim"
+        tools = self.root / "installer-tools"
+        launch_agents = home / "Library" / "LaunchAgents"
+        shim.mkdir(exist_ok=True)
+        tools.mkdir(exist_ok=True)
+        launch_agents.mkdir(parents=True, exist_ok=True)
+        calls = self.root / "launchctl-calls"
+        if not calls.exists():
+            calls.write_text("")
+        launchctl = shim / "launchctl"
+        launchctl.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + str(calls) + "\"\n")
+        launchctl.chmod(0o755)
+        for name in ("cmux", "claude"):
+            if name in without_tools:
+                continue
+            tool = tools / name
+            if not tool.exists():
+                tool.write_text("#!/bin/sh\nexit 0\n")
+                tool.chmod(0o755)
+        env = dict(os.environ, HOME=str(home), PATH=f"{shim}:{tools}:/usr/bin:/bin",
+                   AUTODREAM_CMUX_DEFAULT=str(self.root / "missing-cmux"),
+                   AUTODREAM_EPHEMERAL_DIRS="", TMPDIR=str(self.root))
+        env.update(env_extra or {})
+        result = subprocess.run(["/bin/bash", str(REPO / "install.sh"), *args],
+                                env=env, capture_output=True, text=True, timeout=30)
+        return result, home, launch_agents, calls, tools
+
+    @staticmethod
+    def plist(path):
+        with path.open("rb") as stream:
+            return plistlib.load(stream)
+
+    @staticmethod
+    def tree_snapshot(root):
+        entries = []
+        for path in root.rglob("*"):
+            if path.is_symlink():
+                entries.append((str(path.relative_to(root)), "link", os.readlink(path)))
+            elif path.is_file():
+                entries.append((str(path.relative_to(root)), "file", path.read_bytes()))
+            elif path.is_dir():
+                entries.append((str(path.relative_to(root)), "dir", None))
+        return sorted(entries)
+
+    def test_install_web_agent_ownership_and_options(self):
+        result, _, launch_agents, calls, tools = self.run_install(str(self.root / "target"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        nightly = next(path for path in launch_agents.glob("*.plist")
+                       if not path.stem.endswith(("-review", "-web")))
+        nightly_label = self.plist(nightly)["Label"]
+        nightly_contents = nightly.read_bytes()
+        web = launch_agents / (nightly_label + "-web.plist")
+        self.assertTrue(web.exists())
+        self.assertEqual(self.plist(web)["Label"], nightly_label + "-web")
+
+        launch_agents.joinpath(nightly.name).write_text(
+            "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>"
+            "<key>Label</key><string>" + nightly_label + "</string>"
+            "<key>ProgramArguments</key><array><string>/elsewhere/run.sh</string>"
+            "</array></dict></plist>")
+        web.unlink()
+        calls.write_text("")
+        refused, _, _, _, _ = self.run_install(str(self.root / "refused"))
+        self.assertEqual(refused.returncode, 0, refused.stderr)
+        self.assertEqual(calls.read_text().splitlines(), [])
+        self.assertFalse((launch_agents / (nightly_label + "-web.plist")).exists())
+        nightly.write_bytes(nightly_contents)
+        restored, _, _, _, _ = self.run_install(str(self.root / "target"))
+        self.assertEqual(restored.returncode, 0, restored.stderr)
+        self.assertTrue((launch_agents / (nightly_label + "-web.plist")).exists())
+
+        self.assertIn("--no-web", subprocess.run(
+            ["/bin/bash", str(REPO / "install.sh"), "--help"],
+            capture_output=True, text=True, timeout=10).stdout)
+
+        dry_before = self.tree_snapshot(self.root)
+        dry, _, _, _, _ = self.run_install("--dry-run", str(self.root / "dry-target"))
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        dry_after = self.tree_snapshot(self.root)
+        self.assertEqual(dry_after, dry_before)
+
+        no_web, _, _, _, _ = self.run_install("--no-web", str(self.root / "target"))
+        self.assertEqual(no_web.returncode, 0, no_web.stderr)
+        self.assertFalse((launch_agents / (nightly_label + "-web.plist")).exists())
+        config = self.root / "target" / "autodream" / "config"
+        config.write_text("AUTODREAM_WEB=0\n")
+        disabled, _, _, _, _ = self.run_install(str(self.root / "target"))
+        self.assertEqual(disabled.returncode, 0, disabled.stderr)
+        self.assertFalse((launch_agents / (nightly_label + "-web.plist")).exists())
+        enabled, _, _, _, _ = self.run_install(
+            str(self.root / "target"), env_extra={"AUTODREAM_WEB": "1"})
+        self.assertEqual(enabled.returncode, 0, enabled.stderr)
+        self.assertTrue((launch_agents / (nightly_label + "-web.plist")).exists())
+
+    def test_install_web_survives_review_opt_out(self):
+        result, _, launch_agents, _, tools = self.run_install(
+            "--no-review", str(self.root / "target"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(any(path.stem.endswith("-web") for path in launch_agents.glob("*.plist")))
+        (tools / "cmux").unlink()
+        for path in launch_agents.iterdir():
+            path.unlink()
+        without_cmux, _, _, _, _ = self.run_install(
+            str(self.root / "without-cmux"), without_tools=("cmux",))
+        self.assertEqual(without_cmux.returncode, 0, without_cmux.stderr)
+        self.assertTrue(any(path.stem.endswith("-web") for path in launch_agents.glob("*.plist")))
+        self.assertFalse(any(path.stem.endswith("-review") for path in launch_agents.glob("*.plist")))
+
+    def test_install_web_restart_policy(self):
+        result, _, launch_agents, _, tools = self.run_install(str(self.root / "target"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        web = next(path for path in launch_agents.glob("*-web.plist"))
+        plist = self.plist(web)
+        plist_env = plist["EnvironmentVariables"]
+        self.assertTrue(plist["RunAtLoad"])
+        self.assertEqual(plist["KeepAlive"], {"SuccessfulExit": False})
+        self.assertEqual(plist["ThrottleInterval"], 60)
+        self.assertEqual(plist_env["CMUX_BIN"], str(tools / "cmux"))
+        self.assertEqual(plist_env["CLAUDE_BIN"], str(tools / "claude"))
+        self.assertEqual(plist_env["AUTODREAM_WEB_PORT"], "8765")
+
+    def test_web_port_in_use_warns_once_and_exits_zero(self):
+        self.start_server()
+        occupied = socket.socket()
+        occupied.bind(("127.0.0.1", 0))
+        port = occupied.getsockname()[1]
+        notification = self.install / "notification-argv"
+        notification_count = self.install / "notification-count"
+        notify = self.install / "notify.sh"
+        notify.write_text("#!/bin/sh\nprintf 'call\\n' >> \"" + str(notification_count) +
+                          "\"\nprintf '%s\\n' \"$@\" > \"" + str(notification) + "\"\n")
+        notify.chmod(0o755)
+        result = self.run_command("serve", "--port", str(port))
+        occupied.close()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(notification_count.read_text().splitlines(), ["call"])
+        notification_argv = notification.read_text().splitlines()
+        self.assertGreaterEqual(len(notification_argv), 3)
+        self.assertEqual(notification_argv[0], "--warning")
 
     def load_module(self):
         self.assertTrue(SERVER.is_file(), "HTTP boundary is not implemented")
