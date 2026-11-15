@@ -65,6 +65,15 @@ tmo 5 true; eq "$?" 0 "tmo passes a zero status through"
 tmo 5 sh -c 'exit 7'; eq "$?" 7 "tmo passes a nonzero status through"
 start=$SECONDS; tmo 1 sleep 5 && slow_rc=0 || slow_rc=$?
 [ "$slow_rc" -ne 0 ] && [ $((SECONDS - start)) -lt 4 ] && eq ok ok "tmo kills a command past its bound" || eq "rc=$slow_rc" ok "tmo kills a command past its bound"
+# With no timeout binary tmo backgrounds the command, and bash hands a background job /dev/null
+# as stdin unless it is redirected explicitly. A PATH holding only cat, sleep, kill and pkill
+# forces that fallback on any host, Linux CI included.
+nt=$(mktemp -d "${TMPDIR:-/tmp}/tmo-nt.XXXXXX")
+for tool in cat sleep kill pkill; do p=$(command -v "$tool") && ln -s "$p" "$nt/$tool"; done
+# A fresh bash: this shell has already hashed timeout's path, and command -v answers from that.
+fallback_out=$(printf 'piped\n' | PATH="$nt" /bin/bash -c '. "$1"; tmo 5 cat' _ "$REPO/bin/portable.sh")
+eq "$fallback_out" "piped" "tmo without a timeout binary keeps the caller's stdin"
+rm -rf "$nt"
 g=$(mktemp -d "${TMPDIR:-/tmp}/portable.XXXXXX")
 git init -q "$g" 2>/dev/null
 eq "$(repo_slug "$g")" "" "no remote has no slug"
