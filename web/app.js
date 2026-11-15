@@ -224,6 +224,8 @@ function renderDream(data) {
 }
 
 let threadRenderer;
+const threadActionStates = new Map();
+let currentView = 'lately';
 async function renderThreads(data, selectedId) {
   const request = viewRequest;
   if (!data) {
@@ -234,54 +236,57 @@ async function renderThreads(data, selectedId) {
   }
   const content = document.getElementById('content');
   if (threadRenderer && content.contains(threadRenderer.element)) threadRenderer.update(data);
-  else threadRenderer = mountThreads(content, data, performThreadAction);
+  else threadRenderer = mountThreads(content, data, performThreadAction,
+    id => threadActionStates.get(id));
   if (selectedId && /^t-[0-9a-f]{8}$/.test(selectedId)) threadRenderer.select(selectedId);
 }
 
-async function performThreadAction(id, action, button) {
-  if (button.disabled) return;
-  button.disabled = true;
-  let requiresRefresh = false;
-  const label = button.textContent;
-  const results = button.parentElement.querySelector('.action-result');
-  results.replaceChildren();
+async function performThreadAction(id, action) {
+  const actionView = currentView;
+  const actionRequest = viewRequest;
+  const existing = threadActionStates.get(id);
+  if (existing?.pending || existing?.requiresRefresh) return;
+  threadActionStates.set(id, {action, pending: true, requiresRefresh: false});
+  threadRenderer?.render();
   try {
     const response = await fetch('/api/threads/' + encodeURIComponent(id) + '/' + action, {
       method: 'POST', credentials: 'same-origin', headers: {'X-Autodream': '1'}
     });
     const data = await response.json();
     if (!response.ok || !data.ok) {
-      requiresRefresh = data.error === 'timeout';
-      button.textContent = requiresRefresh ? 'Refresh to check state' : data.message || 'Action failed';
-      results.append(node('span', data.message || 'Action failed'));
-      if (data.brief) {
-        const brief = node('textarea', data.brief);
-        brief.readOnly = true;
-        brief.setAttribute('aria-label', 'Resume brief to copy');
-        results.append(brief);
-      }
+      threadActionStates.set(id, {
+        action, pending: false, requiresRefresh: data.error === 'timeout',
+        message: data.message || 'Action failed', brief: data.brief || ''
+      });
       return;
     }
-    button.textContent = label;
-    try {
-      if (document.getElementById('content').contains(button)) await renderThreads();
-    } catch (_) {
-      requiresRefresh = true;
-      button.textContent = 'Refresh to check state';
-      results.textContent = 'Action succeeded. Refresh to read the updated threads.';
+    if (actionView === 'threads' && currentView === actionView && actionRequest === viewRequest) {
+      try {
+        await renderThreads();
+      } catch (_) {
+        threadActionStates.set(id, {
+          action, pending: false, requiresRefresh: true,
+          message: 'Action succeeded. Refresh to read the updated threads.'
+        });
+      }
     }
+    if (!threadActionStates.get(id)?.requiresRefresh) threadActionStates.delete(id);
   } catch (_) {
-    requiresRefresh = true;
-    button.textContent = 'Refresh to check state';
-    results.textContent = 'The outcome is unknown. Refresh before trying again.';
+    threadActionStates.set(id, {
+      action, pending: false, requiresRefresh: true,
+      message: 'The outcome is unknown. Refresh before trying again.'
+    });
   } finally {
-    button.disabled = requiresRefresh;
+    const state = threadActionStates.get(id);
+    if (state?.pending) threadActionStates.set(id, {...state, pending: false});
+    if (threadRenderer && document.getElementById('content').contains(threadRenderer.element)) threadRenderer.render();
   }
 }
 
 let viewRequest = 0;
 async function loadView(view, date) {
   const request = ++viewRequest;
+  currentView = view;
   const status = document.getElementById('status');
   status.textContent = 'Loading…';
   for (const link of document.querySelectorAll('nav a')) {
@@ -294,8 +299,10 @@ async function loadView(view, date) {
     if (!response.ok) throw new Error(response.status === 401 ? 'Run autodream-web open to sign in.' : 'Could not read this view. Reload to retry.');
     const data = await response.json();
     if (view === 'lately') {
-      const threads = await fetch('/api/threads', {credentials: 'same-origin'});
-      if (threads.ok) data.thread_links = (await threads.json()).threads;
+      try {
+        const threads = await fetch('/api/threads', {credentials: 'same-origin'});
+        if (threads.ok) data.thread_links = (await threads.json()).threads;
+      } catch (_) {}
     }
     if (request !== viewRequest) return;
     if (view === 'threads') await renderThreads(data, date);

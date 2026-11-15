@@ -189,7 +189,7 @@ check(!window.pwned, 'hostile text executed');
 ''')
 
     def test_web_thread_buttons_show_action_results(self):
-        self.run_browser('''await new Promise(resolve => document.addEventListener('DOMContentLoaded', resolve, {once:true}));
+        self.run_browser('''
 const content = document.getElementById('content');
 const hostile = '<img src=x onerror="window.pwned=1">';
 let row = {id:'t-00000001',kind:'work',repo:'/repo',title:hostile,goal:hostile,
@@ -210,7 +210,7 @@ renderLately({days:7,timeline:[{date:'2026-11-01',projects:[{repo:'/repo',
   sessions:[{hash:'a',goal:'Goal'}]}]}],threads:null,newest_dream:null,thread_links:[row]});
 const titleLink = content.querySelector('a[href="#threads/t-00000001"]');
 check(titleLink && titleLink.textContent === hostile, 'Lately must link literal thread titles');
-await renderThreads(undefined, row.id);
+await loadView('threads', row.id);
 check(content.querySelector('article').id === row.id, 'title deep link must select the thread');
 check(content.textContent.includes(hostile), 'thread text missing');
 check(content.querySelector('.meta').textContent.includes('1 session ·'), 'singular session label missing');
@@ -220,10 +220,11 @@ check(close, 'Close action missing');
 let release;
 pending = new Promise(resolve => { release = resolve; });
 let action = performThreadAction(row.id, 'close', close);
-check(close.disabled, 'button must be disabled during request');
+close = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Working…');
+check(close && close.disabled, 'button must be disabled during request');
 release(); await action; pending = null;
-check(close.textContent === 'busy, retry', 'busy failure must stay on button');
-check(!close.disabled, 'busy button must be usable again');
+close = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Close');
+check(close && !close.disabled, 'busy button must be usable again');
 check(content.textContent.includes('busy, retry'), 'failure missing beside action');
 check(calls.filter(c => c.options.method === 'POST').every(c =>
   c.options.headers['X-Autodream'] === '1' && c.options.credentials === 'same-origin'), 'POST credential/header missing');
@@ -247,11 +248,160 @@ await performThreadAction(row.id, 'resume', resume);
 check(content.querySelector('textarea').value === result.brief, 'copyable fallback brief missing');
 check(!content.querySelector('img,script'), 'fallback became markup');
 window.fetch = async function() { throw new TypeError('connection lost'); };
-await performThreadAction(row.id, 'resume', resume);
+const retryResume = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Resume');
+await performThreadAction(row.id, 'resume', retryResume);
 check(content.textContent.includes('outcome is unknown'), 'timeout/network loss must require refresh');
 check(content.textContent.includes('Refresh'), 'unknown outcome needs refresh guidance');
-check(resume.disabled, 'unknown outcome must require refresh before another launch');
+check(Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Refresh to check state')?.disabled,
+  'unknown outcome must require refresh before another launch');
 check(!window.pwned, 'hostile title executed');
+''')
+
+    def test_web_thread_action_state_survives_search_renders(self):
+        self.run_browser('''
+const content = document.getElementById('content');
+let row = {id:'t-00000001',kind:'work',repo:'/repo',title:'Thread',goal:'Goal',
+  status:'dropped',display_status:'dropped',last_seen:'2026-11-01',sessions:[]};
+let response = {ok:false,error:'busy',message:'busy, retry'};
+let httpStatus = 409;
+let release;
+let started;
+let threadReads = 0;
+window.fetch = async function(path, options = {}) {
+  if (options.method === 'POST') {
+    started();
+    await new Promise(resolve => { release = resolve; });
+    return {ok:httpStatus === 200,status:httpStatus,json:async () => response};
+  }
+  threadReads++;
+  return {ok:true,status:200,json:async () => ({threads:[row]})};
+};
+await loadView('threads');
+const search = content.querySelector('input[type=search]');
+let ready = new Promise(resolve => { started = resolve; });
+let close = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Close');
+let action = performThreadAction(row.id, 'close', close);
+await ready;
+search.value = 'thread';
+search.dispatchEvent(new Event('input'));
+close = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Working…');
+check(close && close.disabled, 'a search render must preserve the in-flight action');
+release();
+await action;
+close = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Close');
+check(close && !close.disabled, 'ordinary failure must allow retry after rerender');
+check(content.textContent.includes('busy, retry'), 'failure must survive a search render');
+
+httpStatus = 200;
+response = {ok:true,id:row.id,action:'close'};
+row = {...row,status:'closed_by_sam',display_status:'closed_by_sam'};
+ready = new Promise(resolve => { started = resolve; });
+close = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Close');
+action = performThreadAction(row.id, 'close', close);
+await ready;
+search.value = 'thread';
+search.dispatchEvent(new Event('input'));
+release();
+await action;
+check(threadReads === 2, 'successful action must refresh even after search replaces its button');
+check(content.querySelector('.thread-counts').textContent.includes('Done (1)'),
+  'successful action must render the refreshed status');
+''')
+
+    def test_web_thread_action_clears_pending_after_threads_reload(self):
+        self.run_browser('''
+const content = document.getElementById('content');
+const row = {id:'t-00000001',kind:'work',repo:'/repo',title:'Thread',goal:'Goal',
+  status:'dropped',display_status:'dropped',last_seen:'2026-11-01',sessions:[]};
+let release;
+let started;
+window.fetch = async function(path, options = {}) {
+  if (options.method === 'POST') {
+    started();
+    await new Promise(resolve => { release = resolve; });
+    return {ok:false,status:409,json:async () => ({ok:false,error:'busy',message:'busy, retry'})};
+  }
+  return {ok:true,status:200,json:async () => ({threads:[row]})};
+};
+await loadView('threads');
+const ready = new Promise(resolve => { started = resolve; });
+const close = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Close');
+const action = performThreadAction(row.id, 'close', close);
+await ready;
+await loadView('threads', row.id);
+check(Array.from(content.querySelectorAll('button')).some(b => b.textContent === 'Working…'),
+  'a reloaded threads view must show the pending action');
+release();
+await action;
+const after = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Close');
+check(after && !after.disabled, 'pending state must clear on the reloaded view');
+check(content.textContent.includes('busy, retry'), 'failure must show on the reloaded view');
+''')
+
+    def test_web_thread_action_does_not_replace_newer_navigation(self):
+        self.run_browser('''await new Promise(resolve => window.addEventListener('load', resolve, {once:true}));
+const content = document.getElementById('content');
+const row = {id:'t-00000001',kind:'work',repo:'/repo',title:'Thread',goal:'Goal',
+  status:'dropped',display_status:'dropped',last_seen:'2026-11-01',sessions:[]};
+let releasePost;
+let postStarted;
+let releaseDreams;
+let refreshResolve;
+let refreshStarted;
+const refreshStart = new Promise(resolve => { refreshStarted = resolve; });
+let threadReads = 0;
+window.fetch = async function(path, options = {}) {
+  if (options.method === 'POST') {
+    postStarted();
+    await new Promise(resolve => { releasePost = resolve; });
+    return {ok:true,status:200,json:async () => ({ok:true,id:row.id,action:'close'})};
+  }
+  if (path === '/api/threads') {
+    threadReads++;
+    if (threadReads > 1) return new Promise(resolve => { refreshResolve = resolve; refreshStarted(); });
+    return {ok:true,status:200,json:async () => ({threads:[row]})};
+  }
+  if (path === '/api/dreams')
+    return new Promise(resolve => { releaseDreams = () => resolve({ok:true,status:200,json:async () => ({dates:[]})}); });
+  throw new Error('unexpected fetch ' + path);
+};
+history.replaceState(null, '', '#threads');
+await loadView('threads');
+let started = new Promise(resolve => { postStarted = resolve; });
+const close = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Close');
+const action = performThreadAction(row.id, 'close', close);
+await started;
+history.replaceState(null, '', '#dreams');
+const dreams = loadView('dreams');
+releasePost();
+const actionStartedRefresh = await Promise.race([
+  refreshStart.then(() => true), action.then(() => false)
+]);
+releaseDreams();
+await dreams;
+if (actionStartedRefresh) refreshResolve({ok:true,status:200,json:async () => ({threads:[row]})});
+await action;
+check(threadReads === 1, 'an action from the old view must not start a thread refresh');
+check(content.querySelector('h1')?.textContent === 'Dreams', 'action refresh replaced the selected Dreams view');
+check(location.hash === '#dreams', 'the URL must remain on the selected Dreams view');
+check(document.querySelector('nav a[aria-current="page"]')?.hash === '#dreams',
+  'navigation selection must stay on Dreams');
+''')
+
+    def test_web_lately_renders_when_optional_threads_fetch_rejects(self):
+        self.run_browser('''await new Promise(resolve => window.addEventListener('load', resolve, {once:true}));
+const lately = {days:7,timeline:[{date:'2026-11-14',projects:[{project:'/repo',repo:'/repo',
+  sessions:[{hash:'a',goal:'Primary Lately data',outcome:'not_achieved',user_messages:1,
+    tool_calls:2,duration_minutes:3}]}]}],threads:null,newest_dream:null};
+window.fetch = async function(path) {
+  if (path === '/api/lately?days=7') return {ok:true,status:200,json:async () => lately};
+  if (path === '/api/threads') throw new TypeError('connection interrupted');
+  throw new Error('unexpected fetch ' + path);
+};
+await loadView('lately');
+const content = document.getElementById('content');
+check(content.textContent.includes('Primary Lately data'), 'the primary Lately view must render');
+check(document.getElementById('status').textContent === '', 'optional thread failure must not show a connection error');
 ''')
 
     def test_web_shared_threads_renderer_keeps_standalone_controls(self):

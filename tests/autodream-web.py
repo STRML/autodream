@@ -666,6 +666,17 @@ class WebTests(unittest.TestCase):
                                 text=True, timeout=10)
         self.assertEqual(linked.stdout, configured.stdout)
 
+    def test_web_open_discovers_running_server_port_without_config(self):
+        self.start_server()
+        port_file = self.install / "web-port"
+        self.assertEqual(port_file.read_text().strip(), str(self.port))
+        self.assertEqual(stat.S_IMODE(port_file.stat().st_mode), 0o600)
+        (self.install / "config").write_text("AUTODREAM_WEB_PORT=1\n")
+        opened = self.run_command("open", "--print")
+        self.assertEqual(opened.returncode, 0, opened.stderr)
+        token = (self.install / "web-token").read_text().strip()
+        self.assertEqual(opened.stdout.strip(), self.origin + "/login?t=" + token)
+
     def test_web_token_creation_is_exclusive_and_persistent(self):
         module = self.load_module()
         path = self.install / "web-token"

@@ -29,7 +29,7 @@ function copyCommand(command, button, label) {
   fallback();
 }
 
-function mountThreads(root, data, onAction) {
+function mountThreads(root, data, onAction, getActionState) {
   const viewNames = ["Dropped", "Open", "Ideas", "Done"];
   let activeView = "Dropped";
   const container = document.createElement("section");
@@ -96,15 +96,27 @@ function mountThreads(root, data, onAction) {
         const names = finished ? ["resume", "reopen"] : ["resume", "close"];
         names.forEach(function (action) {
           const label = data.cli ? "Copy " + action + " command" : action[0].toUpperCase() + action.slice(1);
+          const state = getActionState ? getActionState(thread.id) : null;
           const button = document.createElement("button");
           button.type = "button";
-          button.textContent = label;
+          button.textContent = state?.pending && state.action === action ? "Working…" :
+            state?.requiresRefresh ? "Refresh to check state" : label;
+          button.disabled = Boolean(state?.pending || state?.requiresRefresh);
           button.addEventListener("click", function () { onAction(thread.id, action, button); });
           actions.appendChild(button);
         });
         const result = document.createElement("p");
         result.className = "action-result";
         result.setAttribute("role", "status");
+        const state = getActionState ? getActionState(thread.id) : null;
+        if (state?.message) result.appendChild(element("span", "", state.message));
+        if (state?.brief) {
+          const brief = element("textarea");
+          brief.value = state.brief;
+          brief.readOnly = true;
+          brief.setAttribute("aria-label", "Resume brief to copy");
+          result.appendChild(brief);
+        }
         actions.appendChild(result);
       }
       card.appendChild(title);
@@ -129,7 +141,7 @@ function mountThreads(root, data, onAction) {
     views.appendChild(button);
   });
   function update(next) {
-    data = next;
+    if (next) data = next;
     generated.textContent = data.generated_at ? "Generated " + new Date(data.generated_at).toLocaleString() + " · as of " + data.as_of : "";
     const selection = repo.value;
     repo.replaceChildren();
@@ -160,5 +172,5 @@ function mountThreads(root, data, onAction) {
   search.addEventListener("input", render);
   repo.addEventListener("change", render);
   update(data);
-  return {element: container, update, select};
+  return {element: container, update, select, render};
 }

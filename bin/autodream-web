@@ -15,6 +15,7 @@ _code=$(cd "$(dirname "$_real")" && pwd)
 . "$_code/lib-install-dir.sh"
 resolve_install_dir "$_src"
 export AUTODREAM_DIR
+_web_port_was_set=${AUTODREAM_WEB_PORT+x}
 _config="${AUTODREAM_CONFIG:-$AUTODREAM_DIR/config}"
 if [ -f "$_config" ]; then
   _environment=$(export -p)
@@ -25,5 +26,9 @@ if [ -f "$_config" ]; then
   set +a
   eval "$_environment"
   set -u
+fi
+if [ "${1:-}" = open ] && [ -z "$_web_port_was_set" ] && [ -f "$AUTODREAM_DIR/web-port" ]; then
+  IFS= read -r AUTODREAM_WEB_PORT < "$AUTODREAM_DIR/web-port" || true
+  export AUTODREAM_WEB_PORT
 fi
 exec python3 "$_code/autodream-web.py" "$@"

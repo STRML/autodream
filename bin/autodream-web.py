@@ -345,6 +345,26 @@ def make_server(config, port):
     return server
 
 
+def record_port(install, port):
+    fd, temporary = tempfile.mkstemp(prefix=".web-port-", dir=install)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="ascii") as stream:
+            fd = -1
+            stream.write(str(port) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, Path(install) / "web-port")
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def warn_port_in_use(install, port):
     notifier = Path(install) / "notify.sh"
     if not notifier.is_file():
@@ -393,6 +413,11 @@ def main():
             raise
         warn_port_in_use(install, port)
         return
+    try:
+        record_port(install, server.server_port)
+    except BaseException:
+        server.server_close()
+        raise
     with server:
         print(server.origin, flush=True)
         server.serve_forever()
