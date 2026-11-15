@@ -7968,21 +7968,19 @@ test_threads_lock_exhaustion_is_bounded(){
   root=$(setup_env)
   session=$(mk_thread_session "$root" locked "$REPO")
   seed_thread_findings "$root" "$session" "locked goal" '[]' partially_achieved >/dev/null
-  lock="$(thread_state "$root").lock"
-  mkdir "$lock"
-  printf '%s\n' "$$" > "$lock/pid"
-  : > "$lock/start"
+  lock="$(thread_state "$root").flock"
+  exec 9>>"$lock"
+  python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)' || { no "test holder acquires kernel lock"; exec 9>&-; thread_cleanup "$root"; return; }
   export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
   run_dream "$root"
   unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
   assert_grep "$(fdir "$root")/run-stats.txt" '^threads_skipped: locked$' "nightly skips"
   AUTODREAM_DIR="$root/autodream" AUTODREAM_THREADS_STATE="$(thread_state "$root")" \
-    /bin/bash "$REPO/bin/threads.sh" close t-11111111 >/dev/null 2>&1
+    /bin/bash "$REPO/bin/threads.sh" close t-11111111 > "$root/cli.out" 2>&1
   cli_exit=$?
-  assert_eq "$cli_exit" 1 "CLI fails loudly"
-  unlink "$lock/pid"
-  unlink "$lock/start"
-  rmdir "$lock"
+  assert_eq "$cli_exit" 1 "CLI fails when lock budget is spent"
+  assert_grep "$root/cli.out" 'lock is held' "CLI fails loudly"
+  exec 9>&-
   thread_cleanup "$root"
 }
 
@@ -8528,9 +8526,20 @@ case "$1" in
     /usr/bin/python3 "$@" || exit $?
     : > "$AUTODREAM_DIR/temporary-render-complete"
     if [ "$THREAD_PUBLISH_FAILURE" = locked ]; then
-      mkdir "$AUTODREAM_DIR/threads.jsonl.lock" || exit 1
-      printf '%s\n' "$PPID" > "$AUTODREAM_DIR/threads.jsonl.lock/pid"
-      : > "$AUTODREAM_DIR/threads.jsonl.lock/start"
+      /usr/bin/python3 - "$AUTODREAM_DIR" <<'PY_HOLDER' >/dev/null 2>&1 &
+import fcntl, pathlib, sys, time
+root = pathlib.Path(sys.argv[1])
+with (root / "threads.jsonl.flock").open("a") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    (root / "publish-lock-ready").touch()
+    time.sleep(30)
+PY_HOLDER
+      printf '%s\n' "$!" > "$AUTODREAM_DIR/publish-lock-holder"
+      tries=0
+      while [ ! -e "$AUTODREAM_DIR/publish-lock-ready" ] && [ "$tries" -lt 200 ]; do
+        sleep 0.05; tries=$((tries + 1))
+      done
+      [ -e "$AUTODREAM_DIR/publish-lock-ready" ] || exit 1
     fi
     exit 0
     ;;
@@ -8554,6 +8563,7 @@ PUBLISH_RENAME
     assert_nogrep "$(fdir "$root")/run-stats.txt" '^threads_render: ok$' "temporary render never reports publish success"
     if [ "$mode" = locked ]; then
       assert_grep "$root/autodream/logs/run-$DATE.log" 'lock is held' "publish lock refusal was reached"
+      kill "$(cat "$root/autodream/publish-lock-holder")" 2>/dev/null || true
     else
       assert_file "$root/autodream/publish-rename-refused" "final page rename failure was reached"
     fi

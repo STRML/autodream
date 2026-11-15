@@ -250,160 +250,105 @@ test_threads_environment_overrides_config() {
   assert_eq "$count" 1 "environment value wins over config"
 }
 
-lock_shims() {
-  local dir=$1
-  mkdir -p "$dir/bin"
-  cat > "$dir/bin/ps" <<'EOF'
-#!/bin/sh
-exit 1
-EOF
-  cat > "$dir/bin/cat" <<'EOF'
-#!/bin/bash
-case "$*" in
-  *threads-next.*)
-    : > "$AUTODREAM_DIR/writing.$PPID"
-    tries=0
-    while [ ! -e "$AUTODREAM_DIR/release" ] && [ "$tries" -lt 200 ]; do
-      sleep 0.05; tries=$((tries + 1))
-    done
-    [ -e "$AUTODREAM_DIR/release" ] || exit 99
-    ;;
-esac
-exec /bin/cat "$@"
-EOF
-  chmod +x "$dir/bin/ps" "$dir/bin/cat"
-}
-
 wait_for_gate() {
   local marker=$1 tries=0
   while [ ! -e "$marker" ] && [ "$tries" -lt 200 ]; do sleep 0.05; tries=$((tries + 1)); done
   [ -e "$marker" ]
 }
 
-backdate_lock() {
-  local now stamp
-  now=$(pdate_epoch "$(date '+%Y-%m-%d %H:%M:%S')") || return 1
-  stamp=$(pdate_fmt_epoch "$((now - 121))" +%Y%m%d%H%M.%S) || return 1
-  touch -t "$stamp" "$1"
+start_lock_holder() {
+  local dir=$1
+  mkfifo "$dir/release"
+  AUTODREAM_DIR="$dir" /bin/bash -c '
+    . "$1" list --json >/dev/null || exit 1
+    threads_acquire_lock || exit 1
+    : > "$2/ready"
+    read -r release < "$2/release"
+    threads_release_lock
+    : > "$2/released"
+    read -r finish < "$2/release"
+  ' holder "$THREADS" "$dir" > "$dir/holder.out" 2>&1 &
+  HOLDER=$!
+  wait_for_gate "$dir/ready"
 }
 
-test_threads_live_old_lock_is_never_reclaimed() {
-  local dir="$TMP/live-lock" holder rc before
-  seed "$dir"; lock_shims "$dir"
-  sleep 30 & holder=$!
-  mkdir "$dir/threads.jsonl.lock"
-  printf '%s\n' "$holder" > "$dir/threads.jsonl.lock/pid"
-  : > "$dir/threads.jsonl.lock/start"
-  backdate_lock "$dir/threads.jsonl.lock"
+probe_lock() {
+  python3 - "$1/threads.jsonl.flock" <<'PY_PROBE'
+import fcntl, sys
+with open(sys.argv[1], "a") as lock:
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit(1)
+PY_PROBE
+}
+
+test_threads_flock_excludes_until_release() {
+  local dir="$TMP/held-lock" rc before started
+  seed "$dir"
+  start_lock_holder "$dir" || { no "holder acquires lock"; kill "$HOLDER"; wait "$HOLDER" 2>/dev/null; return; }
   before=$(cat "$dir/threads.jsonl")
-  PATH="$dir/bin:$PATH" AUTODREAM_DIR="$dir" "$THREADS" close t-00000001 > "$dir/close.out" 2>&1
+  probe_lock "$dir"
+  assert_eq "$?" 1 "another process cannot acquire the held kernel lock"
+  started=$SECONDS
+  AUTODREAM_DIR="$dir" /bin/bash "$THREADS" close t-00000001 > "$dir/close.out" 2>&1
   rc=$?
-  assert_eq "$rc" 1 "aged live holder refuses competing CLI write with ps unavailable"
-  assert_eq "$(cat "$dir/threads.jsonl.lock/pid" 2>/dev/null)" "$holder" "live holder retains its lock"
+  assert_eq "$rc" 1 "CLI fails when the retry budget is spent"
+  [ "$((SECONDS - started))" -ge 3 ] && ok "retry budget waits at least three seconds" || no "retry budget waits at least three seconds"
+  grep -q 'lock is held' "$dir/close.out" && ok "lock refusal is loud" || no "lock refusal is loud"
   assert_eq "$(cat "$dir/threads.jsonl")" "$before" "refused writer preserves state"
-  grep -q 'lock is held' "$dir/close.out" && ok "live lock refusal is loud" || no "live lock refusal is loud"
-  kill "$holder"; wait "$holder" 2>/dev/null || true
+  printf 'release\n' > "$dir/release"
+  wait_for_gate "$dir/released" || no "holder closes its descriptor"
+  [ -f "$dir/threads.jsonl.flock" ] && ok "release leaves the lock file in place" || no "release leaves the lock file in place"
+  probe_lock "$dir"
+  assert_eq "$?" 0 "another process acquires immediately after release"
+  AUTODREAM_DIR="$dir" /bin/bash "$THREADS" close t-00000001 >/dev/null 2>&1
+  assert_eq "$?" 0 "CLI can write after release"
+  assert_eq "$(state_json "$dir" t-00000001 | jq -r .status)" closed_by_sam "released lock permits publication"
+  [ -f "$dir/threads.jsonl.flock" ] && ok "lock file remains after CLI publication" || no "lock file remains after CLI publication"
+  printf 'finish\n' > "$dir/release"
+  wait "$HOLDER"
 }
 
-test_threads_dead_lock_is_reclaimed() {
-  local dir="$TMP/dead-lock" holder rc
-  seed "$dir"; lock_shims "$dir"
-  sleep 0 & holder=$!; wait "$holder"
+test_threads_sigkill_releases_flock_immediately() {
+  local dir="$TMP/killed-lock"
+  seed "$dir"
+  start_lock_holder "$dir" || { no "holder acquires lock"; kill "$HOLDER"; wait "$HOLDER" 2>/dev/null; return; }
+  probe_lock "$dir"
+  assert_eq "$?" 1 "holder owns the kernel lock before SIGKILL"
+  kill -KILL "$HOLDER"
+  wait "$HOLDER" 2>/dev/null || true
+  probe_lock "$dir"
+  assert_eq "$?" 0 "SIGKILL releases immediately without retry or reclaim"
+  AUTODREAM_DIR="$dir" /bin/bash "$THREADS" close t-00000001 >/dev/null 2>&1
+  assert_eq "$?" 0 "CLI writes after a killed holder"
+}
+
+test_threads_old_lock_directory_does_not_block() {
+  local dir="$TMP/old-lock"
+  seed "$dir"
   mkdir "$dir/threads.jsonl.lock"
-  printf '%s\n' "$holder" > "$dir/threads.jsonl.lock/pid"
-  : > "$dir/threads.jsonl.lock/start"
-  : > "$dir/release"
-  PATH="$dir/bin:$PATH" AUTODREAM_DIR="$dir" "$THREADS" close t-00000001 > "$dir/close.out" 2>&1
-  rc=$?
-  assert_eq "$rc" 0 "dead holder is reclaimed without waiting for lock age"
-  assert_eq "$(state_json "$dir" t-00000001 | jq -r .status)" closed_by_sam "reclaimer publishes the edit"
-  [ ! -d "$dir/threads.jsonl.lock" ] && ok "reclaimer releases lock" || no "reclaimer releases lock"
+  AUTODREAM_DIR="$dir" /bin/bash "$THREADS" close t-00000001 >/dev/null 2>&1
+  assert_eq "$?" 0 "old lock directory does not block a write"
+  [ -d "$dir/threads.jsonl.lock" ] && ok "old directory is left untouched" || no "old directory is left untouched"
+  [ -f "$dir/threads.jsonl.flock" ] && ok "new lock uses a persistent plain file" || no "new lock uses a persistent plain file"
 }
 
-test_threads_two_reclaimers_leave_one_owner() {
-  local dir="$TMP/racing-lock" dead a b loser winner rc tries
-  seed "$dir"; lock_shims "$dir"
-  sleep 0 & dead=$!; wait "$dead"
-  mkdir "$dir/threads.jsonl.lock"
-  printf '%s\n' "$dead" > "$dir/threads.jsonl.lock/pid"
-  : > "$dir/threads.jsonl.lock/start"
-  cat > "$dir/bin/mv" <<'EOF'
-#!/bin/bash
-if [ "$1" = "$AUTODREAM_DIR/threads.jsonl.lock" ]; then
-  : > "$AUTODREAM_DIR/reclaim.$PPID"
-  tries=0
-  while [ "$tries" -lt 200 ]; do
-    set -- "$AUTODREAM_DIR"/reclaim.*
-    [ "$#" -lt 2 ] || break
-    sleep 0.05; tries=$((tries + 1))
+test_threads_missing_python_refuses_writes() {
+  local dir="$TMP/no-python" tool before output rc
+  seed "$dir"
+  mkdir "$dir/bin"
+  for tool in dirname readlink jq cat mktemp mkdir date stat; do
+    ln -s "$(command -v "$tool")" "$dir/bin/$tool"
   done
-  [ "$#" -eq 2 ] || exit 99
-  exec /bin/mv "$AUTODREAM_DIR/threads.jsonl.lock" "$AUTODREAM_DIR/threads.jsonl.lock.stale.$PPID"
-fi
-exec /bin/mv "$@"
-EOF
-  chmod +x "$dir/bin/mv"
-  PATH="$dir/bin:$PATH" AUTODREAM_DIR="$dir" "$THREADS" close t-00000001 > "$dir/a.out" 2>&1 & a=$!
-  PATH="$dir/bin:$PATH" AUTODREAM_DIR="$dir" "$THREADS" close t-00000002 > "$dir/b.out" 2>&1 & b=$!
-  tries=0
-  while [ ! -e "$dir/writing.$a" ] && [ ! -e "$dir/writing.$b" ] && [ "$tries" -lt 200 ]; do
-    sleep 0.05; tries=$((tries + 1))
-  done
-  if [ -e "$dir/writing.$a" ]; then winner=$a; loser=$b
-  elif [ -e "$dir/writing.$b" ]; then winner=$b; loser=$a
-  else
-    no "a reclaimer reaches locked publication"
-    : > "$dir/release"; wait "$a"; wait "$b"; return
-  fi
-  wait "$loser"; rc=$?
-  assert_eq "$rc" 1 "second reclaimer cannot acquire the live replacement"
-  assert_eq "$(cat "$dir/threads.jsonl.lock/pid" 2>/dev/null)" "$winner" "exactly one reclaimer owns the lock"
-  local writers
-  writers=$(find "$dir" -name 'writing.*' | wc -l | tr -d ' ')
-  assert_eq "$writers" 1 "only one writer reaches publication"
-  : > "$dir/release"
-  wait "$winner"; rc=$?
-  assert_eq "$rc" 0 "winning reclaimer completes"
-  assert_eq "$(jq -s '[.[] | select(.status == "closed_by_sam")] | length' "$dir/threads.jsonl")" 1 "one competing edit is committed"
-  [ ! -d "$dir/threads.jsonl.lock" ] && ok "winner releases lock" || no "winner releases lock"
-}
-
-test_threads_stalled_writer_keeps_aged_lock() {
-  local dir="$TMP/stalled-writer" writer rc before
-  seed "$dir"; lock_shims "$dir"
   before=$(cat "$dir/threads.jsonl")
-  PATH="$dir/bin:$PATH" AUTODREAM_DIR="$dir" "$THREADS" close t-00000001 > "$dir/writer.out" 2>&1 & writer=$!
-  if ! wait_for_gate "$dir/writing.$writer"; then
-    no "writer reaches locked work"; : > "$dir/release"; wait "$writer"; return
-  fi
-  backdate_lock "$dir/threads.jsonl.lock"
-  AUTODREAM_DIR="$dir" "$THREADS" close t-00000002 > "$dir/contender.out" 2>&1
+  output=$(PATH="$dir/bin" AUTODREAM_DIR="$dir" /bin/bash "$THREADS" close t-00000001 2>&1)
   rc=$?
-  assert_eq "$rc" 1 "stalled writer cannot lose its aged lock to a contender"
-  assert_eq "$(cat "$dir/threads.jsonl")" "$before" "contender cannot publish while the owner is stalled"
-  assert_eq "$(cat "$dir/threads.jsonl.lock/pid" 2>/dev/null)" "$writer" "stalled owner retains the lock"
-  : > "$dir/release"
-  wait "$writer"; rc=$?
-  assert_eq "$rc" 0 "stalled owner resumes and publishes normally"
-  assert_eq "$(state_json "$dir" t-00000001 | jq -r .status)" closed_by_sam "owner edit survives contention"
-}
-
-test_threads_nonowner_cannot_publish_or_release() {
-  local dir="$TMP/nonowner" writer holder rc before
-  seed "$dir"; lock_shims "$dir"
-  before=$(cat "$dir/threads.jsonl")
-  PATH="$dir/bin:$PATH" AUTODREAM_DIR="$dir" "$THREADS" close t-00000001 > "$dir/close.out" 2>&1 & writer=$!
-  if ! wait_for_gate "$dir/writing.$writer"; then
-    no "writer reaches publication"; : > "$dir/release"; wait "$writer"; return
-  fi
-  sleep 30 & holder=$!
-  printf '%s\n' "$holder" > "$dir/threads.jsonl.lock/pid"
-  : > "$dir/release"
-  wait "$writer"; rc=$?
-  assert_eq "$rc" 1 "non-owner refuses state publication"
-  assert_eq "$(cat "$dir/threads.jsonl")" "$before" "non-owner preserves state"
-  assert_eq "$(cat "$dir/threads.jsonl.lock/pid" 2>/dev/null)" "$holder" "non-owner release preserves the lock"
-  kill "$holder"; wait "$holder" 2>/dev/null || true
+  assert_eq "$rc" 1 "missing python3 refuses CLI writes"
+  case "$output" in *"python3 is required"*) ok "missing python3 is loud" ;; *) no "missing python3 is loud ($output)" ;; esac
+  assert_eq "$(cat "$dir/threads.jsonl")" "$before" "missing python3 preserves state"
+  output=$(PATH="$dir/bin" AUTODREAM_DIR="$dir" /bin/bash "$THREADS" update 2020-01-02 </dev/null 2>&1)
+  printf '%s\n' "$output" | grep -q '^threads_skipped: locked$' && ok "nightly discloses missing lock support" || no "nightly discloses missing lock support ($output)"
 }
 
 for test_name in \
@@ -425,11 +370,10 @@ for test_name in \
   test_threads_search_treats_metacharacters_literally \
   test_threads_dropped_days_accepts_leading_zero \
   test_threads_environment_overrides_config \
-  test_threads_live_old_lock_is_never_reclaimed \
-  test_threads_dead_lock_is_reclaimed \
-  test_threads_two_reclaimers_leave_one_owner \
-  test_threads_stalled_writer_keeps_aged_lock \
-  test_threads_nonowner_cannot_publish_or_release; do
+  test_threads_flock_excludes_until_release \
+  test_threads_sigkill_releases_flock_immediately \
+  test_threads_old_lock_directory_does_not_block \
+  test_threads_missing_python_refuses_writes; do
   "$test_name"
 done
 

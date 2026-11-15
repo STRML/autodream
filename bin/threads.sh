@@ -36,7 +36,7 @@ if [ -f "$CONFIG_FILE" ]; then
 fi
 
 STATE=${AUTODREAM_THREADS_STATE:-$AUTODREAM_DIR/threads.jsonl}
-LOCK="$STATE.lock"
+LOCK="$STATE.flock"
 DROPPED_DAYS=${AUTODREAM_THREADS_DROPPED_DAYS:-7}
 
 threads_error() { printf 'threads: %s\n' "$1" >&2; }
@@ -80,72 +80,39 @@ threads_read_state() {
   jq -cs '.' "$STATE"
 }
 
-threads_proc_start() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '; }
-
-# 0 = live, 1 = stale, 2 = the owner has not written its pid yet.
-threads_lock_holder_state() {
-  local pid=$1 start
-  [ -n "$pid" ] || return 2
-  kill -0 "$pid" 2>/dev/null || return 1
-  start=$(cat "$LOCK/start" 2>/dev/null) || start=""
-  [ -z "$start" ] || [ "$(threads_proc_start "$pid")" = "$start" ]
-}
-
-threads_reclaim_lock() {
-  local dead="$LOCK.stale.$$"
-  mv "$LOCK" "$dead" 2>/dev/null || return 0
-  if [ "$(cat "$dead/pid" 2>/dev/null)" = "$1" ]; then
-    rm -rf "$dead"
+threads_acquire_lock() {
+  command -v python3 >/dev/null 2>&1 || { threads_error "python3 is required for thread locking"; return 1; }
+  if ! { exec 9>>"$LOCK"; }; then
+    threads_error "cannot open lock at $LOCK"
+    return 1
+  fi
+  # flock follows the open file description inherited from the shell, even after Python exits.
+  if python3 -c '
+import fcntl, sys, time
+for attempt in range(4):
+    try:
+        fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        sys.exit(0)
+    except BlockingIOError:
+        if attempt == 3:
+            sys.exit(1)
+        time.sleep(1)
+'; then
     return 0
   fi
-  # A faster reclaimer replaced the stale lock before our rename.
-  mv "$dead" "$LOCK" 2>/dev/null || {
-    threads_error "cannot restore another writer's lock from $dead"
-    return 1
-  }
-}
-
-threads_acquire_lock() {
-  local attempts=0 st pid
-  until mkdir "$LOCK" 2>/dev/null; do
-    pid=$(cat "$LOCK/pid" 2>/dev/null) || pid=""
-    threads_lock_holder_state "$pid"; st=$?
-    attempts=$((attempts + 1))
-    if [ "$st" -eq 0 ] || [ "$st" -eq 2 ]; then
-      if [ "$attempts" -le 3 ]; then sleep 1; continue; fi
-      threads_error "lock is held at $LOCK"
-      return 1
-    fi
-    threads_reclaim_lock "$pid" || return 1
-    if [ "$attempts" -ge 8 ]; then
-      threads_error "lock is held at $LOCK"
-      return 1
-    fi
-  done
-  if ! printf '%s\n' "$$" > "$LOCK/pid"; then
-    threads_error "cannot record lock ownership at $LOCK"
-    rmdir "$LOCK" 2>/dev/null || true
-    return 1
-  fi
-  threads_proc_start "$$" > "$LOCK/start" || true
-  return 0
-}
-
-threads_check_lock() {
-  [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$$" ] && return 0
-  threads_error "lock is not owned by this process"
+  threads_release_lock
+  threads_error "lock is held or unavailable at $LOCK"
   return 1
 }
 
 threads_release_lock() {
-  [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$$" ] || return 0
-  rm -rf "$LOCK"
+  exec 9>&-
 }
 
 threads_write_state() {
   local next_file=$1 temp_file
   temp_file=$(mktemp "$STATE.XXXXXX" 2>/dev/null) || return 1
-  if cat "$next_file" > "$temp_file" 2>/dev/null && threads_check_lock && mv -f "$temp_file" "$STATE" 2>/dev/null; then
+  if cat "$next_file" > "$temp_file" 2>/dev/null && mv -f "$temp_file" "$STATE" 2>/dev/null; then
     return 0
   fi
   unlink "$temp_file" 2>/dev/null || true
@@ -299,11 +266,6 @@ threads_render() {
     threads_acquire_lock || { unlink "$temp_file" 2>/dev/null || true; printf 'threads_render: stale\n'; return 1; }
     if [ -f "$STATE" ]; then current_fingerprint=$(shasum -a 256 "$STATE" | awk '{print $1}') || current_fingerprint=""
     else current_fingerprint=missing
-    fi
-    if ! threads_check_lock; then
-      unlink "$temp_file" 2>/dev/null || true
-      printf 'threads_render: stale\n'
-      return 1
     fi
     if [ "$fingerprint" = "$current_fingerprint" ]; then
       if mv -f "$temp_file" "$output"; then
@@ -815,6 +777,11 @@ threads_update() {
   local all_candidates groups_dir groups_file request_list request_candidates group_candidates request_json input_file response_file valid_file rejected_file unusable_file assignments_file
   local failed=0 rejected=0 close_refused=0 linked=0 calls=0 skipped="" link_status=not_needed size unusable index group rc merge_rejected call_budget candidate_count unassigned
   threads_valid_date "$date" || { threads_error "invalid update date: $date"; return 2; }
+  if ! command -v python3 >/dev/null 2>&1; then
+    threads_error "python3 is required for thread locking"
+    threads_emit_stats ok failed 0 0 0 0 0 locked
+    return 0
+  fi
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/threads-update.XXXXXX" 2>/dev/null) || {
     threads_emit_stats ok failed 0 0 0 0 0
     return 0
