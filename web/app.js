@@ -242,8 +242,6 @@ async function renderThreads(data, selectedId) {
 }
 
 async function performThreadAction(id, action) {
-  const actionView = currentView;
-  const actionRequest = viewRequest;
   const existing = threadActionStates.get(id);
   if (existing?.pending || existing?.requiresRefresh) return;
   threadActionStates.set(id, {action, pending: true, requiresRefresh: false});
@@ -260,7 +258,7 @@ async function performThreadAction(id, action) {
       });
       return;
     }
-    if (actionView === 'threads' && currentView === actionView && actionRequest === viewRequest) {
+    if (currentView === 'threads') {
       try {
         await renderThreads();
       } catch (_) {

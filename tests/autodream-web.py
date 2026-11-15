@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import concurrent.futures
+import contextlib
+import io
 import fcntl
 import shutil
 from datetime import date, timedelta
@@ -676,6 +678,22 @@ class WebTests(unittest.TestCase):
         self.assertEqual(opened.returncode, 0, opened.stderr)
         token = (self.install / "web-token").read_text().strip()
         self.assertEqual(opened.stdout.strip(), self.origin + "/login?t=" + token)
+
+    def test_web_open_falls_back_to_service_started_before_web_port(self):
+        self.start_server()
+        (self.install / "web-port").unlink()
+        module = self.load_module()
+        module.PRE_RECORD_PORT = self.port
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            closed = probe.getsockname()[1]
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"AUTODREAM_DIR": str(self.install),
+                                          "AUTODREAM_WEB_PORT": str(closed)}), \
+                mock.patch.object(sys, "argv", ["autodream-web.py", "open", "--print"]), \
+                contextlib.redirect_stdout(out):
+            self.assertIsNone(module.main())
+        self.assertEqual(out.getvalue().strip(), self.origin + "/login?t=" + self.token)
 
     def test_web_token_creation_is_exclusive_and_persistent(self):
         module = self.load_module()

@@ -93,6 +93,10 @@ def identity_proof(token, nonce):
     return hmac.new(token.encode("ascii"), nonce.encode("ascii"), hashlib.sha256).hexdigest()
 
 
+# A service started before web-port existed may still serve the old default.
+PRE_RECORD_PORT = 8765
+
+
 def verify_service(port, token):
     nonce = secrets.token_hex(16)
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
@@ -391,8 +395,10 @@ def main():
         parser.error("port must be between 0 and 65535")
     if args.command == "open":
         token = load_or_create_token(install / "web-token")
-        if not verify_service(port, token):
-            print(f"autodream-web: port {port} is not this autodream-web", file=sys.stderr)
+        candidates = list(dict.fromkeys((port, PRE_RECORD_PORT)))
+        port = next((candidate for candidate in candidates if verify_service(candidate, token)), None)
+        if port is None:
+            print(f"autodream-web: port {candidates[0]} is not this autodream-web", file=sys.stderr)
             return 1
         url = f"http://127.0.0.1:{port}/login?t={token}"
         if args.print_url:

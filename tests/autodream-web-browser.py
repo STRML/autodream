@@ -338,6 +338,38 @@ check(after && !after.disabled, 'pending state must clear on the reloaded view')
 check(content.textContent.includes('busy, retry'), 'failure must show on the reloaded view');
 ''')
 
+    def test_web_thread_action_refreshes_after_failed_threads_navigation(self):
+        self.run_browser('''
+const content = document.getElementById('content');
+let row = {id:'t-00000001',kind:'work',repo:'/repo',title:'Thread',goal:'Goal',
+  status:'dropped',display_status:'dropped',last_seen:'2026-11-01',sessions:[]};
+let release;
+let started;
+let threadReads = 0;
+window.fetch = async function(path, options = {}) {
+  if (options.method === 'POST') {
+    started();
+    await new Promise(resolve => { release = resolve; });
+    row = {...row,status:'closed_by_sam',display_status:'closed_by_sam'};
+    return {ok:true,status:200,json:async () => ({ok:true,id:row.id,action:'close'})};
+  }
+  threadReads++;
+  if (threadReads === 2) return {ok:false,status:500,json:async () => ({})};
+  return {ok:true,status:200,json:async () => ({threads:[row]})};
+};
+await loadView('threads', row.id);
+const ready = new Promise(resolve => { started = resolve; });
+const close = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Close');
+const action = performThreadAction(row.id, 'close', close);
+await ready;
+await loadView('threads');
+release();
+await action;
+check(threadReads === 3, 'a successful action must refresh after a failed Threads navigation');
+check(content.querySelector('.thread-counts').textContent.includes('Done (1)'),
+  'the refreshed status must replace the stale card');
+''')
+
     def test_web_thread_action_does_not_replace_newer_navigation(self):
         self.run_browser('''await new Promise(resolve => window.addEventListener('load', resolve, {once:true}));
 const content = document.getElementById('content');
