@@ -434,9 +434,16 @@ files instead of loading their contents into the launch prompt.
 
 Each eligible session can contribute one work candidate and up to three explicitly
 deferred idea candidates. Ideas retain their source transcript reference and use a
-separate candidate handle derived from the normalized (idea, quote) pair, so accepting
-one candidate does not mark its siblings processed. Closed idea threads remain closed when later
-sessions describe the idea differently.
+separate candidate handle derived from the normalized (idea, quote) pair. Once any idea
+from a session's (date, hash) is indexed, that source's ideas are never offered again.
+Re-triage replaces only work candidates and leaves existing ideas and their sources
+untouched. Sessions with no indexed ideas can still contribute their first ideas.
+Only work candidates with an achieved outcome can close a thread. An idea candidate's
+finished flag is refused and counted in `threads_close_refused`. Closed idea threads
+remain closed when later sessions describe the idea differently.
+
+A day split across linker calls can rarely create duplicate threads. Use
+`threads.sh close <id>` to close the duplicate.
 
 The linker settings are `AUTODREAM_THREADS_ENGINE` (default `claude`),
 `AUTODREAM_THREADS_MODEL` (default `claude-haiku-5-5`),

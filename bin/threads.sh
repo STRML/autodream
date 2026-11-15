@@ -410,11 +410,10 @@ EOF_REFRESH
 
 threads_collect_candidates() {
   local source_file=$1 state_json=$2 candidates_file=$3 unmeasured=0
-  local seen_file="$candidates_file.seen" idea_seen_file="$candidates_file.idea-seen" line date hash source path cwd repo nested count measured
-  local findings facet goal outcome handle linked refresh refresh_json idea_file digest
+  local seen_file="$candidates_file.seen" line date hash source path cwd repo nested count measured
+  local findings facet goal outcome handle linked refresh idea_file digest
   : > "$candidates_file" || return 1
   : > "$seen_file" || return 1
-  : > "$idea_seen_file" || return 1
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     printf '%s\n' "$line" | jq -s -e 'length == 1 and (.[0] | type == "object")' >/dev/null 2>&1 || continue
@@ -465,8 +464,6 @@ threads_collect_candidates() {
     goal=$(printf '%s\n' "$facet" | jq -r '.goal')
     outcome=$(printf '%s\n' "$facet" | jq -r '.outcome')
     refresh=$(threads_refresh_has "$date" "$hash" && echo yes || echo no)
-    refresh_json=false
-    [ "$refresh" != yes ] || refresh_json=true
     handle="$date:$hash"
     linked=$(printf '%s\n' "$state_json" | jq -e --arg d "$date" --arg h "$hash" --arg handle "$handle" \
       'any(.[]; .kind == "work" and any(.sessions[]?; .date == $d and .hash == $h and (.candidate_handle == null or .candidate_handle == $handle)))' \
@@ -474,11 +471,15 @@ threads_collect_candidates() {
     if [ -n "$facet" ] && { [ "$linked" != yes ] || [ "$refresh" = yes ]; }; then
       jq -cn --arg handle "$handle" --arg date "$date" --arg hash "$hash" --arg source "$source" \
         --arg path "$path" --arg cwd "$cwd" --arg repo "$repo" --arg kind work \
-        --arg goal "$goal" --arg outcome "$outcome" --argjson refresh "$refresh_json" \
-        '{handle:$handle,date:$date,hash:$hash,source:$source,session_path:$path,cwd:$cwd,repo:$repo,kind:$kind,goal:$goal,outcome:$outcome,quote:"",refresh:$refresh}' \
+        --arg goal "$goal" --arg outcome "$outcome" \
+        '{handle:$handle,date:$date,hash:$hash,source:$source,session_path:$path,cwd:$cwd,repo:$repo,kind:$kind,goal:$goal,outcome:$outcome,quote:""}' \
         >> "$candidates_file" || return 1
     fi
 
+    if printf '%s\n' "$state_json" | jq -e --arg d "$date" --arg h "$hash" \
+      'any(.[]; .kind == "idea" and any(.sessions[]?; .date == $d and .hash == $h))' >/dev/null 2>&1; then
+      continue
+    fi
     idea_file="$candidates_file.ideas"
     jq -c '
       def clean: gsub("[\\x00-\\x1F\\x7F]"; " ") | gsub("\\s+"; " ") | gsub("^\\s+|\\s+$"; "");
@@ -493,27 +494,19 @@ threads_collect_candidates() {
     ' "$findings" 2>/dev/null > "$idea_file" || : > "$idea_file"
     while IFS= read -r line; do
       [ -n "$line" ] || continue
-      goal=$(printf '%s\n' "$line" | jq -r '.goal')
       digest=$(printf '%s\n' "$line" | jq -c '
         def clean: gsub("[\\x00-\\x1F\\x7F]"; " ") | gsub("\\s+"; " ") | gsub("^\\s+|\\s+$"; "");
         [.goal,.quote] | map(clean | ascii_downcase)
       ' | python3 -c 'import hashlib,sys; print(hashlib.sha1(sys.stdin.buffer.read()).hexdigest())') || continue
-      grep -Fqx "$date:$hash:$digest" "$idea_seen_file" && continue
-      printf '%s\n' "$date:$hash:$digest" >> "$idea_seen_file"
       handle="$date:$hash:idea:$digest"
-      linked=$(printf '%s\n' "$state_json" | jq -e --arg d "$date" --arg h "$hash" --arg handle "$handle" \
-        'any(.[]; any(.sessions[]?; .date == $d and .hash == $h and .candidate_handle == $handle))' \
-        >/dev/null 2>&1 && echo yes || echo no)
-      [ "$linked" != yes ] || [ "$refresh" = yes ] || continue
       jq -cn --arg handle "$handle" --arg date "$date" --arg hash "$hash" --arg source "$source" \
         --arg path "$path" --arg cwd "$cwd" --arg repo "$repo" --argjson idea "$line" \
-        --argjson refresh "$refresh_json" \
-        '{handle:$handle,date:$date,hash:$hash,source:$source,session_path:$path,cwd:$cwd,repo:$repo,kind:"idea",goal:$idea.goal,quote:$idea.quote,outcome:"not_achieved",refresh:$refresh}' \
+        '{handle:$handle,date:$date,hash:$hash,source:$source,session_path:$path,cwd:$cwd,repo:$repo,kind:"idea",goal:$idea.goal,quote:$idea.quote,outcome:"not_achieved"}' \
         >> "$candidates_file" || return 1
     done < "$idea_file"
     unlink "$idea_file" 2>/dev/null || true
   done < "$source_file"
-  unlink "$seen_file" "$idea_seen_file" 2>/dev/null || true
+  unlink "$seen_file" 2>/dev/null || true
   printf '%s' "$unmeasured"
 }
 
@@ -686,7 +679,6 @@ threads_merge_assignments() {
   python3 - "$state_file" "$candidates_file" "$assignments_file" "$output_file" "$result_file" <<'PY'
 import hashlib
 import json
-import re
 import sys
 import unicodedata
 
@@ -702,7 +694,9 @@ for line in open(candidates_path, encoding="utf-8"):
         candidates[item["handle"]] = item
 assignments = [json.loads(line) for line in open(assignments_path, encoding="utf-8") if line.strip()]
 by_id = {item["id"]: item for item in state}
-created_ids = set()
+idea_sources = {(session.get("date"), session.get("hash"))
+                for thread in state if thread.get("kind") == "idea"
+                for session in thread.get("sessions", [])}
 linked = rejected = close_refused = 0
 accepted = []
 for assignment in assignments:
@@ -712,18 +706,11 @@ for assignment in assignments:
             target is None or target.get("kind", "work") != candidate["kind"])):
         rejected += 1
         continue
+    if candidate["kind"] == "idea" and (candidate["date"], candidate["hash"]) in idea_sources:
+        rejected += 1
+        continue
     accepted.append(assignment)
 assignments = accepted
-accepted_handles = {assignment["hash"] for assignment in assignments}
-candidate_handles = {}
-refreshed_sources = set()
-for candidate in candidates.values():
-    key = (candidate["date"], candidate["hash"], candidate["kind"])
-    candidate_handles.setdefault(key, set()).add(candidate["handle"])
-    if candidate.get("refresh") and candidate["handle"] in accepted_handles:
-        refreshed_sources.add(key)
-refreshed_sources = {key for key in refreshed_sources
-                     if candidate_handles[key] <= accepted_handles}
 
 def source_key(session):
     return session.get("date"), session.get("hash")
@@ -733,35 +720,11 @@ def refresh_last_seen(thread):
     if dates:
         thread["last_seen"] = max(dates)
 
-idea_sources = {thread["id"]: {source_key(session) for session in thread.get("sessions", [])}
-                for thread in state if thread.get("kind") == "idea"}
-
-for thread in state:
-    kept = []
-    for session in thread.get("sessions", []):
-        key = source_key(session)
-        refresh_key = key + (thread.get("kind", "work"),)
-        if refresh_key in refreshed_sources:
-            handle = session.get("candidate_handle")
-            if handle is None and thread.get("kind", "work") == "work":
-                handle = "%s:%s" % key
-            if handle not in candidate_handles.get(refresh_key, set()):
-                continue
-        kept.append(session)
-    thread["sessions"] = kept
-    refresh_last_seen(thread)
-
 def safe_title(value, fallback):
     if not isinstance(value, str):
         value = fallback
     value = "".join(char for char in value if unicodedata.category(char) != "Cc")[:120].strip()
     return value or fallback[:120]
-
-def normalized_title(value):
-    title = re.sub(r"\s+", " ", value.casefold()).strip()
-    while title and unicodedata.category(title[-1]).startswith("P"):
-        title = title[:-1].rstrip()
-    return title
 
 def new_id(candidate):
     seed = candidate["handle"]
@@ -781,10 +744,12 @@ for assignment in assignments:
     date = candidate["date"]
     hash_value = candidate["hash"]
     for item in state:
+        if candidate["kind"] != "work" or item.get("kind", "work") != "work":
+            continue
         item["sessions"] = [s for s in item.get("sessions", []) if not (
             source_key(s) == (date, hash_value)
             and (s.get("candidate_handle") == candidate["handle"]
-                 or (candidate["kind"] == "work" and s.get("candidate_handle") is None))) ]
+                 or s.get("candidate_handle") is None)) ]
     by_id = {item["id"]: item for item in state}
     if assignment["thread"] == "new":
         ident = new_id(candidate)
@@ -796,7 +761,6 @@ for assignment in assignments:
                      "done_by": None, "last_seen": date}
             state.append(thread)
             by_id[ident] = thread
-            created_ids.add(ident)
     else:
         ident = assignment["thread"]
         thread = by_id[ident]
@@ -815,50 +779,13 @@ for assignment in assignments:
     if assignment["finished"]:
         if (date, hash_value) < before_latest:
             close_refused += 1
-        elif ((candidate["kind"] == "work" and candidate["outcome"] in ("fully_achieved", "mostly_achieved"))
-              or (candidate["kind"] == "idea" and any(
-                  source_hash != hash_value and (source_date, source_hash) <= (date, hash_value)
-                  for source_date, source_hash in idea_sources.get(ident, set())))):
+        elif candidate["kind"] == "work" and candidate["outcome"] in ("fully_achieved", "mostly_achieved"):
             if thread["status"] == "open":
                 thread["status"] = "done"
                 thread["done_by"] = "linker"
         else:
             close_refused += 1
     linked += 1
-
-candidate_goals = {candidate["handle"]: candidate["goal"] for candidate in candidates.values()}
-assignment_finished = {assignment["hash"]: assignment["finished"] for assignment in assignments}
-folded = {}
-merged_state = []
-for thread in state:
-    if thread["id"] not in created_ids:
-        merged_state.append(thread)
-        continue
-    finished = frozenset(assignment_finished[session["candidate_handle"]]
-                         for session in thread["sessions"])
-    key = (thread.get("kind", "work"), normalized_title(thread["title"]), thread.get("repo", ""), finished)
-    primary = folded.get(key)
-    if primary is None:
-        folded[key] = thread
-        merged_state.append(thread)
-        continue
-    seen_sessions = {session.get("candidate_handle", source_key(session))
-                     for session in primary.get("sessions", [])}
-    for session in thread.get("sessions", []):
-        session_key = session.get("candidate_handle", source_key(session))
-        if session_key not in seen_sessions:
-            primary.setdefault("sessions", []).append(session)
-            seen_sessions.add(session_key)
-    primary["sessions"].sort(key=lambda item: (item.get("date", ""), item.get("hash", "")))
-    refresh_last_seen(primary)
-    newest = primary["sessions"][-1]
-    primary["goal"] = candidate_goals[newest["candidate_handle"]]
-    completed = (assignment_finished[newest["candidate_handle"]]
-                 and newest["outcome"] in ("fully_achieved", "mostly_achieved")
-                 and primary["kind"] == "work")
-    primary["status"] = "done" if completed else "open"
-    primary["done_by"] = "linker" if completed else None
-state = merged_state
 
 for item in state:
     refresh_last_seen(item)

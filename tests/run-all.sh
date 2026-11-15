@@ -7809,42 +7809,6 @@ test_threads_runner_provenance_survives_worker_tampering(){
   thread_cleanup "$root"
 }
 
-test_threads_split_new_assignments_with_different_repos_stay_separate(){
-  echo "# threads: same-day new assignments with matching titles retain distinct repo identities"
-  local root first_hash second_hash count sessions expected_id actual_id merged_sessions existing_count large_goal state rows cap
-  root=$(setup_env)
-  first_hash=111111111111; second_hash=222222222222
-  large_goal=$(python3 -c 'print("backup goal " * 24)')
-  mkdir -p "$(fdir "$root")"
-  jq -cn --arg goal "$large_goal first" '{underlying_goal:$goal,outcome:"partially_achieved",findings:[]}' > "$(fdir "$root")/$first_hash.json"
-  jq -cn --arg goal "$large_goal second" '{underlying_goal:$goal,outcome:"partially_achieved",findings:[]}' > "$(fdir "$root")/$second_hash.json"
-  state=$(thread_state "$root")
-  jq -cn '{id:"t-abcdef12",kind:"work",repo:"/repo/existing",title:"  FETCH three backup files from remote host via an lftp command?!  ",goal:"existing goal",sessions:[{date:"2019-12-31",hash:"eeeeeeeeeeee",session_path:"/old/session.jsonl",outcome:"partially_achieved"}],status:"open",done_by:null,last_seen:"2019-12-31"}' > "$state"
-  rows="$root/thread-rows.jsonl"
-  jq -cn --arg date "$DATE" --arg hash "$first_hash" '{date:$date,hash:$hash,source:"claude",session_path:"/sessions/first.jsonl",cwd:"/repo/alpha",repo:"/repo/alpha",nested:false,user_message_count:2,measured:true}' > "$rows"
-  jq -cn --arg date "$DATE" --arg hash "$second_hash" '{date:$date,hash:$hash,source:"claude",session_path:"/sessions/second.jsonl",cwd:"/repo/beta",repo:"/repo/beta",nested:false,user_message_count:2,measured:true}' >> "$rows"
-  export MOCK_THREADS_MODE=duplicate_split MOCK_CAPTURE_DIR="$root/cap"
-  cap=$(( $(wc -c < "$REPO/prompts/THREAD_LINKER.md") + 744 ))
-  AUTODREAM_THREADS_MAX_INPUT=$cap AUTODREAM_DIR="$root/autodream" AUTODREAM_THREADS_STATE="$state" \
-    AUTODREAM_THREADS_TIMEOUT_BIN=/usr/bin/timeout CLAUDE_BIN="$MOCK" \
-    /bin/bash "$REPO/bin/threads.sh" update "$DATE" < "$rows" > "$root/update.out" 2>&1
-  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
-  count=$(thread_index_count "$root")
-  sessions=$(jq -sr '[.[].sessions[]] | length' "$(thread_state "$root")")
-  expected_id=$(printf '%s' "$(thread_request_json "$root/cap/threads-stdin-1.txt" | jq -r '.candidates[0].hash')" | shasum -a 1 | cut -c1-8)
-  expected_id="t-$expected_id"
-  actual_id=$(jq -sr --arg existing t-abcdef12 '[.[] | select(.id != $existing) | .id] | first // empty' "$(thread_state "$root")")
-  merged_sessions=$(jq -sr --arg id "$expected_id" '[.[] | select(.id == $id) | .sessions[]] | length' "$(thread_state "$root")")
-  existing_count=$(jq -sr '[.[] | select(.id == "t-abcdef12")] | length' "$(thread_state "$root")")
-  assert_eq "$(thread_call_count "$root/cap")" 2 "repo-hint split makes two linker calls"
-  assert_eq "$count" 3 "matching new titles in different repos stay separate"
-  assert_eq "$sessions" 3 "both new sources and the existing source remain linked"
-  assert_eq "$actual_id" "$expected_id" "the first new thread id is retained"
-  assert_eq "$merged_sessions" 1 "the first new thread keeps only its own source session"
-  assert_eq "$existing_count" 1 "the older matching thread is preserved separately"
-  thread_cleanup "$root"
-}
-
 test_threads_request_sends_full_details_only_for_recent_open_threads(){
   echo "# threads: older open hints omit goal and last_seen from linker requests"
   local root session state day_ten day_forty_five day_hundred request_json recent_keys older_keys absent_count
@@ -8129,70 +8093,30 @@ thread_review_update(){
     /bin/bash "$REPO/bin/threads.sh" update "$DATE" < "$root/rows.jsonl" > "$root/update.out" 2>&1
 }
 
-test_threads_refresh_keeps_unaccepted_idea_source(){
-  local mode root old_id hash=111111111111 expected
-  for mode in reject_idea omit_last partial good; do
+test_threads_refresh_preserves_existing_ideas(){
+  local mode root before hash=111111111111
+  for mode in good reject_idea omit_last; do
     root=$(setup_env)
-    thread_review_row "$root" "$hash" "ship service" partially_achieved '[{"idea":"cache later","quote":"Later, add caching"}]'
-    if [ "$mode" = partial ]; then
-      jq '.deferred_ideas += [{idea:"index later",quote:"Later add index"}]' "$(fdir "$root")/$hash.json" > "$root/f.json"
-      mv "$root/f.json" "$(fdir "$root")/$hash.json"
-    fi
+    thread_review_row "$root" "$hash" "ship service" partially_achieved '[{"idea":"cache later","quote":"Later add caching"},{"idea":"index later","quote":"Later add index"}]'
     thread_review_update "$root"
-    old_id=$(jq -sr '.[] | select(.kind == "idea" and .goal == "cache later") | .id' "$(thread_state "$root")")
+    jq 'if .kind == "idea" and .goal == "cache later" then del(.sessions[].candidate_handle) else . end' "$(thread_state "$root")" > "$root/legacy.jsonl"
+    mv "$root/legacy.jsonl" "$(thread_state "$root")"
+    before=$(jq -sc '[.[] | select(.kind == "idea")]' "$(thread_state "$root")")
     : > "$root/rows.jsonl"
-    thread_review_row "$root" "$hash" "ship service" partially_achieved '[{"idea":"cache later","quote":"We can cache after launch"}]'
-    if [ "$mode" = partial ]; then
-      jq '.deferred_ideas += [{idea:"index later",quote:"Later add index"}]' "$(fdir "$root")/$hash.json" > "$root/f.json"
-      mv "$root/f.json" "$(fdir "$root")/$hash.json"
-    fi
-    THREADS_REFRESH_KEYS=$(printf '%s\t%s' "$DATE" "$hash") MOCK_THREADS_REJECT_GOAL="cache later" thread_review_update "$root" "${mode/partial/reject_idea}"
-    expected=1; [ "$mode" != good ] || expected=0
-    assert_eq "$(jq -sr --arg id "$old_id" '[.[] | select(.id == $id) | .sessions[]] | length' "$(thread_state "$root")")" "$expected" "$mode refresh preserves old idea until replacement accepted"
-    assert_eq "$(jq -sr '[.[] | select(.kind == "idea" and .goal == "cache later") | .sessions[]] | length' "$(thread_state "$root")")" 1 "$mode refresh keeps exactly one cache source"
-    assert_eq "$(jq -sr '[.[] | select(.kind == "work") | .sessions[]] | length' "$(thread_state "$root")")" 1 "$mode refresh accepts work independently"
-    thread_cleanup "$root"
-  done
-}
-
-test_threads_fold_requires_repo_kind_and_finished(){
-  local variant root repo outcome expected mode status
-  for variant in repo finished matching kind completed recompute; do
-    root=$(setup_env)
-    repo=/repo/alpha; outcome=partially_achieved; expected=2; mode=same_title; status=open
-    [ "$variant" != repo ] || repo=/repo/beta
-    [ "$variant" != finished ] || outcome=fully_achieved
-    case "$variant" in
-      matching) expected=1 ;;
-      completed) expected=1; outcome=fully_achieved; status=done ;;
-      recompute) expected=1; outcome=fully_achieved; mode=same_title_finished ;;
-    esac
-    if [ "$variant" = kind ]; then
-      thread_review_row "$root" 111111111111 "deploy first" partially_achieved '[{"idea":"deploy later","quote":"Later deploy service"}]'
-    else
-      thread_review_row "$root" 111111111111 "deploy first" "$outcome" '[]' 2020-01-01
-      thread_review_row "$root" 222222222222 "deploy newest" "$outcome" '[]' "$DATE" "$repo"
-    fi
-    if [ "$variant" = finished ] || [ "$variant" = recompute ]; then
-      jq '.outcome="partially_achieved"' "$(fdir "$root")/222222222222.json" > "$root/f.json"
-      mv "$root/f.json" "$(fdir "$root")/222222222222.json"
-    fi
-    thread_review_update "$root" "$mode"
-    assert_eq "$(thread_index_count "$root")" "$expected" "$variant boundary controls title folding"
-    if [ "$expected" -eq 1 ]; then
-      assert_eq "$(jq -sr '.[0].goal' "$(thread_state "$root")")" "deploy newest" "fold uses newest session goal"
-      assert_eq "$(jq -sr '.[0].last_seen' "$(thread_state "$root")")" "$DATE" "fold recomputes last_seen"
-      assert_eq "$(jq -sr '.[0].status' "$(thread_state "$root")")" "$status" "fold recomputes status from newest session"
-    fi
-    if [ "$variant" = finished ]; then
-      assert_eq "$(jq -sr '[.[] | .status] | sort | join(",")' "$(thread_state "$root")")" done,open "finished and unfinished work retain their statuses"
-    fi
+    thread_review_row "$root" "$hash" "revised service goal" partially_achieved '[{"idea":"reworded cache","quote":"We can cache after launch"},{"idea":"reworded index","quote":"We can index after launch"}]'
+    THREADS_REFRESH_KEYS=$(printf '%s\t%s' "$DATE" "$hash") MOCK_THREADS_REJECT_GOAL="revised service goal" thread_review_update "$root" "$mode"
+    assert_eq "$(jq -sc '[.[] | select(.kind == "idea")]' "$(thread_state "$root")")" "$before" "$mode refresh leaves original ideas and sources unchanged"
+    assert_eq "$(thread_request_json "$root/cap/threads-stdin-2.txt" | jq '[.candidates[] | select(.kind == "idea")] | length')" 0 "$mode refresh never offers existing idea sources"
+    assert_eq "$(jq -sr '[.[] | select(.kind == "work") | .sessions[]] | length' "$(thread_state "$root")")" 1 "$mode refresh keeps one work source"
+    thread_review_update "$root"
+    assert_eq "$(thread_call_count "$root/cap")" 2 "$mode ordinary rerun does not offer changed ideas"
+    assert_eq "$(jq -sc '[.[] | select(.kind == "idea")]' "$(thread_state "$root")")" "$before" "$mode rerun leaves ideas untouched"
     thread_cleanup "$root"
   done
 }
 
 test_threads_completed_work_leaves_deferred_idea_open(){
-  local outcome root idea_id
+  local outcome root idea_id work_id
   for outcome in fully_achieved mostly_achieved; do
     root=$(setup_env)
     thread_review_row "$root" 111111111111 "ship release" "$outcome" '[{"idea":"cache after release","quote":"Later add cache"}]'
@@ -8202,13 +8126,20 @@ test_threads_completed_work_leaves_deferred_idea_open(){
     AUTODREAM_DIR="$root/autodream" /bin/bash "$REPO/bin/threads.sh" report 2020-01-20 > "$root/report.md"
     assert_grep "$root/report.md" 'cache after release' "deferred idea reaches dropped report after completed work"
     idea_id=$(jq -sr '.[] | select(.kind == "idea") | .id' "$(thread_state "$root")")
+    work_id=$(jq -sr '.[] | select(.kind == "work") | .id' "$(thread_state "$root")")
     THREADS_REFRESH_KEYS=$(printf '%s\t%s' "$DATE" 111111111111) MOCK_THREADS_CLOSE_ID="$idea_id" thread_review_update "$root" finish_ideas
     assert_eq "$(jq -sr --arg id "$idea_id" '.[] | select(.id == $id) | .status' "$(thread_state "$root")")" open "retriaging the originating session cannot close its idea"
     : > "$root/rows.jsonl"
-    thread_review_row "$root" 222222222222 "follow-up work" fully_achieved '[{"idea":"cache after release","quote":"Now finish the cache we deferred"}]' 2020-01-03
+    thread_review_row "$root" 222222222222 "follow-up work" fully_achieved '[{"idea":"cache after release","quote":"Later finish the cache we deferred"}]' 2020-01-03
     idea_id=$(jq -sr '.[] | select(.kind == "idea") | .id' "$(thread_state "$root")")
     MOCK_THREADS_CLOSE_ID="$idea_id" thread_review_update "$root" finish_ideas
-    assert_eq "$(jq -sr --arg id "$idea_id" '.[] | select(.id == $id) | .status' "$(thread_state "$root")")" done "a later session can finish the earlier idea"
+    assert_eq "$(jq -sr --arg id "$idea_id" '.[] | select(.id == $id) | .status' "$(thread_state "$root")")" open "later deferral cannot finish the earlier idea"
+    assert_grep "$root/update.out" '^threads_close_refused: 1$' "later deferral refusal is counted"
+    : > "$root/rows.jsonl"
+    AUTODREAM_DIR="$root/autodream" /bin/bash "$REPO/bin/threads.sh" reopen "$work_id" >/dev/null
+    thread_review_row "$root" 333333333333 "service completed" "$outcome" '[]' 2020-01-04
+    MOCK_THREADS_CLOSE_ID="$work_id" thread_review_update "$root" finished_existing
+    assert_eq "$(jq -sr --arg id "$work_id" '.[] | select(.id == $id) | .status' "$(thread_state "$root")")" done "$outcome later work still closes its work thread"
     thread_cleanup "$root"
   done
 }
@@ -8283,29 +8214,37 @@ test_threads_deferred_ideas_are_independent_candidates(){
   thread_cleanup "$malformed_root"
 }
 
-test_threads_idea_retry_does_not_lose_rejected_sibling(){
-  echo "# threads: an accepted idea stays linked while a rejected sibling retries"
-  local root session ideas first_ideas second_ideas rejected_idea
+test_threads_first_ideas_are_collected_after_work(){
+  local root refresh
+  for refresh in no yes; do
+    root=$(setup_env)
+    thread_review_row "$root" 111111111111 "ship service" partially_achieved '[]'
+    thread_review_update "$root"
+    : > "$root/rows.jsonl"
+    thread_review_row "$root" 111111111111 "ship service" partially_achieved '[{"idea":"first idea","quote":"Later try this idea"},{"idea":"second idea","quote":"Later try another idea"}]'
+    if [ "$refresh" = yes ]; then
+      THREADS_REFRESH_KEYS=$(printf '%s\t%s' "$DATE" 111111111111) thread_review_update "$root"
+    else
+      thread_review_update "$root"
+    fi
+    assert_eq "$(jq -sr '[.[] | select(.kind == "idea")] | length' "$(thread_state "$root")")" 2 "$refresh refresh collects first ideas beside existing work"
+    assert_eq "$(thread_request_json "$root/cap/threads-stdin-2.txt" | jq '[.candidates[] | select(.kind == "idea")] | length')" 2 "$refresh refresh offers both first ideas"
+    thread_review_update "$root"
+    assert_eq "$(thread_call_count "$root/cap")" 2 "$refresh refresh first ideas stay idempotent"
+    thread_cleanup "$root"
+  done
+}
+
+test_threads_concurrent_idea_link_keeps_one_source(){
+  local root
   root=$(setup_env)
-  session=$(mk_thread_session "$root" idea-retry "$REPO")
-  ideas='[{"idea":"first idea","quote":"I will revisit the first idea"},{"idea":"second idea","quote":"I will revisit the second idea"}]'
-  seed_thread_deferred_findings "$root" "$session" "retry work" "$ideas" partially_achieved >/dev/null
-  export MOCK_THREADS_MODE=reject_idea MOCK_THREADS_REJECT_GOAL="second idea" MOCK_THREADS_L1_IDEAS="$ideas" MOCK_CAPTURE_DIR="$root/cap"
-  run_dream "$root"
-  unset MOCK_THREADS_MODE MOCK_THREADS_REJECT_GOAL MOCK_THREADS_L1_IDEAS
-  first_ideas=$(jq -sr '[.[] | select(.kind == "idea" and .goal == "first idea")] | length' "$(thread_state "$root")")
-  DATE=2020-01-03
-  STAMP=202001031200
-  export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
-  run_dream "$root"
-  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
-  second_ideas=$(jq -sr '[.[] | select(.kind == "idea" and .goal == "first idea")] | length' "$(thread_state "$root")")
-  rejected_idea=$(jq -sr '[.[] | select(.kind == "idea" and .goal == "second idea") | .sessions[] | select(.date == "2020-01-02")] | length' "$(thread_state "$root")")
-  assert_eq "$first_ideas" 1 "accepted idea linked on the first call"
-  assert_eq "$second_ideas" 1 "accepted idea remains idempotent on retry"
-  assert_eq "$rejected_idea" 1 "rejected sibling remains pending and eventually links"
-  DATE=2020-01-02
-  STAMP=202001021200
+  thread_review_row "$root" 111111111111 "" partially_achieved '[{"idea":"cache later","quote":"Later add cache"}]'
+  MOCK_THREADS_CLI="$REPO/bin/threads.sh" MOCK_THREADS_SOURCE_ROWS="$root/rows.jsonl" \
+    thread_review_update "$root" ideas_during_call
+  assert_eq "$(jq -sr '[.[] | select(.kind == "idea") | .sessions[]] | length' "$(thread_state "$root")")" 1 "concurrent update retains exactly one idea source"
+  assert_grep "$root/update.out" '^threads_linked: 0$' "stale idea assignment cannot change the indexed source"
+  thread_review_update "$root"
+  assert_eq "$(thread_call_count "$root/cap")" 1 "concurrent idea stays idempotent on rerun"
   thread_cleanup "$root"
 }
 
@@ -9173,7 +9112,6 @@ _run test_threads_eligibility_and_goal_fallback
 _run test_threads_closed_hints_are_capped_and_newest_first
 _run test_threads_missing_sidecar_is_unmeasured
 _run test_threads_runner_provenance_survives_worker_tampering
-_run test_threads_split_new_assignments_with_different_repos_stay_separate
 _run test_threads_request_sends_full_details_only_for_recent_open_threads
 _run test_threads_one_call_across_repo_hints
 _run test_threads_no_eligible_sessions_makes_no_call
@@ -9184,14 +9122,14 @@ _run test_threads_unreadable_index_prevents_write_and_render
 _run test_threads_concurrent_merges_preserve_cli_close
 _run test_threads_lock_exhaustion_is_bounded
 _run test_threads_retriaged_goal_replaces_source_link
-_run test_threads_refresh_keeps_unaccepted_idea_source
-_run test_threads_fold_requires_repo_kind_and_finished
+_run test_threads_refresh_preserves_existing_ideas
 _run test_threads_completed_work_leaves_deferred_idea_open
 _run test_threads_idea_identity_includes_text_and_quote
 _run test_threads_ideas_without_work_facet_survive
 _run test_threads_idea_length_validates_before_cap
 _run test_threads_deferred_ideas_are_independent_candidates
-_run test_threads_idea_retry_does_not_lose_rejected_sibling
+_run test_threads_first_ideas_are_collected_after_work
+_run test_threads_concurrent_idea_link_keeps_one_source
 _run test_threads_closed_idea_stays_closed
 _run test_threads_idea_slots_are_reserved
 _run test_threads_older_rebuild_only_links_missing_sources

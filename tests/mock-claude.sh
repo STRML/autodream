@@ -172,6 +172,12 @@ if [ "$line1" = "AUTODREAM_THREADS_LINKER" ]; then
         <<< "$threads_request"
       exit 0
       ;;
+    ideas_during_call)
+      MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR= /bin/bash "$MOCK_THREADS_CLI" update \
+        "$(jq -r '.date' <<< "$threads_request")" < "$MOCK_THREADS_SOURCE_ROWS" >/dev/null 2>&1 || exit 1
+      threads_good
+      exit 0
+      ;;
     attach_existing)
       jq -c --arg id "$MOCK_THREADS_CLOSE_ID" '.candidates[] | {hash:.hash,thread:$id,title:.goal,finished:false}' \
         <<< "$threads_request"
@@ -184,20 +190,6 @@ if [ "$line1" = "AUTODREAM_THREADS_LINKER" ]; then
       ;;
     finish_ideas)
       jq -c --arg id "$MOCK_THREADS_CLOSE_ID" '.candidates[] | {hash:.hash,thread:(if .kind == "idea" then $id else "new" end),title:.goal,finished:true}' <<< "$threads_request"
-      exit 0
-      ;;
-    same_title|same_title_finished)
-      jq -c --arg mode "$threads_mode" '.candidates[] | {hash:.hash,thread:"new",title:(if .hash | contains("222222222222") then "  deploy   SERVICE!!! " else "Deploy service" end),finished:($mode == "same_title_finished" or .outcome == "fully_achieved" or .outcome == "mostly_achieved")}' <<< "$threads_request"
-      exit 0
-      ;;
-    duplicate_split)
-      if [ "${threads_call:-1}" -eq 1 ]; then
-        title='Fetch three backup files from remote host via an lftp command'
-      else
-        title='  fetch   three backup files from remote host via an lftp command!!!  '
-      fi
-      jq -c --arg title "$title" '.candidates[] | {hash:.hash,thread:"new",title:$title,finished:false}' \
-        <<< "$threads_request"
       exit 0
       ;;
     reject_idea)
