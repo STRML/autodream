@@ -5671,6 +5671,7 @@ test_pins_applied_after_complete_report(){
   assert_eq "$(sm_calls "$root")" "1" "one remember call"
   assert_eq "$(jq -r .cwd "$root/sm-calls.jsonl" 2>/dev/null)" "$cwd" "scoped to the session's working directory"
   assert_grep "$d/pin-projects.tsv" "^$b"$'\t'"$cwd\$" "pin-projects.tsv pairs the bucket with its cwd"
+  assert_grep "$d/session-cwds.tsv" $'\t'"$cwd\$" "session-cwds.tsv retains each runner-resolved cwd"
   assert_nonempty "$d/pins-applied.tsv" "the ledger records the stored pin"
   assert_grep "$root/run.out" 'memory pins:' "the run log reports the pin counts"
   # The pins and their authorization list land before the report does (issue 72), so a complete

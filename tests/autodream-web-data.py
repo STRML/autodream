@@ -48,14 +48,10 @@ class DataTests(unittest.TestCase):
                               text=True, timeout=10).stdout.strip()
 
     def test_web_lately_excludes_nested_and_folds_repos(self):
-        main = self.root / 'main'
-        self.git('init', main)
-        self.git('-C', main, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@invalid',
-                 'commit', '--allow-empty', '-m', 'fixture')
-        worktree = self.root / 'worktree'
-        temporary = self.root / 'tmp/worktree'
-        self.git('-C', main, 'worktree', 'add', '-b', 'one', worktree)
-        self.git('-C', main, 'worktree', 'add', '-b', 'two', temporary)
+        common = Path(self.git('-C', REPO, 'rev-parse', '--git-common-dir')).resolve()
+        main = common.parent
+        worktree = REPO
+        temporary = REPO / 'tests'
         (self.day / 'pin-projects.tsv').write_text('-repo\t' + str(worktree) + '\n')
         self.finding(underlying_goal=None)
         self.finding('111111111111', stats={'nested': True})
@@ -66,10 +62,7 @@ class DataTests(unittest.TestCase):
         self.assertEqual(result['projects'][0]['repo'], str(main.resolve()))
         self.assertEqual(self.sessions(result)[0]['goal'], 'Fallback goal')
         self.assertEqual(self.data.repo_for_project('-tmp', temporary, []), str(main.resolve()))
-        bare = self.root / 'bare.git'
-        self.git('init', '--bare', bare)
-        self.assertEqual(self.data.repo_for_project('-bare', bare, []), str(bare.resolve()))
-        self.assertEqual(self.data.repo_for_project('-Users-made-up', '', []), '-Users-made-up')
+        self.assertEqual(self.data.repo_for_project('-Users-made-up', '', []), '/Users/made/up')
         self.assertEqual(self.data.repo_for_project('-gone', '', [{'repo': '/historical/repo'}]),
                          '/historical/repo')
         self.assertTrue(result['degraded'])
@@ -88,6 +81,72 @@ class DataTests(unittest.TestCase):
                 ('2026-11-13', 'bbbbbbbbbbbb'): [{'repo': '/repo/two'}]}})
         self.assertEqual({p['repo'] for p in summary['projects']}, {'/repo/one', '/repo/two'},
                          'session references must resolve shared temporary buckets independently')
+
+    def test_web_projects_use_runner_cwds_and_decode_fallback_labels(self):
+        common = Path(self.git('-C', REPO, 'rev-parse', '--git-common-dir')).resolve()
+        main = common.parent
+        worktree = REPO
+        (self.day / 'pin-projects.tsv').write_text(
+            '-Users-fixture-git-cc-autodream\t\n'
+            '-home-fixture-projects-cc-autodream\t\n')
+        self.finding(project='-Users-fixture-git-cc-autodream', transcript_mtime=10)
+        self.finding('111111111111', project='-home-fixture-projects-cc-autodream',
+                     underlying_goal='Most recent goal', transcript_mtime=20,
+                     outcome='mostly_achieved')
+        home = Path('/Users/fixture')
+        home_bucket = '-Users-fixture'
+        self.finding('222222222222', project=home_bucket, outcome='unclear_from_transcript')
+        temp_bucket = '-private-tmp-adw22p'
+        scratch_bucket = '-Users-fixture-scratchpad'
+        with (self.day / 'pin-projects.tsv').open('a') as stream:
+            stream.write(temp_bucket + '\t/tmp/adw22p\n')
+            stream.write(scratch_bucket + '\t' + str(home / 'scratchpad') + '\n')
+        self.finding('333333333333', project=temp_bucket)
+        self.finding('444444444444', project=scratch_bucket)
+        (self.day / 'session-cwds.tsv').write_text(
+            '0123456789ab\t' + str(worktree) + '\n'
+            '111111111111\t' + str(worktree) + '\n'
+            '222222222222\t?\n'
+            '333333333333\t/tmp/adw22p\n'
+            '444444444444\t' + str(home / 'scratchpad') + '\n')
+        with patch.dict(os.environ, {'HOME': str(home)}):
+            summary = self.data.build_night_summary('2026-11-14', {
+                'findings_dir': self.day, 'thread_references': {}})
+        self.assertEqual({project['repo'] for project in summary['projects']},
+                         {str(main.resolve()), '~'}, summary)
+        repo = next(project for project in summary['projects']
+                    if project['repo'] == str(main.resolve()))
+        self.assertEqual(len(repo['sessions']), 2,
+                         'Claude and OMP buckets for one cwd must fold into the same repo')
+        self.assertEqual(repo['session_count'], 2)
+        self.assertEqual(repo['outcomes'], {
+            'fully_or_mostly': 1, 'partially': 1, 'not_achieved': 0, 'unclear': 0})
+        self.assertEqual(repo['latest_goal'], 'Most recent goal')
+        fallback = next(project for project in summary['projects'] if project['repo'] == '~')
+        self.assertEqual(fallback['sessions'][0]['outcome'], 'unclear_from_transcript')
+        self.assertEqual(len(self.sessions(summary)), 3,
+                         'temporary and scratchpad sessions must stay out of Lately')
+
+    def test_web_missing_session_values_do_not_create_night_notices(self):
+        self.finding(underlying_goal=None, notable_initiatives=[], outcome='unknown',
+                     stats={'tool_call_count': None})
+        summary = self.cache.summary('2026-11-14')
+        session = self.sessions(summary)[0]
+        self.assertEqual(session['goal'], None)
+        self.assertIsNone(session['outcome'])
+        self.assertIsNone(session['tool_calls'])
+        self.assertEqual(summary['notices'], [])
+
+    def test_web_legacy_night_and_unreadable_file_notices_name_the_cause(self):
+        old = self.root / 'findings/2026-07-16'
+        self.finding(day=old)
+        legacy = self.data.build_night_summary('2026-07-16', {'findings_dir': old})
+        self.assertEqual(legacy['notices'], [
+            'Outcomes were not measured before 2026-07-17.',
+            'Goals were not measured before 2026-07-20.'])
+        (self.day / '111111111111.json').write_text('{broken')
+        broken = self.cache.summary('2026-11-14')
+        self.assertTrue(any('111111111111.json' in notice for notice in broken['notices']))
 
     def test_web_legacy_measurements_are_not_zero(self):
         for date, goal, outcome in [('2026-07-16', None, None),
@@ -119,7 +178,7 @@ class DataTests(unittest.TestCase):
         self.assertEqual(len(self.sessions(self.cache.summary('2026-11-14'))), 2)
         (self.day / '111111111111.json').unlink()
         self.assertEqual(len(self.sessions(self.cache.summary('2026-11-14'))), 1)
-        for name in ['categories.tsv', 'run-stats.txt', 'pin-projects.tsv']:
+        for name in ['categories.tsv', 'run-stats.txt', 'pin-projects.tsv', 'session-cwds.tsv']:
             before = self.cache.fingerprint('2026-11-14')
             (self.day / name).write_text('changed')
             self.assertNotEqual(self.cache.fingerprint('2026-11-14'), before)

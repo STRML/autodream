@@ -339,6 +339,39 @@ class WebTests(unittest.TestCase):
         for days in ("0", "-1", "no", "1&days=2", "366"):
             self.assertEqual(self.request("GET", "/api/lately?days=" + days, cookie=cookie).status, 400)
 
+    def test_web_lately_project_rows_aggregate_outcomes_and_recent_goal(self):
+        recent_date = (date.today() - timedelta(days=1)).isoformat()
+        day = self.install / "findings" / recent_date
+        day.mkdir(parents=True)
+        common = Path(subprocess.run(["git", "-C", str(REPO), "rev-parse", "--git-common-dir"],
+                                     check=True, capture_output=True, text=True).stdout.strip()).resolve()
+        repo = common.parent
+        worktree = REPO
+        bucket = "-Users-fixture-git-project"
+        for session_hash, goal, outcome, mtime in (
+                ("0123456789ab", "Earlier goal", "partially_achieved", 10),
+                ("111111111111", "Latest goal", "mostly_achieved", 20)):
+            (day / (session_hash + ".json")).write_text(json.dumps({
+                "project": bucket, "underlying_goal": goal, "outcome": outcome}))
+            (day / (session_hash + ".stats.json")).write_text(json.dumps({
+                "nested": False, "user_message_count": 1, "tool_call_count": 2,
+                "duration_minutes": 3, "transcript_mtime": mtime}))
+        (day / "pin-projects.tsv").write_text(bucket + "\t" + str(worktree) + "\n")
+        (day / "session-cwds.tsv").write_text(
+            "0123456789ab\t" + str(worktree) + "\n"
+            "111111111111\t" + str(worktree) + "\n")
+        self.start_server()
+        cookie = self.login()
+        response = self.request("GET", "/api/lately?days=7", cookie=cookie)
+        self.assertEqual(response.status, 200)
+        project = json.loads(response.text)["timeline"][0]["projects"][0]
+        self.assertEqual(project["repo"], str(repo.resolve()))
+        self.assertEqual(project["session_count"], 2)
+        self.assertEqual(project["outcomes"], {
+            "fully_or_mostly": 1, "partially": 1, "not_achieved": 0, "unclear": 0})
+        self.assertEqual(project["latest_goal"], "Latest goal")
+        self.assertEqual(project["sessions"][0]["goal"], "Latest goal")
+
     def test_web_subprocesses_are_bounded(self):
         module = self.load_module()
         result = module.run_bounded([sys.executable, "-c", "import sys; print(sys.stdin.read())"],

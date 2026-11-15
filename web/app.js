@@ -139,7 +139,13 @@ function renderMarkdown(markdown, depth = 0) {
 }
 
 function measured(value) {
-  return value === null || value === undefined ? 'not measured' : String(value).replaceAll('_', ' ');
+  return value === null || value === undefined ? '—' : String(value).replaceAll('_', ' ');
+}
+
+function outcomeLabel(value) {
+  return ({fully_achieved: '✓ fully achieved', mostly_achieved: '✓ mostly achieved',
+    partially_achieved: '◐ partially achieved', not_achieved: '✗ not achieved',
+    unclear_from_transcript: '? unclear'})[value] || '—';
 }
 
 function renderLately(data) {
@@ -157,19 +163,32 @@ function renderLately(data) {
   for (const night of data.timeline) {
     const section = node('section');
     section.append(node('h2', night.date));
-    if (night.degraded && night.degraded.length) section.append(node('p', 'Some measurements are unavailable. Artifacts will be checked again on your next visit.', 'notice'));
-    if (!night.projects.length) section.append(node('p', 'No measured top-level sessions.'));
+    for (const notice of night.notices || []) section.append(node('p', notice, 'notice'));
+    if (!night.projects.length) section.append(node('p', 'No top-level sessions.'));
     for (const project of night.projects) {
-      section.append(node('h3', project.repo || project.project));
+      const row = node('article', undefined, 'project-row');
+      row.append(node('h3', project.repo || project.project));
+      const outcomes = project.outcomes || {};
+      row.append(node('p', `${project.session_count ?? project.sessions.length} sessions · ` +
+        `✓ ${outcomes.fully_or_mostly ?? 0} fully/mostly · ` +
+        `◐ ${outcomes.partially ?? 0} partially · ` +
+        `✗ ${outcomes.not_achieved ?? 0} not achieved · ` +
+        `? ${outcomes.unclear ?? 0} unclear`, 'project-outcomes'));
+      const latestGoal = project.latest_goal ?? project.sessions[0]?.goal;
+      row.append(node('p', measured(latestGoal), 'project-goal'));
+      const details = node('details');
+      details.append(node('summary', `Sessions (${project.session_count ?? project.sessions.length})`));
       const list = node('ul', undefined, 'sessions');
       for (const session of project.sessions) {
         const item = node('li');
         item.append(node('p', measured(session.goal), 'goal'));
-        item.append(node('p', measured(session.outcome), 'outcome'));
+        item.append(node('p', outcomeLabel(session.outcome), 'outcome'));
         item.append(node('p', `${measured(session.user_messages)} user messages · ${measured(session.tool_calls)} tool calls · ${measured(session.duration_minutes)} minutes`, 'metrics'));
         list.append(item);
       }
-      section.append(list);
+      details.append(list);
+      row.append(details);
+      section.append(row);
     }
     content.append(section);
   }

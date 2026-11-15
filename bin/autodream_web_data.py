@@ -37,7 +37,7 @@ def fingerprint_files(paths):
     return tuple(result)
 
 
-def read_object(path, degraded):
+def read_object(path, degraded, unreadable):
     try:
         value = json.loads(path.read_text(encoding='utf-8'))
         if isinstance(value, dict):
@@ -45,6 +45,7 @@ def read_object(path, degraded):
     except (OSError, ValueError):
         pass
     degraded.append(path.name)
+    unreadable.add(path.name)
     return {}
 
 
@@ -61,8 +62,50 @@ def read_open_questions(report_path):
     return None
 
 
-def repo_for_project(project, cwd, thread_references):
-    if cwd and Path(cwd).is_dir():
+def display_path(path, home):
+    path = Path(path).resolve()
+    if home:
+        try:
+            relative = path.relative_to(Path(home).resolve())
+            return '~' if not relative.parts else '~/' + relative.as_posix()
+        except (OSError, ValueError):
+            pass
+    return str(path)
+
+
+def decoded_project(project, home):
+    if not project.startswith('-'):
+        return project
+    decoded = '/' + project.lstrip('-').replace('-', '/')
+    return display_path(decoded, home)
+
+
+def cwd_excluded(cwd):
+    if not cwd or not Path(cwd).is_absolute():
+        return False
+    lexical = Path(cwd)
+    path = Path(cwd).resolve()
+    excluded = {Path('/tmp').resolve(), Path('/private/tmp').resolve()}
+    if os.environ.get('TMPDIR'):
+        excluded.add(Path(os.environ['TMPDIR']).resolve())
+    if any(path == root or root in path.parents for root in excluded):
+        return True
+    return 'scratchpad' in lexical.parts or 'scratchpad' in path.parts
+
+
+def cwd_allowed(cwd):
+    if not cwd or not Path(cwd).is_absolute() or cwd_excluded(cwd):
+        return False
+    try:
+        Path(cwd).resolve(strict=True)
+    except OSError:
+        return False
+    return True
+
+
+def repo_for_project(project, cwd, thread_references, home=None):
+    home = home if home is not None else os.environ.get('HOME', '')
+    if cwd_allowed(cwd):
         try:
             result = subprocess.run(['git', '-C', str(cwd), 'rev-parse', '--git-common-dir'],
                                     capture_output=True, text=True, timeout=2, shell=False)
@@ -80,7 +123,11 @@ def repo_for_project(project, cwd, thread_references):
             pass
     repos = {ref['repo'] for ref in thread_references
              if isinstance(ref, dict) and isinstance(ref.get('repo'), str) and ref['repo']}
-    return repos.pop() if len(repos) == 1 else project
+    if len(repos) == 1:
+        return repos.pop()
+    if cwd and Path(cwd).is_absolute():
+        return display_path(cwd, home)
+    return decoded_project(project, home)
 
 
 def measurement(value):
@@ -98,7 +145,9 @@ def text(value):
 def build_night_summary(date, paths):
     directory = Path(paths['findings_dir'])
     degraded = []
+    unreadable = set()
     mappings = {}
+    session_cwds = {}
     mapping_file = directory / 'pin-projects.tsv'
     if mapping_file.exists():
         try:
@@ -107,13 +156,24 @@ def build_night_summary(date, paths):
                 mappings.setdefault(project, set()).add(cwd)
         except (OSError, ValueError):
             degraded.append('pin-projects.tsv')
+            unreadable.add('pin-projects.tsv')
+    session_cwds_file = directory / 'session-cwds.tsv'
+    if session_cwds_file.exists():
+        try:
+            for row in session_cwds_file.read_text(encoding='utf-8').splitlines():
+                session_hash, cwd = row.split('\t')
+                session_cwds[session_hash] = cwd
+        except (OSError, ValueError):
+            degraded.append('session-cwds.tsv')
+            unreadable.add('session-cwds.tsv')
     projects = {}
     references = paths.get('thread_references', {})
     for path in sorted(directory.glob('*.json')):
         if not FINDING.fullmatch(path.name):
             continue
-        finding = read_object(path, degraded)
-        stats = read_object(path.with_name(path.stem + '.stats.json'), degraded)
+        finding = read_object(path, degraded, unreadable)
+        stats_path = path.with_name(path.stem + '.stats.json')
+        stats = read_object(stats_path, degraded, unreadable)
         provenance = [stats[key] for key in ('nested', 'isSidechain') if key in stats]
         if any(value is True for value in provenance):
             continue
@@ -123,6 +183,15 @@ def build_night_summary(date, paths):
         project = text(finding.get('project'))
         if not project:
             degraded.append(path.name + ': project not measured')
+            continue
+        if path.stem in session_cwds:
+            cwd = session_cwds[path.stem] if session_cwds[path.stem] != '?' else ''
+        else:
+            project_cwds = mappings.get(project, set())
+            cwd = next(iter(project_cwds)) if len(project_cwds) == 1 else ''
+        if cwd_excluded(cwd) or (not references.get((date, path.stem)) and
+                                  not cwd and cwd_excluded(
+                                      decoded_project(project, os.environ.get('HOME', '')))):
             continue
         initiatives = finding.get('notable_initiatives')
         fallback = text(initiatives[0]) if isinstance(initiatives, list) and initiatives else None
@@ -134,26 +203,50 @@ def build_night_summary(date, paths):
                        user_messages=measurement(stats.get('user_message_count')),
                        tool_calls=measurement(stats.get('tool_call_count')),
                        duration_minutes=measurement(stats.get('duration_minutes')))
-        if any(value is None for value in session.values()):
+        session['_transcript_mtime'] = measurement(stats.get('transcript_mtime'))
+        if any(value is None for key, value in session.items() if not key.startswith('_')):
             degraded.append(path.stem + ': measurements unavailable')
         session_refs = references.get((date, path.stem), [])
         ref_repos = tuple(sorted({ref['repo'] for ref in session_refs
                                   if isinstance(ref.get('repo'), str) and ref['repo']}))
-        group = projects.setdefault((project, ref_repos),
-                                    dict(project=project, sessions=[], references=session_refs))
+        group = projects.setdefault((project, ref_repos, cwd),
+                                    dict(project=project, sessions=[], references=session_refs,
+                                         cwd=cwd))
         group['sessions'].append(session)
     rows = {}
     for _, group in sorted(projects.items()):
         project = group['project']
-        cwds = mappings.get(project, set())
-        cwd = next(iter(cwds)) if len(cwds) == 1 else ''
+        cwd = group.pop('cwd')
         repo = repo_for_project(project, cwd, group.pop('references'))
         group['repo'] = repo
         if repo in rows:
             rows[repo]['sessions'].extend(group['sessions'])
         else:
             rows[repo] = group
-    return dict(date=date, projects=list(rows.values()), degraded=sorted(set(degraded)))
+    outcome_groups = {
+        'fully_or_mostly': {'fully_achieved', 'mostly_achieved'},
+        'partially': {'partially_achieved'},
+        'not_achieved': {'not_achieved'},
+        'unclear': {'unclear_from_transcript'},
+    }
+    for group in rows.values():
+        sessions = group['sessions']
+        sessions.sort(key=lambda session: (session['_transcript_mtime'] or -1, session['hash']),
+                      reverse=True)
+        group['session_count'] = len(sessions)
+        group['outcomes'] = {name: sum(session['outcome'] in outcomes for session in sessions)
+                             for name, outcomes in outcome_groups.items()}
+        group['latest_goal'] = sessions[0]['goal'] if sessions else None
+        for session in sessions:
+            session.pop('_transcript_mtime', None)
+    notices = []
+    if date < '2026-07-17':
+        notices.append('Outcomes were not measured before 2026-07-17.')
+    if date < '2026-07-20':
+        notices.append('Goals were not measured before 2026-07-20.')
+    notices.extend('Could not read ' + name + '.' for name in sorted(unreadable))
+    return dict(date=date, projects=sorted(rows.values(), key=lambda group: group['repo']),
+                degraded=sorted(set(degraded)), notices=notices)
 
 
 class NightCache:
@@ -167,7 +260,8 @@ class NightCache:
 
     def fingerprint(self, date):
         directory = self.root / 'findings' / date
-        paths = [directory / name for name in ('pin-projects.tsv', 'categories.tsv', 'run-stats.txt')]
+        paths = [directory / name for name in ('pin-projects.tsv', 'session-cwds.tsv',
+                                                'categories.tsv', 'run-stats.txt')]
         paths.append(self.dreams / (date + '.md'))
         paths.extend(path for path in directory.glob('*.json')
                      if FINDING.fullmatch(path.name) or re.fullmatch(r'[0-9a-f]{12}\.stats\.json', path.name))

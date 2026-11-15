@@ -37,6 +37,9 @@ class BrowserTests(unittest.TestCase):
             (root / 'index.html').write_text('''<!doctype html><html><head><meta charset="utf-8"></head><body>
 <nav><a href="#lately">Lately</a><a href="#dreams">Dreams</a></nav>
 <p id="status"></p><main id="content"></main>
+<script>Object.defineProperty(Element.prototype, 'innerHTML', {
+set() { throw new Error('innerHTML must not be used'); }, configurable: true
+});</script>
 <script src="app.js"></script><script src="checks.js"></script></body></html>''')
             (root / 'checks.js').write_text('''function check(value, message) {
 if (!value) throw new Error(message);
@@ -112,8 +115,36 @@ for (const tag of ['h1','strong','em','ul','li','blockquote','pre','code','table
 project:'-legacy',repo:'-legacy',sessions:[{hash:'0123456789ab',goal:null,outcome:null,
 user_messages:null,tool_calls:0,duration_minutes:null}]}]}],threads:null,newest_dream:null});
 const text = document.getElementById('content').textContent;
-check(text.includes('not measured'), 'missing measurements must be labeled');
+check(text.includes('—'), 'missing measurements must use an em dash');
 check(text.includes('0'), 'measured zero must survive');
+''')
+
+    def test_web_lately_renders_project_rows_and_safe_session_details(self):
+        hostile = '<img src=x onerror="window.pwned=1">'
+        self.run_browser('''renderLately({days:7,timeline:[{date:'2026-11-14',notices:[],projects:[{
+project:'~/git/cc-autodream',repo:'~/git/cc-autodream',session_count:4,
+outcomes:{fully_or_mostly:2,partially:1,not_achieved:0,unclear:1},latest_goal:''' + json.dumps(hostile) + ''',
+sessions:[{hash:'0123456789ab',goal:''' + json.dumps(hostile) + ''',outcome:'fully_achieved',
+user_messages:null,tool_calls:0,duration_minutes:null},{hash:'111111111111',goal:'Second goal',
+outcome:'unclear_from_transcript',user_messages:1,tool_calls:2,duration_minutes:3}]
+}]}],threads:null,newest_dream:null});
+const content = document.getElementById('content');
+const rows = content.querySelectorAll('.project-row');
+check(rows.length === 1, 'one project row must render for the day');
+const row = rows[0];
+check(row.querySelector('.project-outcomes').textContent.includes('4 sessions'), 'session count missing');
+check(row.textContent.includes('✓ 2') && row.textContent.includes('◐ 1') &&
+row.textContent.includes('✗ 0') && row.textContent.includes('? 1'), 'outcome totals missing');
+check(row.querySelector('.project-goal').textContent.includes(''' + json.dumps(hostile) + '''),
+  'latest goal should remain visible as text in the project row');
+check(row.querySelectorAll('details').length === 1, 'sessions must sit under one details element');
+const details = row.querySelector('details');
+check(!details.open, 'session details should start collapsed');
+check(details.textContent.includes('Second goal'), 'project sessions missing from details');
+check(!content.querySelector('img'), 'hostile goal became markup');
+check(content.textContent.includes('—'), 'missing per-session values need an em dash');
+check(!content.textContent.includes('Some measurements are unavailable'), 'partial data must not add a banner');
+check(!window.pwned, 'hostile text executed');
 ''')
 
 
