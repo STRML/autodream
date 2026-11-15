@@ -110,6 +110,46 @@ test_threads_list_computes_dropped() {
   assert_eq "$mostly_achieved_count" 0 "mostly achieved stays quiet"
 }
 
+test_threads_dropped_status_has_one_contract() {
+  local dir="$TMP/dropped-contract" old_date seven_date tie_date future_date before cli_status page_status report
+  mkdir -p "$dir/dreams"
+  old_date=$(pdate_shift "$AS_OF" -8 d) || return 1
+  seven_date=$(pdate_shift "$AS_OF" -7 d) || return 1
+  tie_date=$(pdate_shift "$AS_OF" -9 d) || return 1
+  future_date=$(pdate_shift "$AS_OF" 2 d) || return 1
+  jq -nc --arg old "$old_date" --arg seven "$seven_date" --arg tie "$tie_date" --arg future "$future_date" --arg seen "$AS_OF" '[
+    {id:"t-10000001",kind:"work",repo:"/repo",title:"inconsistent last_seen",goal:"contract",sessions:[{date:$old,hash:"a",outcome:"not_achieved"}],status:"open",done_by:null,last_seen:$seen},
+    {id:"t-10000002",kind:"work",repo:"/repo",title:"seven days",goal:"boundary",sessions:[{date:$seven,hash:"a",outcome:"not_achieved"}],status:"open",done_by:null,last_seen:$old},
+    {id:"t-10000003",kind:"work",repo:"/repo",title:"same day tie",goal:"hash order",sessions:[{date:$tie,hash:"a",outcome:"not_achieved"},{date:$tie,hash:"z",outcome:"achieved"}],status:"open",done_by:null,last_seen:$old},
+    {id:"t-10000004",kind:"work",repo:"/repo",title:"future history",goal:"historical cutoff",sessions:[{date:$old,hash:"a",outcome:"not_achieved"},{date:$future,hash:"z",outcome:"achieved"}],status:"open",done_by:null,last_seen:$future},
+    {id:"t-10000005",kind:"work",repo:"/repo",title:"mostly achieved",goal:"quiet",sessions:[{date:$old,hash:"a",outcome:"mostly_achieved"}],status:"open",done_by:null,last_seen:$old},
+    {id:"t-10000006",kind:"work",repo:"/repo",title:"closed by Sam",goal:"closed",sessions:[{date:$old,hash:"a",outcome:"not_achieved"}],status:"closed_by_sam",done_by:"sam",last_seen:$old}
+  ] | .[]' > "$dir/threads.jsonl"
+  before=$(cat "$dir/threads.jsonl")
+  cli_status=$(AUTODREAM_DIR="$dir" "$THREADS" list --json | jq -r '.[] | select(.id == "t-10000001") | .status')
+  AUTODREAM_DIR="$dir" DREAMS_DIR="$dir/dreams" "$THREADS" render >/dev/null 2>&1
+  page_status=$(python3 - "$dir/dreams/threads.html" <<'PY'
+import json, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+start = text.index("<script id=\"threads-data\" type=\"application/json\">")
+start = text.index(">", start) + 1
+end = text.index("</script>", start)
+threads = json.loads(text[start:end])["threads"]
+print(next(item["display_status"] for item in threads if item["id"] == "t-10000001"))
+PY
+)
+  assert_eq "$cli_status" dropped "CLI uses latest session instead of inconsistent last_seen"
+  assert_eq "$page_status" "$cli_status" "renderer shares the CLI dropped status"
+  assert_eq "$(AUTODREAM_DIR="$dir" "$THREADS" list --json | jq -r '.[] | select(.id == "t-10000002") | .status')" open "seven day cutoff remains strict"
+  assert_eq "$(AUTODREAM_DIR="$dir" "$THREADS" list --json | jq -r '.[] | select(.id == "t-10000003") | .status')" open "same-day tie selects the higher hash"
+  assert_eq "$(AUTODREAM_DIR="$dir" "$THREADS" list --json | jq -r '.[] | select(.id == "t-10000005") | .status')" open "mostly achieved stays open"
+  assert_eq "$(AUTODREAM_DIR="$dir" "$THREADS" list --json | jq -r '.[] | select(.id == "t-10000006") | .status')" closed_by_sam "operator close remains visible"
+  report=$(AUTODREAM_DIR="$dir" DREAMS_DIR="$dir/dreams" "$THREADS" report "$AS_OF")
+  case "$report" in *'`t-10000004`'*) ok "historical report ignores future sessions" ;; *) no "historical report ignores future sessions" ;; esac
+  case "$report" in *'`t-10000001`'*) ok "CLI, renderer, and report include the same eligible dropped thread" ;; *) no "CLI, renderer, and report include the same eligible dropped thread" ;; esac
+  assert_eq "$(cat "$dir/threads.jsonl")" "$before" "derived dropped status never changes stored bytes"
+}
+
 test_threads_missing_state_is_empty() {
   local dir="$TMP/missing" count
   mkdir -p "$dir"
@@ -379,6 +419,7 @@ for test_name in \
   test_threads_state_write_is_atomic \
   test_threads_cli_refuses_unreadable_state \
   test_threads_list_computes_dropped \
+  test_threads_dropped_status_has_one_contract \
   test_threads_missing_state_is_empty \
   test_threads_empty_state_is_empty \
   test_threads_report_without_index_is_empty \

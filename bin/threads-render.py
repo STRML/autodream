@@ -33,21 +33,6 @@ def valid_thread(item):
     )
 
 
-def display_status(item, as_of, dropped_days):
-    if item["status"] != "open":
-        return item["status"]
-    newest = max(item["sessions"], key=lambda row: (row.get("date", ""), row.get("hash", "")), default={})
-    outcome = newest.get("outcome", "") if isinstance(newest, dict) else ""
-    if outcome not in {"not_achieved", "partially_achieved", "unclear_from_transcript"}:
-        return "open"
-    cutoff = as_of - datetime.timedelta(days=dropped_days)
-    try:
-        last_seen = datetime.date.fromisoformat(item["last_seen"])
-    except ValueError:
-        raise ValueError("thread has an invalid last_seen date")
-    return "dropped" if last_seen < cutoff else "open"
-
-
 def template_path(renderer_dir):
     installed = os.environ.get("AUTODREAM_THREADS_TEMPLATE")
     options = ([Path(installed)] if installed else []) + [
@@ -61,10 +46,7 @@ def template_path(renderer_dir):
 
 
 def render(state_path, output_path, as_of_text):
-    as_of = datetime.date.fromisoformat(as_of_text)
-    dropped_days = int(os.environ.get("AUTODREAM_THREADS_DROPPED_DAYS", "7"), 10)
-    if dropped_days < 1:
-        raise ValueError("AUTODREAM_THREADS_DROPPED_DAYS must be positive")
+    datetime.date.fromisoformat(as_of_text)
     if state_path == "-":
         state = json.load(sys.stdin)
         if not isinstance(state, list):
@@ -83,7 +65,7 @@ def render(state_path, output_path, as_of_text):
         if not valid_thread(item):
             raise ValueError("state contains an invalid thread")
         item = dict(item)
-        item["display_status"] = display_status(item, as_of, dropped_days)
+        item["display_status"] = item.get("display_status", item["status"])
         threads.append(item)
     ids = [item["id"] for item in threads]
     if len(ids) != len(set(ids)):

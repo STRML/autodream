@@ -9026,6 +9026,7 @@ test_threads_install_links_entrypoint(){
   if [ -x "$target/threads.sh" ] && AUTODREAM_DIR="$target" /bin/bash "$target/threads.sh" list >/dev/null 2>&1; then installed=true; fi
   if [ -s "$target/threads.jsonl" ]; then links=$(jq -sr '[.[].sessions[]] | length' "$target/threads.jsonl"); else links=0; fi
   assert_eq "$installed" true "installed symlink resolves helpers"
+  assert_file "$target/threads-status.jq" "shared status filter is installed beside the CLI"
   assert_eq "$links" 1 "installed update finds the linked prompt and runs the mock linker"
   assert_grep "$output" '^threads_link: ok$' "installed layout reports a successful update"
   thread_cleanup "$root"
@@ -9369,6 +9370,39 @@ test_threads_explore_resolves_claude_from_path_and_checks_before_open(){
   thread_cleanup "$root"
 }
 
+test_threads_list_uses_one_jq_process(){
+  echo "# threads: listing 600 threads uses one jq process"
+  local root real_jq shim count invocations
+  root=$(setup_env); shim="$root/jq-bin"
+  mkdir -p "$shim"
+  python3 - "$root/autodream/threads.jsonl" <<'PY'
+import json, sys
+with open(sys.argv[1], "w", encoding="utf-8") as stream:
+    for number in range(600):
+        item = {
+            "id": "t-%08x" % number, "kind": "work", "repo": "/repo",
+            "title": "thread %d" % number, "goal": "goal",
+            "sessions": [{"date": "2020-01-01", "hash": "%012x" % number,
+                          "outcome": "not_achieved"}],
+            "status": "open", "done_by": None, "last_seen": "2020-01-01",
+        }
+        stream.write(json.dumps(item, separators=(",", ":")) + "\n")
+PY
+  real_jq=$(command -v jq)
+  cat > "$shim/jq" <<'EOF'
+#!/bin/sh
+printf 'jq\n' >> "$JQ_COUNT_FILE"
+exec "$REAL_JQ" "$@"
+EOF
+  chmod +x "$shim/jq"
+  count=$(PATH="$shim:$PATH" REAL_JQ="$real_jq" JQ_COUNT_FILE="$root/jq-count" \
+    AUTODREAM_DIR="$root/autodream" /bin/bash "$REPO/bin/threads.sh" list --json | jq 'length')
+  invocations=$(wc -l < "$root/jq-count" | tr -d ' ')
+  assert_eq "$count" 600 "large thread list preserves every row"
+  assert_eq "$invocations" 1 "large thread list starts jq once"
+  thread_cleanup "$root"
+}
+
 _run test_threads_eligibility_and_goal_fallback
 _run test_threads_closed_hints_are_capped_and_newest_first
 _run test_threads_missing_sidecar_is_unmeasured
@@ -9428,6 +9462,7 @@ _run test_threads_render_retries_when_state_changes_during_render
 _run test_threads_explore_launch_is_constrained
 _run test_threads_explore_quotes_paths_and_reports_launch_failure
 _run test_threads_explore_resolves_claude_from_path_and_checks_before_open
+_run test_threads_list_uses_one_jq_process
 
 test_prune_worktrees_wiring(){
   echo "# prune: run.sh calls the helper only when roots are set, records the summary, and survives a failing helper"

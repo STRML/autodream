@@ -39,6 +39,11 @@ STATE=${AUTODREAM_THREADS_STATE:-$AUTODREAM_DIR/threads.jsonl}
 IDEA_OFFERS="$AUTODREAM_DIR/threads-idea-offers.tsv"
 LOCK="$STATE.flock"
 DROPPED_DAYS=${AUTODREAM_THREADS_DROPPED_DAYS:-7}
+if [ -r "$THREADS_LIB_DIR/threads-status.jq" ]; then
+  THREADS_STATUS_JQ="$THREADS_LIB_DIR/threads-status.jq"
+else
+  THREADS_STATUS_JQ="$THREADS_DIR/threads-status.jq"
+fi
 
 threads_error() { printf 'threads: %s\n' "$1" >&2; }
 
@@ -175,36 +180,29 @@ threads_write_state() {
   threads_write_atomic "$1" "$STATE"
 }
 
-threads_is_dropped() {
-  local as_of=$1 last_seen=$2 status=$3 outcome=$4 cutoff cutoff_epoch last_seen_epoch
-  [ "$status" = open ] || return 1
-  case "$outcome" in not_achieved|partially_achieved|unclear_from_transcript) ;; *) return 1 ;; esac
-  cutoff=$(pdate_shift "$as_of" "-$DROPPED_DAYS" d) || return 1
-  cutoff_epoch=$(pdate_epoch "$cutoff") || return 1
-  last_seen_epoch=$(pdate_epoch "$last_seen") || return 1
-  [ "$last_seen_epoch" -lt "$cutoff_epoch" ]
+threads_status_output() {
+  local mode=$1 as_of=$2 status_filter=$3 kind_filter=$4 repo_filter=$5 query=$6 json=$7 previous_as_of=${8:-} input
+  [ -r "$THREADS_STATUS_JQ" ] || { threads_error "threads-status.jq was not found"; return 1; }
+  if [ -e "$STATE" ] && { [ ! -f "$STATE" ] || [ ! -r "$STATE" ]; }; then
+    threads_error "cannot read valid state at $STATE"
+    return 1
+  fi
+  input=$STATE
+  [ -e "$STATE" ] || input=/dev/null
+  if jq -crs \
+    --arg mode "$mode" --arg as_of "$as_of" --arg previous_as_of "$previous_as_of" \
+    --argjson dropped_days "$DROPPED_DAYS" --arg status_filter "$status_filter" \
+    --arg kind_filter "$kind_filter" --arg repo_filter "$repo_filter" \
+    --arg query "$query" --arg json "$json" -f "$THREADS_STATUS_JQ" \
+    "$input" 2>/dev/null; then
+    return 0
+  fi
+  threads_error "malformed state at $STATE"
+  return 1
 }
-
-threads_annotate() {
-  local as_of=$1
-  local thread latest last_seen outcome status
-  jq -c '.[]' | while IFS= read -r thread; do
-    latest=$(printf '%s\n' "$thread" | jq -c '(.sessions | sort_by([.date, .hash]) | last) // {}')
-    last_seen=$(printf '%s\n' "$latest" | jq -r '.date // empty')
-    outcome=$(printf '%s\n' "$latest" | jq -r '.outcome // empty')
-    status=$(printf '%s\n' "$thread" | jq -r '.status')
-    if threads_is_dropped "$as_of" "$last_seen" "$status" "$outcome"; then
-      printf '%s\n' "$thread" | jq -c '.status = "dropped"'
-    else
-      printf '%s\n' "$thread"
-    fi
-  done | jq -cs '.'
-}
-
-threads_json_output() { jq -c '.'; }
 
 threads_list() {
-  local status_filter="" kind_filter="" repo_filter="" json=0 arg as_of state
+  local status_filter="" kind_filter="" repo_filter="" json=0 arg as_of
   while [ "$#" -gt 0 ]; do
     arg=$1; shift
     case "$arg" in
@@ -225,18 +223,12 @@ threads_list() {
   fi
   threads_valid_days "$DROPPED_DAYS" || { threads_error "invalid AUTODREAM_THREADS_DROPPED_DAYS"; return 2; }
   DROPPED_DAYS=$((10#$DROPPED_DAYS))
-  state=$(threads_read_state) || return 1
   as_of=$(pdate_shift "$(pdate_yesterday)" 1 d) || { threads_error "cannot determine current date"; return 1; }
-  state=$(printf '%s\n' "$state" | threads_annotate "$as_of") || return 1
-  printf '%s\n' "$state" | jq -c --arg status "$status_filter" --arg kind "$kind_filter" --arg repo "$repo_filter" '
-    map(select(($status == "" or .status == $status) and
-               ($kind == "" or .kind == $kind) and
-               ($repo == "" or .repo == $repo)))
-  ' | if [ "$json" -eq 1 ]; then cat; else jq -r '.[] | "\(.id)\t\(.status)\t\(.kind)\t\(.repo)\t\(.title)"'; fi
+  threads_status_output list "$as_of" "$status_filter" "$kind_filter" "$repo_filter" "" "$json"
 }
 
 threads_search() {
-  local query=$1 json=0 arg state as_of
+  local query=$1 json=0 arg as_of
   shift
   while [ "$#" -gt 0 ]; do
     arg=$1; shift
@@ -244,16 +236,12 @@ threads_search() {
   done
   threads_valid_days "$DROPPED_DAYS" || { threads_error "invalid AUTODREAM_THREADS_DROPPED_DAYS"; return 2; }
   DROPPED_DAYS=$((10#$DROPPED_DAYS))
-  state=$(threads_read_state) || return 1
   as_of=$(pdate_shift "$(pdate_yesterday)" 1 d) || { threads_error "cannot determine current date"; return 1; }
-  state=$(printf '%s\n' "$state" | threads_annotate "$as_of") || return 1
-  printf '%s\n' "$state" | jq -c --arg query "$query" '
-    map(select([.id, .kind, .repo, .title, .goal, .status] | any(contains($query))))
-  ' | if [ "$json" -eq 1 ]; then cat; else jq -r '.[] | "\(.id)\t\(.status)\t\(.kind)\t\(.repo)\t\(.title)"'; fi
+  threads_status_output search "$as_of" "" "" "" "$query" "$json"
 }
 
 threads_render_unlocked() {
-  local renderer as_of output state threads_cli
+  local renderer as_of output state threads_cli annotated
   state=$1
   output=$2
   renderer=""
@@ -279,11 +267,19 @@ threads_render_unlocked() {
     printf 'threads_render: failed\n'
     return 1
   }
+  annotated=$(printf '%s\n' "$state" | jq -c \
+    --arg mode render --arg as_of "$as_of" --arg previous_as_of "" \
+    --argjson dropped_days "$DROPPED_DAYS" --arg status_filter "" --arg kind_filter "" \
+    --arg repo_filter "" --arg query "" --arg json 1 -f "$THREADS_STATUS_JQ") || {
+      threads_error "could not annotate dashboard state"
+      printf 'threads_render: failed\n'
+      return 1
+    }
   if [ -r "$THREADS_LIB_DIR/threads-template.html" ]; then
-    printf '%s\n' "$state" | AUTODREAM_THREADS_CLI="$threads_cli" AUTODREAM_THREADS_TEMPLATE="$THREADS_LIB_DIR/threads-template.html" \
+    printf '%s\n' "$annotated" | AUTODREAM_THREADS_CLI="$threads_cli" AUTODREAM_THREADS_TEMPLATE="$THREADS_LIB_DIR/threads-template.html" \
       python3 "$renderer" - "$output" --as-of "$as_of"
   else
-    printf '%s\n' "$state" | AUTODREAM_THREADS_CLI="$threads_cli" python3 "$renderer" - "$output" --as-of "$as_of"
+    printf '%s\n' "$annotated" | AUTODREAM_THREADS_CLI="$threads_cli" python3 "$renderer" - "$output" --as-of "$as_of"
   fi
   if [ "$?" -eq 0 ]; then
     return 0
@@ -295,6 +291,8 @@ threads_render_unlocked() {
 
 threads_render() {
   local output state fingerprint current_fingerprint attempt temp_file
+  threads_valid_days "$DROPPED_DAYS" || { threads_error "invalid AUTODREAM_THREADS_DROPPED_DAYS"; return 2; }
+  DROPPED_DAYS=$((10#$DROPPED_DAYS))
   output="${DREAMS_DIR:-${HOME:-}/.claude/dreams}/threads.html"
   mkdir -p "$(dirname "$STATE")" "$(dirname "$output")" || {
     threads_error "cannot create render directory"
@@ -1186,7 +1184,7 @@ PY_SORT
 }
 
 threads_report() {
-  local date=$1 state previous report_file next_date state_file report_rc
+  local date=$1 state previous report_file next_date state_file status_file report_rc
   threads_valid_date "$date" || { threads_error "invalid report date: $date"; return 2; }
   threads_valid_days "$DROPPED_DAYS" || { threads_error "invalid AUTODREAM_THREADS_DROPPED_DAYS"; return 2; }
   DROPPED_DAYS=$((10#$DROPPED_DAYS))
@@ -1205,34 +1203,30 @@ threads_report() {
       [ -n "$previous" ] && [ ! "$previous" \< "$next_date" ] || previous=$next_date
     fi
   done
-  python3 - "$date" "$previous" "$DROPPED_DAYS" "${AUTODREAM_THREADS_LINK_STATUS:-ok}" "${AUTODREAM_THREADS_UNASSIGNED:-0}" "$state_file" <<'PY_REPORT'
-import datetime
+  status_file=$(mktemp "${TMPDIR:-/tmp}/threads-report-status.XXXXXX") || { threads_cleanup_tmp "$state_file"; return 1; }
+  if ! printf '%s\n' "$state" | jq -c \
+    --arg mode report --arg as_of "$date" --arg previous_as_of "$previous" \
+    --argjson dropped_days "$DROPPED_DAYS" --arg status_filter "" --arg kind_filter "" \
+    --arg repo_filter "" --arg query "" --arg json 1 -f "$THREADS_STATUS_JQ" > "$status_file"; then
+    threads_cleanup_tmp "$state_file" "$status_file"
+    threads_error "could not annotate report thread state"
+    return 1
+  fi
+  python3 - "$date" "${AUTODREAM_THREADS_LINK_STATUS:-ok}" "${AUTODREAM_THREADS_UNASSIGNED:-0}" "$status_file" <<'PY_REPORT'
 import json
 import sys
 
-report_date, previous_date, days, link_status, unassigned, state_path = sys.argv[1:]
+report_date, link_status, unassigned, state_path = sys.argv[1:]
 with open(state_path, encoding="utf-8") as stream:
     state = json.load(stream)
 unassigned = int(unassigned)
-cutoff = datetime.date.fromisoformat(report_date) - datetime.timedelta(days=int(days))
-previous_cutoff = datetime.date.fromisoformat(previous_date) - datetime.timedelta(days=int(days)) if previous_date else None
-def dropped(item, edge, edge_cutoff):
-    if item.get("status") != "open":
-        return False
-    sessions = [s for s in item.get("sessions", []) if s.get("date", "") <= edge]
-    if not sessions:
-        return False
-    latest = max(sessions, key=lambda s: (s.get("date", ""), s.get("hash", "")))
-    return latest.get("outcome") in ("not_achieved", "partially_achieved", "unclear_from_transcript") and datetime.date.fromisoformat(latest["date"]) < edge_cutoff
-
 eligible = []
 for original in state:
-    sessions = [s for s in original.get("sessions", []) if s.get("date", "") <= report_date]
-    if not sessions or not dropped(original, report_date, cutoff):
+    if original["report_status"] != "dropped":
         continue
     item = dict(original)
-    item["_count"] = len(sessions)
-    item["_new"] = previous_cutoff is not None and not dropped(original, previous_date, previous_cutoff)
+    item["_count"] = original["report_session_count"]
+    item["_new"] = original["previous_report_status"] is not None and original["previous_report_status"] != "dropped"
     eligible.append(item)
 eligible.sort(key=lambda x: (not x["_new"], -x["_count"], x["id"]))
 ideas = [x for x in eligible if x.get("kind") == "idea"]
@@ -1257,7 +1251,7 @@ if closed:
         print("- **%s** `%s`" % (item.get("title", item["id"]), item["id"]))
 PY_REPORT
   report_rc=$?
-  threads_cleanup_tmp "$state_file"
+  threads_cleanup_tmp "$state_file" "$status_file"
   return "$report_rc"
 }
 
