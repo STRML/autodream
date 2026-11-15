@@ -8795,6 +8795,86 @@ test_threads_all_failed_groups_preserve_index(){
   thread_cleanup "$root"
 }
 
+test_threads_request_list_copy_failure_is_failed(){
+  echo "# threads: request-list setup failure stops before linker calls"
+  local root cap shim
+  root=$(setup_env)
+  thread_group_publish_fixture "$root" yes
+  cap=$(( $(wc -c < "$REPO/prompts/THREAD_LINKER.md") + 800 ))
+  shim="$root/cp-bin"; mkdir -p "$shim"
+  cat > "$shim/cp" <<'EOF_CP'
+#!/bin/sh
+case "$1:$2" in
+  */groups.txt:*/requests-to-call.txt) exit 1 ;;
+esac
+exec /bin/cp "$@"
+EOF_CP
+  chmod +x "$shim/cp"
+  MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_THREADS_MAX_INPUT="$cap" \
+    AUTODREAM_DIR="$root/autodream" CLAUDE_BIN="$MOCK" PATH="$shim:$PATH" \
+    /bin/bash "$REPO/bin/threads.sh" update "$DATE" < "$root/group-rows.jsonl" > "$root/update.out" 2>&1
+  assert_grep "$root/update.out" '^threads_link: failed$' "failed request-list copy is reported as failed"
+  assert_eq "$(thread_call_count "$root/cap")" 0 "failed setup makes no linker calls"
+  thread_cleanup "$root"
+}
+
+test_threads_status_requires_published_assignments(){
+  echo "# threads: partial status and report require published assignments"
+  local root cap lock shim status attempts
+  root=$(setup_env)
+  thread_group_publish_fixture "$root" yes
+  cap=$(( $(wc -c < "$REPO/prompts/THREAD_LINKER.md") + 800 ))
+  shim="$root/claude-bin"; mkdir -p "$shim"
+  cat > "$shim/claude" <<'EOF_CLAUDE'
+#!/bin/bash
+count=0
+[ ! -f "$MOCK_WAIT_COUNT" ] || count=$(cat "$MOCK_WAIT_COUNT")
+count=$((count + 1))
+printf '%s\n' "$count" > "$MOCK_WAIT_COUNT"
+if [ "$count" -eq 1 ]; then
+  cat > "$MOCK_WAIT_INPUT"
+  : > "$MOCK_WAIT_READY"
+  while [ ! -e "$MOCK_WAIT_RELEASE" ]; do sleep 0.02; done
+  exec "$MOCK" "$@" < "$MOCK_WAIT_INPUT"
+fi
+exec "$MOCK" "$@"
+EOF_CLAUDE
+  chmod +x "$shim/claude"
+  lock="$(thread_state "$root").flock"
+  MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap" MOCK_WAIT_COUNT="$root/call-count" \
+    MOCK_WAIT_INPUT="$root/input" MOCK_WAIT_READY="$root/ready" MOCK_WAIT_RELEASE="$root/release" \
+    MOCK="$MOCK" AUTODREAM_THREADS_MAX_INPUT="$cap" AUTODREAM_DIR="$root/autodream" \
+    CLAUDE_BIN="$shim/claude" /bin/bash "$REPO/bin/threads.sh" update "$DATE" \
+    < "$root/group-rows.jsonl" > "$root/update.out" 2>&1 &
+  local update_pid=$!
+  attempts=0
+  while [ ! -e "$root/ready" ] && [ "$attempts" -lt 200 ]; do sleep 0.05; attempts=$((attempts + 1)); done
+  assert_file "$root/ready" "first successful group reaches inference"
+  exec 9>>"$lock"
+  python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)' || no "test holder acquires merge lock"
+  : > "$root/release"
+  wait "$update_pid"
+  status=$(sed -n 's/^threads_link: //p' "$root/update.out")
+  assert_eq "$status" failed "busy merge lock prevents partial status"
+  assert_grep "$root/update.out" '^threads_skipped: locked$' "busy lock is reported"
+  AUTODREAM_DIR="$root/autodream" AUTODREAM_THREADS_LINK_STATUS="$status" \
+    /bin/bash "$REPO/bin/threads.sh" report "$DATE" > "$root/report.md"
+  assert_nogrep "$root/report.md" 'updated index' "report does not claim an unpublished index update"
+  exec 9>&-
+  thread_cleanup "$root"
+
+  root=$(setup_env)
+  thread_group_publish_fixture "$root" yes
+  MOCK_THREADS_MODE=invalid_assignments MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_THREADS_MAX_INPUT="$cap" \
+    AUTODREAM_DIR="$root/autodream" CLAUDE_BIN="$MOCK" \
+    /bin/bash "$REPO/bin/threads.sh" update "$DATE" < "$root/group-rows.jsonl" > "$root/update.out" 2>&1
+  assert_eq "$(thread_call_count "$root/cap")" 2 "valid-sized groups call the linker"
+  assert_grep "$root/update.out" '^threads_link: failed$' "zero valid assignments is failed"
+  assert_grep "$root/update.out" '^threads_groups_failed: 1$' "oversized sibling group is counted"
+  assert_eq "$(thread_index_count "$root")" 0 "empty assignment set publishes no index entries"
+  thread_cleanup "$root"
+}
+
 test_threads_resume_quotes_injected_goal(){
   echo "# threads: resume fences transcript text and launches with ordinary approvals in the repo"
   local root state brief launch permission cwd inside evidence argsfile
@@ -9471,6 +9551,8 @@ _run test_threads_older_finished_session_does_not_close_newer_open_thread
 _run test_threads_counts_assignments_omitted_by_linker
 _run test_threads_publishes_good_groups_when_one_is_oversized
 _run test_threads_all_failed_groups_preserve_index
+_run test_threads_request_list_copy_failure_is_failed
+_run test_threads_status_requires_published_assignments
 _run test_threads_resume_quotes_injected_goal
 _run test_threads_resume_marks_missing_transcript
 _run test_threads_backfill_uses_sidecars_and_respects_budget

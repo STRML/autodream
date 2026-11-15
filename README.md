@@ -465,9 +465,10 @@ Nightly `run-stats.txt` records `threads_state`, `threads_link`, `threads_linked
 `threads_rejected`, `threads_close_refused`, `threads_unmeasured`, `threads_calls`,
 `threads_groups_failed`, `threads_unassigned`, and `threads_skipped` when the merge
 lock is held. Each successful group contributes its validated assignments to one
-atomic index update. `threads_link: partial` means some groups failed; their
-candidates stay unassigned for catch-up. `failed` means every group failed and
-the index stays unchanged. `ok` means every group succeeded.
+atomic index update. `threads_link: partial` means assignments were published and
+some groups failed; their candidates stay unassigned for catch-up. `failed` means
+no assignments were published, including setup failures and a busy merge lock.
+`ok` means every group succeeded and its assignments were published.
 
 Findings written before explicit deferred-idea capture do not contain idea candidates.
 The ordinary `threads.sh backfill` only links facets already on disk; it does not

@@ -954,7 +954,7 @@ threads_warn_unreadable() {
 threads_update() {
   local date=$1 tmp source_file state_json state_file candidates_file unmeasured prompt engine model timeout_s max_input timeout_bin
   local all_candidates groups_dir groups_file request_list request_candidates group_candidates request_json input_file response_file valid_file rejected_file unusable_file assignments_file
-  local failed=0 rejected=0 close_refused=0 linked=0 calls=0 skipped="" link_status=not_needed size unusable index group rc merge_rejected call_budget candidate_count unassigned groups_failed=0 groups_succeeded=0
+  local failed=0 rejected=0 close_refused=0 linked=0 calls=0 skipped="" link_status=not_needed size unusable index group rc merge_rejected call_budget candidate_count unassigned groups_failed=0 published=0
   threads_valid_date "$date" || { threads_error "invalid update date: $date"; return 2; }
   if ! command -v python3 >/dev/null 2>&1; then
     threads_error "python3 is required for thread locking"
@@ -1100,6 +1100,12 @@ PY_SORT
     fi
     cp "$groups_file" "$request_list" 2>/dev/null || failed=1
   fi
+  if [ "$failed" -ne 0 ]; then
+    threads_cleanup_tmp "$tmp"
+    threads_emit_stats ok failed 0 "$rejected" "$close_refused" "$unmeasured" 0 "" "$unassigned"
+    return 0
+  fi
+  link_status=failed
   index=0
   while IFS= read -r group; do
     [ -n "$group" ] || continue
@@ -1143,15 +1149,11 @@ PY_SORT
     fi
     if cat "$assignments_file" "$valid_file" > "$tmp/assignments-next.jsonl" &&
        mv "$tmp/assignments-next.jsonl" "$assignments_file"; then
-      groups_succeeded=$((groups_succeeded + 1))
+      :
     else
       groups_failed=$((groups_failed + 1))
     fi
   done < "$request_list"
-  if [ "$groups_failed" -gt 0 ]; then
-    link_status=failed
-    [ "$groups_succeeded" -eq 0 ] || link_status=partial
-  fi
 
   if [ -s "$assignments_file" ]; then
     mkdir -p "$(dirname "$STATE")" || {
@@ -1178,8 +1180,9 @@ PY_SORT
         rejected=$((rejected + ${merge_rejected:-0}))
         if ! threads_write_state "$tmp/merged.jsonl"; then
           threads_error "could not atomically write thread state"
-          link_status=failed
           linked=0
+        else
+          published=1
         fi
       else
         threads_error "could not merge thread assignments"
@@ -1187,6 +1190,10 @@ PY_SORT
       fi
       threads_release_lock || { link_status=failed; linked=0; }
     fi
+  fi
+  if [ "$published" -eq 1 ]; then
+    link_status=ok
+    [ "$groups_failed" -eq 0 ] || link_status=partial
   fi
   unassigned=$((candidate_count - linked))
   [ "$unassigned" -ge 0 ] || unassigned=0
