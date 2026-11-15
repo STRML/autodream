@@ -432,6 +432,31 @@ MCP servers, slash commands and hooks, and automatically permits Bash calls only
 through the installed `threads.sh` command. It points Claude to the index and dashboard
 files instead of loading their contents into the launch prompt.
 
+Each eligible session can contribute one work candidate and up to three explicitly
+deferred idea candidates. Ideas retain their source transcript reference and use a
+separate candidate handle derived from the normalized (idea, quote) pair. Ordinary
+catch-up retries rejected or omitted handles from the first offer. The runner records
+all first-offer handles and their idea text and quote for each (date, hash) in
+`threads-idea-offers.tsv` before calling the linker, under the index lock with an
+atomic rename. Its five TSV columns are date, hash, handle, idea text, and quote;
+the text fields are JSON strings so tabs and newlines round-trip. Re-triage replaces
+only work candidates and leaves existing ideas and their sources untouched. Reworded ideas have
+new handles and are suppressed on both re-triage and later catch-up. Sessions with no
+ledger rows are seeded from indexed idea deferrals when present; otherwise they
+can contribute their first ideas. Retries read the original payload from the ledger.
+An unreadable or malformed ledger skips linking and reports `threads_state: unreadable`.
+
+Work candidates can attach to an idea thread and complete it with an achieved outcome
+and `finished:true` when their (date, hash) is absent from that thread's deferring
+sessions. The originating session's completed work can attach while the idea stays
+open. The thread
+keeps kind `idea`. An idea candidate's finished flag is refused and counted
+in `threads_close_refused`. Closed idea threads remain closed when later sessions
+describe the idea differently.
+
+A day split across linker calls can rarely create duplicate threads. Use
+`threads.sh close <id>` to close the duplicate.
+
 The linker settings are `AUTODREAM_THREADS_ENGINE` (default `claude`),
 `AUTODREAM_THREADS_MODEL` (default `claude-haiku-5-5`),
 `AUTODREAM_THREADS_TIMEOUT` (300 seconds), `AUTODREAM_THREADS_MAX_INPUT` (65536
@@ -440,6 +465,15 @@ Nightly `run-stats.txt` records `threads_state`, `threads_link`, `threads_linked
 `threads_rejected`, `threads_close_refused`, `threads_unmeasured`, `threads_calls`,
 and `threads_skipped` when the merge lock is held. A failed linker leaves the prior
 index in place and the report section names the failure.
+
+Findings written before explicit deferred-idea capture do not contain idea candidates.
+The ordinary `threads.sh backfill` only links facets already on disk; it does not
+re-triage transcripts. Recovering historical ideas is a separate opt-in operation.
+Start with a small representative sample in an isolated `AUTODREAM_DIR`, `DREAMS_DIR`
+and session root. Record actual L1 and chunk calls, elapsed time, and cost telemetry
+when the engine provides it. Use that sample and the eligible historical session count
+to estimate full-run cost, then quote that estimate and scope to Sam before re-triaging
+the full history. Keep that operation separate from facet-only backfill.
 
 - `adapters/<name>/` — one directory per harness: `manifest.json` (data, read with
   `jq`, never sourced), `adapter.sh` (enumerate, normalize, project, stats, slim,

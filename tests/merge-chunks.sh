@@ -102,6 +102,31 @@ assert_eq "$(J '.meta.chunks')" "3" "meta records how many chunks answered"
 assert_eq "$(J '.meta.chunks_elided')" "2" "and how many the chunker dropped"
 assert_eq "$(J 'has("error")')" "false" "and the merged object carries no error"
 
+echo "# merge: explicitly deferred ideas survive chunk union"
+w idea1.json '{"findings":[]}'
+jq -cn '{findings:[],deferred_ideas:[{idea:"idea-a",quote:"quote-a"},"bad",{idea:"too long",quote:("x" * 200)}]}' > "$TMP/idea2.json"
+w idea3.json '{"findings":[],"deferred_ideas":"not an array"}'
+jq -cn '{findings:[],deferred_ideas:[{idea:"idea-a",quote:"quote-a"},{idea:"idea-b",quote:"quote-b"},{idea:"idea-c",quote:"quote-c"},{idea:"idea-d",quote:"quote-d"}]}' > "$TMP/idea4.json"
+"$MG" --session /s "$TMP/idea1.json" "$TMP/idea2.json" "$TMP/idea3.json" "$TMP/idea4.json" > "$TMP/out.json" 2>/dev/null
+merged_idea_count=$(J '.deferred_ideas | length')
+merged_quotes=$(J '[.deferred_ideas[].quote] | join("|")')
+missing_or_mistyped_field_count=$(J '[.deferred_ideas[] | select(type != "object" or (.idea | type != "string") or (.quote | type != "string" or length == 0 or length >= 200))] | length')
+assert_eq "$merged_idea_count" "3" "test_merge_chunks_preserves_deferred_ideas: union is capped at three"
+assert_eq "$merged_quotes" "quote-a|quote-b|quote-c" "stable deduplication"
+assert_eq "$missing_or_mistyped_field_count" "0" "optional bad field ignored"
+
+echo "# merge: distinct ideas can share evidence; normalized pairs dedupe"
+w pair1.json '{"findings":[],"deferred_ideas":[{"idea":"add cache","quote":"Later, cache and index"},{"idea":"add index","quote":"Later, cache and index"}]}'
+w pair2.json '{"findings":[],"deferred_ideas":[{"idea":" ADD  CACHE ","quote":" Later,  cache and index "}]}'
+"$MG" --session /s "$TMP/pair1.json" "$TMP/pair2.json" > "$TMP/out.json"
+assert_eq "$(J '[.deferred_ideas[].idea] | join("|")')" 'add cache|add index' "identity uses normalized idea and quote"
+
+echo "# merge: length validation happens before the three-idea cap"
+jq -cn '{findings:[],deferred_ideas:[{idea:("x" * 121),quote:"Later long"},{idea:("y" * 120),quote:"Later boundary"},{idea:"short a",quote:"Later A"}]}' > "$TMP/length1.json"
+w length2.json '{"findings":[],"deferred_ideas":[{"idea":"short b","quote":"Later B"}]}'
+"$MG" --session /s "$TMP/length1.json" "$TMP/length2.json" > "$TMP/out.json"
+assert_eq "$(J '[.deferred_ideas[].idea | length] | join(",")')" '120,7,7' "121 characters is rejected before it can displace a valid idea"
+
 echo "# merge: a duplicate needs the same category AND the same what"
 w d1.json '{"findings":[{"category":"a","severity":"low","what":"x"}]}'
 w d2.json '{"findings":[{"category":"b","severity":"low","what":"x"},{"category":"a","severity":"low","what":"y"}]}'

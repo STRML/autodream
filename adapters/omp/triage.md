@@ -2,6 +2,8 @@
 
 This session came from Oh My Pi (omp), not Claude Code. Where this section disagrees with the text above, this section wins. The transcript you were given is the **live conversation branch only**: omp keeps an append-only tree, and the runner linearized it before you saw it.
 
+Use the shared `deferred_ideas` field from the triage schema. Include only ideas the user explicitly put off, each with a one-line `idea` of at most 120 characters and a nonempty verbatim quote under 200 characters; emit `[]` when none qualifies.
+
 **Record shapes.** A turn is a `message` record whose `message.role` is `user` or `assistant`; a tool result is a separate record. A tool call is a `custom` record with `customType: "tool_execution_start"`, named by its `data.toolName`; its result is a `message` record whose `message.role` is `toolResult`, matched by `message.toolCallId`, with `message.isError` set on a failure. A skill the user ran with `/<name>` leaves one `custom_message` record of `customType: "skill-prompt"`; a skill the model loaded itself is a `read` call on `skill://<name>` or on a `<dir>/<name>/SKILL.md` path. The stats block counts both.
 
 **Harness-provided tools are never `fabricated_id`.** A tool named `StructuredOutput` (or `SendMessage`, `Task`) appearing as a `tool_execution_start` record but NOT in the transcript's skill listing is provided by the workflow or subagent harness, not fabricated. Never flag it. Only flag a tool invocation as `fabricated_id` if the matching `tool_result` record is an error saying the tool does not exist. The same applies to any finding whose content would be that something should NOT be flagged: write nothing.

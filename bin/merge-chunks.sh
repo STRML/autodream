@@ -28,6 +28,7 @@
 #   findings         union, each tagged with its chunk, exact duplicates on (category, what)
 #                    dropped, most severe first, capped at 10 (the schema cap)
 #   other lists      order-preserving union, instructions_given capped at 3 (the schema cap)
+#   deferred_ideas   chunk-order union by normalized (idea, quote), valid entries only, capped at 3
 #   meta             chunks (how many answered) and chunks_elided (how many the chunker dropped)
 set -u
 
@@ -72,6 +73,8 @@ jq -s --arg session "$session" --argjson elided "$elided" '
   def strs: arr | map(select(type == "string"));
   def num: if type == "number" then . else 0 end;
   def sig($all; $k): [$all[] | .satisfaction_signals | (if type == "object" then .[$k] else null end) | num] | add;
+  def clean: gsub("[\\x00-\\x1F\\x7F]"; " ") | gsub("\\s+"; " ") | gsub("^\\s+|\\s+$"; "");
+  def idea_identity: [.idea,.quote] | map(clean | ascii_downcase);
   def uniq_ordered: reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end);
   # A finding with neither a category nor a what has no identity to merge on, so it is kept.
   def dedupe: reduce .[] as $f ({seen: {}, out: []};
@@ -84,6 +87,13 @@ jq -s --arg session "$session" --argjson elided "$elided" '
       outcome: ([$all[].outcome | select(type == "string" and length > 0)] | .[-1]),
       notable_initiatives: ([$all[].notable_initiatives | strs | .[]] | uniq_ordered),
       instructions_given: ([$all[].instructions_given | strs | .[]] | uniq_ordered | .[0:3]),
+      deferred_ideas: ([$all[].deferred_ideas | arr | .[]
+        | select(type == "object"
+          and (.idea | type == "string" and length > 0 and length <= 120 and (contains("\n") | not))
+          and (.quote | type == "string" and length > 0 and length < 200))
+        | select(.idea | clean | length > 0)]
+        | reduce .[] as $idea ([]; if any(.[]; idea_identity == ($idea | idea_identity)) then . else . + [$idea] end)
+        | .[0:3]),
       satisfaction_signals: {
         happy: sig($all; "happy"),
         satisfied: sig($all; "satisfied"),
