@@ -459,12 +459,16 @@ A day split across linker calls can rarely create duplicate threads. Use
 
 The linker settings are `AUTODREAM_THREADS_ENGINE` (default `claude`),
 `AUTODREAM_THREADS_MODEL` (default `claude-haiku-5-5`),
-`AUTODREAM_THREADS_TIMEOUT` (300 seconds), `AUTODREAM_THREADS_MAX_INPUT` (65536
+`AUTODREAM_THREADS_TIMEOUT` (300 seconds), `AUTODREAM_THREADS_MAX_INPUT` (262144
 bytes before requests split by repo hint), and `AUTODREAM_THREADS_DROPPED_DAYS` (7).
 Nightly `run-stats.txt` records `threads_state`, `threads_link`, `threads_linked`,
 `threads_rejected`, `threads_close_refused`, `threads_unmeasured`, `threads_calls`,
-and `threads_skipped` when the merge lock is held. A failed linker leaves the prior
-index in place and the report section names the failure.
+`threads_groups_failed`, `threads_unassigned`, and `threads_skipped` when the merge
+lock is held. Each successful group contributes its validated assignments to one
+atomic index update. `threads_link: partial` means assignments were published and
+some groups failed; their candidates stay unassigned for catch-up. `failed` means
+no assignments were published, including setup failures and a busy merge lock.
+`ok` means every group succeeded and its assignments were published.
 
 Findings written before explicit deferred-idea capture do not contain idea candidates.
 The ordinary `threads.sh backfill` only links facets already on disk; it does not
