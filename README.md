@@ -415,6 +415,7 @@ run catches up eligible unlinked sessions from the trailing 14 days.
 ~/.claude/autodream/threads.sh reopen t-0123abcd
 ~/.claude/autodream/threads.sh resume t-0123abcd
 ~/.claude/autodream/threads.sh resume t-0123abcd --launch
+~/.claude/autodream/threads.sh explore
 ~/.claude/autodream/threads.sh backfill 2026-07-17 2026-11-13 --engine omp --model MODEL --max-calls 120
 ```
 
@@ -424,6 +425,12 @@ otherwise `$HOME`. Backfill reads findings and stats sidecars directly, so it wo
 dates without rollups. It prints `planned_calls` and `max_calls` before calls, then
 `actual_calls`; calls that fail still count against the budget. Dates without usable
 sidecars or left beyond the budget are named for catch-up later.
+
+`explore` opens the local `threads.html` dashboard and starts Claude in a right cmux
+split. The session has Read and Bash tools, uses the normal permission mode, disables
+MCP servers, slash commands and hooks, and automatically permits Bash calls only
+through the installed `threads.sh` command. It points Claude to the index and dashboard
+files instead of loading their contents into the launch prompt.
 
 The linker settings are `AUTODREAM_THREADS_ENGINE` (default `claude`),
 `AUTODREAM_THREADS_MODEL` (default `claude-haiku-5-5`),

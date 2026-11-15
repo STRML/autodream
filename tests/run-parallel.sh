@@ -23,6 +23,43 @@ N=$((10#$N))
 # Short on purpose: the suite's sandbox paths sit under TMPDIR, and some fixtures embed them in lines
 # that are cut at a fixed length, so every character here is a character those lines lose.
 OUT=$(mktemp -d "${TMPDIR:-/tmp}/rp.XXXXXX")
+REAL_DREAMS="${HOME:-}/.claude/dreams"
+snapshot_real_dreams() {
+  python3 - "${1:-$REAL_DREAMS}" <<'PY_DREAMS_SNAPSHOT'
+import os
+import sys
+root = sys.argv[1]
+def fail(error):
+    print("snapshot error: %s" % error, file=sys.stderr)
+    raise SystemExit(1)
+try:
+    os.lstat(root)
+except FileNotFoundError:
+    print("absent")
+except OSError as error:
+    fail(error)
+else:
+    try:
+        for current, dirs, files in os.walk(root, onerror=fail):
+            for name in ["."] + dirs + files:
+                path = current if name == "." else os.path.join(current, name)
+                info = os.lstat(path)
+                print("%s\t%s\t%s" % (os.path.relpath(path, root), info.st_mtime_ns, info.st_size))
+    except OSError as error:
+        fail(error)
+PY_DREAMS_SNAPSHOT
+}
+if dreams_before=$(snapshot_real_dreams); then :; else
+  echo "FAIL: real dreams snapshot before parallel tests" >&2
+  exit 1
+fi
+if snapshot_real_dreams /dev/null >/dev/null 2>&1; then
+  echo "FAIL: non-traversable dreams snapshot was accepted" >&2
+  exit 1
+fi
+SENTINEL_HOME="$OUT/sentinel-home"
+mkdir -p "$SENTINEL_HOME/.claude/dreams"
+export HOME="$SENTINEL_HOME" DREAMS_DIR="$SENTINEL_HOME/.claude/dreams"
 pids=()
 # Each shard runs in a process group of its own (set -m), and Ctrl-C or TERM sends TERM to every
 # group. Without that the shards keep running: they inherit an ignored SIGINT from the background,
@@ -59,5 +96,22 @@ done
 
 echo
 echo "----------------------------------------"
+if dreams_after=$(snapshot_real_dreams); then
+  snapshot_ok=1
+else
+  snapshot_ok=0
+  echo "FAIL: real dreams snapshot after parallel tests" >&2
+fi
+if [ "$snapshot_ok" -eq 0 ]; then
+  fail=$((fail + 1))
+  bad=1
+elif [ "$dreams_before" = "$dreams_after" ]; then
+  pass=$((pass + 1))
+  echo "  ok   - tests leave real $REAL_DREAMS unchanged with a sentinel HOME"
+else
+  fail=$((fail + 1))
+  bad=1
+  echo "  FAIL - tests created or modified files under real $REAL_DREAMS"
+fi
 echo "passed: $pass   failed: $fail   ($N shards, $((SECONDS - start))s)"
 [ "$bad" -eq 0 ] && [ "$fail" -eq 0 ]
