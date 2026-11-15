@@ -7685,6 +7685,9 @@ test_threads_eligibility_and_goal_fallback(){
   assert_eq "$candidate_count" 2 "only eligible human sessions reach linker"
   assert_eq "$array_fallback_goal" "first initiative" "array fallback"
   assert_eq "$string_fallback_goal" "omp initiative" "string fallback"
+  local fallback_kinds
+  fallback_kinds=$(thread_request_json "$req" | jq -r '[.candidates[] | select(.goal == "first initiative" or .goal == "omp initiative") | .kind] | unique | join(",")')
+  assert_eq "$fallback_kinds" "work" "a notable_initiatives fallback is work, never an idea"
   thread_cleanup "$root"
 }
 
@@ -7967,6 +7970,8 @@ test_threads_lock_exhaustion_is_bounded(){
   seed_thread_findings "$root" "$session" "locked goal" '[]' partially_achieved >/dev/null
   lock="$(thread_state "$root").lock"
   mkdir "$lock"
+  printf '%s\n' "$$" > "$lock/pid"
+  : > "$lock/start"
   export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
   run_dream "$root"
   unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
@@ -7975,6 +7980,8 @@ test_threads_lock_exhaustion_is_bounded(){
     /bin/bash "$REPO/bin/threads.sh" close t-11111111 >/dev/null 2>&1
   cli_exit=$?
   assert_eq "$cli_exit" 1 "CLI fails loudly"
+  unlink "$lock/pid"
+  unlink "$lock/start"
   rmdir "$lock"
   thread_cleanup "$root"
 }
@@ -8522,7 +8529,8 @@ case "$1" in
     : > "$AUTODREAM_DIR/temporary-render-complete"
     if [ "$THREAD_PUBLISH_FAILURE" = locked ]; then
       mkdir "$AUTODREAM_DIR/threads.jsonl.lock" || exit 1
-      printf 'competing-writer\n' > "$AUTODREAM_DIR/threads.jsonl.lock/owner"
+      printf '%s\n' "$PPID" > "$AUTODREAM_DIR/threads.jsonl.lock/pid"
+      : > "$AUTODREAM_DIR/threads.jsonl.lock/start"
     fi
     exit 0
     ;;

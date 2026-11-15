@@ -37,7 +37,6 @@ fi
 
 STATE=${AUTODREAM_THREADS_STATE:-$AUTODREAM_DIR/threads.jsonl}
 LOCK="$STATE.lock"
-THREADS_LOCK_OWNER=""
 DROPPED_DAYS=${AUTODREAM_THREADS_DROPPED_DAYS:-7}
 
 threads_error() { printf 'threads: %s\n' "$1" >&2; }
@@ -81,56 +80,66 @@ threads_read_state() {
   jq -cs '.' "$STATE"
 }
 
+threads_proc_start() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '; }
+
+# 0 = live, 1 = stale, 2 = the owner has not written its pid yet.
+threads_lock_holder_state() {
+  local pid=$1 start
+  [ -n "$pid" ] || return 2
+  kill -0 "$pid" 2>/dev/null || return 1
+  start=$(cat "$LOCK/start" 2>/dev/null) || start=""
+  [ -z "$start" ] || [ "$(threads_proc_start "$pid")" = "$start" ]
+}
+
+threads_reclaim_lock() {
+  local dead="$LOCK.stale.$$"
+  mv "$LOCK" "$dead" 2>/dev/null || return 0
+  if [ "$(cat "$dead/pid" 2>/dev/null)" = "$1" ]; then
+    rm -rf "$dead"
+    return 0
+  fi
+  # A faster reclaimer replaced the stale lock before our rename.
+  mv "$dead" "$LOCK" 2>/dev/null || {
+    threads_error "cannot restore another writer's lock from $dead"
+    return 1
+  }
+}
+
 threads_acquire_lock() {
-  local attempts=0 lock_mtime now age
-  THREADS_LOCK_OWNER=""
-  now=$(pdate_epoch "$(date '+%Y-%m-%d %H:%M:%S')") || return 1
-  local token="$$-$now-$RANDOM"
-  while ! mkdir "$LOCK" 2>/dev/null; do
-    if [ -d "$LOCK" ]; then
-      lock_mtime=$(pstat_mtime "$LOCK") || lock_mtime=""
-      now=$(pdate_epoch "$(date '+%Y-%m-%d %H:%M:%S')") || now=""
-      if [ -n "$lock_mtime" ] && [ -n "$now" ]; then
-        age=$((now - lock_mtime))
-        if [ "$age" -gt 120 ]; then
-          if { [ ! -e "$LOCK/owner" ] || unlink "$LOCK/owner" 2>/dev/null; } && rmdir "$LOCK" 2>/dev/null; then
-            continue
-          fi
-        fi
-      fi
-    fi
-    if [ "$attempts" -ge 3 ]; then
+  local attempts=0 st pid
+  until mkdir "$LOCK" 2>/dev/null; do
+    pid=$(cat "$LOCK/pid" 2>/dev/null) || pid=""
+    threads_lock_holder_state "$pid"; st=$?
+    attempts=$((attempts + 1))
+    if [ "$st" -eq 0 ] || [ "$st" -eq 2 ]; then
+      if [ "$attempts" -le 3 ]; then sleep 1; continue; fi
       threads_error "lock is held at $LOCK"
       return 1
     fi
-    attempts=$((attempts + 1))
-    sleep 1
+    threads_reclaim_lock "$pid" || return 1
+    if [ "$attempts" -ge 8 ]; then
+      threads_error "lock is held at $LOCK"
+      return 1
+    fi
   done
-  THREADS_LOCK_OWNER=$token
-  if ! printf '%s\n' "$THREADS_LOCK_OWNER" > "$LOCK/owner"; then
+  if ! printf '%s\n' "$$" > "$LOCK/pid"; then
     threads_error "cannot record lock ownership at $LOCK"
     rmdir "$LOCK" 2>/dev/null || true
-    THREADS_LOCK_OWNER=""
     return 1
   fi
+  threads_proc_start "$$" > "$LOCK/start" || true
   return 0
 }
 
 threads_check_lock() {
-  local owner=""
-  if [ -n "$THREADS_LOCK_OWNER" ] &&
-     { IFS= read -r owner < "$LOCK/owner"; } 2>/dev/null &&
-     [ "$owner" = "$THREADS_LOCK_OWNER" ]; then
-    return 0
-  fi
-  threads_error "lock was reclaimed by another writer"
+  [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$$" ] && return 0
+  threads_error "lock is not owned by this process"
   return 1
 }
 
 threads_release_lock() {
-  threads_check_lock || return 1
-  unlink "$LOCK/owner" && rmdir "$LOCK" || return 1
-  THREADS_LOCK_OWNER=""
+  [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$$" ] || return 0
+  rm -rf "$LOCK"
 }
 
 threads_write_state() {
@@ -475,7 +484,7 @@ threads_collect_candidates() {
             elif ($f.notable_initiatives | type) == "string" then $f.notable_initiatives
             else empty end) as $idea
            | if ($idea | type) == "string" and ($idea | clean | length) > 0
-             then {goal:($idea | clean), kind:"idea"} else empty end
+             then {goal:($idea | clean), kind:"work"} else empty end
          end)
       + {outcome:(if ($f.outcome | type) == "string" then $f.outcome else "" end)}
       | select(.outcome | IN("fully_achieved", "mostly_achieved", "partially_achieved", "not_achieved", "unclear_from_transcript"))

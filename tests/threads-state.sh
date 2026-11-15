@@ -250,17 +250,28 @@ test_threads_environment_overrides_config() {
   assert_eq "$count" 1 "environment value wins over config"
 }
 
-test_threads_reclaims_stale_lock() {
-  local dir="$TMP/stale-lock" now old stamp rc
-  seed "$dir"
-  mkdir "$dir/threads.jsonl.lock"
-  now=$(pdate_epoch "$(date '+%Y-%m-%d %H:%M:%S')") || return 1
-  old=$((now - 121))
-  stamp=$(pdate_fmt_epoch "$old" +%Y%m%d%H%M.%S) || return 1
-  touch -t "$stamp" "$dir/threads.jsonl.lock"
-  AUTODREAM_DIR="$dir" "$THREADS" close t-00000001 >/dev/null 2>&1
-  rc=$?
-  assert_eq "$rc" 0 "lock older than 120 seconds is reclaimed"
+lock_shims() {
+  local dir=$1
+  mkdir -p "$dir/bin"
+  cat > "$dir/bin/ps" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+  cat > "$dir/bin/cat" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *threads-next.*)
+    : > "$AUTODREAM_DIR/writing.$PPID"
+    tries=0
+    while [ ! -e "$AUTODREAM_DIR/release" ] && [ "$tries" -lt 200 ]; do
+      sleep 0.05; tries=$((tries + 1))
+    done
+    [ -e "$AUTODREAM_DIR/release" ] || exit 99
+    ;;
+esac
+exec /bin/cat "$@"
+EOF
+  chmod +x "$dir/bin/ps" "$dir/bin/cat"
 }
 
 wait_for_gate() {
@@ -269,78 +280,130 @@ wait_for_gate() {
   [ -e "$marker" ]
 }
 
-test_threads_reclaimed_owner_cannot_write_or_release() {
-  local phase dir a b rc owner before old stamp name
-  local command_args
-  for phase in read hash1 hash2 write; do
-    dir="$TMP/reclaimed-$phase"
-    seed "$dir"
-    mkdir -p "$dir/bin" "$dir/dreams"
-    printf 'previous page\n' > "$dir/dreams/threads.html"
-    before=$(shasum "$dir/threads.jsonl")
-    cat > "$dir/bin/gate" <<'GATE'
+backdate_lock() {
+  local now stamp
+  now=$(pdate_epoch "$(date '+%Y-%m-%d %H:%M:%S')") || return 1
+  stamp=$(pdate_fmt_epoch "$((now - 121))" +%Y%m%d%H%M.%S) || return 1
+  touch -t "$stamp" "$1"
+}
+
+test_threads_live_old_lock_is_never_reclaimed() {
+  local dir="$TMP/live-lock" holder rc before
+  seed "$dir"; lock_shims "$dir"
+  sleep 30 & holder=$!
+  mkdir "$dir/threads.jsonl.lock"
+  printf '%s\n' "$holder" > "$dir/threads.jsonl.lock/pid"
+  : > "$dir/threads.jsonl.lock/start"
+  backdate_lock "$dir/threads.jsonl.lock"
+  before=$(cat "$dir/threads.jsonl")
+  PATH="$dir/bin:$PATH" AUTODREAM_DIR="$dir" "$THREADS" close t-00000001 > "$dir/close.out" 2>&1
+  rc=$?
+  assert_eq "$rc" 1 "aged live holder refuses competing CLI write with ps unavailable"
+  assert_eq "$(cat "$dir/threads.jsonl.lock/pid" 2>/dev/null)" "$holder" "live holder retains its lock"
+  assert_eq "$(cat "$dir/threads.jsonl")" "$before" "refused writer preserves state"
+  grep -q 'lock is held' "$dir/close.out" && ok "live lock refusal is loud" || no "live lock refusal is loud"
+  kill "$holder"; wait "$holder" 2>/dev/null || true
+}
+
+test_threads_dead_lock_is_reclaimed() {
+  local dir="$TMP/dead-lock" holder rc
+  seed "$dir"; lock_shims "$dir"
+  sleep 0 & holder=$!; wait "$holder"
+  mkdir "$dir/threads.jsonl.lock"
+  printf '%s\n' "$holder" > "$dir/threads.jsonl.lock/pid"
+  : > "$dir/threads.jsonl.lock/start"
+  : > "$dir/release"
+  PATH="$dir/bin:$PATH" AUTODREAM_DIR="$dir" "$THREADS" close t-00000001 > "$dir/close.out" 2>&1
+  rc=$?
+  assert_eq "$rc" 0 "dead holder is reclaimed without waiting for lock age"
+  assert_eq "$(state_json "$dir" t-00000001 | jq -r .status)" closed_by_sam "reclaimer publishes the edit"
+  [ ! -d "$dir/threads.jsonl.lock" ] && ok "reclaimer releases lock" || no "reclaimer releases lock"
+}
+
+test_threads_two_reclaimers_leave_one_owner() {
+  local dir="$TMP/racing-lock" dead a b loser winner rc tries
+  seed "$dir"; lock_shims "$dir"
+  sleep 0 & dead=$!; wait "$dead"
+  mkdir "$dir/threads.jsonl.lock"
+  printf '%s\n' "$dead" > "$dir/threads.jsonl.lock/pid"
+  : > "$dir/threads.jsonl.lock/start"
+  cat > "$dir/bin/mv" <<'EOF'
 #!/bin/bash
-name=${0##*/}
-block=0
-case "$name:$THREAD_GATE_PHASE:$*" in
-  jq:read:*"$AUTODREAM_DIR/threads.jsonl"*) block=1 ;;
-  shasum:hash*:*"$AUTODREAM_DIR/threads.jsonl"*)
-    n=0; [ ! -f "$THREAD_GATE.count" ] || read -r n < "$THREAD_GATE.count"
-    n=$((n + 1)); printf '%s\n' "$n" > "$THREAD_GATE.count"
-    [ "hash$n" != "$THREAD_GATE_PHASE" ] || block=1 ;;
-  cat:write:*threads-next.*) block=1 ;;
-esac
-if [ "$block" -eq 1 ] && [ ! -e "$THREAD_GATE" ]; then
-  : > "$THREAD_GATE"
+if [ "$1" = "$AUTODREAM_DIR/threads.jsonl.lock" ]; then
+  : > "$AUTODREAM_DIR/reclaim.$PPID"
   tries=0
-  while [ ! -e "$THREAD_GATE.release" ] && [ "$tries" -lt 400 ]; do sleep 0.05; tries=$((tries + 1)); done
-  [ -e "$THREAD_GATE.release" ] || exit 99
-fi
-case "$name" in
-  jq) exec "$REAL_JQ" "$@" ;;
-  shasum) exec "$REAL_SHASUM" "$@" ;;
-  cat) exec /bin/cat "$@" ;;
-esac
-GATE
-    chmod +x "$dir/bin/gate"
-    for name in jq shasum cat; do ln -s gate "$dir/bin/$name"; done
-    command_args=(render)
-    if [ "$phase" = write ]; then command_args=(close t-00000001); fi
-    REAL_JQ=$(command -v jq) REAL_SHASUM=$(command -v shasum) \
-      THREAD_GATE="$dir/a" THREAD_GATE_PHASE="$phase" PATH="$dir/bin:$PATH" \
-      AUTODREAM_DIR="$dir" DREAMS_DIR="$dir/dreams" \
-      /bin/bash "$THREADS" "${command_args[@]}" > "$dir/a.out" 2>&1 &
-    a=$!
-    if ! wait_for_gate "$dir/a"; then
-      no "$phase: A reached locked work"; wait "$a"; continue
-    fi
-    old=$(pdate_epoch "$(date '+%Y-%m-%d %H:%M:%S')"); old=$((old - 121))
-    stamp=$(pdate_fmt_epoch "$old" +%Y%m%d%H%M.%S)
-    touch -t "$stamp" "$dir/threads.jsonl.lock"
-    REAL_JQ=$(command -v jq) REAL_SHASUM=$(command -v shasum) \
-      THREAD_GATE="$dir/b" THREAD_GATE_PHASE=write PATH="$dir/bin:$PATH" \
-      AUTODREAM_DIR="$dir" DREAMS_DIR="$dir/dreams" \
-      /bin/bash "$THREADS" close t-00000002 > "$dir/b.out" 2>&1 &
-    b=$!
-    if ! wait_for_gate "$dir/b"; then
-      no "$phase: B reclaimed the aged live lock"
-      : > "$dir/a.release"; : > "$dir/b.release"; wait "$a"; wait "$b"; continue
-    fi
-    owner=$(cat "$dir/threads.jsonl.lock/owner" 2>/dev/null || true)
-    : > "$dir/a.release"
-    wait "$a"; rc=$?
-    assert_nonzero "$rc" "$phase: reclaimed A refuses publication"
-    assert_eq "$(shasum "$dir/threads.jsonl")" "$before" "$phase: A preserves state"
-    assert_eq "$(head -1 "$dir/dreams/threads.html")" 'previous page' "$phase: A preserves dashboard"
-    [ -d "$dir/threads.jsonl.lock" ] && ok "$phase: A leaves B lock" || no "$phase: A removed B lock"
-    assert_eq "$(cat "$dir/threads.jsonl.lock/owner" 2>/dev/null || true)" "$owner" "$phase: B owner survives"
-    grep -q 'lock was reclaimed by another writer' "$dir/a.out" && ok "$phase: lost ownership disclosed" || no "$phase: lost ownership undisclosed"
-    : > "$dir/b.release"
-    wait "$b"; rc=$?
-    assert_eq "$rc" 0 "$phase: B completes normally"
-    assert_eq "$(jq -r 'select(.id == "t-00000002") | .status' "$dir/threads.jsonl")" closed_by_sam "$phase: B state committed"
-    [ ! -d "$dir/threads.jsonl.lock" ] && ok "$phase: B releases its lock" || no "$phase: B lock remains"
+  while [ "$tries" -lt 200 ]; do
+    set -- "$AUTODREAM_DIR"/reclaim.*
+    [ "$#" -lt 2 ] || break
+    sleep 0.05; tries=$((tries + 1))
   done
+  [ "$#" -eq 2 ] || exit 99
+  exec /bin/mv "$AUTODREAM_DIR/threads.jsonl.lock" "$AUTODREAM_DIR/threads.jsonl.lock.stale.$PPID"
+fi
+exec /bin/mv "$@"
+EOF
+  chmod +x "$dir/bin/mv"
+  PATH="$dir/bin:$PATH" AUTODREAM_DIR="$dir" "$THREADS" close t-00000001 > "$dir/a.out" 2>&1 & a=$!
+  PATH="$dir/bin:$PATH" AUTODREAM_DIR="$dir" "$THREADS" close t-00000002 > "$dir/b.out" 2>&1 & b=$!
+  tries=0
+  while [ ! -e "$dir/writing.$a" ] && [ ! -e "$dir/writing.$b" ] && [ "$tries" -lt 200 ]; do
+    sleep 0.05; tries=$((tries + 1))
+  done
+  if [ -e "$dir/writing.$a" ]; then winner=$a; loser=$b
+  elif [ -e "$dir/writing.$b" ]; then winner=$b; loser=$a
+  else
+    no "a reclaimer reaches locked publication"
+    : > "$dir/release"; wait "$a"; wait "$b"; return
+  fi
+  wait "$loser"; rc=$?
+  assert_eq "$rc" 1 "second reclaimer cannot acquire the live replacement"
+  assert_eq "$(cat "$dir/threads.jsonl.lock/pid" 2>/dev/null)" "$winner" "exactly one reclaimer owns the lock"
+  local writers
+  writers=$(find "$dir" -name 'writing.*' | wc -l | tr -d ' ')
+  assert_eq "$writers" 1 "only one writer reaches publication"
+  : > "$dir/release"
+  wait "$winner"; rc=$?
+  assert_eq "$rc" 0 "winning reclaimer completes"
+  assert_eq "$(jq -s '[.[] | select(.status == "closed_by_sam")] | length' "$dir/threads.jsonl")" 1 "one competing edit is committed"
+  [ ! -d "$dir/threads.jsonl.lock" ] && ok "winner releases lock" || no "winner releases lock"
+}
+
+test_threads_stalled_writer_keeps_aged_lock() {
+  local dir="$TMP/stalled-writer" writer rc before
+  seed "$dir"; lock_shims "$dir"
+  before=$(cat "$dir/threads.jsonl")
+  PATH="$dir/bin:$PATH" AUTODREAM_DIR="$dir" "$THREADS" close t-00000001 > "$dir/writer.out" 2>&1 & writer=$!
+  if ! wait_for_gate "$dir/writing.$writer"; then
+    no "writer reaches locked work"; : > "$dir/release"; wait "$writer"; return
+  fi
+  backdate_lock "$dir/threads.jsonl.lock"
+  AUTODREAM_DIR="$dir" "$THREADS" close t-00000002 > "$dir/contender.out" 2>&1
+  rc=$?
+  assert_eq "$rc" 1 "stalled writer cannot lose its aged lock to a contender"
+  assert_eq "$(cat "$dir/threads.jsonl")" "$before" "contender cannot publish while the owner is stalled"
+  assert_eq "$(cat "$dir/threads.jsonl.lock/pid" 2>/dev/null)" "$writer" "stalled owner retains the lock"
+  : > "$dir/release"
+  wait "$writer"; rc=$?
+  assert_eq "$rc" 0 "stalled owner resumes and publishes normally"
+  assert_eq "$(state_json "$dir" t-00000001 | jq -r .status)" closed_by_sam "owner edit survives contention"
+}
+
+test_threads_nonowner_cannot_publish_or_release() {
+  local dir="$TMP/nonowner" writer holder rc before
+  seed "$dir"; lock_shims "$dir"
+  before=$(cat "$dir/threads.jsonl")
+  PATH="$dir/bin:$PATH" AUTODREAM_DIR="$dir" "$THREADS" close t-00000001 > "$dir/close.out" 2>&1 & writer=$!
+  if ! wait_for_gate "$dir/writing.$writer"; then
+    no "writer reaches publication"; : > "$dir/release"; wait "$writer"; return
+  fi
+  sleep 30 & holder=$!
+  printf '%s\n' "$holder" > "$dir/threads.jsonl.lock/pid"
+  : > "$dir/release"
+  wait "$writer"; rc=$?
+  assert_eq "$rc" 1 "non-owner refuses state publication"
+  assert_eq "$(cat "$dir/threads.jsonl")" "$before" "non-owner preserves state"
+  assert_eq "$(cat "$dir/threads.jsonl.lock/pid" 2>/dev/null)" "$holder" "non-owner release preserves the lock"
+  kill "$holder"; wait "$holder" 2>/dev/null || true
 }
 
 for test_name in \
@@ -362,8 +425,11 @@ for test_name in \
   test_threads_search_treats_metacharacters_literally \
   test_threads_dropped_days_accepts_leading_zero \
   test_threads_environment_overrides_config \
-  test_threads_reclaims_stale_lock \
-  test_threads_reclaimed_owner_cannot_write_or_release; do
+  test_threads_live_old_lock_is_never_reclaimed \
+  test_threads_dead_lock_is_reclaimed \
+  test_threads_two_reclaimers_leave_one_owner \
+  test_threads_stalled_writer_keeps_aged_lock \
+  test_threads_nonowner_cannot_publish_or_release; do
   "$test_name"
 done
 
