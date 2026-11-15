@@ -411,6 +411,76 @@ check(!content.textContent.includes('Action succeeded. Refresh'),
   'a later Threads load must clear the stale notice');
 ''')
 
+    def test_web_thread_action_stays_guarded_after_failed_dreams_navigation(self):
+        self.run_browser('''
+const content = document.getElementById('content');
+let row = {id:'t-00000001',kind:'work',repo:'/repo',title:'Thread',goal:'Goal',
+  status:'dropped',display_status:'dropped',last_seen:'2026-11-01',sessions:[]};
+let releaseRefresh;
+let refreshStarted;
+const refreshStart = new Promise(resolve => { refreshStarted = resolve; });
+let threadReads = 0;
+window.fetch = async function(path, options = {}) {
+  if (options.method === 'POST') {
+    row = {...row,status:'closed_by_sam',display_status:'closed_by_sam'};
+    return {ok:true,status:200,json:async () => ({ok:true,id:row.id,action:'close'})};
+  }
+  if (path === '/api/dreams') return {ok:false,status:500,json:async () => ({})};
+  threadReads++;
+  if (threadReads === 2) {
+    refreshStarted();
+    await new Promise(resolve => { releaseRefresh = resolve; });
+  }
+  return {ok:true,status:200,json:async () => ({threads:[row]})};
+};
+await loadView('threads');
+const close = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Close');
+const action = performThreadAction(row.id, 'close', close);
+await refreshStart;
+await loadView('dreams');
+releaseRefresh();
+await action;
+check(content.querySelector('.thread-view'), 'the failed Dreams load must leave the old cards visible');
+check(!Array.from(content.querySelectorAll('.actions button')).some(b => !b.disabled),
+  'a stale card left by a failed navigation must stay guarded');
+''')
+
+    def test_web_thread_action_clears_when_newer_load_renders_first(self):
+        self.run_browser('''
+const content = document.getElementById('content');
+let row = {id:'t-00000001',kind:'work',repo:'/repo',title:'Thread',goal:'Goal',
+  status:'dropped',display_status:'dropped',last_seen:'2026-11-01',sessions:[]};
+let releaseRefresh;
+let refreshStarted;
+const refreshStart = new Promise(resolve => { refreshStarted = resolve; });
+let threadReads = 0;
+window.fetch = async function(path, options = {}) {
+  if (options.method === 'POST') {
+    row = {...row,status:'closed_by_sam',display_status:'closed_by_sam'};
+    return {ok:true,status:200,json:async () => ({ok:true,id:row.id,action:'close'})};
+  }
+  threadReads++;
+  const snapshot = {threads:[row]};
+  if (threadReads === 2) {
+    refreshStarted();
+    await new Promise(resolve => { releaseRefresh = resolve; });
+  }
+  return {ok:true,status:200,json:async () => snapshot};
+};
+await loadView('threads');
+const close = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Close');
+const action = performThreadAction(row.id, 'close', close);
+await refreshStart;
+await loadView('threads');
+releaseRefresh();
+await action;
+check(content.querySelector('.thread-counts').textContent.includes('Done (1)'), 'the newer load must render');
+check(!content.textContent.includes('Action succeeded. Refresh'), 'a newer load must clear the guard');
+Array.from(content.querySelectorAll('nav button')).find(b => b.textContent === 'Done').click();
+const reopen = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Reopen');
+check(reopen && !reopen.disabled, 'a fresh card must not stay guarded');
+''')
+
     def test_web_thread_action_does_not_replace_newer_navigation(self):
         self.run_browser('''await new Promise(resolve => window.addEventListener('load', resolve, {once:true}));
 const content = document.getElementById('content');
