@@ -162,3 +162,12 @@ report_is_triaged(){ grep -q '^## Triage decisions' "$1"; }
 report_progress_count(){
   awk '/^## Triage in progress/{f=1;next} /^## /{f=0} f' "$1" | grep -cE '^([-*]|[0-9]+\.) ' || true
 }
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  if [ "$#" -eq 2 ] && [ "$1" = open-questions ] && [ -r "$2" ]; then
+    report_open_questions "$2"
+  else
+    printf 'Usage: report-format.sh open-questions REPORT\n' >&2
+    exit 2
+  fi
+fi

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import concurrent.futures
+from datetime import date, timedelta
 import http.client
 import importlib.util
+import json
 import os
 from pathlib import Path
 import re
@@ -280,6 +282,62 @@ class WebTests(unittest.TestCase):
         path.symlink_to(outside)
         self.assertNotEqual(self.run_command("open", "--print").returncode, 0)
         self.assertEqual(outside.read_text(), "do not change")
+
+    def test_web_dream_dates_and_question_reader(self):
+        dreams = self.root / "dreams"
+        dreams.mkdir()
+        self.env["DREAMS_DIR"] = str(dreams)
+        for name in ("2026-11-14.md", "2026-11-13.md", "2026-11-14.md.stale-1",
+                     "2026-02-30.md", "other.md"):
+            (dreams / name).write_text("# Dream\n<!-- autodream:open-questions=2 -->\n")
+        (dreams / "2026-11-13.md").write_text("## Open questions\nAn old uncertain report")
+        self.start_server()
+        cookie = self.login()
+        dates = self.request("GET", "/api/dreams", cookie=cookie)
+        self.assertEqual(dates.status, 200, "dream endpoints have not been implemented")
+        self.assertEqual(json.loads(dates.text), {"dates": ["2026-11-14", "2026-11-13"]})
+        dream = json.loads(self.request("GET", "/api/dreams/2026-11-14", cookie=cookie).text)
+        self.assertEqual(dream["open_questions"], 2)
+        self.assertIn("# Dream", dream["markdown"])
+        old = json.loads(self.request("GET", "/api/dreams/2026-11-13", cookie=cookie).text)
+        self.assertIsNone(old["open_questions"])
+        for date in ("2026-02-30", "../web-token", "%2e%2e%2fweb-token", "2026-11-14.md"):
+            self.assertEqual(self.request("GET", "/api/dreams/" + date, cookie=cookie).status, 400)
+        self.assertEqual(self.request("GET", "/api/dreams/2026-11-12", cookie=cookie).status, 404)
+        command = subprocess.run(["/bin/bash", str(REPO / "bin/report-format.sh"),
+                                  "open-questions", str(dreams / "2026-11-14.md")],
+                                 capture_output=True, text=True, timeout=3)
+        self.assertEqual(command.stdout.strip(), "2")
+
+    def test_web_lately_reads_artifacts_and_threads(self):
+        recent_date = (date.today() - timedelta(days=1)).isoformat()
+        day = self.install / "findings" / recent_date
+        day.mkdir(parents=True)
+        (day / "0123456789ab.json").write_text(json.dumps({
+            "project": "-repo", "underlying_goal": "Private goal", "outcome": "not_achieved"}))
+        (day / "0123456789ab.stats.json").write_text(json.dumps({
+            "nested": False, "user_message_count": 1, "tool_call_count": 2, "duration_minutes": 3}))
+        thread = {"id": "t-12345678", "kind": "idea", "repo": "/gone/repo",
+                  "title": "Idea", "goal": "Private goal", "status": "open", "done_by": None,
+                  "last_seen": recent_date, "sessions": [{"date": recent_date,
+                  "hash": "0123456789ab", "outcome": "not_achieved"}]}
+        (self.install / "threads.jsonl").write_text(json.dumps(thread) + "\n")
+        self.start_server()
+        cookie = self.login()
+        response = self.request("GET", "/api/lately?days=7", cookie=cookie)
+        self.assertEqual(response.status, 200, "Lately endpoint has not been implemented")
+        data = json.loads(response.text)
+        self.assertEqual(data["days"], 7)
+        project = data["timeline"][0]["projects"][0]
+        self.assertEqual(project["repo"], "/gone/repo")
+        self.assertEqual(project["sessions"][0]["goal"], "Private goal")
+        self.assertEqual(data["threads"], {"open": 0, "dropped": 0, "ideas": 1})
+        thread["status"] = "done"
+        (self.install / "threads.jsonl").write_text(json.dumps(thread) + "\n")
+        data = json.loads(self.request("GET", "/api/lately", cookie=cookie).text)
+        self.assertEqual(data["threads"]["ideas"], 0)
+        for days in ("0", "-1", "no", "1&days=2", "366"):
+            self.assertEqual(self.request("GET", "/api/lately?days=" + days, cookie=cookie).status, 400)
 
     def test_web_subprocesses_are_bounded(self):
         module = self.load_module()

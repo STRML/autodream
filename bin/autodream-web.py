@@ -2,6 +2,7 @@
 import argparse
 import fcntl
 import hmac
+import json
 from http.cookies import SimpleCookie, CookieError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
@@ -14,6 +15,9 @@ import subprocess
 import sys
 import time
 from urllib.parse import parse_qs, urlsplit
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from autodream_web_data import NightCache
 
 
 CSP = (
@@ -167,6 +171,9 @@ class AutodreamHandler(BaseHTTPRequestHandler):
                 "Set-Cookie": f"{COOKIE_NAME}={self.server.token}; HttpOnly; SameSite=Strict; Path=/",
             })
             return
+        if target.path.startswith("/api/"):
+            self.serve_api(target)
+            return
         route = STATIC_ROUTES.get(target.path)
         if route is None:
             self.respond(404, "Not found\n")
@@ -179,6 +186,29 @@ class AutodreamHandler(BaseHTTPRequestHandler):
             return
         self.respond(200, data, content_type=content_type)
 
+    def serve_api(self, target):
+        try:
+            if target.path == "/api/lately":
+                values = parse_qs(target.query, keep_blank_values=True).get("days", ["7"])
+                if len(values) != 1 or not re.fullmatch(r"[0-9]+", values[0]):
+                    raise ValueError("invalid days")
+                data = self.server.data.lately(int(values[0]))
+            elif target.path == "/api/dreams":
+                data = self.server.data.dream_dates()
+            elif target.path.startswith("/api/dreams/"):
+                data = self.server.data.read_dream(target.path[len("/api/dreams/"):])
+            else:
+                self.respond(404, "Not found\n")
+                return
+            self.respond(200, json.dumps(data, allow_nan=False),
+                         content_type="application/json; charset=utf-8")
+        except ValueError:
+            self.respond(400, "Invalid request\n")
+        except FileNotFoundError:
+            self.respond(404, "Dream not found\n")
+        except OSError:
+            self.respond(503, "Artifacts unavailable; retry\n")
+
     def do_POST(self):
         self.respond(404, "Not found\n")
 
@@ -188,6 +218,8 @@ def make_server(config, port):
         raise ValueError("only 127.0.0.1 binding is permitted")
     token = load_or_create_token(Path(config["autodream_dir"]) / "web-token")
     server = ThreadingHTTPServer(("127.0.0.1", port), AutodreamHandler)
+    server.data = NightCache(config["autodream_dir"], config.get("dreams_dir",
+        os.environ.get("DREAMS_DIR", Path.home() / ".claude/dreams")))
     server.token = token
     server.web_dir = Path(config["web_dir"])
     server.canonical_host = f"127.0.0.1:{server.server_port}"
