@@ -106,5 +106,28 @@ assert_eq "$n_name" "$n_cmd" "the job name carries the same count as the run lin
 assert_eq "$n_step" "$n_cmd" "and so does the step name"
 if grep -qE '^  test:' "$WF" && grep -qE '^    needs: shards' "$WF"; then ok "the \`test\` check still exists and waits on every shard"; else no "the aggregating \`test\` job is missing or does not need the shards"; fi
 
+echo "# parallel runner refuses an inaccessible real-dreams ancestor"
+mkdir -p "$D/parallel-runner"
+cp "$HERE/run-parallel.sh" "$D/parallel-runner/run-parallel.sh"
+cat > "$D/parallel-runner/run-all.sh" <<'SHARD_PROBE'
+#!/bin/bash
+[ -z "${SNAPSHOT_DENY_AFTER:-}" ] || chmod 000 "$SNAPSHOT_DENY_AFTER"
+echo 'passed: 0   failed: 0'
+SHARD_PROBE
+for phase in before after; do
+  parent="$D/dreams-$phase"
+  mkdir -p "$parent/home/.claude/dreams"
+  printf 'keep\n' > "$parent/home/.claude/dreams/threads.html"
+  [ "$phase" != before ] || chmod 000 "$parent"
+  deny_after=""; [ "$phase" != after ] || deny_after="$parent"
+  tmo 20 env HOME="$parent/home" SNAPSHOT_DENY_AFTER="$deny_after" \
+    /bin/bash "$D/parallel-runner/run-parallel.sh" 1 > "$D/snapshot-$phase.out" 2>&1
+  rc=$?
+  chmod 700 "$parent"
+  assert_eq "$rc" 1 "$phase snapshot: inaccessible ancestor fails the run"
+  grep -q 'snapshot error:' "$D/snapshot-$phase.out" && ok "$phase snapshot: traversal error is disclosed" || no "$phase snapshot: traversal error was suppressed"
+  grep -q 'FAIL.*real dreams snapshot' "$D/snapshot-$phase.out" && ok "$phase snapshot: guard reports failure" || no "$phase snapshot: guard reports success without inspection"
+done
+
 printf '\npassed: %s   failed: %s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

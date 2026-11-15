@@ -2236,7 +2236,8 @@ threads_linked: 0
 threads_rejected: 0
 threads_close_refused: 0
 threads_unmeasured: 0
-threads_calls: 0"
+threads_calls: 0
+threads_unassigned: 0"
   [ -n "$updater" ] || return 0
   from=$(pdate_shift "$TARGET_DATE" -13 d) || return 0
   THREADS_SUMMARY=$(printf '%s\n' "$THREAD_SOURCE_ROWS" | env \
@@ -2250,35 +2251,39 @@ threads_linked: 0
 threads_rejected: 0
 threads_close_refused: 0
 threads_unmeasured: 0
-threads_calls: 0"
+threads_calls: 0
+threads_unassigned: 0"
     }
   clean_work_bucket
 }
 
 run_threads_dashboard() {
-  local renderer output status
+  local renderer output status rc=0
   renderer=$(find_lib threads.sh) || renderer=""
   if [ -n "$renderer" ]; then
     output=$(env AUTODREAM_DIR="$AUTODREAM_DIR" DREAMS_DIR="$DREAMS_DIR" \
-      /bin/bash "$renderer" render 2>> "$RUN_LOG") || true
+      /bin/bash "$renderer" render 2>> "$RUN_LOG") || rc=$?
     status=$(printf '%s\n' "$output" | sed -n 's/^threads_render: //p' | tail -1)
   else
     status=failed
   fi
-  case "$status" in ok|failed|skipped_unreadable) ;; *) status=failed ;; esac
+  case "$status" in ok|stale|failed|skipped_unreadable) ;; *) status=failed ;; esac
+  if [ "$rc" -ne 0 ] && [ "$status" = ok ]; then status=failed; fi
   THREADS_SUMMARY="${THREADS_SUMMARY}
 threads_render: $status"
-  [ "$status" != failed ] || log "WARNING: thread dashboard render failed; output was not replaced"
+  case "$status" in failed|stale) log "WARNING: thread dashboard render $status; output was not replaced" ;; esac
   return 0
 }
 
 write_threads_report_input() {
-  local reporter status
+  local reporter status unassigned
   reporter=$(find_lib threads.sh) || reporter=""
   [ -n "$reporter" ] || return 1
   status=$(printf '%s\n' "$THREADS_SUMMARY" | sed -n 's/^threads_link: //p' | tail -1)
+  unassigned=$(printf '%s\n' "$THREADS_SUMMARY" | sed -n 's/^threads_unassigned: //p' | tail -1)
   env AUTODREAM_DIR="$AUTODREAM_DIR" DREAMS_DIR="$DREAMS_DIR" \
-    AUTODREAM_THREADS_LINK_STATUS="${status:-failed}" /bin/bash "$reporter" report "$TARGET_DATE" \
+    AUTODREAM_THREADS_LINK_STATUS="${status:-failed}" AUTODREAM_THREADS_UNASSIGNED="${unassigned:-0}" \
+    /bin/bash "$reporter" report "$TARGET_DATE" \
     > "$FINDINGS_DIR/dropped-threads.md" 2>> "$RUN_LOG"
 }
 

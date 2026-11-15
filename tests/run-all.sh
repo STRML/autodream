@@ -16,6 +16,8 @@ REPO=$(cd "$HERE/.." && pwd)
 . "$REPO/bin/portable.sh"
 # shellcheck source=/dev/null
 . "$HERE/lib-tmp.sh"; suite_tmp runall
+export HOME="$SUITE_TMP/home" DREAMS_DIR="$SUITE_TMP/dreams"
+mkdir -p "$HOME" "$DREAMS_DIR"
 RUN="$REPO/bin/run.sh"
 MOCK="$HERE/mock-claude.sh"
 # run.sh puts ~/.local/bin on PATH, where the real shared-memory CLI lives, so a
@@ -7716,6 +7718,55 @@ test_threads_eligibility_and_goal_fallback(){
   assert_eq "$candidate_count" 2 "only eligible human sessions reach linker"
   assert_eq "$array_fallback_goal" "first initiative" "array fallback"
   assert_eq "$string_fallback_goal" "omp initiative" "string fallback"
+  local fallback_kinds
+  fallback_kinds=$(thread_request_json "$req" | jq -r '[.candidates[] | select(.goal == "first initiative" or .goal == "omp initiative") | .kind] | unique | join(",")')
+  assert_eq "$fallback_kinds" "work" "a notable_initiatives fallback is work, never an idea"
+  thread_cleanup "$root"
+}
+
+test_threads_closed_hints_are_capped_and_newest_first(){
+  echo "# threads: closed linker hints carry only the newest 200 dates"
+  local root session state req count first last fields
+  root=$(setup_env)
+  session=$(mk_thread_session "$root" closed-hints "$REPO")
+  seed_thread_findings "$root" "$session" "closed hint candidate" '[]' partially_achieved >/dev/null
+  state=$(thread_state "$root"); mkdir -p "$(dirname "$state")"
+  python3 - "$state" <<'PY_CLOSED_THREADS'
+import datetime
+import json
+import sys
+
+state_path = sys.argv[1]
+start = datetime.date(2000, 1, 1)
+with open(state_path, "w", encoding="utf-8") as stream:
+    for index in range(300):
+        stream.write(json.dumps({
+            "id": "t-%08x" % index,
+            "kind": "work",
+            "repo": "/repo/closed",
+            "title": "Closed thread %d" % index,
+            "goal": "historical goal",
+            "sessions": [{"date": (start + datetime.timedelta(days=index)).isoformat(),
+                          "hash": "%012x" % index,
+                          "session_path": "/sessions/%d.jsonl" % index,
+                          "outcome": "fully_achieved"}],
+            "status": "closed_by_sam",
+            "done_by": "sam",
+            "last_seen": (start + datetime.timedelta(days=index)).isoformat()
+        }, separators=(",", ":")) + "\n")
+PY_CLOSED_THREADS
+  export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  req="$root/cap/threads-stdin-1.txt"
+  count=$(thread_request_json "$req" | jq '.threads | length')
+  first=$(thread_request_json "$req" | jq -r '.threads[0].id')
+  last=$(thread_request_json "$req" | jq -r '.threads[-1].id')
+  fields=$(thread_request_json "$req" | jq -r '[.threads[] | (keys | sort | join(","))] | unique | join(";")')
+  assert_eq "$count" 200 "exactly 200 closed hints reach the linker"
+  assert_eq "$first" t-0000012b "newest closed thread is first"
+  assert_eq "$last" t-00000064 "oldest retained closed thread is last"
+  assert_eq "$fields" id,repo,title "closed hints expose only id, title, and repo"
   thread_cleanup "$root"
 }
 
@@ -7762,7 +7813,7 @@ test_threads_one_call_across_repo_hints(){
   echo "# threads: one request spans Claude and OMP buckets and two canonical repos"
   local root repo_two repo_two_git claude_a claude_b state calls linked_harnesses linked_repos
   root=$(setup_env)
-  repo_two_git=$(mktemp -d /private/tmp/adt.XXXXXX) || { no "isolated repo fixture"; thread_cleanup "$root"; return 0; }
+  repo_two_git=$(mktemp -d "${TMPDIR:-/var/tmp}/adt.XXXXXX") || { no "isolated repo fixture"; thread_cleanup "$root"; return 0; }
   repo_two="$REPO/.thread-fixture.$$"
   if ! mkdir "$repo_two" 2>/dev/null; then
     no "isolated repo fixture"
@@ -7950,17 +8001,19 @@ test_threads_lock_exhaustion_is_bounded(){
   root=$(setup_env)
   session=$(mk_thread_session "$root" locked "$REPO")
   seed_thread_findings "$root" "$session" "locked goal" '[]' partially_achieved >/dev/null
-  lock="$(thread_state "$root").lock"
-  mkdir "$lock"
+  lock="$(thread_state "$root").flock"
+  exec 9>>"$lock"
+  python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)' || { no "test holder acquires kernel lock"; exec 9>&-; thread_cleanup "$root"; return; }
   export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
   run_dream "$root"
   unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
   assert_grep "$(fdir "$root")/run-stats.txt" '^threads_skipped: locked$' "nightly skips"
   AUTODREAM_DIR="$root/autodream" AUTODREAM_THREADS_STATE="$(thread_state "$root")" \
-    /bin/bash "$REPO/bin/threads.sh" close t-11111111 >/dev/null 2>&1
+    /bin/bash "$REPO/bin/threads.sh" close t-11111111 > "$root/cli.out" 2>&1
   cli_exit=$?
-  assert_eq "$cli_exit" 1 "CLI fails loudly"
-  rmdir "$lock"
+  assert_eq "$cli_exit" 1 "CLI fails when lock budget is spent"
+  assert_grep "$root/cli.out" 'lock is held' "CLI fails loudly"
+  exec 9>&-
   thread_cleanup "$root"
 }
 
@@ -8123,6 +8176,47 @@ test_threads_older_rebuild_only_links_missing_sources(){
   thread_cleanup "$root"
 }
 
+test_threads_reassignment_updates_dropped_status_and_report(){
+  echo "# threads: reassigning the newest session lowers last_seen for list and report"
+  local root session hash state today previous_date previous_stamp seen list_count report moved source_row dashboard
+  root=$(setup_env)
+  mkdir -p "$root/dreams"
+  printf '<script id="threads-data" type="application/json">{"generated_at":"before-update","threads":[]}</script>' > "$root/dreams/threads.html"
+  previous_date=$DATE; previous_stamp=$STAMP
+  DATE=$(pdate_shift "$(pdate_yesterday)" 1 d) || { no "current report date resolved"; thread_cleanup "$root"; return 0; }
+  today=$DATE
+  STAMP=$(pdate_fmt_epoch "$(pdate_epoch "$DATE")" +%Y%m%d1200) || { no "current report stamp resolved"; thread_cleanup "$root"; DATE=$previous_date; STAMP=$previous_stamp; return 0; }
+  session=$(mk_thread_session "$root" reassign-newest "$REPO")
+  hash=$(seed_thread_findings "$root" "$session" "reassigned current goal" '[]' partially_achieved)
+  state=$(thread_state "$root"); mkdir -p "$(dirname "$state")"
+  jq -cn --arg date "$(pdate_shift "$DATE" -8 d)" --arg current "$DATE" --arg hash "$hash" --arg path "$session" \
+    '{id:"t-77777777",kind:"work",repo:"/repo",title:"Surviving old work",goal:"old goal",
+      sessions:[{date:$date,hash:"aaaaaaaaaaaa",session_path:"/old/session.jsonl",outcome:"partially_achieved"},
+                {date:$current,hash:$hash,session_path:$path,outcome:"partially_achieved"}],
+      status:"open",done_by:null,last_seen:$current}' > "$state"
+  source_row=$(jq -cn --arg date "$DATE" --arg hash "$hash" --arg path "$session" --arg repo "$REPO" \
+    '{date:$date,hash:$hash,source:"claude",session_path:$path,cwd:$repo,repo:$repo,nested:false,user_message_count:2,measured:true}')
+  printf '%s\n' "$source_row" | env AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" AUTODREAM_CONFIG="$root/no-config" \
+    AUTODREAM_THREADS_STATE="$state" AUTODREAM_THREADS_ENGINE=claude AUTODREAM_THREADS_MODEL=claude-haiku-5-5 \
+    AUTODREAM_THREADS_TIMEOUT_BIN="$(command -v timeout)" AUTODREAM_ADAPTERS=claude \
+    THREADS_REFRESH_KEYS="$(printf '%s\t%s' "$DATE" "$hash")" CLAUDE_BIN="$MOCK" \
+    MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap" /bin/bash "$REPO/bin/threads.sh" update "$DATE" > "$root/update.out"
+  DATE=$previous_date; STAMP=$previous_stamp
+  dashboard=$(threads_html_inspect "$root/dreams/threads.html")
+  assert_eq "$(printf '%s' "$dashboard" | jq -r --arg id t-77777777 '[.payload.threads[].id] | index($id) != null')" true "direct update refreshes dashboard membership"
+  assert_eq "$(printf '%s' "$dashboard" | jq -r '.payload.generated_at != "before-update"')" true "direct update replaces the previous dashboard timestamp"
+  moved=$(jq -sr --arg hash "$hash" '[.[] | select(any(.sessions[]; .hash == $hash)) | select(.id != "t-77777777")] | length' "$state")
+  seen=$(jq -sr '.[] | select(.id == "t-77777777") | .last_seen' "$state")
+  list_count=$(AUTODREAM_DIR="$root/autodream" "$REPO/bin/threads.sh" list --status dropped --json | jq '[.[] | select(.id == "t-77777777")] | length')
+  report="$root/dreams/$today.md"
+  AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" /bin/bash "$REPO/bin/threads.sh" report "$today" > "$report"
+  assert_eq "$moved" 1 "the newest source is actually reassigned away"
+  assert_eq "$seen" "$(pdate_shift "$today" -8 d)" "last_seen is recomputed from surviving sessions"
+  assert_eq "$list_count" 1 "list computes dropped from the surviving newest session"
+  assert_grep "$report" 't-77777777' "report agrees that the surviving session is dropped"
+  thread_cleanup "$root"
+}
+
 test_threads_linker_cannot_write(){
   echo "# threads: linker runs without Write and valid stdout still links"
   local root session attempted links
@@ -8139,9 +8233,9 @@ test_threads_linker_cannot_write(){
   thread_cleanup "$root"
 }
 
-seed_thread_archive_date(){ # $1=root $2=date $3=name $4=goal $5=outcome $6=sidecar yes|no
-  local root="$1" date="$2" name="$3" session hash epoch stamp
-  session=$(mk_thread_session "$root" "$name" "$REPO")
+seed_thread_archive_date(){ # $1=root $2=date $3=name $4=goal $5=outcome $6=sidecar yes|no [$7=cwd]
+  local root="$1" date="$2" name="$3" session hash epoch stamp cwd="${7:-$REPO}"
+  session=$(mk_thread_session "$root" "$name" "$cwd")
   epoch=$(pdate_epoch "$date") || return 1
   stamp=$(pdate_fmt_epoch "$epoch" +%Y%m%d1200) || return 1
   touch -t "$stamp" "$session"
@@ -8154,7 +8248,7 @@ seed_thread_archive_date(){ # $1=root $2=date $3=name $4=goal $5=outcome $6=side
     jq -cn '{nested:false,user_message_count:2}' \
       > "$root/autodream/findings/$date/$hash.stats.json"
   fi
-  printf '%s\t%s\tclaude\n' "$hash" "$session" >> "$root/autodream/findings/$date/sessions-source.txt"
+  printf '%s\tclaude\n' "$hash" >> "$root/autodream/findings/$date/sessions-source.txt"
   printf '%s\n' "$hash"
 }
 
@@ -8190,7 +8284,7 @@ test_threads_report_ranking_and_limit(){
   local root state report ids first new_id idea_rows recommendation_rows i id
   root=$(setup_env)
   state=$(thread_state "$root"); : > "$state"
-  new_id=t-10000001
+  new_id=t-10000009
   seed_thread_report_record "$root" "$new_id" work 2019-12-25 open partially_achieved /gone/new.jsonl
   for i in 2 3 4 5; do
     id=$(printf 't-1000000%s' "$i")
@@ -8230,6 +8324,39 @@ test_threads_auto_closed_threads_are_visible_and_reopenable(){
   AUTODREAM_DIR="$root/autodream" /bin/bash "$REPO/bin/threads.sh" reopen "$closed" >/dev/null 2>&1
   status=$(jq -sr '.[0].status' "$(thread_state "$root")")
   assert_eq "$status" open "operator can correct false done"
+  thread_cleanup "$root"
+}
+
+test_threads_older_finished_session_does_not_close_newer_open_thread(){
+  echo "# threads: an older completed session cannot close a thread with a newer unfinished session"
+  local root session hash status
+  root=$(setup_env)
+  session=$(mk_thread_session "$root" old-finished "$REPO")
+  hash=$(seed_thread_findings "$root" "$session" "older completed goal" '[]' fully_achieved)
+  seed_thread_record "$root" t-66666666 "$REPO" "newer unfinished goal" 2020-01-03 bbbbbbbbbbbb /newer/session.jsonl partially_achieved open
+  export MOCK_THREADS_MODE=finished_existing MOCK_THREADS_CLOSE_ID=t-66666666 MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_THREADS_CLOSE_ID MOCK_CAPTURE_DIR
+  status=$(jq -sr '.[] | select(.id == "t-66666666") | .status' "$(thread_state "$root")")
+  assert_eq "$status" open "only the newest session can close its thread"
+  thread_cleanup "$root"
+}
+
+test_threads_counts_assignments_omitted_by_linker(){
+  echo "# threads: omitted linker assignments remain pending and are disclosed"
+  local root first second stats section
+  root=$(setup_env)
+  first=$(mk_thread_session "$root" assignment-first "$REPO")
+  second=$(mk_thread_session "$root" assignment-second "$REPO")
+  seed_thread_findings "$root" "$first" "first assignment goal" '[]' partially_achieved >/dev/null
+  seed_thread_findings "$root" "$second" "second assignment goal" '[]' partially_achieved >/dev/null
+  export MOCK_THREADS_MODE=omit_last MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  stats="$(fdir "$root")/run-stats.txt"
+  section="$(fdir "$root")/dropped-threads.md"
+  assert_grep "$stats" '^threads_unassigned: 1$' "one missing assignment is counted"
+  assert_grep "$section" '1 eligible session remains unlinked' "the stale-index note names the pending session count"
   thread_cleanup "$root"
 }
 
@@ -8298,25 +8425,154 @@ test_threads_resume_marks_missing_transcript(){
 
 test_threads_backfill_uses_sidecars_and_respects_budget(){
   echo "# threads: backfill uses archived sidecars without rollups and stops at the call budget"
-  local root from to no_sidecar first_date output calls plan_seen
+  local root from to first_hash first_date output calls plan_seen linked dashboard
   root=$(setup_env); from=2019-12-30; to=2020-01-02
-  seed_thread_archive_date "$root" 2019-12-30 backfill-first "first historical goal" partially_achieved yes >/dev/null
+  mkdir -p "$root/dreams"
+  printf '<script id="threads-data" type="application/json">{"generated_at":"before-backfill","threads":[]}</script>' > "$root/dreams/threads.html"
+  first_hash=$(seed_thread_archive_date "$root" 2019-12-30 backfill-first "first historical goal" partially_achieved yes)
   seed_thread_archive_date "$root" 2019-12-31 backfill-second "second historical goal" partially_achieved yes >/dev/null
-  no_sidecar=$(seed_thread_archive_date "$root" 2020-01-01 backfill-unmeasured "unmeasured goal" partially_achieved no)
+  seed_thread_archive_date "$root" 2019-12-30 backfill-unmeasured "unmeasured goal" partially_achieved no >/dev/null
   output="$root/backfill.out"
   export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap" \
     MOCK_BACKFILL_OUTPUT_FILE="$output" MOCK_BACKFILL_PLAN_SEEN="$root/plan-seen"
-  AUTODREAM_DIR="$root/autodream" PROJECTS_DIR="$root/projects" CLAUDE_BIN="$MOCK" \
+  AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" PROJECTS_DIR="$root/projects" CLAUDE_BIN="$MOCK" \
     /bin/bash "$REPO/bin/threads.sh" backfill "$from" "$to" --max-calls 2 > "$output" 2>&1
   unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR MOCK_BACKFILL_OUTPUT_FILE MOCK_BACKFILL_PLAN_SEEN
   calls=$(thread_call_count "$root/cap")
   plan_seen=$(cat "$root/plan-seen" 2>/dev/null)
   first_date=$(thread_request_json "$root/cap/threads-stdin-1.txt" | jq -r '.date // .report_date // empty')
+  linked=$(jq -sr --arg hash "$first_hash" '[.[].sessions[] | select(.hash == $hash)] | length' "$(thread_state "$root")")
   assert_eq "$([ -e "$root/autodream/findings/2019-12-30/rollup.tsv" ] && echo true || echo false)" false "pre-November archive is supported without rollup"
   assert_eq "$first_date" "$from" "oldest first"
   assert_eq "$calls" 2 "budget is enforced"
+  assert_eq "$([ "$calls" -gt 0 ] && echo true || echo false)" true "real two-column source map makes linker calls"
+  assert_eq "$linked" 1 "real-format backfill links the archived session"
+  dashboard=$(threads_html_inspect "$root/dreams/threads.html")
+  assert_eq "$(printf '%s' "$dashboard" | jq -r --arg id "$(jq -sr '.[0].id' "$(thread_state "$root")")" '[.payload.threads[].id] | index($id) != null')" true "backfill refreshes dashboard membership once at completion"
+  assert_eq "$(printf '%s' "$dashboard" | jq -r '.payload.generated_at != "before-backfill"')" true "backfill writes a fresh dashboard timestamp"
   assert_eq "$plan_seen" true "plan precedes the first engine call"
-  assert_grep "$output" '2020-01-01' "date without sidecars is named"
+  assert_grep "$output" '^unmeasured_sessions: 1$' "an unparseable or missing sidecar counts its session"
+  assert_grep "$output" '^unmeasured_dates:$' "unmeasured dates are grouped"
+  assert_grep "$output" '^- 2019-12-30$' "date with unmeasured sessions is named"
+  assert_nogrep "$output" '^skipped_dates:' "one unmeasured session does not make a linked date skipped"
+  thread_cleanup "$root"
+}
+
+test_threads_backfill_skipped_dates_have_no_linker_call(){
+  echo "# threads: backfill lists budget and no-candidate dates only when their linker call is skipped"
+  local root linked_hash budget_date linked_date output calls dates rerun
+  root=$(setup_env); budget_date=2019-12-30; linked_date=2019-12-31
+  seed_thread_archive_date "$root" "$budget_date" backfill-budget "budget goal" partially_achieved yes >/dev/null
+  linked_hash=$(seed_thread_archive_date "$root" "$linked_date" backfill-already-linked "already linked goal" partially_achieved yes)
+  seed_thread_record "$root" t-abcddcba "$REPO" "already linked goal" "$linked_date" "$linked_hash" "/archive/already-linked.jsonl" partially_achieved open
+  output="$root/backfill-skipped.out"
+  export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
+  AUTODREAM_DIR="$root/autodream" PROJECTS_DIR="$root/projects" CLAUDE_BIN="$MOCK" \
+    /bin/bash "$REPO/bin/threads.sh" backfill "$budget_date" "$linked_date" --max-calls 0 > "$output" 2>&1
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  calls=$(thread_call_count "$root/cap")
+  dates=$(sed -n '/^skipped_dates:$/,$p' "$output" | sed '1d' | tr '\n' ' ')
+  assert_eq "$calls" 0 "zero budget makes no linker calls"
+  assert_grep "$output" '^skipped_dates:$' "dates without linker calls are grouped"
+  assert_grep "$output" "$budget_date" "budget-blocked candidate date is listed"
+  assert_nogrep "$output" "$linked_date" "date with no remaining candidates is not listed"
+  assert_eq "$dates" "- $budget_date " "only the date blocked by budget is listed"
+  rerun="$root/backfill-complete.out"
+  AUTODREAM_DIR="$root/autodream" PROJECTS_DIR="$root/projects" CLAUDE_BIN="$MOCK" \
+    /bin/bash "$REPO/bin/threads.sh" backfill "$linked_date" "$linked_date" --max-calls 1 > "$rerun" 2>&1
+  assert_nogrep "$rerun" '^skipped_dates:' "completed date is not reported as skipped on rerun"
+  printf '{broken state\n' > "$(thread_state "$root")"
+  AUTODREAM_DIR="$root/autodream" PROJECTS_DIR="$root/projects" CLAUDE_BIN="$MOCK" \
+    /bin/bash "$REPO/bin/threads.sh" backfill "$linked_date" "$linked_date" --max-calls 1 > "$root/backfill-unreadable.out" 2>&1
+  assert_grep "$root/backfill-unreadable.out" "^- $linked_date$" "unreadable index date is reported as skipped"
+  thread_cleanup "$root"
+}
+
+test_threads_backfill_requires_timeout_binary(){
+  echo "# threads: backfill fails clearly when neither timeout command is available"
+  local root bash_env rc
+  root=$(setup_env); bash_env="$root/no-timeout.bash-env"
+  cat > "$bash_env" <<'EOF_NO_TIMEOUT'
+command() {
+  if [ "${1:-}" = -v ]; then
+    case "${2:-}" in timeout|gtimeout) return 1 ;; esac
+  fi
+  builtin command "$@"
+}
+EOF_NO_TIMEOUT
+  BASH_ENV="$bash_env" AUTODREAM_DIR="$root/autodream" PROJECTS_DIR="$root/projects" \
+    /bin/bash "$REPO/bin/threads.sh" backfill 2019-12-30 2019-12-30 --max-calls 1 > "$root/no-timeout.out" 2>&1
+  rc=$?
+  assert_eq "$rc" 1 "missing timeout is a nonzero backfill failure"
+  assert_grep "$root/no-timeout.out" 'timeout binary.*timeout or gtimeout' "failure names both accepted commands"
+  thread_cleanup "$root"
+}
+
+test_threads_backfill_accepts_claude_isSidechain_sidecar(){
+  echo "# threads: backfill reads the claude isSidechain sidecar shape"
+  local root hash output calls
+  root=$(setup_env)
+  hash=$(seed_thread_archive_date "$root" 2019-12-30 claude-sidecar "claude sidecar goal" partially_achieved yes)
+  printf '{"isSidechain":false,"user_message_count":2}\n' > "$root/autodream/findings/2019-12-30/$hash.stats.json"
+  output="$root/backfill-is-sidechain.out"
+  export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
+  AUTODREAM_DIR="$root/autodream" PROJECTS_DIR="$root/projects" CLAUDE_BIN="$MOCK" \
+    /bin/bash "$REPO/bin/threads.sh" backfill 2019-12-30 2019-12-30 --max-calls 1 > "$output" 2>&1
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  calls=$(thread_call_count "$root/cap")
+  assert_eq "$calls" 1 "a real-shaped claude sidecar makes one linker call"
+  assert_grep "$output" '^actual_calls: 1$' "the eligible historical session is measured and linked"
+  thread_cleanup "$root"
+}
+
+test_threads_backfill_reads_unterminated_manifest_root(){
+  echo "# threads: backfill reads the final root from adapter_manifest_get without a newline"
+  local root home session hash out calls
+  root=$(setup_env); home="$root/home"
+  session="$home/.omp/agent/sessions/project/20200102_session.jsonl"
+  mkdir -p "$(dirname "$session")"
+  jq -cn --arg cwd "$REPO" '{type:"session",cwd:$cwd}' > "$session"
+  touch -t 201912301200 "$session"
+  hash=$(hash_of "$session")
+  mkdir -p "$root/autodream/findings/2019-12-30"
+  jq -cn '{underlying_goal:"OMP root goal",outcome:"partially_achieved",findings:[]}' > "$root/autodream/findings/2019-12-30/$hash.json"
+  jq -cn '{nested:false,user_message_count:2}' > "$root/autodream/findings/2019-12-30/$hash.stats.json"
+  printf '%s\tomp\n' "$hash" > "$root/autodream/findings/2019-12-30/sessions-source.txt"
+  out="$root/omp-backfill.out"
+  export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
+  HOME="$home" AUTODREAM_ADAPTERS=omp AUTODREAM_DIR="$root/autodream" CLAUDE_BIN="$MOCK" \
+    /bin/bash "$REPO/bin/threads.sh" backfill 2019-12-30 2019-12-30 --max-calls 1 > "$out" 2>&1
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  calls=$(thread_call_count "$root/cap")
+  assert_eq "$calls" 1 "OMP session root is enumerated from the manifest"
+  assert_grep "$out" '^actual_calls: 1$' "the final manifest root reaches backfill"
+  thread_cleanup "$root"
+}
+
+test_threads_backfill_budget_uses_grown_index_request(){
+  echo "# threads: backfill enforces max-calls after earlier dates grow the index"
+  local root repo_base repo_a repo_b repo_link_a repo_link_b large output calls actual
+  root=$(setup_env); repo_base=$(mktemp -d "$REPO/.threads-budget.XXXXXX") || return 1
+  repo_a="$repo_base/a"; repo_b="$repo_base/b"
+  mkdir -p "$repo_a" "$repo_b"
+  git init -q --template=/dev/null --separate-git-dir="$repo_a/.git-meta" "$repo_a"
+  git init -q --template=/dev/null --separate-git-dir="$repo_b/.git-meta" "$repo_b"
+  large=$(python3 -c 'print("x" * 80)')
+  seed_thread_archive_date "$root" 2019-12-30 budget-first "$large" partially_achieved yes "$REPO" >/dev/null
+  seed_thread_archive_date "$root" 2019-12-31 budget-second-a "second goal a" partially_achieved yes "$repo_a" >/dev/null
+  seed_thread_archive_date "$root" 2019-12-31 budget-second-b "second goal b" partially_achieved yes "$repo_b" >/dev/null
+  output="$root/backfill-budget.out"
+  export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
+  AUTODREAM_THREADS_MAX_INPUT=1600 AUTODREAM_DIR="$root/autodream" PROJECTS_DIR="$root/projects" CLAUDE_BIN="$MOCK" \
+    /bin/bash "$REPO/bin/threads.sh" backfill 2019-12-30 2019-12-31 --max-calls 2 > "$output" 2>&1
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  calls=$(thread_call_count "$root/cap")
+  actual=$(sed -n 's/^actual_calls: //p' "$output" | tail -1)
+  assert_eq "$calls" 2 "engine calls never exceed the live max-calls budget"
+  assert_eq "$actual" 2 "actual_calls reports the calls made after context growth"
+  assert_grep "$output" '^skipped_dates:$' "partially processed date with budget skips is listed"
+  assert_grep "$output" '^- 2019-12-31$' "date skipped after linking one group is named"
+  python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1])' "$repo_base"
   thread_cleanup "$root"
 }
 
@@ -8339,13 +8595,24 @@ test_threads_backfill_does_not_retriage_ideas(){
 }
 
 test_threads_install_links_entrypoint(){
-  echo "# threads: install links a working threads CLI beside the runtime helpers"
-  local root parent target installed
+  echo "# threads: install links a working threads CLI and linker prompt beside the runtime helpers"
+  local root parent target installed hash output links
   root=$(setup_env); parent="$root/home/.claude"; target="$parent/autodream"
   HOME="$root/home" /bin/bash "$REPO/install.sh" --no-schedule --no-review --no-skill "$parent" > "$root/install.out" 2>&1
+  hash=aaaaaaaaaaaa
+  mkdir -p "$target/findings/2020-01-02"
+  printf '{"underlying_goal":"installed update","outcome":"partially_achieved","findings":[]}\n' > "$target/findings/2020-01-02/$hash.json"
+  output="$root/installed-update.out"
+  export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
+  printf '{"date":"2020-01-02","hash":"%s","source":"claude","session_path":"/archive/installed.jsonl","cwd":"%s","repo":"%s","nested":false,"user_message_count":2,"measured":true}\n' "$hash" "$REPO" "$REPO" |
+    HOME="$root/home" AUTODREAM_DIR="$target" CLAUDE_BIN="$MOCK" "$target/threads.sh" update 2020-01-02 > "$output" 2>&1
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
   installed=false
   if [ -x "$target/threads.sh" ] && AUTODREAM_DIR="$target" /bin/bash "$target/threads.sh" list >/dev/null 2>&1; then installed=true; fi
+  if [ -s "$target/threads.jsonl" ]; then links=$(jq -sr '[.[].sessions[]] | length' "$target/threads.jsonl"); else links=0; fi
   assert_eq "$installed" true "installed symlink resolves helpers"
+  assert_eq "$links" 1 "installed update finds the linked prompt and runs the mock linker"
+  assert_grep "$output" '^threads_link: ok$' "installed layout reports a successful update"
   thread_cleanup "$root"
 }
 
@@ -8415,10 +8682,70 @@ test_threads_render_failure_preserves_previous_page(){
   thread_cleanup "$root"
 }
 
+test_threads_publish_failure_reports_final_status(){
+  echo "# threads: publish lock and rename failures preserve the page and report final status"
+  local root mode expected_status
+  for mode in locked rename; do
+    root=$(setup_env)
+    printf 'previous dashboard\n' > "$root/dreams/threads.html"
+    mkdir -p "$root/render-bin"
+    cat > "$root/render-bin/python3" <<'PUBLISH_LOCK'
+#!/bin/bash
+case "$1" in
+  */threads-render.py)
+    /usr/bin/python3 "$@" || exit $?
+    : > "$AUTODREAM_DIR/temporary-render-complete"
+    if [ "$THREAD_PUBLISH_FAILURE" = locked ]; then
+      /usr/bin/python3 - "$AUTODREAM_DIR" <<'PY_HOLDER' >/dev/null 2>&1 &
+import fcntl, pathlib, sys, time
+root = pathlib.Path(sys.argv[1])
+with (root / "threads.jsonl.flock").open("a") as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    (root / "publish-lock-ready").touch()
+    time.sleep(30)
+PY_HOLDER
+      printf '%s\n' "$!" > "$AUTODREAM_DIR/publish-lock-holder"
+      tries=0
+      while [ ! -e "$AUTODREAM_DIR/publish-lock-ready" ] && [ "$tries" -lt 200 ]; do
+        sleep 0.05; tries=$((tries + 1))
+      done
+      [ -e "$AUTODREAM_DIR/publish-lock-ready" ] || exit 1
+    fi
+    exit 0
+    ;;
+esac
+exec /usr/bin/python3 "$@"
+PUBLISH_LOCK
+    cat > "$root/render-bin/mv" <<'PUBLISH_RENAME'
+#!/bin/bash
+if [ "$THREAD_PUBLISH_FAILURE" = rename ] && [ "${3:-}" = "$DREAMS_DIR/threads.html" ]; then
+  : > "$AUTODREAM_DIR/publish-rename-refused"
+  exit 1
+fi
+exec /bin/mv "$@"
+PUBLISH_RENAME
+    chmod +x "$root/render-bin/python3" "$root/render-bin/mv"
+    THREAD_PUBLISH_FAILURE="$mode" PATH="$root/render-bin:$PATH" run_dream "$root"
+    expected_status=stale; [ "$mode" != rename ] || expected_status=failed
+    assert_file "$root/autodream/temporary-render-complete" "temporary rendering succeeded before publication"
+    assert_eq "$(cat "$root/dreams/threads.html")" 'previous dashboard' "failed publication preserves prior page"
+    assert_grep "$(fdir "$root")/run-stats.txt" "^threads_render: $expected_status$" "$mode: failed publish status reaches nightly statistics"
+    assert_nogrep "$(fdir "$root")/run-stats.txt" '^threads_render: ok$' "temporary render never reports publish success"
+    if [ "$mode" = locked ]; then
+      assert_grep "$root/autodream/logs/run-$DATE.log" 'lock is held' "publish lock refusal was reached"
+      kill "$(cat "$root/autodream/publish-lock-holder")" 2>/dev/null || true
+    else
+      assert_file "$root/autodream/publish-rename-refused" "final page rename failure was reached"
+    fi
+    thread_cleanup "$root"
+  done
+}
+
 test_threads_html_payload_is_inert(){
   echo "# threads: hostile state renders as inert JSON and text"
   local root hostile state page baseline result
   root=$(setup_env)
+  ln -s "$REPO/bin/threads.sh" "$root/autodream/threads.sh"
   state=$(thread_state "$root"); mkdir -p "$(dirname "$state")"
   page="$root/dreams/threads.html"
   hostile='</script><img src=x onerror="alert(1)"> "quoted" '\'' ; $(touch /tmp/adt21-pwned)'$'\001'
@@ -8451,6 +8778,7 @@ PY_THREADS_HOSTILE
   assert_eq "$(printf '%s' "$result" | jq -r .unexpected_html_nodes)" 0 "payload creates no HTML elements"
   assert_eq "$(printf '%s' "$result" | jq -r .unsafe_dom_sinks)" 0 "dynamic text uses textContent"
   assert_eq "$(printf '%s' "$result" | jq -r .invalid_id_commands)" 0 "copy commands require valid IDs"
+  assert_eq "$(printf '%s' "$result" | jq -r '.payload.cli')" "$(python3 -c 'import shlex,sys; print(shlex.quote(sys.argv[1]))' "$root/autodream/threads.sh")" "dashboard embeds the shell-quoted install CLI path"
   assert_eq "$(printf '%s' "$result" | jq -r '.payload.generated_at | length > 0')" true "generation time is embedded"
   thread_cleanup "$root"
 }
@@ -8471,6 +8799,52 @@ test_threads_render_runs_on_empty_night_and_cli_write(){
   generated=$(printf '%s' "$result" | jq -r '.payload.generated_at')
   assert_eq "$status" closed_by_sam "CLI write refreshes page"
   [ -n "$generated" ] && ok "generation time is present" || no "generation time is present"
+  thread_cleanup "$root"
+}
+
+test_threads_render_retries_when_state_changes_during_render(){
+  echo "# threads: renderer runs unlocked and retries a stale snapshot"
+  local root state renderer_started release_renderer close_pid attempts result status close_rc
+  root=$(setup_env)
+  state=$(thread_state "$root"); mkdir -p "$(dirname "$state")" "$root/renderer-bin"
+  jq -cn '{id:"t-50000002",kind:"work",repo:"/repo",title:"serialized",goal:"serialize render",sessions:[{date:"2020-01-01",hash:"aaaaaaaaaaaa",session_path:"/archive/a.jsonl",outcome:"partially_achieved"}],status:"open",done_by:null,last_seen:"2020-01-01"}' > "$state"
+  renderer_started="$root/renderer-started"; release_renderer="$root/release-renderer"
+  cat > "$root/renderer-bin/python3" <<'EOF_RENDER_GATE'
+#!/bin/bash
+case "$1" in
+  */threads-render.py)
+    renderer=$1
+    : > "$MOCK_RENDER_STARTED"
+    while [ ! -e "$MOCK_RENDER_RELEASE" ]; do sleep 0.05; done
+    shift
+    exec /usr/bin/python3 "$renderer" "$@"
+    ;;
+esac
+exec /usr/bin/python3 "$@"
+EOF_RENDER_GATE
+  chmod +x "$root/renderer-bin/python3"
+  MOCK_RENDER_STARTED="$renderer_started" MOCK_RENDER_RELEASE="$release_renderer" \
+    PATH="$root/renderer-bin:$PATH" AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
+    /bin/bash "$REPO/bin/threads.sh" close t-50000002 > "$root/close-render.out" 2>&1 &
+  close_pid=$!
+  attempts=0
+  while [ ! -e "$renderer_started" ] && [ "$attempts" -lt 100 ]; do sleep 0.05; attempts=$((attempts + 1)); done
+  assert_file "$renderer_started" "close reaches dashboard rendering"
+  assert_eq "$([ -d "$(thread_state "$root").lock" ] && echo true || echo false)" false "state lock is free during dashboard rendering"
+  if [ ! -e "$renderer_started" ]; then cat "$root/close-render.out"; fi
+  mkdir "$(thread_state "$root").lock"
+  jq -c 'if .id == "t-50000002" then .title = "changed while rendering" else . end' "$(thread_state "$root")" > "$root/state-next"
+  mv -f "$root/state-next" "$(thread_state "$root")"
+  rmdir "$(thread_state "$root").lock"
+  : > "$release_renderer"
+  wait "$close_pid"
+  close_rc=$?
+  assert_eq "$close_rc" 0 "CLI close completes after rendering is released"
+  if [ ! -f "$root/dreams/threads.html" ]; then cat "$root/close-render.out"; fi
+  result=$(threads_html_inspect "$root/dreams/threads.html")
+  status=$(printf '%s' "$result" | jq -r '.payload.threads[0].status')
+  assert_eq "$status" closed_by_sam "rendered page contains the committed status"
+  assert_eq "$(printf '%s' "$result" | jq -r '.payload.threads[0].title')" "changed while rendering" "stale render is discarded and retried"
   thread_cleanup "$root"
 }
 
@@ -8515,6 +8889,7 @@ test_threads_explore_launch_is_constrained(){
   assert_eq "$bash_permission" "$installed_threads_permission" "CLI scope"
   assert_eq "$inlined" false "prompt points to files"
   assert_grep "$root/claude.args" "$root/autodream/threads.jsonl" "prompt references the index path"
+  assert_grep "$root/claude.args" "Threads CLI: $root/autodream/threads.sh" "system prompt names the scoped CLI path"
   assert_grep "$root/claude.args" "$root/dreams/threads.html" "prompt references the dashboard path"
   assert_eq "$launch_rc" 0 "explore launch succeeds"
   prompt_words=0
@@ -8549,7 +8924,38 @@ test_threads_explore_quotes_paths_and_reports_launch_failure(){
   thread_cleanup "$parent"
 }
 
+test_threads_explore_resolves_claude_from_path_and_checks_before_open(){
+  echo "# threads: explore resolves Claude from PATH and checks all launch tools before opening"
+  local root open_bin cmux_bin path_claude opened marker rc
+  root=$(setup_env); mkdir -p "$root/path-bin"
+  ln -s "$REPO/bin/threads.sh" "$root/autodream/threads.sh"
+  open_bin="$root/open"; cmux_bin="$root/cmux"; path_claude="$root/path-bin/claude"
+  printf '%s\n' '#!/bin/bash' ': > "$MOCK_OPEN_MARKER"' > "$open_bin"
+  printf '%s\n' '#!/bin/bash' 'while [ "$#" -gt 0 ]; do if [ "$1" = --command ]; then shift; /bin/bash -c "$1"; exit $?; fi; shift; done' > "$cmux_bin"
+  printf '%s\n' '#!/bin/bash' 'printf "%s\\n" "$@" > "$MOCK_CLAUDE_ARGS"' > "$path_claude"
+  chmod +x "$open_bin" "$cmux_bin" "$path_claude"
+  MOCK_OPEN_MARKER="$root/opened" MOCK_CLAUDE_ARGS="$root/path-claude.args" \
+    PATH="$root/path-bin:/usr/bin:/bin" HOME="$root/home" AUTODREAM_DIR="$root/autodream" \
+    DREAMS_DIR="$root/dreams" OPEN_BIN="$open_bin" CMUX_BIN="$cmux_bin" CLAUDE_BIN=claude \
+    /bin/bash "$REPO/bin/threads.sh" explore > "$root/path-explore.out" 2>&1
+  rc=$?
+  assert_eq "$rc" 0 "bare claude name resolves from PATH"
+  assert_file "$root/opened" "dashboard opens with every prerequisite available"
+  assert_grep "$root/path-claude.args" '^--permission-mode$' "PATH-resolved Claude launches"
+
+  rm -f "$root/opened" "$root/path-claude.args"
+  MOCK_OPEN_MARKER="$root/opened" HOME="$root/home" AUTODREAM_DIR="$root/autodream" \
+    DREAMS_DIR="$root/dreams" OPEN_BIN="$open_bin" CMUX_BIN="$root/missing-cmux" \
+    CLAUDE_BIN="$root/missing-claude" PATH="$root/empty-path" \
+    /bin/bash "$REPO/bin/threads.sh" explore > "$root/missing-explore.out" 2>&1
+  rc=$?
+  assert_eq "$rc" 1 "missing launch prerequisite fails"
+  assert_no_file "$root/opened" "missing prerequisite leaves dashboard unopened"
+  thread_cleanup "$root"
+}
+
 _run test_threads_eligibility_and_goal_fallback
+_run test_threads_closed_hints_are_capped_and_newest_first
 _run test_threads_missing_sidecar_is_unmeasured
 _run test_threads_runner_provenance_survives_worker_tampering
 _run test_threads_one_call_across_repo_hints
@@ -8566,20 +8972,31 @@ _run test_threads_idea_retry_does_not_lose_rejected_sibling
 _run test_threads_closed_idea_stays_closed
 _run test_threads_idea_slots_are_reserved
 _run test_threads_older_rebuild_only_links_missing_sources
+_run test_threads_reassignment_updates_dropped_status_and_report
 _run test_threads_linker_cannot_write
 _run test_threads_empty_night_still_catches_up_and_reports
 _run test_threads_report_ranking_and_limit
 _run test_threads_auto_closed_threads_are_visible_and_reopenable
+_run test_threads_older_finished_session_does_not_close_newer_open_thread
+_run test_threads_counts_assignments_omitted_by_linker
 _run test_threads_resume_quotes_injected_goal
 _run test_threads_resume_marks_missing_transcript
 _run test_threads_backfill_uses_sidecars_and_respects_budget
 _run test_threads_backfill_does_not_retriage_ideas
+_run test_threads_backfill_skipped_dates_have_no_linker_call
+_run test_threads_backfill_requires_timeout_binary
+_run test_threads_backfill_accepts_claude_isSidechain_sidecar
+_run test_threads_backfill_reads_unterminated_manifest_root
+_run test_threads_backfill_budget_uses_grown_index_request
 _run test_threads_install_links_entrypoint
+_run test_threads_publish_failure_reports_final_status
 _run test_threads_render_failure_preserves_previous_page
 _run test_threads_html_payload_is_inert
 _run test_threads_render_runs_on_empty_night_and_cli_write
+_run test_threads_render_retries_when_state_changes_during_render
 _run test_threads_explore_launch_is_constrained
 _run test_threads_explore_quotes_paths_and_reports_launch_failure
+_run test_threads_explore_resolves_claude_from_path_and_checks_before_open
 
 test_prune_worktrees_wiring(){
   echo "# prune: run.sh calls the helper only when roots are set, records the summary, and survives a failing helper"

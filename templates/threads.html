@@ -94,8 +94,8 @@ function copyCommand(command, button, label) {
 function commandsFor(thread) {
   if (!/^t-[0-9a-f]{8}$/.test(thread.id)) return null;
   return {
-    resume: "~/.claude/autodream/threads.sh resume " + thread.id,
-    close: "~/.claude/autodream/threads.sh close " + thread.id
+    resume: data.cli + " resume " + thread.id,
+    close: data.cli + " close " + thread.id
   };
 }
 
@@ -120,7 +120,7 @@ function render() {
     title.textContent = thread.title || thread.goal;
     const meta = document.createElement("p");
     meta.className = "meta";
-    meta.textContent = [thread.repo || "No repository", thread.sessions.length + " sessions", thread.last_seen, thread.display_status].join(" · ");
+    meta.textContent = [thread.repo || "No repository", thread.sessions.length + (thread.sessions.length === 1 ? " session" : " sessions"), thread.last_seen, thread.display_status].join(" · ");
     const goal = document.createElement("p");
     goal.className = "goal";
     goal.textContent = thread.goal;

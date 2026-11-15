@@ -191,6 +191,14 @@ if [ "$line1" = "AUTODREAM_THREADS_LINKER" ]; then
       jq -c '.candidates[] | {hash:.hash,thread:"new",title:.goal,finished:true}' <<< "$threads_request"
       exit 0
       ;;
+    finished_existing)
+      jq -c --arg id "$MOCK_THREADS_CLOSE_ID" '.candidates[] | {hash:.hash,thread:$id,title:.goal,finished:true}' <<< "$threads_request"
+      exit 0
+      ;;
+    omit_last)
+      jq -c '.candidates[0] | {hash:.hash,thread:"new",title:.goal,finished:false}' <<< "$threads_request"
+      exit 0
+      ;;
     bad_assignments)
       first=$(jq -r '.candidates[0].hash // empty' <<< "$threads_request")
       second=$(jq -r '.candidates[1].hash // empty' <<< "$threads_request")

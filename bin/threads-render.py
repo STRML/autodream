@@ -4,6 +4,7 @@ import datetime
 import json
 import os
 import re
+import shlex
 import sys
 import tempfile
 from pathlib import Path
@@ -14,21 +15,28 @@ def valid_thread(item):
         isinstance(item, dict)
         and isinstance(item.get("id"), str)
         and re.fullmatch(r"t-[0-9a-f]{8}", item["id"]) is not None
-        and isinstance(item.get("kind"), str)
+        and item.get("kind") in {"work", "idea"}
         and isinstance(item.get("repo"), str)
         and isinstance(item.get("title"), str)
         and isinstance(item.get("goal"), str)
         and isinstance(item.get("sessions"), list)
-        and all(isinstance(row, dict) and isinstance(row.get("date"), str) for row in item["sessions"])
+        and all(
+            isinstance(row, dict)
+            and isinstance(row.get("date"), str)
+            and isinstance(row.get("hash"), str)
+            for row in item["sessions"]
+        )
         and item.get("status") in {"open", "done", "closed_by_sam"}
+        and (item.get("done_by") is None or isinstance(item.get("done_by"), str))
         and isinstance(item.get("last_seen"), str)
+        and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", item["last_seen"]) is not None
     )
 
 
 def display_status(item, as_of, dropped_days):
     if item["status"] != "open":
         return item["status"]
-    newest = max(item["sessions"], key=lambda row: row.get("date", ""), default={})
+    newest = max(item["sessions"], key=lambda row: (row.get("date", ""), row.get("hash", "")), default={})
     outcome = newest.get("outcome", "") if isinstance(newest, dict) else ""
     if outcome not in {"not_achieved", "partially_achieved", "unclear_from_transcript"}:
         return "open"
@@ -57,24 +65,33 @@ def render(state_path, output_path, as_of_text):
     dropped_days = int(os.environ.get("AUTODREAM_THREADS_DROPPED_DAYS", "7"), 10)
     if dropped_days < 1:
         raise ValueError("AUTODREAM_THREADS_DROPPED_DAYS must be positive")
-    threads = []
-    if Path(state_path).exists():
+    if state_path == "-":
+        state = json.load(sys.stdin)
+        if not isinstance(state, list):
+            raise ValueError("state must be a JSON array")
+    elif Path(state_path).exists():
+        state = []
         with open(state_path, encoding="utf-8") as stream:
             for line in stream:
                 if not line.strip():
                     continue
-                item = json.loads(line)
-                if not valid_thread(item):
-                    raise ValueError("state contains an invalid thread")
-                item = dict(item)
-                item["display_status"] = display_status(item, as_of, dropped_days)
-                threads.append(item)
+                state.append(json.loads(line))
+    else:
+        state = []
+    threads = []
+    for item in state:
+        if not valid_thread(item):
+            raise ValueError("state contains an invalid thread")
+        item = dict(item)
+        item["display_status"] = display_status(item, as_of, dropped_days)
+        threads.append(item)
     ids = [item["id"] for item in threads]
     if len(ids) != len(set(ids)):
         raise ValueError("state contains duplicate thread IDs")
     payload = {
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "as_of": as_of_text,
+        "cli": shlex.quote(os.environ.get("AUTODREAM_THREADS_CLI", "threads.sh")),
         "threads": threads,
     }
     json_text = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).replace("<", r"\u003c")
