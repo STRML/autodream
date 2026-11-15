@@ -435,13 +435,18 @@ files instead of loading their contents into the launch prompt.
 Each eligible session can contribute one work candidate and up to three explicitly
 deferred idea candidates. Ideas retain their source transcript reference and use a
 separate candidate handle derived from the normalized (idea, quote) pair. Ordinary
-catch-up skips only linked idea handles, so a rejected or omitted sibling is offered
-again. Re-triage replaces only work candidates and leaves existing ideas
-and their sources untouched. During re-triage, any indexed idea from a session's
-(date, hash) suppresses all ideas from that source to prevent wording drift. Sessions
-with no indexed ideas can still contribute their first ideas. Work candidates can
-attach to an idea thread and complete it with an achieved outcome and `finished:true`;
-the thread keeps kind `idea`. An idea candidate's finished flag is refused and counted
+catch-up retries rejected or omitted handles from the first offer. The runner records
+all first-offer handles for each (date, hash) in `threads-idea-offers.tsv` before calling
+the linker, under the index lock with an atomic rename. Re-triage replaces only work
+candidates and leaves existing ideas and their sources untouched. Reworded ideas have
+new handles and are suppressed on both re-triage and later catch-up. Sessions with no
+ledger rows can still contribute their first ideas. An unreadable or malformed ledger
+skips linking and reports `threads_state: unreadable`.
+
+Work candidates can attach to an idea thread and complete it with an achieved outcome
+and `finished:true` when their (date, hash) is absent from that thread's sources. The
+originating session's completed work can attach while the idea stays open. The thread
+keeps kind `idea`. An idea candidate's finished flag is refused and counted
 in `threads_close_refused`. Closed idea threads remain closed when later sessions
 describe the idea differently.
 

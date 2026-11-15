@@ -36,6 +36,7 @@ if [ -f "$CONFIG_FILE" ]; then
 fi
 
 STATE=${AUTODREAM_THREADS_STATE:-$AUTODREAM_DIR/threads.jsonl}
+IDEA_OFFERS="$AUTODREAM_DIR/threads-idea-offers.tsv"
 LOCK="$STATE.flock"
 DROPPED_DAYS=${AUTODREAM_THREADS_DROPPED_DAYS:-7}
 
@@ -78,6 +79,34 @@ threads_read_state() {
     return 1
   fi
   jq -cs '.' "$STATE"
+}
+
+threads_read_idea_offers() {
+  if [ ! -e "$IDEA_OFFERS" ] && [ ! -L "$IDEA_OFFERS" ]; then
+    return 0
+  fi
+  if [ ! -f "$IDEA_OFFERS" ] || [ ! -r "$IDEA_OFFERS" ]; then
+    threads_error "cannot read idea offers at $IDEA_OFFERS"
+    return 1
+  fi
+  if ! python3 - "$IDEA_OFFERS" <<'PY_OFFERS'
+import re
+import sys
+
+try:
+    with open(sys.argv[1], encoding="ascii") as stream:
+        rows = stream.read().splitlines()
+except (OSError, UnicodeError):
+    sys.exit(1)
+for line in rows:
+    if not re.fullmatch(r"(\d{4}-\d{2}-\d{2})\t([0-9a-f]{12})\t\1:\2:idea:[0-9a-f]{40}", line):
+        sys.exit(1)
+sys.stdout.write("".join(line + "\n" for line in rows))
+PY_OFFERS
+  then
+    threads_error "malformed idea offers at $IDEA_OFFERS"
+    return 1
+  fi
 }
 
 threads_acquire_lock() {
@@ -123,14 +152,18 @@ threads_release_lock() {
   exec 9>&-
 }
 
-threads_write_state() {
-  local next_file=$1 temp_file
-  temp_file=$(mktemp "$STATE.XXXXXX" 2>/dev/null) || return 1
-  if cat "$next_file" > "$temp_file" 2>/dev/null && mv -f "$temp_file" "$STATE" 2>/dev/null; then
+threads_write_atomic() {
+  local next_file=$1 destination=$2 temp_file
+  temp_file=$(mktemp "$destination.XXXXXX" 2>/dev/null) || return 1
+  if cat "$next_file" > "$temp_file" 2>/dev/null && mv -f "$temp_file" "$destination" 2>/dev/null; then
     return 0
   fi
   unlink "$temp_file" 2>/dev/null || true
   return 1
+}
+
+threads_write_state() {
+  threads_write_atomic "$1" "$STATE"
 }
 
 threads_is_dropped() {
@@ -409,9 +442,9 @@ EOF_REFRESH
 }
 
 threads_collect_candidates() {
-  local source_file=$1 state_json=$2 candidates_file=$3 unmeasured=0
+  local source_file=$1 state_json=$2 candidates_file=$3 offers_file=$4 unmeasured=0
   local seen_file="$candidates_file.seen" line date hash source path cwd repo nested count measured
-  local findings facet goal outcome handle linked refresh idea_file digest
+  local findings facet goal outcome handle linked refresh idea_file digest ledgered offer_row
   : > "$candidates_file" || return 1
   : > "$seen_file" || return 1
   while IFS= read -r line; do
@@ -478,12 +511,9 @@ threads_collect_candidates() {
         >> "$candidates_file" || return 1
     fi
 
-    if [ "$refresh" = yes ] && printf '%s\n' "$state_json" | jq -e --arg d "$date" --arg h "$hash" \
-      'any(.[]; .kind == "idea" and any(.sessions[]?;
-        .date == $d and .hash == $h and
-        (.candidate_handle == null or (.candidate_handle | startswith($d + ":" + $h + ":idea:")))))' >/dev/null 2>&1; then
-      continue
-    fi
+    ledgered=$(awk -F '\t' -v d="$date" -v h="$hash" '
+      ($1 "") == (d "") && ("x" $2) == ("x" h) { found = 1 }
+      END { print found ? "yes" : "no" }' "$offers_file") || return 1
     idea_file="$candidates_file.ideas"
     jq -c '
       def clean: gsub("[\\x00-\\x1F\\x7F]"; " ") | gsub("\\s+"; " ") | gsub("^\\s+|\\s+$"; "");
@@ -503,13 +533,19 @@ threads_collect_candidates() {
         [.goal,.quote] | map(clean | ascii_downcase)
       ' | python3 -c 'import hashlib,sys; print(hashlib.sha1(sys.stdin.buffer.read()).hexdigest())') || continue
       handle="$date:$hash:idea:$digest"
+      offer_row=$(printf '%s\t%s\t%s' "$date" "$hash" "$handle")
+      if [ "$ledgered" = yes ]; then
+        grep -Fqx "$offer_row" "$offers_file" || continue
+      else
+        printf '%s\n' "$offer_row" >> "$offers_file" || return 1
+      fi
       if printf '%s\n' "$state_json" | jq -e --arg handle "$handle" \
         'any(.[]; any(.sessions[]?; .candidate_handle == $handle))' >/dev/null 2>&1; then
         continue
       fi
       jq -cn --arg handle "$handle" --arg date "$date" --arg hash "$hash" --arg source "$source" \
-        --arg path "$path" --arg cwd "$cwd" --arg repo "$repo" --argjson idea "$line" --arg refresh "$refresh" \
-        '{handle:$handle,date:$date,hash:$hash,source:$source,session_path:$path,cwd:$cwd,repo:$repo,kind:"idea",goal:$idea.goal,quote:$idea.quote,outcome:"not_achieved",refresh:($refresh == "yes")}' \
+        --arg path "$path" --arg cwd "$cwd" --arg repo "$repo" --argjson idea "$line" \
+        '{handle:$handle,date:$date,hash:$hash,source:$source,session_path:$path,cwd:$cwd,repo:$repo,kind:"idea",goal:$idea.goal,quote:$idea.quote,outcome:"not_achieved"}' \
         >> "$candidates_file" || return 1
     done < "$idea_file"
     unlink "$idea_file" 2>/dev/null || true
@@ -702,10 +738,6 @@ for line in open(candidates_path, encoding="utf-8"):
         candidates[item["handle"]] = item
 assignments = [json.loads(line) for line in open(assignments_path, encoding="utf-8") if line.strip()]
 by_id = {item["id"]: item for item in state}
-idea_sources = {(session.get("date"), session.get("hash"))
-                for thread in state if thread.get("kind") == "idea"
-                for session in thread.get("sessions", [])
-                if session.get("candidate_handle") is None or ":idea:" in session["candidate_handle"]}
 idea_handles = {session.get("candidate_handle") for thread in state
                 for session in thread.get("sessions", [])}
 linked = rejected = close_refused = 0
@@ -717,8 +749,7 @@ for assignment in assignments:
             target is None or (candidate["kind"] == "idea" and target.get("kind", "work") != "idea"))):
         rejected += 1
         continue
-    if candidate["kind"] == "idea" and (candidate["handle"] in idea_handles or (
-            candidate.get("refresh") and (candidate["date"], candidate["hash"]) in idea_sources)):
+    if candidate["kind"] == "idea" and candidate["handle"] in idea_handles:
         rejected += 1
         continue
     accepted.append(assignment)
@@ -755,6 +786,9 @@ for assignment in assignments:
     candidate = candidates[assignment["hash"]]
     date = candidate["date"]
     hash_value = candidate["hash"]
+    target = by_id.get(assignment["thread"])
+    same_idea_source = (target is not None and target["kind"] == "idea"
+                       and any(source_key(s) == (date, hash_value) for s in target.get("sessions", [])))
     for item in state:
         if candidate["kind"] != "work":
             continue
@@ -789,7 +823,7 @@ for assignment in assignments:
     thread["sessions"].sort(key=lambda item: (item.get("date", ""), item.get("hash", "")))
     refresh_last_seen(thread)
     if assignment["finished"]:
-        if (date, hash_value) < before_latest:
+        if (date, hash_value) < before_latest or same_idea_source:
             close_refused += 1
         elif candidate["kind"] == "work" and candidate["outcome"] in ("fully_achieved", "mostly_achieved"):
             if thread["status"] == "open":
@@ -835,9 +869,9 @@ threads_emit_stats() {
 
 threads_warn_unreadable() {
   local date=$1
-  threads_error "state is unreadable; refusing to link or rewrite $STATE"
+  threads_error "state or idea offers are unreadable; refusing to link or rewrite $STATE"
   if [ -x "$AUTODREAM_DIR/notify.sh" ]; then
-    "$AUTODREAM_DIR/notify.sh" --warning "$date" "The dropped threads index could not be read. It was left unchanged and linking was skipped." threads \
+    "$AUTODREAM_DIR/notify.sh" --warning "$date" "The dropped threads index or idea offers could not be read. It was left unchanged and linking was skipped." threads \
       >/dev/null 2>&1 || true
   fi
 }
@@ -865,19 +899,39 @@ threads_update() {
     threads_emit_stats ok failed 0 0 0 0 0
     return 0
   }
-  if ! state_json=$(threads_read_state); then
+  if ! mkdir -p "$(dirname "$STATE")" "$AUTODREAM_DIR" || ! threads_acquire_lock; then
+    threads_cleanup_tmp "$tmp"
+    threads_emit_stats ok failed 0 0 0 0 0 locked
+    return 0
+  fi
+  if ! state_json=$(threads_read_state) || ! threads_read_idea_offers > "$tmp/idea-offers.tsv"; then
+    threads_release_lock
     threads_warn_unreadable "$date"
     threads_cleanup_tmp "$tmp"
     threads_emit_stats unreadable failed 0 0 0 0 0
     return 0
   fi
   printf '%s\n' "$state_json" | jq -c '.[]' > "$state_file" || {
+    threads_release_lock
     threads_warn_unreadable "$date"
     threads_cleanup_tmp "$tmp"
     threads_emit_stats unreadable failed 0 0 0 0 0
     return 0
   }
-  unmeasured=$(threads_collect_candidates "$source_file" "$state_json" "$tmp/candidates.jsonl") || unmeasured=0
+  cp "$tmp/idea-offers.tsv" "$tmp/next-idea-offers.tsv" || failed=1
+  if [ "$failed" -eq 0 ]; then
+    unmeasured=$(threads_collect_candidates "$source_file" "$state_json" "$tmp/candidates.jsonl" "$tmp/next-idea-offers.tsv") || failed=1
+  fi
+  if [ "$failed" -eq 0 ] && ! cmp -s "$tmp/idea-offers.tsv" "$tmp/next-idea-offers.tsv"; then
+    threads_write_atomic "$tmp/next-idea-offers.tsv" "$IDEA_OFFERS" || failed=1
+  fi
+  threads_release_lock
+  if [ "$failed" -ne 0 ]; then
+    threads_error "could not collect candidates or atomically record idea offers"
+    threads_cleanup_tmp "$tmp"
+    threads_emit_stats ok failed 0 0 0 0 0
+    return 0
+  fi
   case "$unmeasured" in ''|*[!0-9]*) unmeasured=0 ;; esac
   candidates_file="$tmp/candidates.sorted.jsonl"
   if ! python3 - "$tmp/candidates.jsonl" "$candidates_file" <<'PY_SORT'
@@ -1027,7 +1081,7 @@ PY_SORT
     if ! threads_acquire_lock; then
       skipped=locked
     else
-      if ! state_json=$(threads_read_state); then
+      if ! state_json=$(threads_read_state) || ! threads_read_idea_offers > "$tmp/current-idea-offers.tsv"; then
         threads_release_lock
         threads_warn_unreadable "$date"
         threads_cleanup_tmp "$tmp"
@@ -1322,8 +1376,14 @@ threads_backfill() {
     done < "$tmp/path-map.tsv"
     if [ "$day_unmeasured" -gt 0 ]; then unmeasured_dates="${unmeasured_dates}${date}\n"; fi
     if [ -s "$day_rows" ]; then
-      state=$(threads_read_state) || state='[]'
-      threads_collect_candidates "$day_rows" "$state" "$tmp/$date.candidates" >/dev/null 2>&1 || true
+      if ! state=$(threads_read_state) || ! threads_read_idea_offers > "$tmp/$date.idea-offers.tsv"; then
+        threads_warn_unreadable "$date"
+        skipped="${skipped}${date}\n"
+      elif ! threads_collect_candidates "$day_rows" "$state" "$tmp/$date.candidates" "$tmp/$date.idea-offers.tsv" >/dev/null; then
+        threads_error "could not collect backfill candidates for $date"
+        : > "$tmp/$date.candidates"
+        skipped="${skipped}${date}\n"
+      fi
       if [ -s "$tmp/$date.candidates" ] && [ -n "$prompt" ]; then
         threads_prepare_requests "$tmp/$date.candidates" "$tmp/$date.groups" "$tmp/$date.groups.txt" "$tmp/$date.all.json" || true
         threads_write_linker_input "$date" "$state" "$tmp/$date.all.json" "$prompt" "$tmp/$date.request.json" "$tmp/$date.input" || true

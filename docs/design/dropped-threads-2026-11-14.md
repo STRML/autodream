@@ -220,6 +220,23 @@ rather than inferred. `bin/merge-chunks.sh` merges fields by explicit rule
 (`bin/merge-chunks.sh:83-86`), so it gets a rule for this field (concatenate, dedupe,
 cap 3) and a test. Ideas reach the linker as `kind: idea` candidates.
 
+### Idea lifecycle (added 2026-11-15 after four review rounds on PR 194)
+
+The first version said how an idea is created and not how it ends, and review found its
+missing cases one at a time. This table is the rule.
+
+| Event | Rule |
+|---|---|
+| First offer | The first time a session's ideas are seen, every idea handle is offered and recorded in `threads-idea-offers.tsv` |
+| Linker rejects or omits one | That handle is offered again on the next catch-up, because it is in the ledger and unlinked |
+| Re-triage rewords an idea | The new handle is not in the ledger, so it is never offered; ideas are frozen at first offer |
+| Identity | The normalized (idea, quote) pair, so two ideas may share one quote |
+| Outcome | An idea starts `not_achieved`, whatever its session's outcome |
+| Same session's work is achieved | Does not close the idea that session deferred |
+| Later deferral of the same idea | Attaches, never closes |
+| Later achieved work from another session | Attaches and closes it |
+| Length | `idea` at most 120 characters, checked the same way in merge-chunks and collection |
+
 ## Failure matrix
 
 | State or input | What happens | How it can fail | What the caller is told |
@@ -231,7 +248,9 @@ cap 3) and a test. Ideas reach the linker as `kind: idea` candidates.
 | Linker marks finished but outcome not achieved | Link kept, close ignored | False done | `threads_close_refused: N` |
 | Linker auto-closes a thread wrongly | Thread listed under "closed tonight" | Silent false done | Visible in the report; `reopen` fixes it |
 | `threads.jsonl` exists but cannot be read | No write, no render | Index read as empty | Banner, `threads_state: unreadable` |
-| Two runs at once, or a CLI write during a run | Lock held only for the merge; the loser retries 3 times then skips | Lost update | `threads_skipped: locked`; CLI fails loudly |
+| Idea offer ledger unreadable or malformed | Skip linking and preserve both files | First offer mistaken for empty | Banner, `threads_state: unreadable` |
+| Idea offer ledger staging or rename fails | Skip linking; old ledger and index survive | Unrecorded idea is linked | `threads_link: failed` |
+| Two runs at once, or a CLI write during a run | Lock held while recording first offers and again for the merge; the loser retries 3 times then skips | Lost update | `threads_skipped: locked`; CLI fails loudly |
 | A session re-triaged with a new goal | Its `(date, hash)` link replaced | Duplicate thread | none |
 | Rebuild of an older date | Catch-up links only what is missing | History rewritten | none |
 | A worker rewrites `sessions.txt` or a findings JSON's `project`/`session_path` | Path and repo come from the runner's in-memory rows | Thread misfiled | Not reachable; a test forges all three |
