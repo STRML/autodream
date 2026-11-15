@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import argparse
+import datetime
+import errno
 import fcntl
 import hmac
 import json
@@ -227,6 +229,17 @@ def make_server(config, port):
     return server
 
 
+def warn_port_in_use(install, port):
+    notifier = Path(install) / "notify.sh"
+    if not notifier.is_file():
+        notifier = Path(__file__).resolve().with_name("notify.sh")
+    try:
+        run_bounded([str(notifier), "--warning", datetime.date.today().isoformat(),
+                     f"web server port {port} is already in use"], timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
 def main():
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
@@ -256,7 +269,14 @@ def main():
     web_dir = install / "web"
     if not web_dir.is_dir():
         web_dir = Path(__file__).resolve().parent.parent / "web"
-    with make_server({"autodream_dir": install, "web_dir": web_dir}, port) as server:
+    try:
+        server = make_server({"autodream_dir": install, "web_dir": web_dir}, port)
+    except OSError as error:
+        if error.errno != errno.EADDRINUSE:
+            raise
+        warn_port_in_use(install, port)
+        return
+    with server:
         print(server.origin, flush=True)
         server.serve_forever()
 

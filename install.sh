@@ -10,6 +10,7 @@
 #   ./install.sh /path/to        # symlink into /path/to/autodream/ instead
 #   ./install.sh --no-schedule   # symlink only; don't touch launchd
 #   ./install.sh --no-review     # schedule the nightly but not the review triage popup agent
+#   ./install.sh --no-web        # schedule the nightly without the local web dashboard
 #   ./install.sh --no-skill      # don't link the global /autodream skill into ~/.claude/skills
 #   ./install.sh --adapters claude,omp   # harnesses a run scans (names or `all`); written to config
 #   ./install.sh --l2-engine omp         # adapter whose engine runs L2; written to config
@@ -23,6 +24,7 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 # ----------------------------------------------------------------- arg parsing --
 SCHEDULE=1
 REVIEW=1
+WEB=1
 SKILL=1
 DRY=0
 ADAPTERS_ARG=""
@@ -33,13 +35,14 @@ while [ "$#" -gt 0 ]; do
   case "$a" in
     --no-schedule) SCHEDULE=0 ;;
     --no-review) REVIEW=0 ;;
+    --no-web) WEB=0 ;;
     --no-skill) SKILL=0 ;;
     --dry-run) DRY=1 ;;
     --adapters|--l2-engine)
       [ "$#" -gt 0 ] && [ -n "$1" ] || { echo "install: $a needs a value" >&2; exit 64; }
       case "$a" in --adapters) ADAPTERS_ARG="$1" ;; *) L2_ENGINE_ARG="$1" ;; esac
       shift ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
     -*) echo "install: unknown flag '$a'" >&2; exit 64 ;;
     *) TARGET_PARENT="$a" ;;
   esac
@@ -159,6 +162,9 @@ link "$REPO_DIR/bin/question-streaks.sh"     "$TARGET/question-streaks.sh"
 link "$REPO_DIR/bin/threads.sh"                "$TARGET/threads.sh"
 link "$REPO_DIR/bin/threads-status.jq"           "$TARGET/threads-status.jq"
 link "$REPO_DIR/bin/threads-render.py"          "$TARGET/threads-render.py"
+link "$REPO_DIR/bin/autodream-web"            "$TARGET/autodream-web"
+link "$REPO_DIR/bin/autodream-web.py"         "$TARGET/autodream-web.py"
+link "$REPO_DIR/web"                          "$TARGET/web"
 link "$REPO_DIR/templates/threads.html"         "$TARGET/threads-template.html"
 link "$REPO_DIR/bin/apply-pins.sh"           "$TARGET/apply-pins.sh"
 link "$REPO_DIR/bin/root-probe.sh"           "$TARGET/root-probe.sh"
@@ -295,6 +301,104 @@ show_plist() { # $1=generated file
   [ "$DRY" = 1 ] || return 0
   dry "would write $real_la_dir/$(basename "$1"):"
   sed 's/^/        /' "$1"
+}
+
+xml_escape() {
+  printf '%s' "$1" | sed 's/\&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
+}
+
+install_web_agent() {
+  local label="$1" path_val="$2" cmux_bin="$3" claude_bin="$4"
+  local la_dir="$HOME/Library/LaunchAgents" domain="gui/$(id -u)"
+  local real_la_dir="$la_dir" web_label="${label}-web" cfg_web="" cfg_port=""
+  local web_off="" python_bin="" web_port="" plist_path=""
+  local path_xml home_xml target_xml dreams_xml python_xml cmux_xml claude_xml port_xml
+  [ "$DRY" = 1 ] && la_dir="$DRY_SCRATCH"
+  cfg_web=$(cfg_get AUTODREAM_WEB)
+  cfg_port=$(cfg_get AUTODREAM_WEB_PORT)
+  if [ "$WEB" = 0 ]; then
+    web_off="--no-web"
+  else
+    case "${AUTODREAM_WEB-$cfg_web}" in
+      0|no|off|false|NO|OFF|FALSE) web_off="AUTODREAM_WEB=${AUTODREAM_WEB-$cfg_web}" ;;
+    esac
+  fi
+  if [ -n "$web_off" ]; then
+    echo "  web LaunchAgent not provisioned ($web_off)"
+  else
+    python_bin=$(PATH="$path_val" command -v python3 2>/dev/null || true)
+    case "$python_bin" in /*) ;; *) python_bin="" ;; esac
+    if [ -z "$python_bin" ] || [ ! -x "$python_bin" ]; then
+      echo "  ! python3 not found; skipping web LaunchAgent"
+      web_off="python3 unavailable"
+    fi
+  fi
+  plist_path="$real_la_dir/$web_label.plist"
+  if [ -n "$web_off" ]; then
+    lctl bootout "$domain/$web_label" 2>/dev/null || true
+    if [ "$DRY" = 1 ]; then
+      [ -e "$plist_path" ] && dry "rm $plist_path"
+    else
+      rm -f "$plist_path"
+    fi
+    return 0
+  fi
+  [ "$DRY" = 1 ] || mkdir -p "$la_dir"
+  web_port="${AUTODREAM_WEB_PORT-${cfg_port:-8765}}"
+  [ -n "$web_port" ] || web_port=8765
+  path_xml=$(xml_escape "$path_val")
+  home_xml=$(xml_escape "$HOME")
+  target_xml=$(xml_escape "$TARGET")
+  dreams_xml=$(xml_escape "$TARGET_PARENT/dreams")
+  python_xml=$(xml_escape "$python_bin")
+  cmux_xml=$(xml_escape "$cmux_bin")
+  claude_xml=$(xml_escape "$claude_bin")
+  port_xml=$(xml_escape "$web_port")
+  local target_plist="$la_dir/$web_label.plist"
+  cat > "$target_plist" <<PLIST || { echo "  ERROR: could not write $target_plist" >&2; return 1; }
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>$web_label</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$python_xml</string>
+        <string>$target_xml/autodream-web.py</string>
+        <string>serve</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+    <key>ThrottleInterval</key><integer>60</integer>
+    <key>ProcessType</key><string>Background</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key><string>$path_xml</string>
+        <key>HOME</key><string>$home_xml</string>
+        <key>AUTODREAM_DIR</key><string>$target_xml</string>
+        <key>DREAMS_DIR</key><string>$dreams_xml</string>
+        <key>AUTODREAM_WEB_PORT</key><string>$port_xml</string>
+        <key>CMUX_BIN</key><string>$cmux_xml</string>
+        <key>CLAUDE_BIN</key><string>$claude_xml</string>
+    </dict>
+    <key>StandardOutPath</key><string>$target_xml/logs/web-launch.out.log</string>
+    <key>StandardErrorPath</key><string>$target_xml/logs/web-launch.err.log</string>
+</dict>
+</plist>
+PLIST
+  if command -v plutil >/dev/null 2>&1; then
+    plutil -lint "$target_plist" >/dev/null || {
+      echo "  ! generated web plist failed plutil lint: $target_plist" >&2
+      return 1
+    }
+  fi
+  show_plist "$target_plist"
+  lctl bootout "$domain/$web_label" 2>/dev/null || true
+  lctl bootstrap "$domain" "$target_plist" || {
+    echo "  ERROR: launchctl bootstrap failed for $web_label ($target_plist)" >&2
+    return 1
+  }
+  echo "  scheduled: $web_label  (RunAtLoad, restart on failure)  -> $target_plist"
 }
 
 # A directory under a temp location belongs to the shell that ran the installer: a tool shim (cmux
@@ -568,6 +672,7 @@ PLIST
     echo "  ! claude binary not usable (config [${cfg_claude}], PATH [${CLAUDE_BIN_ABS}]); review LaunchAgent will abort every trigger"
   fi
   CLAUDE_BIN_XML=$(printf '%s' "$eff_claude" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
+  install_web_agent "$label" "$path_val" "$CMUX_FOUND" "$eff_claude" || return $?
   local review_label="${label}-review"
   if [ -n "$review_off" ] || [ -z "$CMUX_FOUND" ] || [ -z "$eff_claude" ]; then
     if [ -n "$review_off" ]; then
