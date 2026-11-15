@@ -8093,6 +8093,59 @@ thread_review_update(){
     /bin/bash "$REPO/bin/threads.sh" update "$DATE" < "$root/rows.jsonl" > "$root/update.out" 2>&1
 }
 
+test_threads_catchup_retries_unlinked_idea_siblings(){
+  local root mode pending_handle
+  for mode in reject_idea omit_last; do
+    root=$(setup_env)
+    thread_review_row "$root" 111111111111 "" partially_achieved '[{"idea":"cache later","quote":"Later add caching"},{"idea":"index later","quote":"Later add index"}]'
+    MOCK_THREADS_REJECT_GOAL="index later" thread_review_update "$root" "$mode"
+    assert_eq "$(jq -sr '[.[] | select(.kind == "idea")] | length' "$(thread_state "$root")")" 1 "$mode accepts one sibling"
+    assert_grep "$root/update.out" '^threads_unassigned: 1$' "$mode leaves one idea pending"
+    pending_handle=$(thread_request_json "$root/cap/threads-stdin-1.txt" | jq -r '.candidates[] | select(.goal == "index later") | .hash')
+    thread_review_update "$root"
+    assert_eq "$(thread_call_count "$root/cap")" 2 "$mode catch-up retries pending idea"
+    assert_eq "$(thread_request_json "$root/cap/threads-stdin-2.txt" | jq -r '[.candidates[].hash] | join(",")')" "$pending_handle" "$mode offers only the unlinked handle"
+    assert_eq "$(jq -sr '[.[] | select(.kind == "idea")] | length' "$(thread_state "$root")")" 2 "$mode catch-up indexes both siblings"
+    thread_review_update "$root"
+    assert_eq "$(thread_call_count "$root/cap")" 2 "$mode accepted handles stay idempotent"
+    thread_cleanup "$root"
+  done
+}
+
+test_threads_later_work_can_complete_idea(){
+  local root outcome mode expected idea_id original case_row
+  for case_row in fully_achieved:finished_existing:done mostly_achieved:finished_existing:done fully_achieved:attach_existing:open partially_achieved:finished_existing:open partially_achieved:attach_existing:open; do
+    outcome=${case_row%%:*}; mode=${case_row#*:}; expected=${mode##*:}; mode=${mode%%:*}
+    root=$(setup_env)
+    thread_review_row "$root" 111111111111 "" not_achieved '[{"idea":"add cache","quote":"Later add caching"}]'
+    thread_review_update "$root"
+    idea_id=$(jq -sr '.[0].id' "$(thread_state "$root")")
+    original=$(jq -sc '.[0].sessions[0]' "$(thread_state "$root")")
+    : > "$root/rows.jsonl"
+    thread_review_row "$root" 222222222222 "implement cache" "$outcome" '[]' 2020-01-03
+    MOCK_THREADS_CLOSE_ID="$idea_id" thread_review_update "$root" "$mode"
+    assert_eq "$(jq -sr '.[0].kind' "$(thread_state "$root")")" idea "$case_row retains idea kind"
+    assert_eq "$(jq -sr '.[0].status' "$(thread_state "$root")")" "$expected" "$case_row sets completion from work"
+    assert_eq "$(jq -sr '.[0].sessions | length' "$(thread_state "$root")")" 2 "$case_row links work source to idea"
+    assert_grep "$root/update.out" '^threads_rejected: 0$' "$case_row accepts work-to-idea assignment"
+    AUTODREAM_DIR="$root/autodream" /bin/bash "$REPO/bin/threads.sh" report 2020-01-03 > "$root/tonight.md"
+    AUTODREAM_DIR="$root/autodream" /bin/bash "$REPO/bin/threads.sh" report 2020-01-20 > "$root/later.md"
+    if [ "$expected" = done ]; then
+      assert_eq "$(jq -sr '.[0].done_by' "$(thread_state "$root")")" linker "$case_row attributes completion"
+      assert_grep "$root/tonight.md" "$idea_id" "$case_row appears under closed tonight"
+      assert_nogrep "$root/later.md" "$idea_id" "$case_row leaves dropped report"
+    elif [ "$outcome" = partially_achieved ]; then
+      assert_grep "$root/later.md" "$idea_id" "$case_row unfinished idea reaches dropped report"
+    fi
+    thread_review_update "$root"
+    assert_eq "$(thread_call_count "$root/cap")" 2 "$case_row attached work stays idempotent"
+    THREADS_REFRESH_KEYS=$(printf '%s\t%s' 2020-01-03 222222222222) MOCK_THREADS_CLOSE_ID="$idea_id" thread_review_update "$root" "$mode"
+    assert_eq "$(jq -sr '.[0].sessions | length' "$(thread_state "$root")")" 2 "$case_row refresh replaces work membership"
+    assert_eq "$(jq -sc '.[0].sessions[0]' "$(thread_state "$root")")" "$original" "$case_row preserves originating deferral"
+    thread_cleanup "$root"
+  done
+}
+
 test_threads_refresh_preserves_existing_ideas(){
   local mode root before hash=111111111111
   for mode in good reject_idea omit_last; do
@@ -8108,9 +8161,6 @@ test_threads_refresh_preserves_existing_ideas(){
     assert_eq "$(jq -sc '[.[] | select(.kind == "idea")]' "$(thread_state "$root")")" "$before" "$mode refresh leaves original ideas and sources unchanged"
     assert_eq "$(thread_request_json "$root/cap/threads-stdin-2.txt" | jq '[.candidates[] | select(.kind == "idea")] | length')" 0 "$mode refresh never offers existing idea sources"
     assert_eq "$(jq -sr '[.[] | select(.kind == "work") | .sessions[]] | length' "$(thread_state "$root")")" 1 "$mode refresh keeps one work source"
-    thread_review_update "$root"
-    assert_eq "$(thread_call_count "$root/cap")" 2 "$mode ordinary rerun does not offer changed ideas"
-    assert_eq "$(jq -sc '[.[] | select(.kind == "idea")]' "$(thread_state "$root")")" "$before" "$mode rerun leaves ideas untouched"
     thread_cleanup "$root"
   done
 }
@@ -9122,6 +9172,8 @@ _run test_threads_unreadable_index_prevents_write_and_render
 _run test_threads_concurrent_merges_preserve_cli_close
 _run test_threads_lock_exhaustion_is_bounded
 _run test_threads_retriaged_goal_replaces_source_link
+_run test_threads_catchup_retries_unlinked_idea_siblings
+_run test_threads_later_work_can_complete_idea
 _run test_threads_refresh_preserves_existing_ideas
 _run test_threads_completed_work_leaves_deferred_idea_open
 _run test_threads_idea_identity_includes_text_and_quote

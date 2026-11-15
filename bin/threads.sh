@@ -466,7 +466,9 @@ threads_collect_candidates() {
     refresh=$(threads_refresh_has "$date" "$hash" && echo yes || echo no)
     handle="$date:$hash"
     linked=$(printf '%s\n' "$state_json" | jq -e --arg d "$date" --arg h "$hash" --arg handle "$handle" \
-      'any(.[]; .kind == "work" and any(.sessions[]?; .date == $d and .hash == $h and (.candidate_handle == null or .candidate_handle == $handle)))' \
+      'any(.[]; .kind as $kind | any(.sessions[]?;
+        .date == $d and .hash == $h and
+        (.candidate_handle == $handle or ($kind == "work" and .candidate_handle == null))))' \
       >/dev/null 2>&1 && echo yes || echo no)
     if [ -n "$facet" ] && { [ "$linked" != yes ] || [ "$refresh" = yes ]; }; then
       jq -cn --arg handle "$handle" --arg date "$date" --arg hash "$hash" --arg source "$source" \
@@ -476,8 +478,10 @@ threads_collect_candidates() {
         >> "$candidates_file" || return 1
     fi
 
-    if printf '%s\n' "$state_json" | jq -e --arg d "$date" --arg h "$hash" \
-      'any(.[]; .kind == "idea" and any(.sessions[]?; .date == $d and .hash == $h))' >/dev/null 2>&1; then
+    if [ "$refresh" = yes ] && printf '%s\n' "$state_json" | jq -e --arg d "$date" --arg h "$hash" \
+      'any(.[]; .kind == "idea" and any(.sessions[]?;
+        .date == $d and .hash == $h and
+        (.candidate_handle == null or (.candidate_handle | startswith($d + ":" + $h + ":idea:")))))' >/dev/null 2>&1; then
       continue
     fi
     idea_file="$candidates_file.ideas"
@@ -499,9 +503,13 @@ threads_collect_candidates() {
         [.goal,.quote] | map(clean | ascii_downcase)
       ' | python3 -c 'import hashlib,sys; print(hashlib.sha1(sys.stdin.buffer.read()).hexdigest())') || continue
       handle="$date:$hash:idea:$digest"
+      if printf '%s\n' "$state_json" | jq -e --arg handle "$handle" \
+        'any(.[]; any(.sessions[]?; .candidate_handle == $handle))' >/dev/null 2>&1; then
+        continue
+      fi
       jq -cn --arg handle "$handle" --arg date "$date" --arg hash "$hash" --arg source "$source" \
-        --arg path "$path" --arg cwd "$cwd" --arg repo "$repo" --argjson idea "$line" \
-        '{handle:$handle,date:$date,hash:$hash,source:$source,session_path:$path,cwd:$cwd,repo:$repo,kind:"idea",goal:$idea.goal,quote:$idea.quote,outcome:"not_achieved"}' \
+        --arg path "$path" --arg cwd "$cwd" --arg repo "$repo" --argjson idea "$line" --arg refresh "$refresh" \
+        '{handle:$handle,date:$date,hash:$hash,source:$source,session_path:$path,cwd:$cwd,repo:$repo,kind:"idea",goal:$idea.goal,quote:$idea.quote,outcome:"not_achieved",refresh:($refresh == "yes")}' \
         >> "$candidates_file" || return 1
     done < "$idea_file"
     unlink "$idea_file" 2>/dev/null || true
@@ -585,7 +593,7 @@ for item in parsed:
             or set(item) - {"hash", "thread", "title", "finished"}
             or not isinstance(thread, str)
             or (thread != "new" and (not re.fullmatch(r"t-[0-9a-f]{8}", thread) or thread not in thread_ids
-                                      or thread_kinds.get(thread) != candidates[handle]["kind"]))
+                                      or (candidates[handle]["kind"] == "idea" and thread_kinds.get(thread) != "idea")))
             or not isinstance(finished, bool)
             or ("title" in item and not isinstance(title, str))):
         rejected += 1
@@ -696,6 +704,9 @@ assignments = [json.loads(line) for line in open(assignments_path, encoding="utf
 by_id = {item["id"]: item for item in state}
 idea_sources = {(session.get("date"), session.get("hash"))
                 for thread in state if thread.get("kind") == "idea"
+                for session in thread.get("sessions", [])
+                if session.get("candidate_handle") is None or ":idea:" in session["candidate_handle"]}
+idea_handles = {session.get("candidate_handle") for thread in state
                 for session in thread.get("sessions", [])}
 linked = rejected = close_refused = 0
 accepted = []
@@ -703,10 +714,11 @@ for assignment in assignments:
     candidate = candidates.get(assignment["hash"])
     target = by_id.get(assignment["thread"])
     if candidate is None or (assignment["thread"] != "new" and (
-            target is None or target.get("kind", "work") != candidate["kind"])):
+            target is None or (candidate["kind"] == "idea" and target.get("kind", "work") != "idea"))):
         rejected += 1
         continue
-    if candidate["kind"] == "idea" and (candidate["date"], candidate["hash"]) in idea_sources:
+    if candidate["kind"] == "idea" and (candidate["handle"] in idea_handles or (
+            candidate.get("refresh") and (candidate["date"], candidate["hash"]) in idea_sources)):
         rejected += 1
         continue
     accepted.append(assignment)
@@ -744,12 +756,12 @@ for assignment in assignments:
     date = candidate["date"]
     hash_value = candidate["hash"]
     for item in state:
-        if candidate["kind"] != "work" or item.get("kind", "work") != "work":
+        if candidate["kind"] != "work":
             continue
         item["sessions"] = [s for s in item.get("sessions", []) if not (
             source_key(s) == (date, hash_value)
             and (s.get("candidate_handle") == candidate["handle"]
-                 or s.get("candidate_handle") is None)) ]
+                 or (item.get("kind", "work") == "work" and s.get("candidate_handle") is None))) ]
     by_id = {item["id"]: item for item in state}
     if assignment["thread"] == "new":
         ident = new_id(candidate)
