@@ -165,6 +165,7 @@ if [ "$line1" = "AUTODREAM_THREADS_LINKER" ]; then
     fail_nonzero) threads_good; echo "linker failed after partial stdout" >&2; exit 7 ;;
     fail_timeout) sleep 5; exit 0 ;;
     fail_unusable) printf 'not a JSON assignment\n'; exit 0 ;;
+    invalid_assignments) printf '{"hash":"unknown","thread":"new","finished":false}\n'; exit 0 ;;
     close_during_call)
       /bin/bash "$MOCK_THREADS_CLI" close "$MOCK_THREADS_CLOSE_ID" >/dev/null 2>&1
       printf '%s\n' "$?" > "$MOCK_CAPTURE_DIR/threads-close-exit.txt"

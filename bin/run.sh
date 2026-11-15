@@ -2237,6 +2237,7 @@ threads_rejected: 0
 threads_close_refused: 0
 threads_unmeasured: 0
 threads_calls: 0
+threads_groups_failed: 0
 threads_unassigned: 0"
   [ -n "$updater" ] || return 0
   from=$(pdate_shift "$TARGET_DATE" -13 d) || return 0
@@ -2252,6 +2253,7 @@ threads_rejected: 0
 threads_close_refused: 0
 threads_unmeasured: 0
 threads_calls: 0
+threads_groups_failed: 0
 threads_unassigned: 0"
     }
   clean_work_bucket
