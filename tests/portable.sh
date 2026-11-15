@@ -73,6 +73,8 @@ for tool in cat sleep kill pkill; do p=$(command -v "$tool") && ln -s "$p" "$nt/
 # A fresh bash: this shell has already hashed timeout's path, and command -v answers from that.
 fallback_out=$(printf 'piped\n' | PATH="$nt" /bin/bash -c '. "$1"; tmo 5 cat' _ "$REPO/bin/portable.sh")
 eq "$fallback_out" "piped" "tmo without a timeout binary keeps the caller's stdin"
+closed_out=$(PATH="$nt" /bin/bash -c '. "$1"; tmo 5 cat 0<&-; echo "rc=$?"' _ "$REPO/bin/portable.sh" 0<&-)
+eq "$closed_out" "rc=0" "tmo without a timeout binary still runs when the caller closed stdin"
 rm -rf "$nt"
 g=$(mktemp -d "${TMPDIR:-/tmp}/portable.XXXXXX")
 git init -q "$g" 2>/dev/null
