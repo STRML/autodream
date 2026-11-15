@@ -60,14 +60,19 @@ def derive_display_status(state, as_of_text):
         'tmo 10 jq -c --arg mode render --arg as_of "$2" '
         '--arg previous_as_of "" --argjson dropped_days "$3" '
         '--arg status_filter "" --arg kind_filter "" --arg repo_filter "" '
-        '--arg query "" --arg json 1 -f "$4"'
+        '--arg query "" --arg json 1 -f "$4" "$5"'
     )
-    result = subprocess.run(
-        ["/bin/bash", "-c", script, "threads-status", str(portable_path), as_of_text,
-         dropped_days_text, str(status_path)],
-        input=json.dumps(state, ensure_ascii=False), text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-    )
+    # A file, never stdin: with no timeout binary, tmo backgrounds jq, and a background job's
+    # stdin is /dev/null, so piped state would vanish and jq would exit 0 with no output.
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as state_file:
+        json.dump(state, state_file, ensure_ascii=False)
+        state_file.flush()
+        result = subprocess.run(
+            ["/bin/bash", "-c", script, "threads-status", str(portable_path), as_of_text,
+             dropped_days_text, str(status_path), state_file.name],
+            stdin=subprocess.DEVNULL, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
     if result.returncode:
         if result.returncode in {124, 137, 143}:
             raise ValueError("status calculation timed out after 10 seconds")

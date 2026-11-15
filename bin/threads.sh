@@ -248,7 +248,7 @@ threads_search() {
 }
 
 threads_render_unlocked() {
-  local renderer as_of output state threads_cli annotated
+  local renderer as_of output state threads_cli annotated render_state
   state=$1
   output=$2
   renderer=""
@@ -274,13 +274,19 @@ threads_render_unlocked() {
     printf 'threads_render: failed\n'
     return 1
   }
-  annotated=$(printf '%s\n' "$state" | threads_status_jq \
+  # A file, never a pipe: with no timeout binary, tmo backgrounds jq, and a background job's
+  # stdin is /dev/null, so piped state would vanish and jq would exit 0 with no output.
+  render_state=$(mktemp "${TMPDIR:-/tmp}/threads-render-state.XXXXXX") || { printf 'threads_render: failed\n'; return 1; }
+  printf '%s\n' "$state" > "$render_state" || { threads_cleanup_tmp "$render_state"; printf 'threads_render: failed\n'; return 1; }
+  annotated=$(threads_status_jq \
     --arg mode render --arg as_of "$as_of" --arg previous_as_of "" \
     --argjson dropped_days "$DROPPED_DAYS" --arg status_filter "" --arg kind_filter "" \
-    --arg repo_filter "" --arg query "" --arg json 1 -f "$THREADS_STATUS_JQ") || {
+    --arg repo_filter "" --arg query "" --arg json 1 -f "$THREADS_STATUS_JQ" "$render_state") || {
+      threads_cleanup_tmp "$render_state"
       printf 'threads_render: failed\n'
       return 1
     }
+  threads_cleanup_tmp "$render_state"
   if [ -r "$THREADS_LIB_DIR/threads-template.html" ]; then
     printf '%s\n' "$annotated" | AUTODREAM_THREADS_CLI="$threads_cli" AUTODREAM_THREADS_TEMPLATE="$THREADS_LIB_DIR/threads-template.html" \
       python3 "$renderer" - "$output" --as-of "$as_of"
@@ -1234,10 +1240,10 @@ threads_report() {
     fi
   done
   status_file=$(mktemp "${TMPDIR:-/tmp}/threads-report-status.XXXXXX") || { threads_cleanup_tmp "$state_file"; return 1; }
-  if ! printf '%s\n' "$state" | threads_status_jq \
+  if ! threads_status_jq \
     --arg mode report --arg as_of "$date" --arg previous_as_of "$previous" \
     --argjson dropped_days "$DROPPED_DAYS" --arg status_filter "" --arg kind_filter "" \
-    --arg repo_filter "" --arg query "" --arg json 1 -f "$THREADS_STATUS_JQ" > "$status_file"; then
+    --arg repo_filter "" --arg query "" --arg json 1 -f "$THREADS_STATUS_JQ" "$state_file" > "$status_file"; then
     threads_cleanup_tmp "$state_file" "$status_file"
     return 1
   fi

@@ -70,7 +70,11 @@ tmo() {
   local s=$1 pid wd rc; shift
   if command -v timeout >/dev/null 2>&1; then timeout "$s" "$@"; return $?
   elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$s" "$@"; return $?; fi
-  "$@" & pid=$!
+  # A background job gets /dev/null as stdin before any explicit redirect applies, so save the
+  # caller's stdin on fd 3 first and hand that to the job.
+  exec 3<&0
+  "$@" <&3 & pid=$!
+  exec 3<&-
   ( sleep "$s"; pkill -P "$pid" 2>/dev/null; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 & wd=$!
   wait "$pid"; rc=$?
   kill "$wd" 2>/dev/null
