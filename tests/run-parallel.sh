@@ -25,21 +25,34 @@ N=$((10#$N))
 OUT=$(mktemp -d "${TMPDIR:-/tmp}/rp.XXXXXX")
 REAL_DREAMS="${HOME:-}/.claude/dreams"
 snapshot_real_dreams() {
-  python3 - "$REAL_DREAMS" <<'PY_DREAMS_SNAPSHOT'
+  python3 - "${1:-$REAL_DREAMS}" <<'PY_DREAMS_SNAPSHOT'
 import os
 import sys
 root = sys.argv[1]
+def fail(error):
+    print("snapshot error: %s" % error, file=sys.stderr)
+    raise SystemExit(1)
 if not os.path.lexists(root):
     print("absent")
 else:
-    for current, dirs, files in os.walk(root):
-        for name in ["."] + dirs + files:
-            path = current if name == "." else os.path.join(current, name)
-            info = os.lstat(path)
-            print("%s\t%s\t%s" % (os.path.relpath(path, root), info.st_mtime_ns, info.st_size))
+    try:
+        for current, dirs, files in os.walk(root, onerror=fail):
+            for name in ["."] + dirs + files:
+                path = current if name == "." else os.path.join(current, name)
+                info = os.lstat(path)
+                print("%s\t%s\t%s" % (os.path.relpath(path, root), info.st_mtime_ns, info.st_size))
+    except OSError as error:
+        fail(error)
 PY_DREAMS_SNAPSHOT
 }
-dreams_before=$(snapshot_real_dreams)
+if dreams_before=$(snapshot_real_dreams); then :; else
+  echo "FAIL: real dreams snapshot before parallel tests" >&2
+  exit 1
+fi
+if snapshot_real_dreams /dev/null >/dev/null 2>&1; then
+  echo "FAIL: non-traversable dreams snapshot was accepted" >&2
+  exit 1
+fi
 SENTINEL_HOME="$OUT/sentinel-home"
 mkdir -p "$SENTINEL_HOME/.claude/dreams"
 export HOME="$SENTINEL_HOME" DREAMS_DIR="$SENTINEL_HOME/.claude/dreams"

@@ -195,11 +195,8 @@ threads_search() {
 
 threads_render_unlocked() {
   local renderer as_of output state threads_cli
-  output="${DREAMS_DIR:-${HOME:-}/.claude/dreams}/threads.html"
-  if ! state=$(threads_read_state); then
-    printf 'threads_render: skipped_unreadable\n'
-    return 1
-  fi
+  state=$1
+  output=$2
   renderer=""
   if [ -r "$THREADS_LIB_DIR/threads-render.py" ]; then
     renderer="$THREADS_LIB_DIR/threads-render.py"
@@ -239,14 +236,42 @@ threads_render_unlocked() {
 }
 
 threads_render() {
-  mkdir -p "$(dirname "$STATE")" || { threads_error "cannot create state directory"; return 1; }
-  threads_acquire_lock || return 1
-  trap 'threads_release_lock' EXIT HUP INT TERM
-  threads_render_unlocked
-  local rc=$?
-  threads_release_lock
-  trap - EXIT HUP INT TERM
-  return "$rc"
+  local output state fingerprint current_fingerprint attempt temp_file
+  output="${DREAMS_DIR:-${HOME:-}/.claude/dreams}/threads.html"
+  mkdir -p "$(dirname "$STATE")" "$(dirname "$output")" || { threads_error "cannot create render directory"; return 1; }
+  attempt=1
+  while [ "$attempt" -le 3 ]; do
+    threads_acquire_lock || return 1
+    if ! state=$(threads_read_state); then
+      threads_release_lock
+      printf 'threads_render: skipped_unreadable\n'
+      return 1
+    fi
+    if [ -f "$STATE" ]; then fingerprint=$(shasum -a 256 "$STATE" | awk '{print $1}') || fingerprint=""
+    else fingerprint=missing
+    fi
+    threads_release_lock
+    [ -n "$fingerprint" ] || { threads_error "cannot fingerprint thread state"; return 1; }
+    temp_file=$(mktemp "$(dirname "$output")/.threads.html.XXXXXX") || return 1
+    if ! threads_render_unlocked "$state" "$temp_file"; then
+      unlink "$temp_file" 2>/dev/null || true
+      return 1
+    fi
+    threads_acquire_lock || { unlink "$temp_file" 2>/dev/null || true; return 1; }
+    if [ -f "$STATE" ]; then current_fingerprint=$(shasum -a 256 "$STATE" | awk '{print $1}') || current_fingerprint=""
+    else current_fingerprint=missing
+    fi
+    if [ "$fingerprint" = "$current_fingerprint" ] && mv -f "$temp_file" "$output"; then
+      threads_release_lock
+      printf 'threads_render: ok\n'
+      return 0
+    fi
+    threads_release_lock
+    unlink "$temp_file" 2>/dev/null || true
+    attempt=$((attempt + 1))
+  done
+  printf 'threads_render: stale\n'
+  return 1
 }
 
 threads_explore() {
@@ -325,9 +350,9 @@ threads_set_status() {
     rc=1
   fi
   unlink "$next_file" 2>/dev/null || true
-  if [ "$rc" -eq 0 ]; then threads_render_unlocked || true; fi
   threads_release_lock
   trap - EXIT HUP INT TERM
+  if [ "$rc" -eq 0 ]; then threads_render || true; fi
   return "$rc"
 }
 
@@ -1167,7 +1192,7 @@ EOF_BACKFILL_DATES
 
 threads_backfill() {
   local from=$1 to=$2 engine=$3 model=$4 max_calls=$5 tmp date day_dir hash source path stats cwd repo nested count row_date
-  local planned actual skipped split_dates prompt state req_size batch_calls remaining output timeout_bin unmeasured unmeasured_dates day_unmeasured day_skipped day_unassigned calls
+  local planned actual skipped split_dates prompt state req_size batch_calls remaining output timeout_bin unmeasured unmeasured_dates day_unmeasured day_skipped day_state day_unassigned calls
   threads_valid_date "$from" && threads_valid_date "$to" && [ ! "$to" \< "$from" ] || { threads_error "invalid backfill date range"; return 2; }
   case "$max_calls" in ''|*[!0-9]*) threads_error "max calls must be a non-negative integer"; return 2 ;; esac
   max_calls=$((10#$max_calls))
@@ -1245,13 +1270,15 @@ threads_backfill() {
         case "$calls" in ''|*[!0-9]*) calls=0 ;; esac
         actual=$((actual + calls)); remaining=$((remaining - calls))
         day_skipped=$(printf '%s\n' "$output" | sed -n 's/^threads_skipped: //p' | tail -1)
+        day_state=$(printf '%s\n' "$output" | sed -n 's/^threads_state: //p' | tail -1)
+        [ "$day_state" != unreadable ] || day_skipped=unreadable
         day_unassigned=$(printf '%s\n' "$output" | sed -n 's/^threads_unassigned: //p' | tail -1)
         case "$day_unassigned" in ''|*[!0-9]*) day_unassigned=0 ;; esac
       else
         day_unassigned=1
       fi
     fi
-    case "$day_skipped" in budget|locked) skipped="${skipped}${date}\n" ;; *)
+    case "$day_skipped" in budget|locked|unreadable) skipped="${skipped}${date}\n" ;; *)
       if [ "$day_unassigned" -gt 0 ]; then skipped="${skipped}${date}\n"; fi
       ;;
     esac
@@ -1283,7 +1310,8 @@ case "${1:-}" in
   update)
     shift
     [ "$#" -eq 1 ] || { threads_usage; exit 2; }
-    threads_update "$1"
+    threads_update "$1" || exit $?
+    threads_render >/dev/null || true
     ;;
   render)
     shift
@@ -1322,7 +1350,8 @@ case "${1:-}" in
         *) threads_usage; exit 2 ;;
       esac
     done
-    threads_backfill "$backfill_from" "$backfill_to" "$backfill_engine" "$backfill_model" "$backfill_max"
+    threads_backfill "$backfill_from" "$backfill_to" "$backfill_engine" "$backfill_model" "$backfill_max" || exit $?
+    threads_render >/dev/null || true
     ;;
   search)
     shift

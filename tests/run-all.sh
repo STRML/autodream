@@ -8021,8 +8021,10 @@ test_threads_older_rebuild_only_links_missing_sources(){
 
 test_threads_reassignment_updates_dropped_status_and_report(){
   echo "# threads: reassigning the newest session lowers last_seen for list and report"
-  local root session hash state today previous_date previous_stamp seen list_count report moved source_row
+  local root session hash state today previous_date previous_stamp seen list_count report moved source_row dashboard
   root=$(setup_env)
+  mkdir -p "$root/dreams"
+  printf '<script id="threads-data" type="application/json">{"generated_at":"before-update","threads":[]}</script>' > "$root/dreams/threads.html"
   previous_date=$DATE; previous_stamp=$STAMP
   DATE=$(pdate_shift "$(pdate_yesterday)" 1 d) || { no "current report date resolved"; thread_cleanup "$root"; return 0; }
   today=$DATE
@@ -8037,12 +8039,15 @@ test_threads_reassignment_updates_dropped_status_and_report(){
       status:"open",done_by:null,last_seen:$current}' > "$state"
   source_row=$(jq -cn --arg date "$DATE" --arg hash "$hash" --arg path "$session" --arg repo "$REPO" \
     '{date:$date,hash:$hash,source:"claude",session_path:$path,cwd:$repo,repo:$repo,nested:false,user_message_count:2,measured:true}')
-  printf '%s\n' "$source_row" | env AUTODREAM_DIR="$root/autodream" AUTODREAM_CONFIG="$root/no-config" \
+  printf '%s\n' "$source_row" | env AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" AUTODREAM_CONFIG="$root/no-config" \
     AUTODREAM_THREADS_STATE="$state" AUTODREAM_THREADS_ENGINE=claude AUTODREAM_THREADS_MODEL=claude-haiku-5-5 \
     AUTODREAM_THREADS_TIMEOUT_BIN="$(command -v timeout)" AUTODREAM_ADAPTERS=claude \
     THREADS_REFRESH_KEYS="$(printf '%s\t%s' "$DATE" "$hash")" CLAUDE_BIN="$MOCK" \
     MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap" /bin/bash "$REPO/bin/threads.sh" update "$DATE" > "$root/update.out"
   DATE=$previous_date; STAMP=$previous_stamp
+  dashboard=$(threads_html_inspect "$root/dreams/threads.html")
+  assert_eq "$(printf '%s' "$dashboard" | jq -r --arg id t-77777777 '[.payload.threads[].id] | index($id) != null')" true "direct update refreshes dashboard membership"
+  assert_eq "$(printf '%s' "$dashboard" | jq -r '.payload.generated_at != "before-update"')" true "direct update replaces the previous dashboard timestamp"
   moved=$(jq -sr --arg hash "$hash" '[.[] | select(any(.sessions[]; .hash == $hash)) | select(.id != "t-77777777")] | length' "$state")
   seen=$(jq -sr '.[] | select(.id == "t-77777777") | .last_seen' "$state")
   list_count=$(AUTODREAM_DIR="$root/autodream" "$REPO/bin/threads.sh" list --status dropped --json | jq '[.[] | select(.id == "t-77777777")] | length')
@@ -8263,15 +8268,17 @@ test_threads_resume_marks_missing_transcript(){
 
 test_threads_backfill_uses_sidecars_and_respects_budget(){
   echo "# threads: backfill uses archived sidecars without rollups and stops at the call budget"
-  local root from to first_hash first_date output calls plan_seen linked
+  local root from to first_hash first_date output calls plan_seen linked dashboard
   root=$(setup_env); from=2019-12-30; to=2020-01-02
+  mkdir -p "$root/dreams"
+  printf '<script id="threads-data" type="application/json">{"generated_at":"before-backfill","threads":[]}</script>' > "$root/dreams/threads.html"
   first_hash=$(seed_thread_archive_date "$root" 2019-12-30 backfill-first "first historical goal" partially_achieved yes)
   seed_thread_archive_date "$root" 2019-12-31 backfill-second "second historical goal" partially_achieved yes >/dev/null
   seed_thread_archive_date "$root" 2019-12-30 backfill-unmeasured "unmeasured goal" partially_achieved no >/dev/null
   output="$root/backfill.out"
   export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap" \
     MOCK_BACKFILL_OUTPUT_FILE="$output" MOCK_BACKFILL_PLAN_SEEN="$root/plan-seen"
-  AUTODREAM_DIR="$root/autodream" PROJECTS_DIR="$root/projects" CLAUDE_BIN="$MOCK" \
+  AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" PROJECTS_DIR="$root/projects" CLAUDE_BIN="$MOCK" \
     /bin/bash "$REPO/bin/threads.sh" backfill "$from" "$to" --max-calls 2 > "$output" 2>&1
   unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR MOCK_BACKFILL_OUTPUT_FILE MOCK_BACKFILL_PLAN_SEEN
   calls=$(thread_call_count "$root/cap")
@@ -8283,6 +8290,9 @@ test_threads_backfill_uses_sidecars_and_respects_budget(){
   assert_eq "$calls" 2 "budget is enforced"
   assert_eq "$([ "$calls" -gt 0 ] && echo true || echo false)" true "real two-column source map makes linker calls"
   assert_eq "$linked" 1 "real-format backfill links the archived session"
+  dashboard=$(threads_html_inspect "$root/dreams/threads.html")
+  assert_eq "$(printf '%s' "$dashboard" | jq -r --arg id "$(jq -sr '.[0].id' "$(thread_state "$root")")" '[.payload.threads[].id] | index($id) != null')" true "backfill refreshes dashboard membership once at completion"
+  assert_eq "$(printf '%s' "$dashboard" | jq -r '.payload.generated_at != "before-backfill"')" true "backfill writes a fresh dashboard timestamp"
   assert_eq "$plan_seen" true "plan precedes the first engine call"
   assert_grep "$output" '^unmeasured_sessions: 1$' "an unparseable or missing sidecar counts its session"
   assert_grep "$output" '^unmeasured_dates:$' "unmeasured dates are grouped"
@@ -8314,6 +8324,10 @@ test_threads_backfill_skipped_dates_have_no_linker_call(){
   AUTODREAM_DIR="$root/autodream" PROJECTS_DIR="$root/projects" CLAUDE_BIN="$MOCK" \
     /bin/bash "$REPO/bin/threads.sh" backfill "$linked_date" "$linked_date" --max-calls 1 > "$rerun" 2>&1
   assert_nogrep "$rerun" '^skipped_dates:' "completed date is not reported as skipped on rerun"
+  printf '{broken state\n' > "$(thread_state "$root")"
+  AUTODREAM_DIR="$root/autodream" PROJECTS_DIR="$root/projects" CLAUDE_BIN="$MOCK" \
+    /bin/bash "$REPO/bin/threads.sh" backfill "$linked_date" "$linked_date" --max-calls 1 > "$root/backfill-unreadable.out" 2>&1
+  assert_grep "$root/backfill-unreadable.out" "^- $linked_date$" "unreadable index date is reported as skipped"
   thread_cleanup "$root"
 }
 
@@ -8554,8 +8568,8 @@ test_threads_render_runs_on_empty_night_and_cli_write(){
   thread_cleanup "$root"
 }
 
-test_threads_render_holds_lock_until_page_is_replaced(){
-  echo "# threads: CLI status write keeps the lock through dashboard replacement"
+test_threads_render_retries_when_state_changes_during_render(){
+  echo "# threads: renderer runs unlocked and retries a stale snapshot"
   local root state renderer_started release_renderer close_pid attempts result status close_rc
   root=$(setup_env)
   state=$(thread_state "$root"); mkdir -p "$(dirname "$state")" "$root/renderer-bin"
@@ -8582,8 +8596,12 @@ EOF_RENDER_GATE
   attempts=0
   while [ ! -e "$renderer_started" ] && [ "$attempts" -lt 100 ]; do sleep 0.05; attempts=$((attempts + 1)); done
   assert_file "$renderer_started" "close reaches dashboard rendering"
-  assert_eq "$([ -d "$(thread_state "$root").lock" ] && echo true || echo false)" true "state lock remains held during dashboard rendering"
+  assert_eq "$([ -d "$(thread_state "$root").lock" ] && echo true || echo false)" false "state lock is free during dashboard rendering"
   if [ ! -e "$renderer_started" ]; then cat "$root/close-render.out"; fi
+  mkdir "$(thread_state "$root").lock"
+  jq -c 'if .id == "t-50000002" then .title = "changed while rendering" else . end' "$(thread_state "$root")" > "$root/state-next"
+  mv -f "$root/state-next" "$(thread_state "$root")"
+  rmdir "$(thread_state "$root").lock"
   : > "$release_renderer"
   wait "$close_pid"
   close_rc=$?
@@ -8592,6 +8610,7 @@ EOF_RENDER_GATE
   result=$(threads_html_inspect "$root/dreams/threads.html")
   status=$(printf '%s' "$result" | jq -r '.payload.threads[0].status')
   assert_eq "$status" closed_by_sam "rendered page contains the committed status"
+  assert_eq "$(printf '%s' "$result" | jq -r '.payload.threads[0].title')" "changed while rendering" "stale render is discarded and retried"
   thread_cleanup "$root"
 }
 
@@ -8734,7 +8753,7 @@ _run test_threads_install_links_entrypoint
 _run test_threads_render_failure_preserves_previous_page
 _run test_threads_html_payload_is_inert
 _run test_threads_render_runs_on_empty_night_and_cli_write
-_run test_threads_render_holds_lock_until_page_is_replaced
+_run test_threads_render_retries_when_state_changes_during_render
 _run test_threads_explore_launch_is_constrained
 _run test_threads_explore_quotes_paths_and_reports_launch_failure
 _run test_threads_explore_resolves_claude_from_path_and_checks_before_open
