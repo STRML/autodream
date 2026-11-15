@@ -47,6 +47,78 @@ class DataTests(unittest.TestCase):
         return subprocess.run(['git', *map(str, args)], check=True, capture_output=True,
                               text=True, timeout=10).stdout.strip()
 
+    def stats_night(self, date='2026-11-14'):
+        self.assertTrue(callable(getattr(self.cache, 'stats', None)), 'nightly statistics are absent')
+        return next(night for night in self.cache.stats()['nights'] if night['date'] == date)
+
+    def test_web_stats_reads_unavailable_threads_once(self):
+        for day in range(10, 15):
+            (self.root / 'findings' / ('2026-11-' + str(day))).mkdir(exist_ok=True)
+        with patch.object(self.cache, 'threads', return_value=None) as read:
+            result = self.cache.stats()
+        self.assertEqual(read.call_count, 1, 'failed thread lookups must not repeat per night')
+        self.assertEqual(len(result['nights']), 5)
+        self.assertTrue(all(night['finished_that_day'] is None for night in result['nights']))
+
+    def test_web_stats_preserves_missing_measurements(self):
+        self.finding(stats={'tool_call_count': 0, 'user_message_count': None})
+        (self.day / 'run-stats.txt').write_text('l1_timed_out: 0\nl1_elapsed_seconds: unknown\n')
+        night = self.stats_night()
+        self.assertIsNone(night['run'].get('sessions_triaged'))
+        self.assertIsNone(night['run'].get('l1_elapsed_seconds'))
+        self.assertEqual(night['run']['l1_timed_out'], 0)
+        self.assertEqual(night['activity']['tool_calls'], 0)
+        self.assertIsNone(night['activity']['user_messages'])
+        self.assertIsNone(night['categories'])
+        (self.day / 'categories.tsv').write_text('category\tseverity\tsessions\tfindings\texample_hashes\nx\tall\tbad\t1\tx\n')
+        self.assertIsNone(self.stats_night()['categories'])
+        self.finding('111111111111', stats=False)
+        night = self.stats_night()
+        self.assertTrue(all(value is None for value in night['activity'].values()),
+                        'a missing sidecar must not silently reduce activity')
+        self.assertTrue(all(value is None for value in night['outcomes'].values()))
+        self.finding('111111111111', stats={'nested': True, 'tool_call_count': 900})
+        self.assertEqual(self.stats_night()['activity']['tool_calls'], 0, 'workers must not inflate activity')
+        old = self.root / 'findings/2026-07-16'
+        self.finding(day=old)
+        self.assertTrue(all(value is None for value in self.stats_night('2026-07-16')['outcomes'].values()))
+        self.finding('222222222222', outcome='unknown')
+        self.assertTrue(all(value is None for value in self.stats_night()['outcomes'].values()))
+
+    def test_web_stats_categories_do_not_double_count(self):
+        categories = self.day / 'categories.tsv'
+        categories.write_text('category\tseverity\tsessions\tfindings\texample_hashes\n'
+            'buggy_code_shipped\tall\t2\t3\ta,b\n'
+            'buggy_code_shipped\thigh\t1\t1\ta\n'
+            'buggy_code_shipped\tmedium\t2\t2\ta,b\n')
+        night = self.stats_night()
+        rows = night['categories']
+        self.assertEqual(next(row['sessions'] for row in rows if row['severity'] == 'all'), 2)
+        self.assertEqual(next(row['sessions'] for row in rows if row['severity'] == 'high'), 1)
+        self.assertEqual(sum(row['sessions'] for row in rows if row['severity'] == 'all'), 2)
+        categories.write_text(categories.read_text().replace('all\t2\t3', 'all\t4\t5'))
+        self.assertEqual(next(row['sessions'] for row in self.stats_night()['categories']
+                              if row['severity'] == 'all'), 4, 'in-place changes must invalidate the cache')
+        categories.unlink()
+        self.assertIsNone(self.stats_night()['categories'])
+
+    def test_web_finished_that_day_uses_last_seen(self):
+        rows = [dict(id='t-' + str(i).zfill(8), kind='work', repo='/repo', goal='Goal',
+                     title='Title', status=status, last_seen=day, sessions=[])
+                for i, (status, day) in enumerate((('done', '2026-11-14'),
+                    ('done', '2026-11-14'), ('done', '2026-11-13'),
+                    ('closed_by_sam', '2026-11-14'), ('open', '2026-11-14')), 1)]
+        state = self.root / 'threads.jsonl'
+        state.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        night = self.stats_night()
+        self.assertEqual(night['finished_that_day'], 2)
+        self.assertNotIn('dropped_over_time', night)
+        rows[0]['status'] = 'open'
+        state.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+        self.assertEqual(self.stats_night()['finished_that_day'], 1, 'thread changes must invalidate stats')
+        state.write_text('{broken')
+        self.assertIsNone(self.stats_night()['finished_that_day'])
+
     def test_web_lately_excludes_nested_and_folds_repos(self):
         common = Path(self.git('-C', REPO, 'rev-parse', '--git-common-dir')).resolve()
         main = common.parent

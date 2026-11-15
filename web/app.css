@@ -61,3 +61,22 @@ hr { border: 0; border-top: 1px solid var(--rule); margin: 2rem 0; }
   nav { gap: 1rem; }
   .metrics { max-width: 35ch; }
 }
+
+.run-row { padding: 1rem 0; border-bottom: 1px solid var(--rule); }
+.run-row h2 { margin: 0 0 .75rem; }
+.last-log-line { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--wash); padding: 1rem; }
+header { flex-wrap: wrap; }
+header nav { flex-wrap: wrap; }
+
+.stats-series { padding: .75rem 0 1.25rem; border-bottom: 1px solid var(--rule); }
+.stats-series h3 { margin: 0 0 .75rem; }
+.stats-series svg { display: block; width: 100%; max-width: 50rem; height: auto; }
+.stats-series svg text { fill: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.stats-series svg circle { fill: var(--accent); }
+.chart-line { stroke: var(--accent); stroke-width: 2; fill: none; }
+.chart-axis { stroke: var(--rule); stroke-width: 1; fill: none; }
+.stats-series summary { color: var(--muted); cursor: pointer; width: fit-content; }
+
+@media (max-width: 40rem) {
+  .stats-series svg text { font-size: 20px; }
+}

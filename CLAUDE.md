@@ -467,6 +467,36 @@ How it works: it writes a transient one-shot LaunchAgent (`<base-label>.ondemand
 
 When you (the agent) need to kick off a run, prefer this over a background Bash task — fire it, then poll `dreams/<date>.md` instead of holding a long task open.
 
+## Local web dashboard
+
+`autodream-web open` signs in to the local five-view dashboard: Lately, Dreams,
+Threads, Progress and Stats. The server binds only `127.0.0.1`; requests require
+the canonical Host and session cookie, and POSTs also require Origin and
+`X-Autodream: 1`. The token file is 0600. Query strings are redacted from logs.
+The CSP is an HTTP header; transcript and model text reaches the DOM as text.
+
+Progress reads `locks/run-<date>.lock/pid` and `start`, using kill-0 and normalized
+`ps -o lstart=` with a 2-second timeout. Missing recorded start retains the live-pid
+fallback. Elapsed time comes from process start; unknown times are null. Locks
+are read-only. The last log line is text, with no phase inference. Visible
+Progress polls every 5 seconds and retries after “server not reachable”.
+
+Stats uses the existing per-night cache and file mtime/size fingerprints, including
+run-stats, categories, findings, sidecars and thread state. `read_allowed_run_stats`
+fixes the HTTP allowlist in `bin/autodream_web_data.py`; unknown and account keys
+are excluded before response construction. Numeric values must parse, unavailable
+measurements stay null, and overlap events are null unless overlap was measured.
+Activity and outcomes cover top-level sessions; missing sidecars leave gaps.
+Category totals use `severity=all`, keeping separate severity rows in the API.
+Charts use inline SVG, accessible labels and tables of values.
+“Finished that day” counts current done threads whose `last_seen` is that day.
+It changes on reopen and does not reconstruct historical status transitions.
+
+Run `TMPDIR=/tmp/adw41 /bin/bash tests/autodream-web.sh` for the data, HTTP security
+and local browser suites. HTTP tests use ephemeral ports. The browser suite needs
+Chrome; browser checks skip in CI and when Chrome is unavailable. The data and
+HTTP suites still run in CI.
+
 ## Reviewing changes here
 
 Almost everything in this repo is shell, and a shell bug here fails silently on a

@@ -268,9 +268,144 @@ async function performThreadAction(id, action, button) {
   }
 }
 
+function svgNode(tag, attributes = {}, value) {
+  const element = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [key, val] of Object.entries(attributes)) element.setAttribute(key, String(val));
+  if (value !== undefined) element.textContent = value;
+  return element;
+}
+
+function drawSeries(svg, points, label) {
+  svg.replaceChildren(svgNode('title', {}, label));
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', label);
+  svg.setAttribute('viewBox', '0 0 640 180');
+  const available = points.filter(p => typeof p.value === 'number' && Number.isFinite(p.value));
+  if (!available.length) {
+    svg.append(svgNode('text', {x: 16, y: 80}, 'Not measured'));
+    return;
+  }
+  const first = Date.parse(points[0].date);
+  const last = Date.parse(points[points.length - 1].date);
+  const max = Math.max(1, ...available.map(p => p.value));
+  svg.append(svgNode('path', {d: 'M 48 12 V 144 H 624', class: 'chart-axis'}));
+  svg.append(svgNode('text', {x: 4, y: 20}, measured(max)), svgNode('text', {x: 24, y: 144}, '0'));
+  svg.append(svgNode('text', {x: 48, y: 174}, points[0].date),
+    svgNode('text', {x: 624, y: 174, 'text-anchor': 'end'}, points[points.length - 1].date));
+  let previous;
+  for (const point of points) {
+    if (typeof point.value !== 'number' || !Number.isFinite(point.value)) { previous = undefined; continue; }
+    const time = Date.parse(point.date);
+    const x = first === last ? 336 : 48 + (time - first) / (last - first) * 576;
+    const y = 144 - point.value / max * 124;
+    if (previous && time - previous.time === 86400000) {
+      svg.append(svgNode('path', {d: `M ${previous.x} ${previous.y} L ${x} ${y}`, class: 'chart-line'}));
+    }
+    const dot = svgNode('circle', {cx: x, cy: y, r: 3, 'data-value': point.value, 'data-date': point.date});
+    dot.append(svgNode('title', {}, point.date + ': ' + point.value));
+    svg.append(dot);
+    previous = {time, x, y};
+  }
+}
+
+function appendChart(parent, nights, label, valueFor) {
+  const section = node('section', undefined, 'stats-series');
+  section.append(node('h3', label));
+  const points = nights.map(night => ({date: night.date, value: valueFor(night)}));
+  const svg = svgNode('svg');
+  drawSeries(svg, points, label);
+  section.append(svg);
+  const details = node('details');
+  details.append(node('summary', 'Values by night'));
+  const table = node('table');
+  const head = node('tr');
+  head.append(node('th', 'Date'), node('th', label));
+  const thead = node('thead');
+  thead.append(head);
+  const tbody = node('tbody');
+  for (const point of points) {
+    const row = node('tr');
+    row.append(node('td', point.date), node('td', point.value == null ? 'Not measured' : measured(point.value)));
+    tbody.append(row);
+  }
+  table.append(thead, tbody);
+  details.append(table);
+  section.append(details);
+  parent.append(section);
+}
+
+function renderStats(data) {
+  const content = document.getElementById('content');
+  content.replaceChildren(node('h1', 'Stats'), node('p', 'Nightly activity and pipeline health. Gaps mean not measured.', 'intro'));
+  const nights = [...data.nights].sort((a, b) => a.date.localeCompare(b.date));
+  if (!nights.length) { content.append(node('p', 'No nightly statistics yet.')); return; }
+  content.append(node('h2', 'Activity'), node('p', 'Activity and outcomes cover top-level sessions.', 'metrics'));
+  for (const [key, label] of [['user_messages', 'User messages'], ['tool_calls', 'Tool calls'], ['duration_minutes', 'Duration (minutes)']]) {
+    appendChart(content, nights, label, n => n.activity?.[key]);
+  }
+  for (const [key, label] of [['top_level', 'Top-level sessions'], ['nested', 'Nested sessions']]) {
+    appendChart(content, nights, label, n => n.sessions?.[key]);
+  }
+  content.append(node('h2', 'Outcomes'));
+  for (const key of ['fully_achieved', 'mostly_achieved', 'partially_achieved', 'not_achieved', 'unclear_from_transcript']) {
+    appendChart(content, nights, measured(key), n => n.outcomes?.[key]);
+  }
+  content.append(node('h2', 'Category findings'));
+  const categories = [...new Set(nights.flatMap(n => (n.categories || []).filter(c => c.severity === 'all').map(c => c.category)))].sort();
+  if (!categories.length) content.append(node('p', 'No measured category findings.'));
+  for (const category of categories) {
+    appendChart(content, nights, 'Category findings: ' + measured(category), n => {
+      if (!n.categories) return null;
+      const rows = n.categories.filter(c => c.category === category);
+      return rows.length ? rows.find(c => c.severity === 'all')?.findings ?? null : 0;
+    });
+  }
+  content.append(node('h2', 'Pipeline health'));
+  for (const [key, label] of [['l1_elapsed_seconds', 'L1 elapsed (seconds)'], ['l1_timed_out', 'L1 timeouts'],
+    ['l1_missing_after_retries', 'Missing after retries'], ['l1_findings_with_error', 'Findings with errors'],
+    ['stats_sidecars_unparseable', 'Unreadable sidecars'], ['network_down_seconds', 'L1 network wait (seconds)'],
+    ['network_down_seconds_l2', 'L2 network wait (seconds)'], ['l1_served_mismatch', 'Served model mismatches'],
+    ['l1_chunks_elided', 'Chunks elided'], ['overlap_events', 'Overlap events']]) {
+    appendChart(content, nights, label, n => n.run?.[key]);
+  }
+  content.append(node('h2', 'Finished that day'),
+    node('p', 'Current done threads whose last_seen is that day. This count changes when threads are reopened.', 'metrics'));
+  appendChart(content, nights, 'Finished that day', n => n.finished_that_day);
+}
+
+function renderProgress(data) {
+  const content = document.getElementById('content');
+  content.replaceChildren(node('h1', 'Progress'), node('p', 'Run ownership, refreshed every 5 seconds.', 'intro'));
+  if (!data.runs.length) content.append(node('p', 'No run locks.'));
+  for (const run of data.runs) {
+    const section = node('section', undefined, 'run-row');
+    section.append(node('h2', run.date + ' · ' + run.state));
+    section.append(node('p', 'PID ' + measured(run.pid) + ' · Started ' + measured(run.started_at) +
+      ' · Elapsed ' + measured(run.elapsed_seconds) + ' seconds', 'metrics'));
+    section.append(node('h3', 'Last log line'), node('pre', run.last_log_line ?? 'No log line available.', 'last-log-line'));
+    content.append(section);
+  }
+}
+
+let progressTimer;
+let progressPending = false;
+let activeView;
+async function pollProgress() {
+  if (document.hidden || activeView !== 'progress' || progressPending) return;
+  progressPending = true;
+  try { await loadView('progress'); }
+  finally { progressPending = false; }
+}
+
 let viewRequest = 0;
 async function loadView(view, date) {
   const request = ++viewRequest;
+  activeView = view;
+  if (view === 'progress' && !progressTimer) progressTimer = window.setInterval(pollProgress, 5000);
+  if (view !== 'progress' && progressTimer) {
+    window.clearInterval(progressTimer);
+    progressTimer = undefined;
+  }
   const status = document.getElementById('status');
   status.textContent = 'Loading…';
   for (const link of document.querySelectorAll('nav a')) {
@@ -278,7 +413,7 @@ async function loadView(view, date) {
     else link.removeAttribute('aria-current');
   }
   try {
-    const path = view === 'threads' ? '/api/threads' : view === 'dreams' ? '/api/dreams' + (date ? '/' + encodeURIComponent(date) : '') : '/api/lately?days=7';
+    const path = view === 'stats' ? '/api/stats' : view === 'progress' ? '/api/progress' : view === 'threads' ? '/api/threads' : view === 'dreams' ? '/api/dreams' + (date ? '/' + encodeURIComponent(date) : '') : '/api/lately?days=7';
     const response = await fetch(path, {credentials: 'same-origin'});
     if (!response.ok) throw new Error(response.status === 401 ? 'Run autodream-web open to sign in.' : 'Could not read this view. Reload to retry.');
     const data = await response.json();
@@ -287,7 +422,9 @@ async function loadView(view, date) {
       if (threads.ok) data.thread_links = (await threads.json()).threads;
     }
     if (request !== viewRequest) return;
-    if (view === 'threads') await renderThreads(data, date);
+    if (view === 'stats') renderStats(data);
+    else if (view === 'progress') renderProgress(data);
+    else if (view === 'threads') await renderThreads(data, date);
     else if (view !== 'dreams') renderLately(data);
     else if (date) renderDream(data);
     else {
@@ -306,13 +443,24 @@ async function loadView(view, date) {
     }
     status.textContent = '';
   } catch (error) {
-    if (request === viewRequest) status.textContent = error instanceof TypeError ? 'Could not connect. Reload to retry.' : error.message;
+    if (request === viewRequest) status.textContent = error instanceof TypeError ? 'server not reachable' : error.message;
   }
 }
 
 function navigate() {
   const [view, date] = location.hash.slice(1).split('/');
-  loadView(['dreams', 'threads'].includes(view) ? view : 'lately', date);
+  loadView(['dreams', 'threads', 'progress', 'stats'].includes(view) ? view : 'lately', date);
 }
 window.addEventListener('hashchange', navigate);
-document.addEventListener('DOMContentLoaded', navigate);
+document.addEventListener('DOMContentLoaded', () => {
+  const nav = document.querySelector('header nav') || document.querySelector('nav');
+  for (const view of ['progress', 'stats']) {
+    if (nav && !nav.querySelector('a[href="#' + view + '"]')) {
+      const link = node('a', view === 'progress' ? 'Progress' : 'Stats');
+      link.href = '#' + view;
+      nav.append(link);
+    }
+  }
+  navigate();
+});
+document.addEventListener('visibilitychange', pollProgress);

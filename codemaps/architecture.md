@@ -48,10 +48,30 @@ bin/run.sh  TARGET_DATE
             (also called on the early no-sessions path, so a question-free night clears streaks)
 ```
 
+## Local web views
+
+```text
+launchd <nightly-label>-web → bin/autodream-web.py (127.0.0.1 only)
+  ├─ Lately   → findings + sidecars + runner cwd maps + threads
+  ├─ Dreams   → reports + report-format.sh open-question counts
+  ├─ Threads  → threads.sh list/actions (sole state writer)
+  ├─ Progress → run locks pid/start + last log line as text; visible 5s polling
+  └─ Stats    → allowlisted run-stats + top-level sidecars/outcomes + categories
+                 per-night mtime/size cache; unavailable = null = chart gaps
+                 Finished that day = current done threads with last_seen that day
+```
+
+Every request checks Host and the session cookie; POSTs also check Origin and
+X-Autodream. `web/app.js` renders untrusted text through DOM nodes and draws SVG
+charts with accessible labels and value tables. Category totals use severity=all.
+
 ## Files
 
 | File | Role |
 |---|---|
+| `bin/autodream-web.py` | authenticated local HTTP boundary, fixed static routes, read APIs and bounded thread actions |
+| `bin/autodream_web_data.py` | artifact readers and per-night cache; lock-derived Progress; allowlisted Stats with null measurements |
+| `web/app.js`, `web/app.css` | five-view navigation, safe markdown, Progress connectivity and SVG Stats charts |
 | `bin/run.sh` | orchestrator: guard, preflight, adapter load, enumerate+filter, L1 retry loop, changelog, L2 retry loop, pin apply, notify. Every fatal goes through `log_fatal`/`fatal_exit` (marker + banner) |
 | `adapters/<name>/` | one harness. `manifest.json` (DATA — jq-parsed, never sourced) + `adapter.sh` + `facts.md`. Subcommands: `enumerate normalize project stats slim is-self skills-inventory`; contract table in `docs/design/unify-harness-adapters-2026-08-23.md`. `_fixture` is test-only (leading `_` excludes it) |
 | `bin/adapters.sh` | adapter discovery + dispatch. Identity is the DIRECTORY BASENAME (dispatch builds a path from it), must agree with `manifest.name`; realpath containment; refusals go to a file because `adapters_list` runs inside `$(...)` |
