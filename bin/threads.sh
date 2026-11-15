@@ -1327,8 +1327,44 @@ PY_RESUME
   return "$rc"
 }
 
+threads_claim_resume() {
+  local id=$1 claim now mtime temp_file owner rc=0
+  claim="$AUTODREAM_DIR/resume/$id"
+  threads_acquire_lock || return 75
+  if [ -e "$claim" ] || [ -L "$claim" ]; then
+    mtime=$(pstat_mtime "$claim") || { threads_release_lock; return 1; }
+    now=$(date +%s) || { threads_release_lock; return 1; }
+    if [ $((now - mtime)) -lt 120 ]; then
+      threads_release_lock
+      threads_error "already resuming $id"
+      return 76
+    fi
+  fi
+  mkdir -p "$AUTODREAM_DIR/resume" || { threads_release_lock; return 1; }
+  temp_file=$(mktemp "$AUTODREAM_DIR/resume/.claim.XXXXXX") || { threads_release_lock; return 1; }
+  owner="$$:${temp_file##*/}"
+  if ! printf '%s\n' "$owner" > "$temp_file" || ! mv -f "$temp_file" "$claim"; then
+    unlink "$temp_file" 2>/dev/null || true
+    rc=1
+  fi
+  threads_release_lock
+  [ "$rc" -eq 0 ] || return "$rc"
+  printf '%s\n' "$owner"
+}
+
+threads_release_resume_claim() {
+  local id=$1 owner=$2 claim current rc=0
+  claim="$AUTODREAM_DIR/resume/$id"
+  threads_acquire_lock || return 75
+  if [ -f "$claim" ] && IFS= read -r current < "$claim" && [ "$current" = "$owner" ]; then
+    unlink "$claim" || rc=1
+  fi
+  threads_release_lock
+  return "$rc"
+}
+
 threads_resume() {
-  local id launch=0 brief repo claude_bin state
+  local id launch=0 brief repo claude_bin state cmux inner_cmd owner rc
   id=$1
   [ "${2:-}" = --launch ] && launch=1
   state=$(threads_read_state) || return 1
@@ -1336,10 +1372,33 @@ threads_resume() {
   if [ "$launch" -eq 0 ]; then printf '%s\n' "$brief"; return 0; fi
   repo=$(printf '%s\n' "$state" | jq -r --arg id "$id" '[.[] | select(.id == $id) | .repo] | first // empty') || repo=""
   if [ ! -d "$repo" ] || ! (cd "$repo" >/dev/null 2>&1); then repo=$HOME; fi
-  claude_bin=${CLAUDE_BIN:-$(command -v claude 2>/dev/null || true)}
-  [ -n "$claude_bin" ] || { threads_error "claude CLI not found"; return 1; }
-  cd "$repo" || return 1
-  exec "$claude_bin" --permission-mode default --append-system-prompt "$brief" "Resume thread $id. Read the available source transcripts listed in the brief and continue the unfinished goal."
+  cmux=${CMUX_BIN:-/Applications/cmux.app/Contents/Resources/bin/cmux}
+  [ -x "$cmux" ] || cmux=$(command -v cmux 2>/dev/null || true)
+  if [ -z "$cmux" ] || [ ! -x "$cmux" ]; then
+    threads_error "cmux is unavailable"
+    printf '%s\n' "$brief"
+    return 69
+  fi
+  claude_bin=${CLAUDE_BIN:-claude}
+  [ -x "$claude_bin" ] || claude_bin=$(command -v "$claude_bin" 2>/dev/null || true)
+  if [ -z "$claude_bin" ] || [ ! -x "$claude_bin" ]; then
+    threads_error "claude CLI is unavailable"
+    printf '%s\n' "$brief"
+    return 69
+  fi
+  owner=$(threads_claim_resume "$id")
+  rc=$?
+  if [ "$rc" -ne 0 ]; then printf '%s\n' "$brief"; return "$rc"; fi
+  printf -v inner_cmd '%q --permission-mode %q --append-system-prompt %q %q' \
+    "$claude_bin" default "$brief" \
+    "Resume thread $id. Read the available source transcripts listed in the brief and continue the unfinished goal."
+  if tmo 15 "$cmux" workspace create --cwd "$repo" --command "$inner_cmd" >&2; then
+    return 0
+  fi
+  threads_error "cmux workspace creation failed"
+  threads_release_resume_claim "$id" "$owner" || threads_error "cannot release resume claim for $id"
+  printf '%s\n' "$brief"
+  return 70
 }
 
 threads_backfill_enabled_adapters() {
