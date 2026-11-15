@@ -85,6 +85,32 @@ class DataTests(unittest.TestCase):
         self.finding('222222222222', outcome='unknown')
         self.assertTrue(all(value is None for value in self.stats_night()['outcomes'].values()))
 
+    def test_web_stats_session_without_findings_is_unmeasured(self):
+        self.finding()
+        sidecar = dict(nested=False, user_message_count=5, tool_call_count=6, duration_minutes=7)
+        (self.day / '111111111111.stats.json').write_text(json.dumps(sidecar))
+        night = self.stats_night()
+        self.assertTrue(all(value is None for value in night['activity'].values()),
+                        'an untriaged session must not leave a partial activity total')
+        self.assertTrue(all(value is None for value in night['outcomes'].values()))
+
+    def test_web_stats_unreadable_file_is_degraded_and_not_cached(self):
+        self.finding()
+        run_stats = self.day / 'run-stats.txt'
+        run_stats.write_text('l1_timed_out: 2\n')
+        run_stats.chmod(0)
+        try:
+            if os.access(run_stats, os.R_OK):
+                self.skipTest('running as a user that ignores file modes')
+            night = self.stats_night()
+            self.assertIsNone(night['run']['l1_timed_out'])
+            self.assertIn('Could not read run-stats.txt.', night['degraded'])
+        finally:
+            run_stats.chmod(0o644)
+        night = self.stats_night()
+        self.assertEqual(night['run']['l1_timed_out'], 2, 'a failed read must not be cached')
+        self.assertEqual(night['degraded'], [])
+
     def test_web_stats_categories_do_not_double_count(self):
         categories = self.day / 'categories.tsv'
         categories.write_text('category\tseverity\tsessions\tfindings\texample_hashes\n'

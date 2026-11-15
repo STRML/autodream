@@ -353,7 +353,7 @@ class WebTests(unittest.TestCase):
         self.env["PATH"] = str(tools) + os.pathsep + os.environ["PATH"]
         self.start_server()
         cookie = self.login()
-        for recorded, expected in ((True, "stale"), (False, "running")):
+        for recorded, expected in ((True, "unverified"), (False, "running")):
             if not recorded:
                 (lock / "start").unlink()
             before = self.tree_snapshot(lock)

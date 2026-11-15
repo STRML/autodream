@@ -73,8 +73,15 @@ def build_night_stats(date, directory):
     activity = dict(user_messages=[], tool_calls=[], duration_minutes=[])
     outcomes = []
     degraded, unreadable = [], set()
-    for path in sorted(directory.glob('*.json')):
-        if not FINDING.fullmatch(path.name):
+    hashes = {path.name[:-len('.json')] for path in directory.glob('*.json') if FINDING.fullmatch(path.name)}
+    hashes.update(path.name[:-len('.stats.json')] for path in directory.glob('*.stats.json')
+                  if FINDING.fullmatch(path.name[:-len('.stats.json')] + '.json'))
+    for session in sorted(hashes):
+        path = directory / (session + '.json')
+        if not path.exists():
+            for values in activity.values():
+                values.append(None)
+            outcomes.append(None)
             continue
         finding = read_object(path, degraded, unreadable)
         if finding.get('skipped') == 'below_noise_gate':
@@ -90,6 +97,8 @@ def build_night_stats(date, directory):
         outcome = finding.get('outcome')
         outcomes.append(outcome if known_top_level and date >= '2026-07-17' and
                         isinstance(outcome, str) and outcome in OUTCOMES else None)
+    unreadable.update(name for name in ('run-stats.txt', 'categories.tsv')
+                      if (directory / name).exists() and not os.access(directory / name, os.R_OK))
     totals = {key: sum(values) if values and all(value is not None for value in values) else None
               for key, values in activity.items()}
     measured_outcomes = bool(outcomes) and None not in outcomes
@@ -97,7 +106,8 @@ def build_night_stats(date, directory):
                 sessions=dict(top_level=run.get('sessions_top_level'), nested=run.get('sessions_nested')),
                 activity=totals,
                 outcomes={key: outcomes.count(key) if measured_outcomes else None for key in sorted(OUTCOMES)},
-                categories=read_categories(directory / 'categories.tsv'))
+                categories=read_categories(directory / 'categories.tsv'),
+                degraded=['Could not read ' + name + '.' for name in sorted(unreadable)])
 
 
 def valid_date(value):
@@ -416,8 +426,8 @@ class NightCache:
             after = self.fingerprint(date)
             thread_after = fingerprint_files([self.root / 'threads.jsonl'])
             if after != key[0] or (threads is not None and thread_after != self._threads_key[1]):
-                night['degraded'] = ['artifacts changed while reading; retry']
-            else:
+                night['degraded'].append('artifacts changed while reading; retry')
+            elif not night['degraded']:
                 self._nights[cache_key] = (key, copy.deepcopy(night))
             return night
 
@@ -463,6 +473,8 @@ class NightCache:
                 current = ' '.join(result.stdout.split()) or None
         except (OSError, ValueError, subprocess.TimeoutExpired):
             pass
+        if saved and current is None:
+            return dict(row, state='unverified')
         if saved and current != saved:
             return row
         if fingerprint_files([lock / 'pid', lock / 'start']) != before:

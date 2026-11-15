@@ -358,6 +358,9 @@ function renderStats(data) {
   content.replaceChildren(node('h1', 'Stats'), node('p', 'Nightly activity and pipeline health. Gaps mean not measured.', 'intro'));
   const nights = [...data.nights].sort((a, b) => a.date.localeCompare(b.date));
   if (!nights.length) { content.append(node('p', 'No nightly statistics yet.')); return; }
+  for (const night of nights) {
+    for (const notice of night.degraded || []) content.append(node('p', night.date + ': ' + notice, 'notice'));
+  }
   content.append(node('h2', 'Activity'), node('p', 'Activity and outcomes cover top-level sessions.', 'metrics'));
   for (const [key, label] of [['user_messages', 'User messages'], ['tool_calls', 'Tool calls'], ['duration_minutes', 'Duration (minutes)']]) {
     appendChart(content, nights, label, n => n.activity?.[key]);
