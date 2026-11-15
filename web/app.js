@@ -226,26 +226,25 @@ function renderDream(data) {
 let threadRenderer;
 const threadActionStates = new Map();
 let currentView = 'lately';
-async function renderThreads(data, selectedId) {
-  const request = viewRequest;
-  if (!data) {
-    const response = await fetch('/api/threads', {credentials: 'same-origin'});
-    if (!response.ok) throw new Error('Could not read threads. Refresh to retry.');
-    data = await response.json();
-    if (request !== viewRequest) return false;
+let threadFetches = 0;
+function drawThreads(data, seq, selectedId) {
+  for (const [id, state] of threadActionStates) {
+    if (state.settledAt !== undefined && seq > state.settledAt) threadActionStates.delete(id);
   }
   const content = document.getElementById('content');
   if (threadRenderer && content.contains(threadRenderer.element)) threadRenderer.update(data);
   else threadRenderer = mountThreads(content, data, performThreadAction,
     id => threadActionStates.get(id));
   if (selectedId && /^t-[0-9a-f]{8}$/.test(selectedId)) threadRenderer.select(selectedId);
-  return true;
 }
 
-function clearSettledActions(request) {
-  for (const [id, state] of threadActionStates) {
-    if (state.settledAt !== undefined && request > state.settledAt) threadActionStates.delete(id);
-  }
+async function refreshThreads() {
+  const request = viewRequest;
+  const seq = ++threadFetches;
+  const response = await fetch('/api/threads', {credentials: 'same-origin'});
+  if (!response.ok) return;
+  const data = await response.json();
+  if (request === viewRequest && currentView === 'threads') drawThreads(data, seq);
 }
 
 async function performThreadAction(id, action) {
@@ -265,16 +264,13 @@ async function performThreadAction(id, action) {
       });
       return;
     }
-    const settledAt = viewRequest;
-    let rendered = false;
-    if (currentView === 'threads') {
-      try { rendered = await renderThreads(); } catch (_) { rendered = false; }
-    }
-    if (rendered || currentView !== 'threads') threadActionStates.delete(id);
-    else threadActionStates.set(id, {
-      action, pending: false, requiresRefresh: true, settledAt,
+    threadActionStates.set(id, {
+      action, pending: false, requiresRefresh: true, settledAt: threadFetches,
       message: 'Action succeeded. Refresh to read the updated threads.'
     });
+    if (currentView === 'threads') {
+      try { await refreshThreads(); } catch (_) {}
+    }
   } catch (_) {
     threadActionStates.set(id, {
       action, pending: false, requiresRefresh: true,
@@ -435,6 +431,7 @@ async function loadView(view, date) {
   }
   try {
     const path = view === 'stats' ? '/api/stats' : view === 'progress' ? '/api/progress' : view === 'threads' ? '/api/threads' : view === 'dreams' ? '/api/dreams' + (date ? '/' + encodeURIComponent(date) : '') : '/api/lately?days=7';
+    const seq = view === 'threads' ? ++threadFetches : 0;
     const response = await fetch(path, {credentials: 'same-origin'});
     if (!response.ok) throw new Error(response.status === 401 ? 'Run autodream-web open to sign in.' : 'Could not read this view. Reload to retry.');
     const data = await response.json();
@@ -447,10 +444,7 @@ async function loadView(view, date) {
     if (request !== viewRequest) return;
     if (view === 'stats') renderStats(data);
     else if (view === 'progress') renderProgress(data);
-    else if (view === 'threads') {
-      clearSettledActions(request);
-      await renderThreads(data, date);
-    }
+    else if (view === 'threads') drawThreads(data, seq, date);
     else if (view !== 'dreams') renderLately(data);
     else if (date) renderDream(data);
     else {
