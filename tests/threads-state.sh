@@ -13,7 +13,12 @@ FAIL=0
 . "$PORTABLE"
 AS_OF=$(pdate_shift "$(pdate_yesterday)" 1 d) || exit 1
 
-cleanup() { /usr/bin/trash "$TMP"; }
+# Portable delete for test fixtures: /usr/bin/trash exists only on macOS, and CI runs Linux.
+remove_path() { python3 -c 'import os,shutil,sys
+p=sys.argv[1]
+if os.path.isdir(p) and not os.path.islink(p): shutil.rmtree(p)
+elif os.path.lexists(p): os.remove(p)' "$1"; }
+cleanup() { remove_path "$TMP"; }
 trap cleanup EXIT
 
 ok() { PASS=$((PASS + 1)); printf 'ok %s - %s\n' "$PASS" "$1"; }
@@ -61,7 +66,7 @@ EOF
   assert_nonzero "$?" "mktemp failure is reported"
   after_failed_write=$(cat "$dir/threads.jsonl")
   assert_eq "$after_failed_write" "$before" "old state survives"
-  /usr/bin/trash "$shim/mktemp"
+  remove_path "$shim/mktemp"
   cat > "$shim/mv" <<'EOF'
 #!/bin/sh
 exit 1

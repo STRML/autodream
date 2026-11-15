@@ -51,6 +51,12 @@ _owns(){ _idx=$((_idx + 1)); [ $((_idx % _shard_n)) -eq "$_shard_i" ]; }
 # RUNALL_TIMES=<file> appends "<seconds> <name>" for every test and unit suite it runs, so a CI job
 # can show which entries are slow and where a better split would come from.
 _timed(){ [ -n "${RUNALL_TIMES:-}" ] && printf '%s %s\n' "$((SECONDS - $2))" "$1" >> "$RUNALL_TIMES"; return 0; }
+# Portable delete for test fixtures: /usr/bin/trash exists only on macOS, and CI runs Linux.
+remove_path() { python3 -c 'import os,shutil,sys
+p=sys.argv[1]
+if os.path.isdir(p) and not os.path.islink(p): shutil.rmtree(p)
+elif os.path.lexists(p): os.remove(p)' "$1"; }
+
 _run(){
   _owns || return 0
   if [ -n "$_list" ]; then printf '%s\n' "$1"; return 0; fi
@@ -8194,7 +8200,7 @@ test_threads_preledger_index_freezes_original_ideas(){
         mv "$root/legacy.jsonl" "$(thread_state "$root")"
       fi
       if [ "$ledger" = missing ]; then
-        /usr/bin/trash "$root/autodream/threads-idea-offers.tsv"
+        remove_path "$root/autodream/threads-idea-offers.tsv"
       else
         awk -F '\t' '$2 != "111111111111"' "$root/autodream/threads-idea-offers.tsv" > "$root/other.tsv"
         mv "$root/other.tsv" "$root/autodream/threads-idea-offers.tsv"
@@ -8278,7 +8284,7 @@ test_threads_idea_offer_failures_preserve_index(){
     case "$mode" in
       unreadable) chmod 000 "$root/autodream/threads-idea-offers.tsv" ;;
       malformed) printf 'broken ledger\n' > "$root/autodream/threads-idea-offers.tsv" ;;
-      directory) /usr/bin/trash "$root/autodream/threads-idea-offers.tsv"; mkdir "$root/autodream/threads-idea-offers.tsv" ;;
+      directory) remove_path "$root/autodream/threads-idea-offers.tsv"; mkdir "$root/autodream/threads-idea-offers.tsv" ;;
       rename)
         mkdir "$root/shim"
         cat > "$root/shim/mv" <<'EOF_IDEA_MV'
