@@ -357,12 +357,12 @@ web_loaded_argument() {
 }
 
 install_web_agent() {
-  local label="$1" path_val="$2" cmux_bin="$3" claude_bin="$4"
+  local label="$1" path_val="$2" cmux_bin="$3" claude_bin="$4" dreams_xml="$5"
   local la_dir="$HOME/Library/LaunchAgents" domain
   domain="gui/$(id -u)"
   local real_la_dir="$la_dir" web_label="${label}-web" cfg_web="" cfg_port=""
-  local web_off="" python_bin="" web_port="" plist_path="" reports_dir=""
-  local path_xml home_xml target_xml dreams_xml python_xml cmux_xml claude_xml port_xml
+  local web_off="" python_bin="" web_port="" plist_path=""
+  local path_xml home_xml target_xml python_xml cmux_xml claude_xml port_xml
   [ "$DRY" = 1 ] && la_dir="$DRY_SCRATCH"
   cfg_web=$(cfg_get AUTODREAM_WEB)
   cfg_port=$(cfg_get AUTODREAM_WEB_PORT)
@@ -403,8 +403,6 @@ install_web_agent() {
   path_xml=$(xml_escape "$path_val")
   home_xml=$(xml_escape "$HOME")
   target_xml=$(xml_escape "$TARGET")
-  reports_dir="${DREAMS_DIR-$(cfg_get DREAMS_DIR)}"
-  dreams_xml=$(xml_escape "${reports_dir:-$TARGET_PARENT/dreams}")
   python_xml=$(xml_escape "$python_bin")
   cmux_xml=$(xml_escape "$cmux_bin")
   claude_xml=$(xml_escape "$claude_bin")
@@ -480,7 +478,7 @@ ephemeral_dir() { # $1=dir -> 0 when it lives under a temp location
 # `export KEY=value`, quotes and later assignments all read as they will at run time.
 cfg_get() { # $1=variable name
   [ -f "$TARGET/config" ] || return 0
-  bash -c 'unset "$2"; . "$1" >/dev/null 2>&1; v="$2"; printf "%s" "${!v:-}"' _ "$TARGET/config" "$1"
+  AUTODREAM_DIR="$TARGET" bash -c 'unset "$2"; . "$1" >/dev/null 2>&1; v="$2"; printf "%s" "${!v:-}"' _ "$TARGET/config" "$1"
 }
 
 # The directories of the CLIs the nightly runs, one per line: every enabled adapter's, and the L2
@@ -581,6 +579,10 @@ install_schedule() {
   done < <(adapter_bin_dirs "$clean_path")
   local path_val="${path_dirs:+$path_dirs:}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
+  local reports_dir dreams_xml
+  reports_dir="${DREAMS_DIR-$(cfg_get DREAMS_DIR)}"
+  dreams_xml=$(xml_escape "${reports_dir:-$TARGET_PARENT/dreams}")
+
   local target_plist="$la_dir/$label.plist"
   local domain
   domain="gui/$(id -u)"
@@ -613,7 +615,7 @@ install_schedule() {
         <key>PATH</key><string>$path_val</string>
         <key>HOME</key><string>$HOME</string>
         <key>AUTODREAM_DIR</key><string>$TARGET</string>
-        <key>DREAMS_DIR</key><string>$TARGET_PARENT/dreams</string>
+        <key>DREAMS_DIR</key><string>$dreams_xml</string>
     </dict>
     <key>StandardOutPath</key>
     <string>$TARGET/logs/launchd.out.log</string>
@@ -727,7 +729,7 @@ PLIST
     echo "  ! claude binary not usable (config [${cfg_claude}], PATH [${CLAUDE_BIN_ABS}]); review LaunchAgent will abort every trigger"
   fi
   CLAUDE_BIN_XML=$(printf '%s' "$eff_claude" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
-  install_web_agent "$label" "$path_val" "$CMUX_FOUND" "$eff_claude" || return $?
+  install_web_agent "$label" "$path_val" "$CMUX_FOUND" "$eff_claude" "$dreams_xml" || return $?
   local review_label="${label}-review"
   if [ -n "$review_off" ] || [ -z "$CMUX_FOUND" ] || [ -z "$eff_claude" ]; then
     if [ -n "$review_off" ]; then
@@ -784,7 +786,7 @@ PLIST
         <key>PATH</key><string>$path_val</string>
         <key>HOME</key><string>$HOME</string>
         <key>AUTODREAM_DIR</key><string>$TARGET</string>
-        <key>DREAMS_DIR</key><string>$TARGET_PARENT/dreams</string>
+        <key>DREAMS_DIR</key><string>$dreams_xml</string>
         <key>AUTODREAM_TRIAGE_SURFACE</key><string>cmux</string>
         <key>CMUX_BIN</key><string>${CMUX_FOUND_XML}</string>
         <key>CLAUDE_BIN</key><string>${CLAUDE_BIN_XML}</string>

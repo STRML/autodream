@@ -37,7 +37,7 @@ SH
   chmod +x "$SANDBOX/shim/launchctl" "$SANDBOX/bin/cmux" "$SANDBOX/bin/claude"
 }
 run_install() {
-  env HOME="$HOME_TEST" PATH="$SANDBOX/shim:$SANDBOX/bin:/usr/bin:/bin" \
+  env -u AUTODREAM_DIR HOME="$HOME_TEST" PATH="$SANDBOX/shim:$SANDBOX/bin:/usr/bin:/bin" \
     AUTODREAM_CMUX_DEFAULT="$SANDBOX/no-cmux" AUTODREAM_EPHEMERAL_DIRS= \
     bash "$REPO/install.sh" "$@" > "$SANDBOX/install.out" 2>&1
 }
@@ -146,20 +146,33 @@ test_owned_loaded_web_agent_is_reinstalled() {
   assert_grep "$CALLS" "bootout gui/$(id -u)/$NIGHTLY-web" "owned loaded service can be unloaded"
 }
 test_web_reports_directory_precedence() {
-  new_sandbox
-  mkdir -p "$SANDBOX/target/autodream"
-  printf 'export DREAMS_DIR="%s/reports & archive"\n' "$SANDBOX" > "$SANDBOX/target/autodream/config"
-  run_install "$SANDBOX/target"
-  NIGHTLY=$(nightly_label)
-  local plist="$LA/$NIGHTLY-web.plist" reports
-  reports=$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:DREAMS_DIR' "$plist")
-  assert_eq "$reports" "$SANDBOX/reports & archive" "config reports directory reaches the web agent"
-  DREAMS_DIR="$SANDBOX/env-reports" run_install "$SANDBOX/target"
-  reports=$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:DREAMS_DIR' "$plist")
-  assert_eq "$reports" "$SANDBOX/env-reports" "environment reports directory wins over config"
-  DREAMS_DIR='' run_install "$SANDBOX/target"
-  reports=$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:DREAMS_DIR' "$plist")
-  assert_eq "$reports" "$SANDBOX/target/dreams" "an empty environment keeps the installed runner default"
+  local source expected suffix reports
+  for source in relative absolute environment empty; do
+    new_sandbox
+    mkdir -p "$SANDBOX/target/autodream"
+    if [ "$source" = relative ]; then
+      printf 'DREAMS_DIR="$AUTODREAM_DIR/reports"\n' > "$SANDBOX/target/autodream/config"
+      expected="$SANDBOX/target/autodream/reports"
+    else
+      printf 'export DREAMS_DIR="%s/reports & archive"\n' "$SANDBOX" > "$SANDBOX/target/autodream/config"
+      expected="$SANDBOX/reports & archive"
+    fi
+    case "$source" in
+      environment)
+        expected="$SANDBOX/env-reports"
+        DREAMS_DIR="$expected" run_install "$SANDBOX/target" ;;
+      empty)
+        expected="$SANDBOX/target/dreams"
+        DREAMS_DIR='' run_install "$SANDBOX/target" ;;
+      *) run_install "$SANDBOX/target" ;;
+    esac
+    assert_eq "$?" 0 "$source: install succeeds"
+    NIGHTLY=$(nightly_label)
+    for suffix in '' -web -review; do
+      reports=$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:DREAMS_DIR' "$LA/$NIGHTLY$suffix.plist")
+      assert_eq "$reports" "$expected" "$source: $NIGHTLY$suffix uses the resolved reports directory"
+    done
+  done
 }
 _run test_web_reports_directory_precedence
 _run test_owned_loaded_web_agent_is_reinstalled

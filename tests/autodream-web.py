@@ -459,20 +459,35 @@ class WebTests(unittest.TestCase):
         capture = self.root / "handoff.json"
         opener = shim / ("open" if sys.platform == "darwin" else "xdg-open")
         opener.write_text("#!" + sys.executable + "\n" +
-                          "import json, pathlib, stat, sys, urllib.parse\n" +
-                          "p = pathlib.Path(urllib.parse.unquote(urllib.parse.urlsplit(sys.argv[1]).path))\n" +
-                          "pathlib.Path(" + repr(str(capture)) + ").write_text(json.dumps({" +
-                          "'argv': sys.argv, 'html': p.read_text(), 'mode': stat.S_IMODE(p.stat().st_mode)}))\n")
+                          "import json, pathlib, sys\n" +
+                          "pathlib.Path(" + repr(str(capture)) + ").write_text(json.dumps({'argv': sys.argv}))\n")
         opener.chmod(0o755)
+        handoff_path = self.install / "web-login.html"
+        previous = self.root / "previous-handoff"
+        previous.write_text("untouched")
+        handoff_path.symlink_to(previous)
         result = self.run_command("open", env=dict(self.env, AUTODREAM_WEB_PORT=str(self.port),
                                   PATH=str(shim) + os.pathsep + os.environ["PATH"]))
         self.assertEqual(result.returncode, 0, result.stderr)
         handoff = json.loads(capture.read_text())
         self.assertNotIn(self.token, " ".join(handoff["argv"]))
-        self.assertEqual(handoff["mode"], 0o600)
-        self.assertIn(self.origin + "/login?t=" + self.token, handoff["html"])
-        self.assertIn('http-equiv="refresh"', handoff["html"])
-        self.assertFalse(Path(urllib.parse.unquote(urllib.parse.urlsplit(handoff["argv"][1]).path)).exists())
+        opened_path = Path(urllib.parse.unquote(urllib.parse.urlsplit(handoff["argv"][1]).path))
+        self.assertTrue(opened_path.exists(), "browser handoff must survive the opener returning")
+        self.assertEqual(opened_path, handoff_path)
+        self.assertFalse(handoff_path.is_symlink())
+        self.assertEqual(previous.read_text(), "untouched")
+        self.assertEqual(stat.S_IMODE(handoff_path.stat().st_mode), 0o600)
+        page = handoff_path.read_text()
+        self.assertIn(self.origin + "/login?t=" + self.token, page)
+        self.assertIn('http-equiv="refresh"', page)
+        for query in ("", "?t=wrong", "?t=" + self.token + "&t=wrong"):
+            with self.subTest(query=query):
+                self.assertEqual(self.request("GET", "/login" + query).status, 401)
+                self.assertEqual(handoff_path.read_text(), page)
+        cookie = self.login()
+        self.assertFalse(handoff_path.exists())
+        self.assertEqual(self.request("GET", "/", cookie=cookie).status, 200)
+        self.login()
 
     def test_web_open_uses_config_and_environment_precedence(self):
         self.start_server()
