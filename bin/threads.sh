@@ -37,6 +37,7 @@ fi
 
 STATE=${AUTODREAM_THREADS_STATE:-$AUTODREAM_DIR/threads.jsonl}
 LOCK="$STATE.lock"
+THREADS_LOCK_OWNER=""
 DROPPED_DAYS=${AUTODREAM_THREADS_DROPPED_DAYS:-7}
 
 threads_error() { printf 'threads: %s\n' "$1" >&2; }
@@ -82,6 +83,9 @@ threads_read_state() {
 
 threads_acquire_lock() {
   local attempts=0 lock_mtime now age
+  THREADS_LOCK_OWNER=""
+  now=$(pdate_epoch "$(date '+%Y-%m-%d %H:%M:%S')") || return 1
+  local token="$$-$now-$RANDOM"
   while ! mkdir "$LOCK" 2>/dev/null; do
     if [ -d "$LOCK" ]; then
       lock_mtime=$(pstat_mtime "$LOCK") || lock_mtime=""
@@ -89,8 +93,9 @@ threads_acquire_lock() {
       if [ -n "$lock_mtime" ] && [ -n "$now" ]; then
         age=$((now - lock_mtime))
         if [ "$age" -gt 120 ]; then
-          rmdir "$LOCK" 2>/dev/null || true
-          continue
+          if { [ ! -e "$LOCK/owner" ] || unlink "$LOCK/owner" 2>/dev/null; } && rmdir "$LOCK" 2>/dev/null; then
+            continue
+          fi
         fi
       fi
     fi
@@ -101,15 +106,37 @@ threads_acquire_lock() {
     attempts=$((attempts + 1))
     sleep 1
   done
+  THREADS_LOCK_OWNER=$token
+  if ! printf '%s\n' "$THREADS_LOCK_OWNER" > "$LOCK/owner"; then
+    threads_error "cannot record lock ownership at $LOCK"
+    rmdir "$LOCK" 2>/dev/null || true
+    THREADS_LOCK_OWNER=""
+    return 1
+  fi
   return 0
 }
 
-threads_release_lock() { rmdir "$LOCK" 2>/dev/null || true; }
+threads_check_lock() {
+  local owner=""
+  if [ -n "$THREADS_LOCK_OWNER" ] &&
+     { IFS= read -r owner < "$LOCK/owner"; } 2>/dev/null &&
+     [ "$owner" = "$THREADS_LOCK_OWNER" ]; then
+    return 0
+  fi
+  threads_error "lock was reclaimed by another writer"
+  return 1
+}
+
+threads_release_lock() {
+  threads_check_lock || return 1
+  unlink "$LOCK/owner" && rmdir "$LOCK" || return 1
+  THREADS_LOCK_OWNER=""
+}
 
 threads_write_state() {
   local next_file=$1 temp_file
   temp_file=$(mktemp "$STATE.XXXXXX" 2>/dev/null) || return 1
-  if cat "$next_file" > "$temp_file" 2>/dev/null && mv -f "$temp_file" "$STATE" 2>/dev/null; then
+  if cat "$next_file" > "$temp_file" 2>/dev/null && threads_check_lock && mv -f "$temp_file" "$STATE" 2>/dev/null; then
     return 0
   fi
   unlink "$temp_file" 2>/dev/null || true
@@ -227,7 +254,6 @@ threads_render_unlocked() {
     printf '%s\n' "$state" | AUTODREAM_THREADS_CLI="$threads_cli" python3 "$renderer" - "$output" --as-of "$as_of"
   fi
   if [ "$?" -eq 0 ]; then
-    printf 'threads_render: ok\n'
     return 0
   fi
   threads_error "dashboard render failed"
@@ -238,35 +264,51 @@ threads_render_unlocked() {
 threads_render() {
   local output state fingerprint current_fingerprint attempt temp_file
   output="${DREAMS_DIR:-${HOME:-}/.claude/dreams}/threads.html"
-  mkdir -p "$(dirname "$STATE")" "$(dirname "$output")" || { threads_error "cannot create render directory"; return 1; }
+  mkdir -p "$(dirname "$STATE")" "$(dirname "$output")" || {
+    threads_error "cannot create render directory"
+    printf 'threads_render: failed\n'
+    return 1
+  }
   attempt=1
   while [ "$attempt" -le 3 ]; do
-    threads_acquire_lock || return 1
+    threads_acquire_lock || { printf 'threads_render: stale\n'; return 1; }
     if ! state=$(threads_read_state); then
-      threads_release_lock
+      threads_release_lock || { printf 'threads_render: stale\n'; return 1; }
       printf 'threads_render: skipped_unreadable\n'
       return 1
     fi
     if [ -f "$STATE" ]; then fingerprint=$(shasum -a 256 "$STATE" | awk '{print $1}') || fingerprint=""
     else fingerprint=missing
     fi
-    threads_release_lock
-    [ -n "$fingerprint" ] || { threads_error "cannot fingerprint thread state"; return 1; }
-    temp_file=$(mktemp "$(dirname "$output")/.threads.html.XXXXXX") || return 1
+    threads_release_lock || { printf 'threads_render: stale\n'; return 1; }
+    [ -n "$fingerprint" ] || { threads_error "cannot fingerprint thread state"; printf 'threads_render: failed\n'; return 1; }
+    temp_file=$(mktemp "$(dirname "$output")/.threads.html.XXXXXX") || { printf 'threads_render: failed\n'; return 1; }
     if ! threads_render_unlocked "$state" "$temp_file"; then
       unlink "$temp_file" 2>/dev/null || true
       return 1
     fi
-    threads_acquire_lock || { unlink "$temp_file" 2>/dev/null || true; return 1; }
+    threads_acquire_lock || { unlink "$temp_file" 2>/dev/null || true; printf 'threads_render: stale\n'; return 1; }
     if [ -f "$STATE" ]; then current_fingerprint=$(shasum -a 256 "$STATE" | awk '{print $1}') || current_fingerprint=""
     else current_fingerprint=missing
     fi
-    if [ "$fingerprint" = "$current_fingerprint" ] && mv -f "$temp_file" "$output"; then
-      threads_release_lock
-      printf 'threads_render: ok\n'
-      return 0
+    if ! threads_check_lock; then
+      unlink "$temp_file" 2>/dev/null || true
+      printf 'threads_render: stale\n'
+      return 1
     fi
-    threads_release_lock
+    if [ "$fingerprint" = "$current_fingerprint" ]; then
+      if mv -f "$temp_file" "$output"; then
+        threads_release_lock || { printf 'threads_render: stale\n'; return 1; }
+        printf 'threads_render: ok\n'
+        return 0
+      fi
+      threads_error "dashboard publish failed"
+      threads_release_lock || true
+      unlink "$temp_file" 2>/dev/null || true
+      printf 'threads_render: failed\n'
+      return 1
+    fi
+    threads_release_lock || { unlink "$temp_file" 2>/dev/null || true; printf 'threads_render: stale\n'; return 1; }
     unlink "$temp_file" 2>/dev/null || true
     attempt=$((attempt + 1))
   done
@@ -350,7 +392,7 @@ threads_set_status() {
     rc=1
   fi
   unlink "$next_file" 2>/dev/null || true
-  threads_release_lock
+  threads_release_lock || rc=1
   trap - EXIT HUP INT TERM
   if [ "$rc" -eq 0 ]; then threads_render || true; fi
   return "$rc"
@@ -960,7 +1002,7 @@ PY_SORT
         threads_error "could not merge thread assignments"
         link_status=failed
       fi
-      threads_release_lock
+      threads_release_lock || { link_status=failed; linked=0; }
     fi
   fi
   unassigned=$((candidate_count - linked))

@@ -32,8 +32,12 @@ root = sys.argv[1]
 def fail(error):
     print("snapshot error: %s" % error, file=sys.stderr)
     raise SystemExit(1)
-if not os.path.lexists(root):
+try:
+    os.lstat(root)
+except FileNotFoundError:
     print("absent")
+except OSError as error:
+    fail(error)
 else:
     try:
         for current, dirs, files in os.walk(root, onerror=fail):
@@ -92,8 +96,16 @@ done
 
 echo
 echo "----------------------------------------"
-dreams_after=$(snapshot_real_dreams)
-if [ "$dreams_before" = "$dreams_after" ]; then
+if dreams_after=$(snapshot_real_dreams); then
+  snapshot_ok=1
+else
+  snapshot_ok=0
+  echo "FAIL: real dreams snapshot after parallel tests" >&2
+fi
+if [ "$snapshot_ok" -eq 0 ]; then
+  fail=$((fail + 1))
+  bad=1
+elif [ "$dreams_before" = "$dreams_after" ]; then
   pass=$((pass + 1))
   echo "  ok   - tests leave real $REAL_DREAMS unchanged with a sentinel HOME"
 else

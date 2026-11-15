@@ -263,6 +263,86 @@ test_threads_reclaims_stale_lock() {
   assert_eq "$rc" 0 "lock older than 120 seconds is reclaimed"
 }
 
+wait_for_gate() {
+  local marker=$1 tries=0
+  while [ ! -e "$marker" ] && [ "$tries" -lt 200 ]; do sleep 0.05; tries=$((tries + 1)); done
+  [ -e "$marker" ]
+}
+
+test_threads_reclaimed_owner_cannot_write_or_release() {
+  local phase dir a b rc owner before old stamp name
+  local command_args
+  for phase in read hash1 hash2 write; do
+    dir="$TMP/reclaimed-$phase"
+    seed "$dir"
+    mkdir -p "$dir/bin" "$dir/dreams"
+    printf 'previous page\n' > "$dir/dreams/threads.html"
+    before=$(shasum "$dir/threads.jsonl")
+    cat > "$dir/bin/gate" <<'GATE'
+#!/bin/bash
+name=${0##*/}
+block=0
+case "$name:$THREAD_GATE_PHASE:$*" in
+  jq:read:*"$AUTODREAM_DIR/threads.jsonl"*) block=1 ;;
+  shasum:hash*:*"$AUTODREAM_DIR/threads.jsonl"*)
+    n=0; [ ! -f "$THREAD_GATE.count" ] || read -r n < "$THREAD_GATE.count"
+    n=$((n + 1)); printf '%s\n' "$n" > "$THREAD_GATE.count"
+    [ "hash$n" != "$THREAD_GATE_PHASE" ] || block=1 ;;
+  cat:write:*threads-next.*) block=1 ;;
+esac
+if [ "$block" -eq 1 ] && [ ! -e "$THREAD_GATE" ]; then
+  : > "$THREAD_GATE"
+  tries=0
+  while [ ! -e "$THREAD_GATE.release" ] && [ "$tries" -lt 400 ]; do sleep 0.05; tries=$((tries + 1)); done
+  [ -e "$THREAD_GATE.release" ] || exit 99
+fi
+case "$name" in
+  jq) exec "$REAL_JQ" "$@" ;;
+  shasum) exec "$REAL_SHASUM" "$@" ;;
+  cat) exec /bin/cat "$@" ;;
+esac
+GATE
+    chmod +x "$dir/bin/gate"
+    for name in jq shasum cat; do ln -s gate "$dir/bin/$name"; done
+    command_args=(render)
+    if [ "$phase" = write ]; then command_args=(close t-00000001); fi
+    REAL_JQ=$(command -v jq) REAL_SHASUM=$(command -v shasum) \
+      THREAD_GATE="$dir/a" THREAD_GATE_PHASE="$phase" PATH="$dir/bin:$PATH" \
+      AUTODREAM_DIR="$dir" DREAMS_DIR="$dir/dreams" \
+      /bin/bash "$THREADS" "${command_args[@]}" > "$dir/a.out" 2>&1 &
+    a=$!
+    if ! wait_for_gate "$dir/a"; then
+      no "$phase: A reached locked work"; wait "$a"; continue
+    fi
+    old=$(pdate_epoch "$(date '+%Y-%m-%d %H:%M:%S')"); old=$((old - 121))
+    stamp=$(pdate_fmt_epoch "$old" +%Y%m%d%H%M.%S)
+    touch -t "$stamp" "$dir/threads.jsonl.lock"
+    REAL_JQ=$(command -v jq) REAL_SHASUM=$(command -v shasum) \
+      THREAD_GATE="$dir/b" THREAD_GATE_PHASE=write PATH="$dir/bin:$PATH" \
+      AUTODREAM_DIR="$dir" DREAMS_DIR="$dir/dreams" \
+      /bin/bash "$THREADS" close t-00000002 > "$dir/b.out" 2>&1 &
+    b=$!
+    if ! wait_for_gate "$dir/b"; then
+      no "$phase: B reclaimed the aged live lock"
+      : > "$dir/a.release"; : > "$dir/b.release"; wait "$a"; wait "$b"; continue
+    fi
+    owner=$(cat "$dir/threads.jsonl.lock/owner" 2>/dev/null || true)
+    : > "$dir/a.release"
+    wait "$a"; rc=$?
+    assert_nonzero "$rc" "$phase: reclaimed A refuses publication"
+    assert_eq "$(shasum "$dir/threads.jsonl")" "$before" "$phase: A preserves state"
+    assert_eq "$(head -1 "$dir/dreams/threads.html")" 'previous page' "$phase: A preserves dashboard"
+    [ -d "$dir/threads.jsonl.lock" ] && ok "$phase: A leaves B lock" || no "$phase: A removed B lock"
+    assert_eq "$(cat "$dir/threads.jsonl.lock/owner" 2>/dev/null || true)" "$owner" "$phase: B owner survives"
+    grep -q 'lock was reclaimed by another writer' "$dir/a.out" && ok "$phase: lost ownership disclosed" || no "$phase: lost ownership undisclosed"
+    : > "$dir/b.release"
+    wait "$b"; rc=$?
+    assert_eq "$rc" 0 "$phase: B completes normally"
+    assert_eq "$(jq -r 'select(.id == "t-00000002") | .status' "$dir/threads.jsonl")" closed_by_sam "$phase: B state committed"
+    [ ! -d "$dir/threads.jsonl.lock" ] && ok "$phase: B releases its lock" || no "$phase: B lock remains"
+  done
+}
+
 for test_name in \
   test_threads_close_and_reopen \
   test_threads_state_write_is_atomic \
@@ -282,7 +362,8 @@ for test_name in \
   test_threads_search_treats_metacharacters_literally \
   test_threads_dropped_days_accepts_leading_zero \
   test_threads_environment_overrides_config \
-  test_threads_reclaims_stale_lock; do
+  test_threads_reclaims_stale_lock \
+  test_threads_reclaimed_owner_cannot_write_or_release; do
   "$test_name"
 done
 

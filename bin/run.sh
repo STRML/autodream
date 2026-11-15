@@ -2258,19 +2258,20 @@ threads_unassigned: 0"
 }
 
 run_threads_dashboard() {
-  local renderer output status
+  local renderer output status rc=0
   renderer=$(find_lib threads.sh) || renderer=""
   if [ -n "$renderer" ]; then
     output=$(env AUTODREAM_DIR="$AUTODREAM_DIR" DREAMS_DIR="$DREAMS_DIR" \
-      /bin/bash "$renderer" render 2>> "$RUN_LOG") || true
+      /bin/bash "$renderer" render 2>> "$RUN_LOG") || rc=$?
     status=$(printf '%s\n' "$output" | sed -n 's/^threads_render: //p' | tail -1)
   else
     status=failed
   fi
-  case "$status" in ok|failed|skipped_unreadable) ;; *) status=failed ;; esac
+  case "$status" in ok|stale|failed|skipped_unreadable) ;; *) status=failed ;; esac
+  if [ "$rc" -ne 0 ] && [ "$status" = ok ]; then status=failed; fi
   THREADS_SUMMARY="${THREADS_SUMMARY}
 threads_render: $status"
-  [ "$status" != failed ] || log "WARNING: thread dashboard render failed; output was not replaced"
+  case "$status" in failed|stale) log "WARNING: thread dashboard render $status; output was not replaced" ;; esac
   return 0
 }
 

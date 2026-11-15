@@ -8507,6 +8507,52 @@ test_threads_render_failure_preserves_previous_page(){
   thread_cleanup "$root"
 }
 
+test_threads_publish_failure_reports_final_status(){
+  echo "# threads: publish lock and rename failures preserve the page and report final status"
+  local root mode expected_status
+  for mode in locked rename; do
+    root=$(setup_env)
+    printf 'previous dashboard\n' > "$root/dreams/threads.html"
+    mkdir -p "$root/render-bin"
+    cat > "$root/render-bin/python3" <<'PUBLISH_LOCK'
+#!/bin/bash
+case "$1" in
+  */threads-render.py)
+    /usr/bin/python3 "$@" || exit $?
+    : > "$AUTODREAM_DIR/temporary-render-complete"
+    if [ "$THREAD_PUBLISH_FAILURE" = locked ]; then
+      mkdir "$AUTODREAM_DIR/threads.jsonl.lock" || exit 1
+      printf 'competing-writer\n' > "$AUTODREAM_DIR/threads.jsonl.lock/owner"
+    fi
+    exit 0
+    ;;
+esac
+exec /usr/bin/python3 "$@"
+PUBLISH_LOCK
+    cat > "$root/render-bin/mv" <<'PUBLISH_RENAME'
+#!/bin/bash
+if [ "$THREAD_PUBLISH_FAILURE" = rename ] && [ "${3:-}" = "$DREAMS_DIR/threads.html" ]; then
+  : > "$AUTODREAM_DIR/publish-rename-refused"
+  exit 1
+fi
+exec /bin/mv "$@"
+PUBLISH_RENAME
+    chmod +x "$root/render-bin/python3" "$root/render-bin/mv"
+    THREAD_PUBLISH_FAILURE="$mode" PATH="$root/render-bin:$PATH" run_dream "$root"
+    expected_status=stale; [ "$mode" != rename ] || expected_status=failed
+    assert_file "$root/autodream/temporary-render-complete" "temporary rendering succeeded before publication"
+    assert_eq "$(cat "$root/dreams/threads.html")" 'previous dashboard' "failed publication preserves prior page"
+    assert_grep "$(fdir "$root")/run-stats.txt" "^threads_render: $expected_status$" "$mode: failed publish status reaches nightly statistics"
+    assert_nogrep "$(fdir "$root")/run-stats.txt" '^threads_render: ok$' "temporary render never reports publish success"
+    if [ "$mode" = locked ]; then
+      assert_grep "$root/autodream/logs/run-$DATE.log" 'lock is held' "publish lock refusal was reached"
+    else
+      assert_file "$root/autodream/publish-rename-refused" "final page rename failure was reached"
+    fi
+    thread_cleanup "$root"
+  done
+}
+
 test_threads_html_payload_is_inert(){
   echo "# threads: hostile state renders as inert JSON and text"
   local root hostile state page baseline result
@@ -8750,6 +8796,7 @@ _run test_threads_backfill_accepts_claude_isSidechain_sidecar
 _run test_threads_backfill_reads_unterminated_manifest_root
 _run test_threads_backfill_budget_uses_grown_index_request
 _run test_threads_install_links_entrypoint
+_run test_threads_publish_failure_reports_final_status
 _run test_threads_render_failure_preserves_previous_page
 _run test_threads_html_payload_is_inert
 _run test_threads_render_runs_on_empty_night_and_cli_write
