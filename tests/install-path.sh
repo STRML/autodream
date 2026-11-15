@@ -37,6 +37,7 @@ new_sandbox() { # sets SANDBOX FAKE_HOME LA CALLS; fake launchctl, cmux and clau
   mkdir -p "$LA" "$SANDBOX/shim" "$SANDBOX/bin"
   CALLS="$SANDBOX/launchctl-calls"; : > "$CALLS"
   printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s"\n' "$CALLS" > "$SANDBOX/shim/launchctl"
+  printf '[ "$1" = print ] && exit 113\nexit 0\n' >> "$SANDBOX/shim/launchctl"
   chmod +x "$SANDBOX/shim/launchctl"
   fake "$SANDBOX/bin/cmux"; fake "$SANDBOX/bin/claude"
 }
@@ -49,7 +50,7 @@ run_install() {
   env HOME="$FAKE_HOME" PATH="$p" AUTODREAM_CMUX_DEFAULT="$SANDBOX/no-such-cmux" \
       ${envs[@]+"${envs[@]}"} bash "$REPO/install.sh" "$@" > "$SANDBOX/install.out" 2>&1
 }
-nightly_plist() { local f; for f in "$LA"/*.plist; do case "$f" in *-review.plist) ;; *) echo "$f"; return ;; esac; done; }
+nightly_plist() { local f; for f in "$LA"/*.plist; do case "$f" in *-review.plist|*-web.plist) ;; *) echo "$f"; return ;; esac; done; }
 review_plist()  { ls "$LA"/*-review.plist 2>/dev/null | head -1; }
 # The PATH string of a plist file, or of the first plist a dry run printed.
 plist_path()    { sed -n 's|.*<key>PATH</key><string>\(.*\)</string>.*|\1|p' "$1" | head -1; }
@@ -77,7 +78,7 @@ mkdir -p "$SANDBOX/ephemeral/shims"; fake "$SANDBOX/ephemeral/shims/claude"; rm 
 run_install "$SANDBOX/shim:$SANDBOX/ephemeral/shims:$SANDBOX/bin:/usr/bin:/bin" \
   AUTODREAM_EPHEMERAL_DIRS="$SANDBOX/ephemeral" -- "$SANDBOX/target"; rc=$?
 assert_eq "$rc" "0" "the install succeeds"
-assert_eq "$(ls "$LA"/*.plist | wc -l | tr -d ' ')" "1" "only the nightly agent is provisioned"
+assert_eq "$(ls "$LA"/*.plist | wc -l | tr -d ' ')" "2" "the nightly and web agents are provisioned"
 assert_grep "$SANDBOX/install.out" "claude binary not usable" "and it says why the review agent was skipped"
 assert_nogrep "$(nightly_plist)" "$SANDBOX/ephemeral" "no temp path in the nightly plist"
 
@@ -95,12 +96,12 @@ assert_eq "$rc" "0" "the install succeeds"
 has_dir "$(plist_path "$(nightly_plist)")" "$SANDBOX/bin" && ok "a fake-tool dir under TMPDIR is kept" || no "a fake-tool dir under TMPDIR is kept"
 assert_nogrep "$SANDBOX/install.out" "ignoring PATH entries" "and nothing is reported as ignored"
 
-echo "# --no-review provisions the nightly agent only"
+echo "# --no-review provisions the nightly and web agents only"
 new_sandbox
 run_install "$(basepath):$SANDBOX/bin" AUTODREAM_EPHEMERAL_DIRS= -- --no-review "$SANDBOX/target"; rc=$?
 assert_eq "$rc" "0" "the install succeeds"
 [ -z "$(review_plist)" ] && ok "no review plist is written" || no "no review plist is written"
-assert_eq "$(grep -c '^bootstrap' "$CALLS")" "1" "only the nightly agent is bootstrapped"
+assert_eq "$(grep -c '^bootstrap' "$CALLS")" "2" "the nightly and web agents are bootstrapped"
 grep -qE "^bootout .*-review$" "$CALLS" && ok "any review job already loaded is booted out" || no "any review job already loaded is booted out"
 assert_grep "$SANDBOX/install.out" "not provisioned (--no-review)" "the install says why"
 

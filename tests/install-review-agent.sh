@@ -28,6 +28,7 @@ new_sandbox() { # -> sets SANDBOX, FAKE_HOME, LA, CALLS; fake cmux and claude un
   printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s"\n' "$CALLS" > "$SANDBOX/shim/launchctl"
   printf '#!/bin/bash\nexit 0\n' > "$SANDBOX/bin/cmux"
   printf '#!/bin/bash\nexit 0\n' > "$SANDBOX/bin/claude"
+  printf '[ "$1" = print ] && exit 113\nexit 0\n' >> "$SANDBOX/shim/launchctl"
   chmod +x "$SANDBOX/shim/launchctl" "$SANDBOX/bin/cmux" "$SANDBOX/bin/claude"
 }
 run_install() { # runs the installer into $SANDBOX/target
@@ -37,13 +38,13 @@ run_install() { # runs the installer into $SANDBOX/target
 }
 review_plist() { ls "$LA"/*-review.plist 2>/dev/null | head -1; }
 
-echo "# a normal install provisions both agents"
+echo "# a normal install provisions the nightly, web, and review agents"
 new_sandbox
 run_install; rc=$?
 assert_eq "$rc" "0" "the install succeeds"
 P=$(review_plist)
 [ -n "$P" ] && ok "a review plist was written beside the nightly one" || no "a review plist was written beside the nightly one"
-NIGHTLY=""; for f in "$LA"/*.plist; do case "$f" in *-review.plist) ;; *) NIGHTLY="$f" ;; esac; done
+NIGHTLY=""; for f in "$LA"/*.plist; do case "$f" in *-review.plist|*-web.plist) ;; *) NIGHTLY="$f" ;; esac; done
 assert_eq "$(basename "$P" .plist)" "$(basename "$NIGHTLY" .plist)-review" "its label is the nightly label plus -review"
 assert_grep "$P" 'exec "$1" "$(date -v-1d +%Y-%m-%d)"' "yesterday's date is evaluated at fire time, not frozen at install"
 assert_grep "$P" "$SANDBOX/target/autodream/review.sh" "it runs the installed review.sh"
@@ -52,7 +53,7 @@ assert_grep "$P" "<key>CLAUDE_BIN</key><string>$SANDBOX/bin/claude</string>" "so
 assert_grep "$P" '<key>AUTODREAM_TRIAGE_SURFACE</key><string>cmux</string>' "and the triage surface"
 assert_eq "$(grep -c '<key>Hour</key>' "$P")" "5" "it fires on five morning and afternoon triggers"
 assert_grep "$CALLS" "bootstrap" "launchctl bootstrap was called"
-assert_eq "$(grep -c '^bootstrap' "$CALLS")" "2" "once per agent"
+assert_eq "$(grep -c '^bootstrap' "$CALLS")" "3" "once per agent"
 assert_grep "$SANDBOX/install.out" "daily 08:00/09:15/12:15/15:30/18:15" "the install says when it fires"
 
 echo "# without cmux there is no review agent, and a stale one is unloaded"
@@ -63,7 +64,7 @@ assert_eq "$rc" "0" "the install still succeeds"
 [ -z "$(review_plist)" ] && ok "no review plist is written" || no "no review plist is written"
 assert_grep "$SANDBOX/install.out" "cmux not found" "the install says why"
 grep -qE "^bootout .*-review$" "$CALLS" && ok "any previously provisioned review job is booted out" || no "any previously provisioned review job is booted out"
-assert_eq "$(grep -c '^bootstrap' "$CALLS")" "1" "only the nightly agent is bootstrapped"
+assert_eq "$(grep -c '^bootstrap' "$CALLS")" "2" "the nightly and web agents are bootstrapped"
 
 echo "# a stale review plist is removed, not just unloaded, when cmux disappears"
 new_sandbox

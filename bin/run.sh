@@ -2321,6 +2321,19 @@ write_pin_projects() {
     && mv "$dir/pin-projects.tsv.tmp" "$dir/pin-projects.tsv"
 }
 
+write_session_cwds() {
+  local dir=$1 tmp
+  rm -f "$dir/session-cwds.tsv" || return 1
+  [ "${PIN_PROJECTS_BUILT:-0}" = "1" ] || return 1
+  tmp=$(mktemp "$dir/session-cwds.tsv.tmp.XXXXXX") || return 1
+  if { [ -n "$SESSION_CWDS_TSV" ] && printf '%s\n' "$SESSION_CWDS_TSV"; } > "$tmp" \
+     && mv -f "$tmp" "$dir/session-cwds.tsv"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
 # $1=findings dir -> puts pins-applied.tsv back to what it held before any model ran (or removes
 # it when it did not exist). Fails when it cannot.
 restore_pins_ledger() {
@@ -3949,9 +3962,11 @@ EOF
   # held in this shell's memory until the pins are applied after the report.
   PIN_PROJECTS_BUILT=0
   PIN_PROJECTS_TSV=""
+  SESSION_CWDS_TSV=""
   SESSION_ROWS=""
   if SESSION_ROWS=$(session_rows "$FINDINGS_DIR") \
-     && PIN_PROJECTS_TSV=$(printf '%s\n' "$SESSION_ROWS" | pin_projects_from_rows); then
+     && PIN_PROJECTS_TSV=$(printf '%s\n' "$SESSION_ROWS" | pin_projects_from_rows) \
+     && SESSION_CWDS_TSV=$(printf '%s\n' "$SESSION_ROWS" | awk -F'\t' 'NF >= 3 { print $1 "\t" $3 }'); then
     PIN_PROJECTS_BUILT=1
   else
     log "WARNING: could not build the pin authorization list; this run will not store memory pins"
@@ -4978,6 +4993,7 @@ PY
     fi
     L2_COMPLETE=0
     if report_has_sentinel "$L2_STDOUT"; then
+      write_session_cwds "$FINDINGS_DIR" || log "WARNING: could not write session-cwds.tsv; Lately will fall back to project buckets"
       if report_body "$L2_STDOUT" > "$REPORT_PATH.tmp" && mv "$REPORT_PATH.tmp" "$REPORT_PATH"; then
         L2_COMPLETE=1
       else

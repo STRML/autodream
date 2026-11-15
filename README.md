@@ -111,6 +111,13 @@ installs the nightly without it, and removes one an earlier install wrote. The f
 run only; put `AUTODREAM_REVIEW_AGENT=0` in `~/.claude/autodream/config` (or the environment) to keep
 a re-install from provisioning it again.
 
+Install also provisions a local web dashboard LaunchAgent, `<label>-web`, on
+`127.0.0.1:8765`. Run `~/.claude/autodream/autodream-web open` to sign in from
+this Mac. Set `AUTODREAM_WEB_PORT` to change the port. Use `./install.sh --no-web`
+for one install, or set `AUTODREAM_WEB=0` in the environment or config to keep
+the dashboard disabled across installs. The service restarts after failures and
+stays stopped after a successful exit, including when another process owns its port.
+
 launchd starts the job with no login shell, so the plist carries a fixed PATH. Install builds it
 from the directories of `claude`, `git` and `bash`, plus the CLI of every enabled adapter (`omp`
 when `--adapters` includes it, or `OMP_BIN` from the config), and the L2 engine's (`--l2-engine`). A directory under a temp location is

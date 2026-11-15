@@ -1,0 +1,29 @@
+#!/bin/bash
+set -eu
+
+_src="${BASH_SOURCE[0]}"
+_real="$_src"
+while [ -L "$_real" ]; do
+  _target=$(readlink "$_real")
+  case "$_target" in
+    /*) _real="$_target" ;;
+    *) _real="$(dirname "$_real")/$_target" ;;
+  esac
+done
+_code=$(cd "$(dirname "$_real")" && pwd)
+# shellcheck source=bin/lib-install-dir.sh
+. "$_code/lib-install-dir.sh"
+resolve_install_dir "$_src"
+export AUTODREAM_DIR
+_config="${AUTODREAM_CONFIG:-$AUTODREAM_DIR/config}"
+if [ -f "$_config" ]; then
+  _environment=$(export -p)
+  set +u
+  set -a
+  # shellcheck source=/dev/null
+  . "$_config"
+  set +a
+  eval "$_environment"
+  set -u
+fi
+exec python3 "$_code/autodream-web.py" "$@"

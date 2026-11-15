@@ -5671,6 +5671,7 @@ test_pins_applied_after_complete_report(){
   assert_eq "$(sm_calls "$root")" "1" "one remember call"
   assert_eq "$(jq -r .cwd "$root/sm-calls.jsonl" 2>/dev/null)" "$cwd" "scoped to the session's working directory"
   assert_grep "$d/pin-projects.tsv" "^$b"$'\t'"$cwd\$" "pin-projects.tsv pairs the bucket with its cwd"
+  assert_grep "$d/session-cwds.tsv" $'\t'"$cwd\$" "session-cwds.tsv retains each runner-resolved cwd"
   assert_nonempty "$d/pins-applied.tsv" "the ledger records the stored pin"
   assert_grep "$root/run.out" 'memory pins:' "the run log reports the pin counts"
   # The pins and their authorization list land before the report does (issue 72), so a complete
@@ -7217,8 +7218,8 @@ if [ -z "$_list" ]; then
 fi
 # The suites that drive launchd need plutil and launchctl, so they run on macOS only (CI runs
 # them in launchd.yml, when a launchd file changes).
-_suites="portable rollup lib-project preflight adapters adapter-claude adapter-omp adapter-contract threads-state slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux review-prompt notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt shard"
-[ "$(uname -s)" = Darwin ] && _suites="$_suites scheduler-label autodream-now install-review-agent install-dry-run install-dir install-skill"
+_suites="portable rollup lib-project preflight adapters adapter-claude adapter-omp adapter-contract threads-state slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux review-prompt notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt autodream-web shard"
+[ "$(uname -s)" = Darwin ] && _suites="$_suites scheduler-label autodream-now install-review-agent install-web-agent install-dry-run install-dir install-skill"
 for _suite in $_suites; do
   _owns || continue
   if [ -n "$_list" ]; then printf 'suite:%s\n' "$_suite"; continue; fi
