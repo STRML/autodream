@@ -157,9 +157,16 @@ function appendNotices(parent, data) {
 const OUTCOME_GLYPHS = [['fully_or_mostly', '✓', 'done'], ['partially', '◐', 'partial'],
   ['not_achieved', '✗', 'not achieved'], ['unclear', '?', 'unclear'], ['unmeasured', '○', 'unmeasured']];
 
-function shortRepo(repo) {
-  const parts = String(repo || '').split('/').filter(Boolean);
-  return parts.length ? parts[parts.length - 1] : String(repo || '—');
+function shortRepoNames(repos) {
+  const split = repos.map(repo => String(repo || '').split('/').filter(Boolean));
+  return split.map((parts, index) => {
+    if (!parts.length) return String(repos[index] || '—');
+    for (let depth = 1; depth <= parts.length; depth++) {
+      const name = parts.slice(-depth).join('/');
+      if (split.every((other, j) => j === index || other.slice(-depth).join('/') !== name)) return name;
+    }
+    return String(repos[index]);
+  });
 }
 
 function totalMinutes(sessions) {
@@ -192,8 +199,8 @@ function sessionLine(session) {
     not_achieved: '✗', unclear_from_transcript: '?'})[session.outcome] || '○';
   item.append(node('span', glyph, 'session-outcome'));
   item.append(node('span', measured(session.goal), 'goal'));
-  item.append(node('span', `${duration(session.duration_minutes)} · ${measured(session.user_messages)} msgs · ${measured(session.tool_calls)} tools`, 'metrics'));
-  item.title = outcomeLabel(session.outcome);
+  const words = outcomeLabel(session.outcome).replace(/^\S+ /, '');
+  item.append(node('span', `${words} · ${duration(session.duration_minutes)} · ${measured(session.user_messages)} msgs · ${measured(session.tool_calls)} tools`, 'metrics'));
   return item;
 }
 
@@ -222,15 +229,18 @@ function latelyTable(night, threadLinks) {
   const thead = node('thead');
   thead.append(head);
   const tbody = node('tbody');
-  for (const project of night.projects) {
+  const names = shortRepoNames(night.projects.map(project => project.repo || project.project));
+  night.projects.forEach((project, index) => {
     const row = node('tr', undefined, 'project-row');
-    const repo = node('td', shortRepo(project.repo || project.project), 'project-repo');
+    const repo = node('td', names[index], 'project-repo');
     repo.title = project.repo || project.project || '';
-    row.append(repo, node('td', measured(project.session_count ?? project.sessions.length), 'project-sessions'),
+    const sessions = node('td', measured(project.session_count ?? project.sessions.length), 'project-sessions');
+    sessions.append(node('span', ' sessions', 'cell-label'));
+    row.append(repo, sessions,
       node('td', duration(totalMinutes(project.sessions)), 'project-minutes'),
       outcomeCell(project.outcomes), goalCell(project, night, threadLinks));
     tbody.append(row);
-  }
+  });
   table.append(thead, tbody);
   return table;
 }

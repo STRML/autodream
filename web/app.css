@@ -41,6 +41,7 @@ p { margin: .5rem 0 1rem; max-width: 72ch; }
 .project-outcomes { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--muted); }
 .outcome-count + .outcome-count { margin-left: .6rem; }
 .outcome-count.zero { opacity: .45; }
+.cell-label { display: none; }
 .project-goal summary { cursor: pointer; }
 .project-goal summary::marker { color: var(--muted); }
 .thread-link { display: block; font-size: .85rem; }
@@ -66,7 +67,8 @@ hr { border: 0; border-top: 1px solid var(--rule); margin: 2rem 0; }
 @media (max-width: 40rem) {
   body { padding-inline: 1rem; }
   .lately-table, .lately-table tbody { display: block; }
-  .lately-table thead { display: none; }
+  .lately-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .cell-label { display: inline; color: var(--muted); }
   .lately-table tr { display: grid; grid-template-columns: 1fr auto auto; gap: 0 .75rem; padding: .6rem 0; border-bottom: 1px solid var(--rule); }
   .lately-table td { border: 0; padding: 0; }
   .project-outcomes, .project-goal { grid-column: 1 / -1; }

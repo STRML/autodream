@@ -377,7 +377,8 @@ check(rows.length === 1, 'one project row must render for the day');
 const row = rows[0];
 const repo = row.querySelector('.project-repo');
 check(repo.textContent === 'cc-autodream' && repo.title === '~/git/cc-autodream', 'repo must show its short name');
-check(row.querySelector('.project-sessions').textContent === '4', 'session count missing');
+check(row.querySelector('.project-sessions').firstChild.textContent === '4', 'session count missing');
+check(row.querySelector('.project-sessions .cell-label').textContent === ' sessions', 'phone layout needs a visible label');
 check(row.querySelector('.project-minutes').textContent === '—', 'a missing duration must not sum to a number');
 check(row.textContent.includes('✓ 2') && row.textContent.includes('◐ 1') &&
 row.textContent.includes('✗ 0') && row.textContent.includes('? 1'), 'outcome totals missing');
@@ -400,6 +401,12 @@ check(document.querySelector('.project-minutes').textContent === '42m', 'minutes
 check(duration(2226) === '37h' && duration(90) === '1.5h' && duration(120) === '2h' && duration(null) === '—',
   'durations past an hour read in hours');
 check(document.querySelector('.project-repo').textContent === 'local-llm', 'short repo name missing');
+check(document.querySelector('.sessions li .metrics').textContent.startsWith('fully achieved'), 'outcome words must be visible');
+check(Array.from(document.querySelectorAll('.sessions li .metrics')).map(m => m.textContent.split(' · ')[0]).join('|') ===
+  'fully achieved|mostly achieved', 'fully and mostly must read differently');
+check(shortRepoNames(['/a/frontend', '/b/frontend', '/c/api', '~']).join('|') === 'a/frontend|b/frontend|api|~',
+  'colliding repo names must be lengthened until unique');
+check(shortRepoNames(['/x/a/b', '/x/a/b']).join('|') === '/x/a/b|/x/a/b', 'identical paths fall back to the full path');
 ''')
 
     def test_web_thread_buttons_show_action_results(self):
