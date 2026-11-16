@@ -269,6 +269,22 @@ class DataTests(unittest.TestCase):
         self.assertEqual(len(self.sessions(summary)), 3,
                          'temporary and scratchpad sessions must stay out of Lately')
 
+    def test_web_lately_drops_gated_sessions_and_reads_every_goal_shape(self):
+        self.finding('0123456789ab', underlying_goal=None, notable_initiatives='Initiative as a string',
+                     stats={'transcript_mtime': 100})
+        self.finding('111111111111', underlying_goal=None, notable_initiatives=None,
+                     outcome='unclear_from_transcript', stats={'transcript_mtime': 300})
+        self.finding('222222222222', skipped='below_noise_gate', underlying_goal=None,
+                     notable_initiatives=None, outcome=None, stats={'transcript_mtime': 200})
+        summary = self.cache.summary('2026-11-14')
+        sessions = {s['hash']: s for s in self.sessions(summary)}
+        self.assertNotIn('222222222222', sessions, 'a noise-gated session is left out, as in Stats')
+        self.assertEqual(sessions['0123456789ab']['goal'], 'Initiative as a string')
+        self.assertEqual(summary['projects'][0]['latest_goal'], 'Initiative as a string',
+                         'the newest session with a goal names the project')
+        self.assertEqual(summary['degraded'], [],
+                         'a missing goal is not a missing measurement')
+
     def test_web_unmeasured_outcomes_are_counted_separately(self):
         for i, outcome in enumerate([None, 'invalid', [], 'fully_achieved', 'mostly_achieved',
                                      'partially_achieved', 'not_achieved', 'unclear_from_transcript']):

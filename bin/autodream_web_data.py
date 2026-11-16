@@ -291,6 +291,8 @@ def build_night_summary(date, paths):
         if not FINDING.fullmatch(path.name):
             continue
         finding = read_object(path, degraded, unreadable)
+        if finding.get('skipped') == 'below_noise_gate':
+            continue
         stats_path = path.with_name(path.stem + '.stats.json')
         stats = read_object(stats_path, degraded, unreadable)
         provenance = [stats[key] for key in ('nested', 'isSidechain') if key in stats]
@@ -313,7 +315,7 @@ def build_night_summary(date, paths):
                                       decoded_project(project, os.environ.get('HOME', '')))):
             continue
         initiatives = finding.get('notable_initiatives')
-        fallback = text(initiatives[0]) if isinstance(initiatives, list) and initiatives else None
+        fallback = text(initiatives[0] if isinstance(initiatives, list) and initiatives else initiatives)
         goal = (text(finding.get('underlying_goal')) or fallback) if date >= '2026-07-20' else None
         outcome = finding.get('outcome')
         if date < '2026-07-17' or not isinstance(outcome, str) or outcome not in OUTCOMES:
@@ -323,7 +325,7 @@ def build_night_summary(date, paths):
                        tool_calls=measurement(stats.get('tool_call_count')),
                        duration_minutes=measurement(stats.get('duration_minutes')))
         session['_transcript_mtime'] = measurement(stats.get('transcript_mtime'))
-        if any(value is None for key, value in session.items() if not key.startswith('_')):
+        if any(session[key] is None for key in ('user_messages', 'tool_calls', 'duration_minutes')):
             degraded.append(path.stem + ': measurements unavailable')
         session_refs = references.get((date, path.stem), [])
         ref_repos = tuple(sorted({ref['repo'] for ref in session_refs
@@ -356,7 +358,7 @@ def build_night_summary(date, paths):
         group['session_count'] = len(sessions)
         group['outcomes'] = {name: sum(session['outcome'] in outcomes for session in sessions)
                              for name, outcomes in outcome_groups.items()}
-        group['latest_goal'] = sessions[0]['goal'] if sessions else None
+        group['latest_goal'] = next((session['goal'] for session in sessions if session['goal']), None)
         for session in sessions:
             session.pop('_transcript_mtime', None)
     notices = []
