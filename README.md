@@ -11,7 +11,8 @@ adding another means writing one directory and touching no shared code. This rep
 ![Lately: each night as one table per repo, with sessions, time, outcome counts and the newest goal; a goal expands to one line per session](docs/screenshots/lately.png)
 
 Lately, the local dashboard's front page: a week of sessions at a glance, one row per repo per
-night. The data in these screenshots is made up.
+night. The data in these screenshots is made up. [Try the demo](https://strml.github.io/autodream/)
+to click through every view with that same made-up data; `docs/demo/build.py` builds it.
 
 ## Why
 

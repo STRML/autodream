@@ -384,6 +384,30 @@ class DataTests(unittest.TestCase):
         self.assertEqual(self.sessions(self.cache.summary('2026-11-14'))[0]['tool_calls'], 30)
 
 
+    def test_web_demo_build_answers_every_view(self):
+        out = self.root / 'site'
+        result = subprocess.run([sys.executable, str(REPO / 'docs/demo/build.py'), str(out)],
+                                capture_output=True, text=True, timeout=60,
+                                env=dict(os.environ, TMPDIR=str(self.root)))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        api = out / 'api'
+        lately = json.loads((api / 'lately.json').read_text())
+        self.assertEqual(len(lately['timeline']), 7)
+        self.assertTrue(all(night['projects'] and not night['degraded'] for night in lately['timeline']))
+        self.assertEqual(lately['newest_dream']['open_questions'], 2)
+        threads = json.loads((api / 'threads.json').read_text())['threads']
+        self.assertEqual({t['display_status'] for t in threads}, {'open', 'dropped', 'done', 'closed_by_sam'})
+        self.assertTrue(any(t['kind'] == 'idea' for t in threads))
+        dates = json.loads((api / 'dreams.json').read_text())['dates']
+        self.assertEqual(len(dates), 7)
+        self.assertTrue(all((api / 'dreams' / (day + '.json')).is_file() for day in dates))
+        self.assertEqual(len(json.loads((api / 'stats.json').read_text())['nights']), 7)
+        page = (out / 'index.html').read_text()
+        self.assertLess(page.index('web/demo-fetch.js'), page.index('web/app.js'))
+        self.assertNotIn('"/web/', page, 'paths must be relative for a Pages subpath')
+        self.assertNotIn('/Users/', (api / 'lately.json').read_text().replace('/Users/dev', ''),
+                         'no real home path may leak into the demo')
+
 if __name__ == '__main__':
     result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(DataTests))
     print(f'passed: {result.testsRun - len(result.failures) - len(result.errors)}   failed: {len(result.failures) + len(result.errors)}')
