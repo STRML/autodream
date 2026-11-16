@@ -8,6 +8,11 @@ One repo, one nightly, one report. Each harness is a directory under `adapters/`
 adding another means writing one directory and touching no shared code. This repo was
 `cc-autodream` until 2026-10-03, when the OMP port (`omp-autodream`) folded back into it.
 
+![Lately: each night as one table per repo, with sessions, time, outcome counts and the newest goal; a goal expands to one line per session](docs/screenshots/lately.png)
+
+Lately, the local dashboard's front page: a week of sessions at a glance, one row per repo per
+night. The data in these screenshots is made up.
+
 ## Why
 
 You have dozens of agent sessions a week. The useful lessons — a wrong
@@ -131,6 +136,11 @@ and retries while Progress is visible. Stats uses gaps for missing measurements.
 “Finished that day” counts current done threads whose `last_seen` is that day;
 reopening a thread changes the count. See [CLAUDE.md](CLAUDE.md#local-web-dashboard)
 for data and security details.
+
+![Stats: nightly user messages and tool calls as line charts, with a table of values per night](docs/screenshots/stats.png)
+
+The screenshots come from `docs/screenshots/fixture.py`, which writes a made-up install of
+public repos; its docstring has the steps to retake them.
 
 launchd starts the job with no login shell, so the plist carries a fixed PATH. Install builds it
 from the directories of `claude`, `git` and `bash`, plus the CLI of every enabled adapter (`omp`
