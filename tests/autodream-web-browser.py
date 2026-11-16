@@ -8,6 +8,7 @@ import selectors
 import socket
 import urllib.request
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -167,7 +168,7 @@ document.body.dataset.result = 'PASS';
                 shim.mkdir()
                 capture = root / 'opened'
                 opener = shim / ('open' if sys.platform == 'darwin' else 'xdg-open')
-                opener.write_text('#!/bin/sh\nprintf %s "$1" > ' + str(capture) + '\n')
+                opener.write_text('#!/bin/sh\nprintf %s "$1" > ' + shlex.quote(str(capture)) + '\n')
                 opener.chmod(0o755)
                 opened = subprocess.run(['/bin/bash', str(REPO / 'bin/autodream-web'), 'open'],
                     env=dict(env, AUTODREAM_WEB_PORT=origin.rsplit(':', 1)[1],
