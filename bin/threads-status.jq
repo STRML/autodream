@@ -2,8 +2,10 @@ def thread_display_status($as_of; $dropped_days):
   . as $thread |
   ([$thread.sessions[] | select(.date <= $as_of)] | sort_by([.date, .hash]) | last // {}) as $latest |
   (($as_of | strptime("%Y-%m-%d") | mktime) - ($dropped_days * 86400) | gmtime | strftime("%Y-%m-%d")) as $cutoff |
+  ([$latest.date // "", ($thread.kept_open // "" | select(. <= $as_of))] | max) as $last_touch |
   if $thread.status != "open" then $thread.status
-  elif (["not_achieved", "partially_achieved", "unclear_from_transcript"] | index($latest.outcome // "")) != null and $latest.date < $cutoff then "dropped"
+  elif $thread.kind == "idea" then "open"
+  elif (["not_achieved", "partially_achieved", "unclear_from_transcript"] | index($latest.outcome // "")) != null and $last_touch < $cutoff then "dropped"
   else "open"
   end;
 
@@ -20,6 +22,7 @@ def valid_thread:
   (.sessions | type == "array" and all(.[]; type == "object" and (.date | type == "string") and (.hash | type == "string"))) and
   (.status | type == "string" and (. == "open" or . == "done" or . == "closed_by_sam")) and
   (.done_by == null or (.done_by | type == "string")) and
+  (.kept_open == null or (.kept_open | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))) and
   (.last_seen | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"));
 
 def valid_state:

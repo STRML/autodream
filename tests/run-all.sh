@@ -8081,6 +8081,60 @@ test_threads_retriaged_goal_replaces_source_link(){
   thread_cleanup "$root"
 }
 
+test_threads_linker_keeps_a_move_to_idea(){
+  echo "# threads: a re-triage of a moved thread replaces its link and keeps kind idea"
+  local root session hash members kind
+  root=$(setup_env)
+  session=$(mk_thread_session "$root" moved-idea "$REPO")
+  hash=$(hash_of "$session")
+  seed_thread_record "$root" t-44444445 "$REPO" "old goal" "$DATE" "$hash" "$session" partially_achieved open
+  AUTODREAM_DIR="$root/autodream" AUTODREAM_THREADS_STATE="$(thread_state "$root")" \
+    /bin/bash "$REPO/bin/threads.sh" move t-44444445 idea >/dev/null 2>&1
+  export MOCK_THREADS_MODE=attach_existing MOCK_THREADS_CLOSE_ID=t-44444445 MOCK_THREADS_L1_GOAL="revised goal" MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_THREADS_CLOSE_ID MOCK_THREADS_L1_GOAL MOCK_CAPTURE_DIR
+  members=$(jq -sr --arg hash "$hash" '[.[] | select(.id == "t-44444445") | .sessions[] | select(.hash == $hash)] | length' "$(thread_state "$root")")
+  kind=$(jq -sr '.[] | select(.id == "t-44444445") | .kind' "$(thread_state "$root")")
+  assert_eq "$members" 1 "the legacy work link is replaced, not duplicated"
+  assert_eq "$kind" idea "the linker keeps a thread Sam moved to Ideas"
+  thread_cleanup "$root"
+}
+
+test_threads_moved_legacy_link_is_not_reoffered(){
+  echo "# threads: a legacy work link stays linked after its thread moves to Ideas"
+  local root session hash
+  root=$(setup_env)
+  session=$(mk_thread_session "$root" moved-linked "$REPO")
+  hash=$(seed_thread_findings "$root" "$session" "linked goal" '[]' partially_achieved)
+  seed_thread_record "$root" t-44444447 "$REPO" "linked goal" "$DATE" "$hash" "$session" partially_achieved open
+  AUTODREAM_DIR="$root/autodream" AUTODREAM_THREADS_STATE="$(thread_state "$root")" \
+    /bin/bash "$REPO/bin/threads.sh" move t-44444447 idea >/dev/null 2>&1
+  export MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_CAPTURE_DIR
+  assert_eq "$(thread_call_count "$root/cap")" 0 "the moved session is still linked, so catch-up offers nothing"
+  assert_eq "$(jq -sr 'length' "$(thread_state "$root")")" 1 "no duplicate thread appears"
+  thread_cleanup "$root"
+}
+
+test_threads_linker_keeps_kept_open(){
+  echo "# threads: the linker keeps kept_open and kind on a row it rewrites"
+  local root session kept row
+  root=$(setup_env)
+  session=$(mk_thread_session "$root" kept-open "$REPO")
+  seed_thread_deferred_findings "$root" "$session" "new goal" '[]' partially_achieved >/dev/null
+  seed_thread_record "$root" t-44444446 "$REPO" "old goal" 2019-12-20 aaaaaaaaaaaa /old/session.jsonl partially_achieved closed_by_sam
+  AUTODREAM_DIR="$root/autodream" AUTODREAM_THREADS_STATE="$(thread_state "$root")" \
+    /bin/bash "$REPO/bin/threads.sh" move t-44444446 open >/dev/null 2>&1
+  kept=$(jq -sr '.[0].kept_open // "missing"' "$(thread_state "$root")")
+  export MOCK_THREADS_MODE=attach_existing MOCK_THREADS_CLOSE_ID=t-44444446 MOCK_CAPTURE_DIR="$root/cap"
+  run_dream "$root"
+  unset MOCK_THREADS_MODE MOCK_THREADS_CLOSE_ID MOCK_CAPTURE_DIR
+  row=$(jq -sc '.[] | select(.id == "t-44444446") | [.kind, .status, .kept_open, (.sessions | length)]' "$(thread_state "$root")")
+  assert_eq "$row" "[\"work\",\"open\",\"$kept\",2]" "kept_open survives a linker rewrite"
+  thread_cleanup "$root"
+}
+
 thread_review_row(){
   local root=$1 hash=$2 goal=$3 outcome=$4 ideas=$5 date=${6:-$DATE} repo=${7:-/repo/alpha}
   mkdir -p "$root/autodream/findings/$date"
@@ -8142,7 +8196,7 @@ test_threads_later_work_can_complete_idea(){
       assert_grep "$root/tonight.md" "$idea_id" "$case_row appears under closed tonight"
       assert_nogrep "$root/later.md" "$idea_id" "$case_row leaves dropped report"
     elif [ "$outcome" = partially_achieved ]; then
-      assert_grep "$root/later.md" "$idea_id" "$case_row unfinished idea reaches dropped report"
+      assert_nogrep "$root/later.md" "$idea_id" "$case_row unfinished idea stays out of the dropped report"
     fi
     thread_review_update "$root"
     assert_eq "$(thread_call_count "$root/cap")" 2 "$case_row attached work stays idempotent"
@@ -8350,7 +8404,7 @@ test_threads_completed_work_leaves_deferred_idea_open(){
     assert_eq "$(thread_request_json "$root/cap/threads-stdin-1.txt" | jq -r '.candidates[] | select(.kind == "idea") | .outcome')" not_achieved "$outcome work does not complete deferred candidate"
     assert_eq "$(jq -sr '.[] | select(.kind == "idea") | .status' "$(thread_state "$root")")" open "linker finished flag cannot close originating deferral"
     AUTODREAM_DIR="$root/autodream" /bin/bash "$REPO/bin/threads.sh" report 2020-01-20 > "$root/report.md"
-    assert_grep "$root/report.md" 'cache after release' "deferred idea reaches dropped report after completed work"
+    assert_nogrep "$root/report.md" 'cache after release' "deferred idea stays out of the dropped report"
     idea_id=$(jq -sr '.[] | select(.kind == "idea") | .id' "$(thread_state "$root")")
     work_id=$(jq -sr '.[] | select(.kind == "work") | .id' "$(thread_state "$root")")
     THREADS_REFRESH_KEYS=$(printf '%s\t%s' "$DATE" 111111111111) MOCK_THREADS_CLOSE_ID="$idea_id" thread_review_update "$root" finish_ideas
@@ -8507,8 +8561,8 @@ test_threads_closed_idea_stays_closed(){
   thread_cleanup "$root"
 }
 
-test_threads_idea_slots_are_reserved(){
-  echo "# threads: linked deferred ideas reach the report's reserved idea slots"
+test_threads_ideas_stay_out_of_the_dropped_report(){
+  echo "# threads: linked deferred ideas never take a Dropped report slot"
   local root session ideas report report_rows idea_rows i id
   root=$(setup_env)
   for i in 1 2 3 4 5 6 7; do
@@ -8527,7 +8581,7 @@ test_threads_idea_slots_are_reserved(){
   report_rows=$(grep -Ec '^- \*\*.*`t-[0-9a-f]{8}`' "$report")
   idea_rows=$(grep -Ec 'idea slot (alpha|beta|gamma)' "$report")
   assert_eq "$report_rows" 5 "recommendation limit remains five"
-  assert_eq "$idea_rows" 2 "ideas survive a larger work backlog"
+  assert_eq "$idea_rows" 0 "an idea is never dropped"
   thread_cleanup "$root"
 }
 
@@ -8657,7 +8711,7 @@ test_threads_empty_night_still_catches_up_and_reports(){
 }
 
 test_threads_report_ranking_and_limit(){
-  echo "# threads: dropped report ranks new crossings, reserves idea slots and caps recommendations"
+  echo "# threads: dropped report ranks new crossings, leaves ideas out and caps recommendations"
   local root state report ids first new_id idea_rows recommendation_rows i id
   root=$(setup_env)
   state=$(thread_state "$root"); : > "$state"
@@ -8681,7 +8735,7 @@ test_threads_report_ranking_and_limit(){
   idea_rows=$(printf '%s\n' "$ids" | grep -c '^t-2000000' || true)
   assert_eq "$recommendation_rows" 5 "report cap"
   assert_eq "$first" "$new_id" "new crossings rank first"
-  assert_eq "$idea_rows" 2 "ideas receive reserved slots"
+  assert_eq "$idea_rows" 0 "ideas never take a dropped slot"
   assert_grep "$REPO/prompts/PROMPT.md" 'dropped-threads\.md' "production prompt names the runner input"
   assert_grep "$REPO/prompts/PROMPT.md" 'verbatim' "production prompt preserves the section verbatim"
   thread_cleanup "$root"
@@ -9714,6 +9768,9 @@ _run test_threads_unreadable_index_prevents_write_and_render
 _run test_threads_concurrent_merges_preserve_cli_close
 _run test_threads_lock_exhaustion_is_bounded
 _run test_threads_retriaged_goal_replaces_source_link
+_run test_threads_linker_keeps_a_move_to_idea
+_run test_threads_moved_legacy_link_is_not_reoffered
+_run test_threads_linker_keeps_kept_open
 _run test_threads_catchup_retries_unlinked_idea_siblings
 _run test_threads_later_work_can_complete_idea
 _run test_threads_refresh_preserves_existing_ideas
@@ -9731,7 +9788,7 @@ _run test_threads_deferred_ideas_are_independent_candidates
 _run test_threads_first_ideas_are_collected_after_work
 _run test_threads_concurrent_idea_link_keeps_one_source
 _run test_threads_closed_idea_stays_closed
-_run test_threads_idea_slots_are_reserved
+_run test_threads_ideas_stay_out_of_the_dropped_report
 _run test_threads_older_rebuild_only_links_missing_sources
 _run test_threads_reassignment_updates_dropped_status_and_report
 _run test_threads_linker_cannot_write

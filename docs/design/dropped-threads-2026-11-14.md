@@ -161,8 +161,9 @@ harnesses (`-Users-samuelreed-git-oss-local-llm` and `-git-oss-local-llm`). So:
   the status.
 
 **Report ranking:** threads that crossed into dropped since the last report first,
-then the rest by linked-session count. Two of the five slots are reserved for ideas
-when any exist, so ideas are not starved by a long work list.
+then the rest by linked-session count. (Superseded by
+https://github.com/STRML/autodream/issues/211: an idea is never dropped, so the two
+reserved idea slots were removed and all five go to work threads.)
 
 ## Backfill (F11)
 

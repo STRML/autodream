@@ -76,6 +76,7 @@ threads_read_state() {
       (.sessions | type == "array" and all(.[]; type == "object" and (.date | type == "string") and (.hash | type == "string"))) and
       (.status | type == "string" and ( . == "open" or . == "done" or . == "closed_by_sam")) and
       (.done_by == null or (.done_by | type == "string")) and
+      (.kept_open == null or (.kept_open | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))) and
       (.last_seen | type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))
     ) and
     ([.[].id] | length == (unique | length))
@@ -398,9 +399,11 @@ threads_explore() {
   return 0
 }
 
-threads_set_status() {
-  local id=$1 status=$2 current_state next_file rc=0
+threads_move() {
+  local id=$1 target=$2 today current_state next_file rc=0
   case "$id" in t-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) threads_error "invalid thread id: $id"; return 2 ;; esac
+  case "$target" in open|idea|done) ;; *) threads_error "invalid move target: $target (open, idea or done)"; return 2 ;; esac
+  today=$(pdate_shift "$(pdate_yesterday)" 1 d) || { threads_error "cannot determine current date"; return 1; }
   mkdir -p "$(dirname "$STATE")" || { threads_error "cannot create state directory"; return 1; }
   threads_acquire_lock || return 1
   current_state=$(threads_read_state) || { threads_release_lock; return 1; }
@@ -410,11 +413,14 @@ threads_set_status() {
     return 1
   fi
   next_file=$(mktemp "${TMPDIR:-/tmp}/threads-next.XXXXXX") || { threads_release_lock; return 1; }
-  if ! printf '%s\n' "$current_state" | jq -c --arg id "$id" --arg status "$status" '
+  if ! printf '%s\n' "$current_state" | jq -c --arg id "$id" --arg target "$target" --arg today "$today" '
     map(if .id == $id then
-      if $status == "closed_by_sam" then .status = $status | .done_by = "sam"
-      else .status = $status | del(.done_by)
-      end
+      .kind as $kind
+      | .sessions |= map(if .kind == null and .candidate_handle == null then .kind = $kind else . end)
+      | if $target == "done" then .status = "closed_by_sam" | .done_by = "sam"
+        elif $target == "idea" then .kind = "idea" | .status = "open" | del(.done_by, .kept_open)
+        else .kind = "work" | .status = "open" | .kept_open = $today | del(.done_by)
+        end
     else . end)
   ' | jq -c '.[]' > "$next_file"; then
     unlink "$next_file" 2>/dev/null || true
@@ -472,13 +478,11 @@ state = json.load(open(state_path, encoding="utf-8"))
 seen = set()
 with open(output_path, "w", encoding="utf-8") as output:
     for thread in state:
-        if thread["kind"] != "idea":
-            continue
         for session in thread["sessions"]:
             handle = session.get("candidate_handle")
             legacy = handle is None
             if not (session.get("kind") == "idea" or ":idea:" in (handle or "")
-                    or (session.get("kind") is None and handle is None)):
+                    or (thread["kind"] == "idea" and session.get("kind") is None and handle is None)):
                 continue
             if not handle:
                 digest = hashlib.sha1(thread["id"].encode("utf-8")).hexdigest()
@@ -559,7 +563,7 @@ threads_collect_candidates() {
     linked=$(printf '%s\n' "$state_json" | jq -e --arg d "$date" --arg h "$hash" --arg handle "$handle" \
       'any(.[]; .kind as $kind | any(.sessions[]?;
         .date == $d and .hash == $h and
-        (.candidate_handle == $handle or ($kind == "work" and .candidate_handle == null))))' \
+        (.candidate_handle == $handle or ((.kind // $kind) == "work" and .candidate_handle == null))))' \
       >/dev/null 2>&1 && echo yes || echo no)
     if [ -n "$facet" ] && { [ "$linked" != yes ] || [ "$refresh" = yes ]; }; then
       jq -cn --arg handle "$handle" --arg date "$date" --arg hash "$hash" --arg source "$source" \
@@ -865,11 +869,12 @@ for assignment in assignments:
     date = candidate["date"]
     hash_value = candidate["hash"]
     target = by_id.get(assignment["thread"])
-    same_idea_source = (target is not None and target["kind"] == "idea"
+    same_idea_source = (target is not None
                        and any(source_key(s) == (date, hash_value)
                                and (s.get("kind") == "idea"
                                     or ":idea:" in (s.get("candidate_handle") or "")
-                                    or (s.get("kind") is None and s.get("candidate_handle") is None))
+                                    or (target["kind"] == "idea" and s.get("kind") is None
+                                        and s.get("candidate_handle") is None))
                                for s in target.get("sessions", [])))
     for item in state:
         if candidate["kind"] != "work":
@@ -877,7 +882,8 @@ for assignment in assignments:
         item["sessions"] = [s for s in item.get("sessions", []) if not (
             source_key(s) == (date, hash_value)
             and (s.get("candidate_handle") == candidate["handle"]
-                 or (item.get("kind", "work") == "work" and s.get("candidate_handle") is None))) ]
+                 or ((s.get("kind") or item.get("kind", "work")) == "work"
+                     and s.get("candidate_handle") is None))) ]
     by_id = {item["id"]: item for item in state}
     if assignment["thread"] == "new":
         ident = new_id(candidate)
@@ -1264,9 +1270,7 @@ for original in state:
     item["_new"] = original["previous_report_status"] is not None and original["previous_report_status"] != "dropped"
     eligible.append(item)
 eligible.sort(key=lambda x: (not x["_new"], -x["_count"], x["id"]))
-ideas = [x for x in eligible if x.get("kind") == "idea"]
-work = [x for x in eligible if x.get("kind") != "idea"]
-selected = sorted(ideas[:2] + work[:5-len(ideas[:2])], key=lambda x: (not x["_new"], -x["_count"], x["id"]))[:5]
+selected = eligible[:5]
 closed = [x for x in state if x.get("status") == "done" and x.get("done_by") == "linker" and x.get("last_seen") == report_date]
 print("## Dropped threads\n")
 if link_status == "failed":
@@ -1613,8 +1617,9 @@ threads_usage() {
     '       threads.sh report DATE' \
     '       threads.sh resume ID [--launch]' \
     '       threads.sh backfill FROM TO [--engine E] [--model M] [--max-calls N]' \
-    '       threads.sh close ID' \
-    '       threads.sh reopen ID' >&2
+    '       threads.sh move ID open|idea|done' \
+    '       threads.sh close ID     (move ID done)' \
+    '       threads.sh reopen ID    (move ID open)' >&2
 }
 
 case "${1:-}" in
@@ -1670,10 +1675,15 @@ case "${1:-}" in
     [ "$#" -gt 0 ] || { threads_usage; exit 2; }
     threads_search "$@"
     ;;
+  move)
+    shift
+    [ "$#" -eq 2 ] || { threads_usage; exit 2; }
+    threads_move "$1" "$2"
+    ;;
   close|reopen)
     action=$1; shift
     [ "$#" -eq 1 ] || { threads_usage; exit 2; }
-    if [ "$action" = close ]; then threads_set_status "$1" closed_by_sam; else threads_set_status "$1" open; fi
+    if [ "$action" = close ]; then threads_move "$1" "done"; else threads_move "$1" "open"; fi
     ;;
   *) threads_usage; exit 2 ;;
 esac

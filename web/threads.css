@@ -6,7 +6,10 @@
 .thread-view input, .thread-view select, .thread-view button { font: inherit; color: inherit; background: Canvas; border: 1px solid color-mix(in srgb, CanvasText 30%, transparent); border-radius: .45rem; padding: .45rem .65rem; }
 .thread-view button { cursor: pointer; }
 .thread-view button[aria-pressed="true"] { background: Highlight; color: HighlightText; }
-.thread-view .thread-counts { display: flex; flex-wrap: wrap; gap: .45rem; color: GrayText; }
+.thread-view nav .count { color: GrayText; font-variant-numeric: tabular-nums; }
+.thread-view nav button[aria-pressed="true"] .count { color: inherit; }
+.thread-view .move-label { align-self: center; margin-left: .4rem; color: GrayText; }
+.thread-view .move-to { display: inline-flex; flex-wrap: wrap; gap: .35rem; }
 .thread-view article { border: 1px solid color-mix(in srgb, CanvasText 20%, transparent); border-radius: .6rem; padding: .85rem 1rem; margin: .7rem 0; }
 .thread-view article h2 { margin: 0; font-size: 1.05rem; }
 .thread-view .meta, .thread-view .goal { margin: .3rem 0; color: GrayText; }
