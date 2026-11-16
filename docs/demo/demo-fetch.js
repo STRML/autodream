@@ -7,7 +7,8 @@
 // thread ages and the age filter read the same on any day, in any timezone. Relative ages do
 // not change, so neither do the statuses computed from them.
 // The shift is fixed for the page's life, because links already drawn carry shifted dates. The
-// first request after the local date changes reloads the page instead, which redraws them all.
+// first request after the local date changes reloads the page instead, which redraws them all,
+// after moving the dates in the URL fragment by the same days so it still names the same report.
 (function () {
   const realFetch = window.fetch.bind(window);
   const base = new URL(".", document.baseURI);
@@ -34,7 +35,9 @@
       return Promise.resolve(json(200, {ok: false, error: "demo",
         message: "This is a demo with made-up data, so actions do nothing."}));
     }
-    if (currentShift() !== shift) {
+    const delta = currentShift() - shift;
+    if (delta !== 0) {
+      history.replaceState(null, "", move(location.hash, delta) || location.pathname);
       location.reload();
       return new Promise(function () {});
     }

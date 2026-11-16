@@ -461,23 +461,25 @@ let clock = new Date(2026, 10, 16, 23, 59).getTime();
 class Clock extends Date { constructor(...a) { if (a.length) super(...a); else super(clock); } static now() { return clock; } }
 const requested = [];
 const window = {DEMO_BUILT: '2026-11-10', fetch: async url => { requested.push(String(url)); return new Response('{"day":"2026-11-10"}'); }};
-let reloaded = 0;
-const location = {href: 'https://x.test/', origin: 'https://x.test', reload: () => { reloaded += 1; }};
+let reloaded = 0, fragment = null;
+const location = {href: 'https://x.test/', origin: 'https://x.test', pathname: '/', hash: '#dreams/2026-11-16',
+  reload: () => { reloaded += 1; }};
+const history = {replaceState: (_, __, url) => { fragment = url; }};
 vm.runInNewContext(fs.readFileSync(process.argv[1], 'utf8'), {window, document: {baseURI: 'https://x.test/'},
-  location, URL, Response, Date: Clock, JSON, Promise});
+  location, history, URL, Response, Date: Clock, JSON, Promise});
 (async () => {
   const before = (await (await window.fetch('/api/lately')).json()).day;
   clock = new Date(2026, 10, 17, 0, 1).getTime();
   window.fetch('/api/dreams/2026-11-16');
   await new Promise(resolve => setTimeout(resolve, 10));
-  console.log(JSON.stringify([before, reloaded, requested.length]));
+  console.log(JSON.stringify([before, reloaded, requested.length, fragment]));
 })();
 """
         result = subprocess.run([node, '-e', script, str(REPO / 'docs/demo/demo-fetch.js')],
                                 capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout), ['2026-11-16', 1, 1],
-                         'after midnight the page reloads instead of reading a link drawn under the old shift')
+        self.assertEqual(json.loads(result.stdout), ['2026-11-16', 1, 1, '#dreams/2026-11-17'],
+                         'after midnight the page reloads, with its fragment moved to name the same report')
 
     def test_web_demo_build_redoes_a_build_that_crosses_midnight(self):
         spec = importlib.util.spec_from_file_location('demo_build', REPO / 'docs/demo/build.py')
