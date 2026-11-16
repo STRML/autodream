@@ -354,8 +354,30 @@ threads_render() {
   return 1
 }
 
+# cmux types --command into the user's login shell, which may be fish, and fish cannot
+# parse bash's $'...' quoting. Write the bash command to a file in a fresh 0700 mktemp -d
+# directory and hand cmux only "/bin/bash '<file>'", which every shell reads the same. The
+# launcher removes its file and directory when it starts; nothing else is ever deleted.
+# Prints the file path: absolute, because the pane may start in another directory, and
+# free of quotes and backslashes, so the single quotes are safe.
+threads_launcher() {
+  local base dir
+  for base in "${TMPDIR:-/tmp}" /tmp; do
+    case $base in /*) ;; *) continue ;; esac
+    dir=$(mktemp -d "${base%/}/autodream-launch.XXXXXX" 2>/dev/null) || continue
+    case $dir in *"'"*|*\\*) rmdir -- "$dir"; continue ;; esac
+    if printf '%s\n' '#!/bin/bash' 'rm -f -- "$0"; rmdir -- "${0%/*}" 2>/dev/null' "exec $1" > "$dir/launch"; then
+      printf '%s\n' "$dir/launch"
+      return 0
+    fi
+    rm -f -- "$dir/launch"; rmdir -- "$dir"
+  done
+  threads_error "cannot write a launcher file"
+  return 1
+}
+
 threads_explore() {
-  local dashboard open_bin cmux claude threads_cli permission system_prompt initial_prompt inner_cmd
+  local dashboard open_bin cmux claude threads_cli permission system_prompt initial_prompt inner_cmd launcher
   dashboard="${DREAMS_DIR:-${HOME:-}/.claude/dreams}/threads.html"
   cmux=${CMUX_BIN:-/Applications/cmux.app/Contents/Resources/bin/cmux}
   [ -x "$cmux" ] || cmux=$(command -v cmux 2>/dev/null || true)
@@ -392,7 +414,9 @@ threads_explore() {
 
   shq() { printf '%q' "$1"; }
   inner_cmd="$(shq "$claude") --permission-mode default --tools Read,Bash --strict-mcp-config --disable-slash-commands --settings $(shq '{"disableAllHooks":true}') --allowedTools $(shq "$permission") --append-system-prompt $(shq "$system_prompt") $(shq "$initial_prompt")"
-  if ! "$cmux" new-split right --command "$inner_cmd"; then
+  launcher=$(threads_launcher "$inner_cmd") || return 1
+  if ! "$cmux" new-split right --command "/bin/bash '$launcher'"; then
+    rm -f -- "$launcher"; rmdir -- "${launcher%/*}" 2>/dev/null
     threads_error "cmux could not create the explore split"
     return 1
   fi
@@ -1381,7 +1405,7 @@ threads_release_resume_claim() {
 }
 
 threads_resume() {
-  local id launch=0 brief repo claude_bin state cmux inner_cmd owner rc
+  local id launch=0 brief repo claude_bin state cmux inner_cmd owner rc launcher
   id=$1
   [ "${2:-}" = --launch ] && launch=1
   state=$(threads_read_state) || return 1
@@ -1409,9 +1433,15 @@ threads_resume() {
   printf -v inner_cmd '%q --permission-mode %q --append-system-prompt %q %q' \
     "$claude_bin" default "$brief" \
     "Resume thread $id. Read the available source transcripts listed in the brief and continue the unfinished goal."
-  if tmo 15 "$cmux" workspace create --cwd "$repo" --command "$inner_cmd" >&2; then
+  if ! launcher=$(threads_launcher "$inner_cmd"); then
+    threads_release_resume_claim "$id" "$owner" || threads_error "cannot release resume claim for $id"
+    printf '%s\n' "$brief"
+    return 70
+  fi
+  if tmo 15 "$cmux" workspace create --cwd "$repo" --command "/bin/bash '$launcher'" >&2; then
     return 0
   fi
+  rm -f -- "$launcher"; rmdir -- "${launcher%/*}" 2>/dev/null
   threads_error "cmux workspace creation failed"
   threads_release_resume_claim "$id" "$owner" || threads_error "cannot release resume claim for $id"
   printf '%s\n' "$brief"

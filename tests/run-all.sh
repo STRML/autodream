@@ -8939,6 +8939,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -9012,6 +9013,8 @@ if scenario == "workspace":
     args = calls()[0]
     assert args[:2] == ["workspace", "create"], args
     assert args[args.index("--cwd") + 1] == str(repo), args
+    typed = args[args.index("--command") + 1]
+    assert re.fullmatch(r"/bin/bash '[^'\\\n]+'", typed), "cmux types the command into the login shell, which may be fish: " + typed
     launched = json.loads((root / "claude.json").read_text())
     assert launched["cwd"] == str(repo.resolve()), launched
     argv = launched["argv"]
@@ -9648,6 +9651,7 @@ test_threads_explore_launch_is_constrained(){
   if printf '%s\n' "$args" | grep -Eq 'PRIVATE_THREAD_(INDEX|REPORT)'; then inlined=true; fi
   assert_eq "$opened_path" "$root/dreams/threads.html" "opens local dashboard"
   assert_eq "$cmux_operation" new-split "opens a split"
+  if grep -Eq "^/bin/bash '[^'\\\\]+'\$" "$root/cmux.command"; then ok "command any login shell can parse"; else no "command any login shell can parse: $(head -c 200 "$root/cmux.command")"; fi
   assert_eq "$permission_mode" default "normal permission mode"
   assert_eq "$tools" "Read,Bash" "explorer toolset"
   assert_grep "$root/claude.args" '^--strict-mcp-config$' "MCP tools are disabled"
@@ -9688,6 +9692,28 @@ test_threads_explore_quotes_paths_and_reports_launch_failure(){
   assert_no_file "$injected" "shell values remain literal"
   assert_file "$parent/claude.args" "quoted command reaches Claude"
   assert_eq "$failed_cmux_exit" 1 "failed launch is visible"
+  thread_cleanup "$parent"
+}
+
+test_threads_launcher_is_private_and_removes_only_itself(){
+  echo "# threads: each launcher gets its own private directory and removes only itself"
+  local parent made mode
+  parent=$(mktemp -d "${TMPDIR:-/tmp}/ccad.XXXXXX")
+  mkdir -p "$parent/rel"
+  sed -n -e '/^threads_error()/p' -e '/^threads_launcher() {/,/^}/p' "$REPO/bin/threads.sh" > "$parent/launcher.sh"
+  made=$(cd "$parent" && TMPDIR=rel /bin/bash -c '. "$1"; threads_launcher "true"' _ "$parent/launcher.sh")
+  case $made in /*) ok "relative TMPDIR is skipped for an absolute path" ;; *) no "relative TMPDIR is skipped for an absolute path (got $made)" ;; esac
+  rm -f -- "$made"; rmdir -- "${made%/*}" 2>/dev/null
+  : > "$parent/rel/autodream-launch.notes"
+  touch -t 202001010000 "$parent/rel/autodream-launch.notes"
+  made=$(TMPDIR="$parent/rel" /bin/bash -c '. "$1"; threads_launcher "printf launched > \"\$1\"/ran"' _ "$parent/launcher.sh")
+  mode=$(pstat_mode "${made%/*}")
+  assert_eq "$mode" 700 "launcher directory is private"
+  /bin/bash "$made" "$parent"
+  assert_file "$parent/ran" "launcher runs its command"
+  assert_no_file "$made" "launcher removes its file"
+  assert_no_file "${made%/*}" "launcher removes its directory"
+  assert_file "$parent/rel/autodream-launch.notes" "unrelated files are never removed"
   thread_cleanup "$parent"
 }
 
@@ -9824,6 +9850,7 @@ _run test_threads_render_retries_when_state_changes_during_render
 _run test_threads_explore_launch_is_constrained
 _run test_threads_explore_quotes_paths_and_reports_launch_failure
 _run test_threads_explore_resolves_claude_from_path_and_checks_before_open
+_run test_threads_launcher_is_private_and_removes_only_itself
 _run test_threads_list_uses_one_jq_process
 
 test_prune_worktrees_wiring(){
