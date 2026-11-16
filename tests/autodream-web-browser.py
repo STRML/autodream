@@ -338,12 +338,14 @@ check(!content.querySelector('img') && !window.pwned, 'dream warning became mark
 repo:'repo',session_count:4,outcomes:{fully_or_mostly:0,partially:0,not_achieved:0,
 unclear:1,unmeasured:3},sessions:[]}]}],threads:null,newest_dream:null});
 const content = document.getElementById('content');
-check(content.textContent.includes('? 3 unmeasured'), 'unknown outcomes disappeared');
-check(content.textContent.includes('? 1 unclear'), 'unclear outcomes must stay distinct');
-check(content.textContent.includes('✓ 0'), 'measured zero must survive');
+const count = name => content.querySelector('[data-outcome="' + name + '"]')?.textContent;
+check(count('unmeasured') === '○ 3', 'unknown outcomes disappeared');
+check(count('unclear') === '? 1', 'unclear outcomes must stay distinct');
+check(count('fully_or_mostly') === '✓ 0', 'measured zero must survive');
+check(content.querySelector('.outcome-legend')?.textContent.includes('○ unmeasured'), 'glyph legend missing');
 renderLately({days:7,timeline:[{date:'2026-11-14',projects:[{
 repo:'repo',session_count:1,sessions:[]}]}],threads:null,newest_dream:null});
-check(content.textContent.includes('✓ —'), 'absent outcome counts must stay unmeasured');
+check(count('fully_or_mostly') === '✓ —', 'absent outcome counts must stay unmeasured');
 check(!content.textContent.includes('✓ 0'), 'absent counts became zero');
 ''')
 
@@ -366,13 +368,20 @@ user_messages:null,tool_calls:0,duration_minutes:null},{hash:'111111111111',goal
 outcome:'unclear_from_transcript',user_messages:1,tool_calls:2,duration_minutes:3}]
 }]}],threads:null,newest_dream:null});
 const content = document.getElementById('content');
-const rows = content.querySelectorAll('.project-row');
+const table = content.querySelector('table.lately-table');
+check(table, 'the night must render as a table');
+check(Array.from(table.querySelectorAll('thead th')).map(th => th.textContent).join('|') ===
+  'Repo|Sess|Time|Outcomes|Goal', 'table headers wrong');
+const rows = content.querySelectorAll('tr.project-row');
 check(rows.length === 1, 'one project row must render for the day');
 const row = rows[0];
-check(row.querySelector('.project-outcomes').textContent.includes('4 sessions'), 'session count missing');
+const repo = row.querySelector('.project-repo');
+check(repo.textContent === 'cc-autodream' && repo.title === '~/git/cc-autodream', 'repo must show its short name');
+check(row.querySelector('.project-sessions').textContent === '4', 'session count missing');
+check(row.querySelector('.project-minutes').textContent === '—', 'a missing duration must not sum to a number');
 check(row.textContent.includes('✓ 2') && row.textContent.includes('◐ 1') &&
 row.textContent.includes('✗ 0') && row.textContent.includes('? 1'), 'outcome totals missing');
-check(row.querySelector('.project-goal').textContent.includes(''' + json.dumps(hostile) + '''),
+check(row.querySelector('.project-goal summary').textContent.includes(''' + json.dumps(hostile) + '''),
   'latest goal should remain visible as text in the project row');
 check(row.querySelectorAll('details').length === 1, 'sessions must sit under one details element');
 const details = row.querySelector('details');
@@ -382,6 +391,15 @@ check(!content.querySelector('img'), 'hostile goal became markup');
 check(content.textContent.includes('—'), 'missing per-session values need an em dash');
 check(!content.textContent.includes('Some measurements are unavailable'), 'partial data must not add a banner');
 check(!window.pwned, 'hostile text executed');
+renderLately({days:7,timeline:[{date:'2026-11-14',projects:[{repo:'/a/local-llm',session_count:2,
+outcomes:{fully_or_mostly:2,partially:0,not_achieved:0,unclear:0,unmeasured:0},latest_goal:'Port',
+sessions:[{hash:'a',goal:'Port',outcome:'fully_achieved',user_messages:3,tool_calls:9,duration_minutes:30},
+{hash:'b',goal:null,outcome:'mostly_achieved',user_messages:1,tool_calls:2,duration_minutes:12.4}]}]}],
+threads:null,newest_dream:null});
+check(document.querySelector('.project-minutes').textContent === '42m', 'minutes must sum and round');
+check(duration(2226) === '37h' && duration(90) === '1.5h' && duration(120) === '2h' && duration(null) === '—',
+  'durations past an hour read in hours');
+check(document.querySelector('.project-repo').textContent === 'local-llm', 'short repo name missing');
 ''')
 
     def test_web_thread_buttons_show_action_results(self):

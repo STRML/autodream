@@ -31,15 +31,23 @@ h4, h5, h6 { margin: 1.5rem 0 .5rem; }
 p { margin: .5rem 0 1rem; max-width: 72ch; }
 .intro, .summary, .metrics, .outcome { color: var(--muted); }
 .summary, .metrics { font-variant-numeric: tabular-nums; }
-.project-row { padding: 1rem 0; border-bottom: 1px solid var(--rule); }
-.project-row h3 { margin: 0; font-size: 1.15rem; }
-.project-outcomes, .project-row details summary { color: var(--muted); font-size: .9rem; }
-.project-goal { font-weight: 600; }
-.project-row details summary { cursor: pointer; width: fit-content; }
-.sessions { list-style: none; padding: 0; margin: .5rem 0 0; }
-.sessions li { padding: 1rem 0; border-bottom: 1px solid var(--rule); }
-.sessions p { margin: .2rem 0; }
-.goal { font-size: 1.1rem; font-weight: 600; }
+.outcome-legend { color: var(--muted); font-size: .85rem; }
+.lately-table { display: table; width: 100%; font-size: .95rem; }
+.lately-table th { white-space: nowrap; color: var(--muted); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+.lately-table td { vertical-align: top; padding: .5rem .75rem; }
+.lately-table th:first-child, .lately-table td:first-child { padding-left: 0; }
+.project-repo { font-weight: 650; white-space: nowrap; }
+.project-sessions, .project-minutes { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.project-outcomes { white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--muted); }
+.outcome-count + .outcome-count { margin-left: .6rem; }
+.outcome-count.zero { opacity: .45; }
+.project-goal summary { cursor: pointer; }
+.project-goal summary::marker { color: var(--muted); }
+.thread-link { display: block; font-size: .85rem; }
+.sessions { list-style: none; padding: 0; margin: .4rem 0 0; }
+.sessions li { display: grid; grid-template-columns: 1.2rem 1fr; column-gap: .4rem; padding: .35rem 0; border-top: 1px solid var(--rule); }
+.sessions .metrics { grid-column: 2; font-size: .8rem; }
+.goal { font-weight: 500; }
 .metrics { font-size: .9rem; }
 .notice { background: var(--wash); padding: .75rem 1rem; }
 .dreams { list-style: none; padding: 0; }
@@ -57,6 +65,11 @@ hr { border: 0; border-top: 1px solid var(--rule); margin: 2rem 0; }
 }
 @media (max-width: 40rem) {
   body { padding-inline: 1rem; }
+  .lately-table, .lately-table tbody { display: block; }
+  .lately-table thead { display: none; }
+  .lately-table tr { display: grid; grid-template-columns: 1fr auto auto; gap: 0 .75rem; padding: .6rem 0; border-bottom: 1px solid var(--rule); }
+  .lately-table td { border: 0; padding: 0; }
+  .project-outcomes, .project-goal { grid-column: 1 / -1; }
   header { gap: 1rem; }
   nav { gap: 1rem; }
   .metrics { max-width: 35ch; }
