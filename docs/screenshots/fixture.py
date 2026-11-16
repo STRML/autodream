@@ -9,7 +9,8 @@ folders do not exist, so Lately shows each repo as its ~ path; threads use that 
 or one repo would show under two names. Dates
 are relative to today because Lately shows the trailing seven days.
 
-Retaking the README screenshots (1280x900 viewport):
+Retaking the README screenshots (1280x900 viewport), from the repo root:
+  D=$(mktemp -d)
   python3 docs/screenshots/fixture.py "$D"
   HOME=/Users/dev AUTODREAM_DIR="$D/install" DREAMS_DIR="$D/dreams" \
     AUTODREAM_CONFIG="$D/install/no-config" bin/autodream-web serve --port 47911
