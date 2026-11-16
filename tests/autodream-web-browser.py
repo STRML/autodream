@@ -257,6 +257,20 @@ renderStats({nights:[]});
 check(content.textContent.includes('No nightly statistics'), 'empty state missing');
 ''')
 
+    def test_web_stats_collapses_nights_without_sidecars(self):
+        self.run_browser('''await new Promise(resolve => document.addEventListener('DOMContentLoaded', resolve, {once:true}));
+const nights = ['2026-07-15','2026-07-16','2026-07-17','2026-07-25'].map((date, i) => ({
+  date,run:{},sessions:{},activity:{},outcomes:{},categories:[],
+  sessions_without_sidecar:i < 3 ? 40 : 0,degraded:i === 3 ? ['Could not read run-stats.txt.'] : []
+}));
+renderStats({nights});
+const notices = Array.from(document.querySelectorAll('#content p.notice')).map(p => p.textContent);
+check(notices.length === 2, 'expected one sidecar summary and one read failure, got ' + notices.length);
+check(notices.some(n => n.includes('3 nights') && n.includes('2026-07-15') && n.includes('2026-07-17')),
+  'sidecar summary missing: ' + notices.join(' | '));
+check(notices.includes('2026-07-25: Could not read run-stats.txt.'), 'read failure must stay listed');
+''')
+
     def test_web_hostile_markdown_and_goal_are_inert(self):
         hostile = '<img src=x onerror="window.pwned=1"><script>window.pwned=2</script>'
         markdown = '# Dream <repo> <repo_with_underscores>\n\n<!-- hidden-canary\ncomment -->\n\n' + hostile + '''

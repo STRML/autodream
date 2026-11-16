@@ -354,6 +354,11 @@ function renderStats(data) {
   content.replaceChildren(node('h1', 'Stats'), node('p', 'Nightly activity and pipeline health. Gaps mean not measured.', 'intro'));
   const nights = [...data.nights].sort((a, b) => a.date.localeCompare(b.date));
   if (!nights.length) { content.append(node('p', 'No nightly statistics yet.')); return; }
+  const unmeasured = nights.filter(night => night.sessions_without_sidecar > 0).map(night => night.date);
+  if (unmeasured.length) {
+    content.append(node('p', unmeasured.length + ' nights have sessions with no stats sidecar, so their activity is not measured (' +
+      unmeasured[0] + ' to ' + unmeasured[unmeasured.length - 1] + ').', 'notice'));
+  }
   for (const night of nights) {
     for (const notice of night.degraded || []) content.append(node('p', night.date + ': ' + notice, 'notice'));
   }
