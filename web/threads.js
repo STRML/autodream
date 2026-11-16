@@ -61,6 +61,12 @@ function latestOutcome(thread) {
   return sessions.length ? sessions[sessions.length - 1].outcome || "" : "";
 }
 
+function localToday() {
+  const now = new Date();
+  return [now.getFullYear(), String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0")].join("-");
+}
+
 function daysBefore(day, days) {
   const date = new Date(day + "T00:00:00Z");
   date.setUTCDate(date.getUTCDate() - days);
@@ -127,7 +133,7 @@ function mountThreads(root, data, onAction, getActionState) {
     const repoFilter = repo.value;
     const wanted = outcome.select.value;
     const since = age.select.value ?
-      daysBefore(data.as_of || new Date().toISOString().slice(0, 10), Number(age.select.value)) : "";
+      daysBefore(data.as_of || localToday(), Number(age.select.value)) : "";
     const inView = data.threads.filter(function (thread) { return isInView(thread, activeView); });
     const filtered = inView.filter(function (thread) {
       const text = [thread.title, thread.goal, thread.repo, thread.id].join(" ").toLocaleLowerCase();

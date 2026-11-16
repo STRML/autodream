@@ -866,6 +866,34 @@ check(root.querySelector('nav button[data-view="Open"]').textContent === 'Open 3
 check(root.textContent.includes('2 of 3 shown'), 'filtered count missing');
 ''', standalone=page.read_text())
 
+    def test_web_threads_age_filter_uses_the_local_date_without_as_of(self):
+        previous = os.environ.get('TZ')
+        os.environ['TZ'] = 'America/New_York'
+        try:
+            self.run_browser('''const RealDate = Date;
+const fixed = RealDate.parse('2026-11-16T03:00:00Z');
+window.Date = class extends RealDate {
+  constructor(...args) { if (args.length) super(...args); else super(fixed); }
+  static now() { return fixed; }
+};
+const root = document.createElement('div');
+document.body.appendChild(root);
+const thread = (id, title, last_seen) => ({id, kind:'work', repo:'/r', title, goal:title, status:'open',
+  display_status:'open', last_seen, sessions:[{date:last_seen, hash:id, outcome:'fully_achieved'}]});
+mountThreads(root, {threads:[thread('t-00000001', 'Edge', '2026-11-08'), thread('t-00000002', 'Old', '2026-11-01')]},
+  () => {}, () => null);
+root.querySelector('nav button[data-view="Open"]').click();
+const age = Array.from(root.querySelectorAll('label')).find(l => l.textContent.startsWith('Last seen')).querySelector('select');
+age.value = '7'; age.dispatchEvent(new Event('change'));
+const titles = Array.from(root.querySelectorAll('article h2')).map(h => h.textContent).join(',');
+check(titles === 'Edge', 'local date 2026-11-15 keeps a thread seen 2026-11-08: ' + titles);
+''')
+        finally:
+            if previous is None:
+                os.environ.pop('TZ', None)
+            else:
+                os.environ['TZ'] = previous
+
 if __name__ == '__main__':
     if os.environ.get('CI') or find_chrome() is None:
         print('SKIP: CI browser checks are local only' if os.environ.get('CI') else 'SKIP: no Chrome')
