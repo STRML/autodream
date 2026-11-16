@@ -285,7 +285,7 @@ class WebTests(unittest.TestCase):
 
     def login(self):
         response = self.request("GET", "/login?t=" + self.token)
-        self.assertEqual(response.status, 303)
+        self.assertEqual(response.status, 200)
         return response.headers["Set-Cookie"].split(";", 1)[0]
 
     def progress_locks(self):
@@ -466,8 +466,9 @@ l1_chunks_elided threads_linked threads_unassigned threads_unmeasured""".split()
     def test_web_login_cookie_and_token_scope(self):
         self.start_server()
         response = self.request("GET", "/login?t=" + self.token)
-        self.assertEqual(response.status, 303)
-        self.assertEqual(response.headers["Location"], "/")
+        self.assertEqual(response.status, 200)
+        self.assertIsNone(response.headers["Location"])
+        self.assertIn('http-equiv="refresh" content="0;url=/"', response.text)
         cookie_header = response.headers["Set-Cookie"]
         for attribute in ("HttpOnly", "SameSite=Strict", "Path=/"):
             self.assertIn(attribute, cookie_header)
