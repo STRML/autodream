@@ -145,6 +145,51 @@ document.body.dataset.result = 'PASS';
                 thread.join(timeout=3)
                 stop_backend()
 
+    def test_web_open_handoff_signs_the_browser_in(self):
+        chrome = find_chrome()
+        if chrome is None:
+            self.skipTest('no Chrome')
+        with tempfile.TemporaryDirectory(prefix='handoff.') as root:
+            root = Path(root)
+            install = root / 'install'
+            install.mkdir()
+            env = dict(os.environ, AUTODREAM_DIR=str(install),
+                       AUTODREAM_CONFIG=str(install / 'no-config'))
+            backend = subprocess.Popen(['/bin/bash', str(REPO / 'bin/autodream-web'),
+                'serve', '--port', '0'], env=env, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, text=True)
+            try:
+                with selectors.DefaultSelector() as selector:
+                    selector.register(backend.stdout, selectors.EVENT_READ)
+                    self.assertTrue(selector.select(timeout=5), 'backend did not start')
+                origin = backend.stdout.readline().strip()
+                shim = root / 'shim'
+                shim.mkdir()
+                capture = root / 'opened'
+                opener = shim / ('open' if sys.platform == 'darwin' else 'xdg-open')
+                opener.write_text('#!/bin/sh\nprintf %s "$1" > ' + str(capture) + '\n')
+                opener.chmod(0o755)
+                opened = subprocess.run(['/bin/bash', str(REPO / 'bin/autodream-web'), 'open'],
+                    env=dict(env, AUTODREAM_WEB_PORT=origin.rsplit(':', 1)[1],
+                             PATH=str(shim) + os.pathsep + os.environ['PATH']),
+                    capture_output=True, text=True, timeout=20)
+                self.assertEqual(opened.returncode, 0, opened.stderr)
+                handoff = capture.read_text()
+                self.assertTrue(handoff.startswith('file://'), handoff)
+                result = subprocess.run([chrome, *(['--single-process'] if sys.platform == 'darwin' else []),
+                    '--headless', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
+                    '--user-data-dir=' + str(root / 'profile'), '--dump-dom',
+                    '--virtual-time-budget=3000', handoff],
+                    capture_output=True, text=True, timeout=25)
+                self.assertEqual(result.returncode, 0, result.stderr[-1000:])
+                self.assertNotIn('sign in', result.stdout, result.stdout[-1000:])
+                self.assertIn('id="content"', result.stdout, result.stdout[-1000:])
+            finally:
+                if backend.poll() is None:
+                    backend.kill()
+                backend.wait(timeout=5)
+                backend.stdout.close()
+
     def test_web_server_killed_shows_unreachable(self):
         self.run_browser('''await new Promise(resolve => document.addEventListener('DOMContentLoaded', resolve, {once:true}));
 const originalInterval = window.setInterval;
