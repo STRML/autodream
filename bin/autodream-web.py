@@ -31,6 +31,10 @@ CSP = (
     "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 )
 COOKIE_NAME = "autodream_session"
+# /login is reached from the file:// handoff, a cross-site navigation. A 303 to /
+# stays in that navigation, so the browser withholds the SameSite=Strict cookie it
+# just set. This page starts a new, same-origin navigation that carries it.
+SAME_ORIGIN_HOP = '<!doctype html><meta http-equiv="refresh" content="0;url=/">'
 STATIC_ROUTES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/web/app.js": ("app.js", "text/javascript; charset=utf-8"),
@@ -221,8 +225,7 @@ class AutodreamHandler(BaseHTTPRequestHandler):
                 self.respond(401, "Run autodream-web open to sign in.\n")
                 return
             self.server.login_page.unlink(missing_ok=True)
-            self.respond(303, headers={
-                "Location": "/",
+            self.respond(200, SAME_ORIGIN_HOP, content_type="text/html; charset=utf-8", headers={
                 "Set-Cookie": f"{COOKIE_NAME}={self.server.token}; HttpOnly; SameSite=Strict; Path=/",
             })
             return
