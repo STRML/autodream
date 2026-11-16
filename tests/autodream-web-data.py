@@ -126,6 +126,11 @@ class DataTests(unittest.TestCase):
         self.assertEqual(night['sessions_without_sidecar'], 2,
                          'a pending session with no sidecar is unmeasured for the same reason')
         self.assertEqual(night['degraded'], [])
+        _, gated = self.worklist('/sessions/old.jsonl', '/sessions/gated.jsonl')
+        self.finding(gated, stats=False, skipped='below_noise_gate')
+        self.assertEqual(self.stats_night()['sessions_without_sidecar'], 1,
+                         'a gated session is left out of Stats, so its sidecar is not missed')
+        (self.day / (gated + '.json')).unlink()
         self.worklist('/sessions/old.jsonl')
         night = self.stats_night()
         self.assertTrue(all(value is None for value in night['activity'].values()))
