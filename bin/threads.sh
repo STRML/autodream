@@ -1683,7 +1683,7 @@ case "${1:-}" in
   close|reopen)
     action=$1; shift
     [ "$#" -eq 1 ] || { threads_usage; exit 2; }
-    if [ "$action" = close ]; then threads_move "$1" done; else threads_move "$1" open; fi
+    if [ "$action" = close ]; then threads_move "$1" "done"; else threads_move "$1" "open"; fi
     ;;
   *) threads_usage; exit 2 ;;
 esac

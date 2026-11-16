@@ -92,6 +92,11 @@ test_threads_kept_open_expires_and_validates() {
   AUTODREAM_DIR="$dir" DREAMS_DIR="$dir/dreams" "$THREADS" render >/dev/null 2>&1
   rc=$?
   assert_eq "$rc" 0 "the renderer accepts kept_open"
+  jq -c --arg future "$(pdate_shift "$AS_OF" 1 d)" 'if .id == "t-00000001" then .kept_open = $future else . end' "$dir/threads.jsonl" > "$dir/next" && mv "$dir/next" "$dir/threads.jsonl"
+  case "$(AUTODREAM_DIR="$dir" DREAMS_DIR="$dir/dreams" "$THREADS" report "$AS_OF")" in
+    *'`t-00000001`'*) ok "a kept_open after the report date does not hide an earlier dropped thread" ;;
+    *) no "a kept_open after the report date does not hide an earlier dropped thread" ;;
+  esac
   jq -c 'if .id == "t-00000001" then .kept_open = "yesterday" else . end' "$dir/threads.jsonl" > "$dir/next" && mv "$dir/next" "$dir/threads.jsonl"
   AUTODREAM_DIR="$dir" "$THREADS" list --json >/dev/null 2>&1
   rc=$?

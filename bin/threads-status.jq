@@ -2,7 +2,7 @@ def thread_display_status($as_of; $dropped_days):
   . as $thread |
   ([$thread.sessions[] | select(.date <= $as_of)] | sort_by([.date, .hash]) | last // {}) as $latest |
   (($as_of | strptime("%Y-%m-%d") | mktime) - ($dropped_days * 86400) | gmtime | strftime("%Y-%m-%d")) as $cutoff |
-  ([$latest.date // "", $thread.kept_open // ""] | max) as $last_touch |
+  ([$latest.date // "", ($thread.kept_open // "" | select(. <= $as_of))] | max) as $last_touch |
   if $thread.status != "open" then $thread.status
   elif $thread.kind == "idea" then "open"
   elif (["not_achieved", "partially_achieved", "unclear_from_transcript"] | index($latest.outcome // "")) != null and $last_touch < $cutoff then "dropped"
