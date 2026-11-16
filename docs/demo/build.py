@@ -41,11 +41,20 @@ def build(out):
         sys.exit(f'{out} exists; pass a new directory')
     for _ in range(3):
         built = date.today()
-        write_site(out, built.isoformat())
-        if date.today() == built:
-            return
-        shutil.rmtree(out)
+        try:
+            write_site(out, built.isoformat())
+        except ThreadsUnavailable:
+            if date.today() == built:
+                sys.exit('threads.sh list failed; is jq installed?')
+        else:
+            if date.today() == built:
+                return
+        shutil.rmtree(out, ignore_errors=True)
     sys.exit('the date kept changing during the build')
+
+
+class ThreadsUnavailable(Exception):
+    """NightCache.threads() returns None when the date changes while it reads, among other causes."""
 
 
 def write_site(out, built):
@@ -61,7 +70,7 @@ def write_site(out, built):
         api = out / 'api'
         threads = cache.threads()
         if threads is None:
-            sys.exit('threads.sh list failed; is jq installed?')
+            raise ThreadsUnavailable()
         write_json(api / 'lately.json', cache.lately(7))
         write_json(api / 'stats.json', cache.stats())
         write_json(api / 'progress.json', cache.progress(time.time()))

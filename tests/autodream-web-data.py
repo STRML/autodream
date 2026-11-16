@@ -451,7 +451,7 @@ vm.runInNewContext(fs.readFileSync(process.argv[1], 'utf8'), {window, document: 
         self.assertFalse(out['action']['ok'])
         self.assertIn('demo', out['action']['message'])
 
-    def test_web_demo_shift_follows_the_clock_across_midnight(self):
+    def test_web_demo_reloads_when_the_date_changes(self):
         node = shutil.which('node')
         if node is None:
             self.skipTest('no node')
@@ -459,20 +459,25 @@ vm.runInNewContext(fs.readFileSync(process.argv[1], 'utf8'), {window, document: 
 const vm = require('vm'), fs = require('fs');
 let clock = new Date(2026, 10, 16, 23, 59).getTime();
 class Clock extends Date { constructor(...a) { if (a.length) super(...a); else super(clock); } static now() { return clock; } }
-const window = {DEMO_BUILT: '2026-11-10', fetch: async () => new Response('{"day":"2026-11-10"}')};
+const requested = [];
+const window = {DEMO_BUILT: '2026-11-10', fetch: async url => { requested.push(String(url)); return new Response('{"day":"2026-11-10"}'); }};
+let reloaded = 0;
+const location = {href: 'https://x.test/', origin: 'https://x.test', reload: () => { reloaded += 1; }};
 vm.runInNewContext(fs.readFileSync(process.argv[1], 'utf8'), {window, document: {baseURI: 'https://x.test/'},
-  location: {href: 'https://x.test/', origin: 'https://x.test'}, URL, Response, Date: Clock, JSON, Promise});
+  location, URL, Response, Date: Clock, JSON, Promise});
 (async () => {
   const before = (await (await window.fetch('/api/lately')).json()).day;
   clock = new Date(2026, 10, 17, 0, 1).getTime();
-  const after = (await (await window.fetch('/api/lately')).json()).day;
-  console.log(JSON.stringify([before, after]));
+  window.fetch('/api/dreams/2026-11-16');
+  await new Promise(resolve => setTimeout(resolve, 10));
+  console.log(JSON.stringify([before, reloaded, requested.length]));
 })();
 """
         result = subprocess.run([node, '-e', script, str(REPO / 'docs/demo/demo-fetch.js')],
                                 capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout), ['2026-11-16', '2026-11-17'])
+        self.assertEqual(json.loads(result.stdout), ['2026-11-16', 1, 1],
+                         'after midnight the page reloads instead of reading a link drawn under the old shift')
 
     def test_web_demo_build_redoes_a_build_that_crosses_midnight(self):
         spec = importlib.util.spec_from_file_location('demo_build', REPO / 'docs/demo/build.py')
@@ -491,6 +496,16 @@ vm.runInNewContext(fs.readFileSync(process.argv[1], 'utf8'), {window, document: 
             demo.build(self.root / 'site')
         self.assertEqual(stamps, ['2026-11-16', '2026-11-17'])
         self.assertTrue((self.root / 'site').is_dir())
+        days = iter([date(2026, 11, 16), date(2026, 11, 17), date(2026, 11, 17), date(2026, 11, 17)])
+        calls = []
+        def threads_gone_at_midnight(out, built):
+            calls.append(built)
+            out.mkdir()
+            if len(calls) == 1:
+                raise demo.ThreadsUnavailable()
+        with patch.object(demo, 'date', Clock), patch.object(demo, 'write_site', threads_gone_at_midnight):
+            demo.build(self.root / 'site2')
+        self.assertEqual(calls, ['2026-11-16', '2026-11-17'], 'threads lost to midnight must retry, not exit')
 
 if __name__ == '__main__':
     result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(DataTests))
