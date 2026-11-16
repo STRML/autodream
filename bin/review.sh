@@ -434,7 +434,7 @@ $(cat "$QUESTIONS_TMP")
 
 Workflow:
 
-1. Restate ONE open question (in order), in full, before asking for any decision. The user has not read the report this morning, so a bare label ("now question 2", "next: the hook failure") is never enough. The restatement must carry (a) the question itself in plain words, (b) every motivation behind it: the findings, session counts, evidence quotes and report section numbers that make it a question, and (c) every potential fix the report or you can see, each with its trade-off. Use the AskUserQuestion tool or prose for the decision, but only after (a), (b) and (c) are on screen.
+1. Restate ONE open question (in order), in full, before asking for any decision. The user has not read the report this morning, so a bare label ("now question 2", "next: the hook failure") is never enough. The restatement must carry (a) the question itself in plain words, (b) every motivation behind it: the findings, session counts, evidence quotes and report section numbers that make it a question, and (c) every potential fix the report or you can see, each with its trade-off. Ask for the decision with the AskUserQuestion tool, passing \`metadata: {"source": "autodream-triage"}\` (an ask-gate hook lets these through, since each triage decision is the user's), but only after (a), (b) and (c) are on screen.
 2. Say what you checked or could not check since the report was written, if anything (a file that now exists, a count that moved).
 3. Recommend one concrete action from (c). Be opinionated — the user trusts your judgment.
 4. Wait for: approve / modify / skip / discuss.

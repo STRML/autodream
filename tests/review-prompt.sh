@@ -161,6 +161,14 @@ test_prompt_does_not_ask_for_the_whole_report(){
   assert_grep "$root/sp" 'Do not read the whole report' "system prompt keeps the model out of the body"
 }
 
+test_prompt_names_the_ask_gate_metadata(){
+  local root; root=$(setup_env); mk_report "$root" 2020-01-02 "$Q_BLOCK"
+  run_review "$root" --force 2020-01-02
+  system_prompt "$root" > "$root/sp"
+  assert_grep "$root/sp" '`metadata: {"source": "autodream-triage"}`' "the AskUserQuestion metadata survives the heredoc"
+  assert_nogrep "$root/sp" 'passing  (' "no command substitution left a gap in the prompt"
+}
+
 test_missing_section_still_launches(){
   local root; root=$(setup_env)
   printf '# Autodream — 2020-01-02\n\n## Top patterns\n\nNothing.\n\n<!-- autodream:open-questions=1 -->\n' \
@@ -266,6 +274,7 @@ test_markdown_inside_the_block_is_text
 test_legacy_report_uses_the_heading_fallback
 test_launch_prompt_is_an_instruction
 test_prompt_does_not_ask_for_the_whole_report
+test_prompt_names_the_ask_gate_metadata
 test_missing_section_still_launches
 test_cap_is_all_or_nothing
 test_oversized_legacy_report_points_at_the_heading
