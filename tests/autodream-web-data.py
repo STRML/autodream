@@ -121,6 +121,13 @@ class DataTests(unittest.TestCase):
         night = self.stats_night()
         self.assertEqual(night['degraded'], [], 'a night from before sidecars existed is not a read failure')
         self.assertEqual(night['sessions_without_sidecar'], 1)
+        self.worklist('/sessions/old.jsonl', '/sessions/pending.jsonl')
+        night = self.stats_night()
+        self.assertEqual(night['sessions_without_sidecar'], 2,
+                         'a pending session with no sidecar is unmeasured for the same reason')
+        self.assertEqual(night['degraded'], [])
+        self.worklist('/sessions/old.jsonl')
+        night = self.stats_night()
         self.assertTrue(all(value is None for value in night['activity'].values()))
         self.assertTrue(all(value is None for value in night['outcomes'].values()))
         key = ('2026-11-14', 'stats')

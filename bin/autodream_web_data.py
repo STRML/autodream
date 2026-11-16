@@ -98,8 +98,11 @@ def build_night_stats(date, directory):
     without_sidecar = 0
     for session in night_sessions(directory, unreadable):
         path = directory / (session + '.json')
+        sidecar = directory / (session + '.stats.json')
+        if not sidecar.exists():
+            without_sidecar += 1
         if not path.exists():
-            if not pending_is_nested(directory / (session + '.stats.json')):
+            if not pending_is_nested(sidecar):
                 for values in activity.values():
                     values.append(None)
                 outcomes.append(None)
@@ -107,10 +110,7 @@ def build_night_stats(date, directory):
         finding = read_object(path, degraded, unreadable)
         if finding.get('skipped') == 'below_noise_gate':
             continue
-        stats_path = path.with_name(path.stem + '.stats.json')
-        if not stats_path.exists():
-            without_sidecar += 1
-        stats = read_object(stats_path, degraded, unreadable) if stats_path.exists() else {}
+        stats = read_object(sidecar, degraded, unreadable) if sidecar.exists() else {}
         provenance = [stats[key] for key in ('nested', 'isSidechain') if key in stats]
         if any(value is True for value in provenance):
             continue
