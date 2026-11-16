@@ -354,27 +354,22 @@ threads_render() {
 }
 
 # cmux types --command into the user's login shell, which may be fish, and fish cannot
-# parse bash's $'...' quoting. Write the bash command to a 0600 file and hand cmux only
-# "/bin/bash '<file>'", which every shell reads the same. The file removes itself on start.
-# Prints the file path; it holds no quote or backslash, so the single quotes are safe. The
-# path is absolute because the pane may start in another directory. Launchers live in a
-# private autodream-launch directory the user owns, so the next launch can remove one an
-# hour old (a pane closed before running it) without touching anyone else's files.
+# parse bash's $'...' quoting. Write the bash command to a file in a fresh 0700 mktemp -d
+# directory and hand cmux only "/bin/bash '<file>'", which every shell reads the same. The
+# launcher removes its file and directory when it starts; nothing else is ever deleted.
+# Prints the file path: absolute, because the pane may start in another directory, and
+# free of quotes and backslashes, so the single quotes are safe.
 threads_launcher() {
-  local base dir file
+  local base dir
   for base in "${TMPDIR:-/tmp}" /tmp; do
     case $base in /*) ;; *) continue ;; esac
-    dir="${base%/}/autodream-launch"
-    mkdir -m 700 "$dir" 2>/dev/null
-    [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ] || continue
-    find "$dir" -maxdepth 1 -name 'launch.*' -type f -mmin +60 -exec rm -f -- {} + 2>/dev/null || true
-    file=$(mktemp "$dir/launch.XXXXXX" 2>/dev/null) || continue
-    case $file in *"'"*|*\\*) rm -f -- "$file"; continue ;; esac
-    if printf '%s\n' '#!/bin/bash' 'rm -f -- "$0"' "exec $1" > "$file"; then
-      printf '%s\n' "$file"
+    dir=$(mktemp -d "${base%/}/autodream-launch.XXXXXX" 2>/dev/null) || continue
+    case $dir in *"'"*|*\\*) rmdir -- "$dir"; continue ;; esac
+    if printf '%s\n' '#!/bin/bash' 'rm -f -- "$0"; rmdir -- "${0%/*}" 2>/dev/null' "exec $1" > "$dir/launch"; then
+      printf '%s\n' "$dir/launch"
       return 0
     fi
-    rm -f -- "$file"
+    rm -f -- "$dir/launch"; rmdir -- "$dir"
   done
   threads_error "cannot write a launcher file"
   return 1
@@ -420,7 +415,7 @@ threads_explore() {
   inner_cmd="$(shq "$claude") --permission-mode default --tools Read,Bash --strict-mcp-config --disable-slash-commands --settings $(shq '{"disableAllHooks":true}') --allowedTools $(shq "$permission") --append-system-prompt $(shq "$system_prompt") $(shq "$initial_prompt")"
   launcher=$(threads_launcher "$inner_cmd") || return 1
   if ! "$cmux" new-split right --command "/bin/bash '$launcher'"; then
-    rm -f -- "$launcher"
+    rm -f -- "$launcher"; rmdir -- "${launcher%/*}" 2>/dev/null
     threads_error "cmux could not create the explore split"
     return 1
   fi
@@ -1442,7 +1437,7 @@ threads_resume() {
   if tmo 15 "$cmux" workspace create --cwd "$repo" --command "/bin/bash '$launcher'" >&2; then
     return 0
   fi
-  rm -f -- "$launcher"
+  rm -f -- "$launcher"; rmdir -- "${launcher%/*}" 2>/dev/null
   threads_error "cmux workspace creation failed"
   threads_release_resume_claim "$id" "$owner" || threads_error "cannot release resume claim for $id"
   printf '%s\n' "$brief"

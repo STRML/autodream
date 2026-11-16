@@ -9641,27 +9641,25 @@ test_threads_explore_quotes_paths_and_reports_launch_failure(){
   thread_cleanup "$parent"
 }
 
-test_threads_launcher_is_absolute_and_reaps_stale_files(){
-  echo "# threads: the launcher path is absolute and old unrun launchers are removed"
-  local parent made stale fresh
+test_threads_launcher_is_private_and_removes_only_itself(){
+  echo "# threads: each launcher gets its own private directory and removes only itself"
+  local parent made mode
   parent=$(mktemp -d "${TMPDIR:-/tmp}/ccad.XXXXXX")
   mkdir -p "$parent/rel"
-  mkdir -m 700 "$parent/rel/autodream-launch"
-  stale="$parent/rel/autodream-launch/launch.stale1"
-  fresh="$parent/rel/autodream-launch/launch.fresh1"
-  : > "$stale"; : > "$fresh"
-  : > "$parent/rel/autodream-launch.notes"
-  touch -t 202001010000 "$parent/rel/autodream-launch.notes"
-  touch -t 202001010000 "$stale"
   sed -n -e '/^threads_error()/p' -e '/^threads_launcher() {/,/^}/p' "$REPO/bin/threads.sh" > "$parent/launcher.sh"
   made=$(cd "$parent" && TMPDIR=rel /bin/bash -c '. "$1"; threads_launcher "true"' _ "$parent/launcher.sh")
   case $made in /*) ok "relative TMPDIR is skipped for an absolute path" ;; *) no "relative TMPDIR is skipped for an absolute path (got $made)" ;; esac
-  rm -f -- "$made"
-  made=$(TMPDIR="$parent/rel" /bin/bash -c '. "$1"; threads_launcher "true"' _ "$parent/launcher.sh")
-  assert_no_file "$stale" "a launcher older than an hour is removed"
-  assert_file "$fresh" "a recent launcher is kept"
-  assert_file "$parent/rel/autodream-launch.notes" "files outside the launcher directory are never removed"
-  rm -f -- "$made"
+  rm -f -- "$made"; rmdir -- "${made%/*}" 2>/dev/null
+  : > "$parent/rel/autodream-launch.notes"
+  touch -t 202001010000 "$parent/rel/autodream-launch.notes"
+  made=$(TMPDIR="$parent/rel" /bin/bash -c '. "$1"; threads_launcher "printf launched > \"\$1\"/ran"' _ "$parent/launcher.sh")
+  mode=$(pstat_mode "${made%/*}")
+  assert_eq "$mode" 700 "launcher directory is private"
+  /bin/bash "$made" "$parent"
+  assert_file "$parent/ran" "launcher runs its command"
+  assert_no_file "$made" "launcher removes its file"
+  assert_no_file "${made%/*}" "launcher removes its directory"
+  assert_file "$parent/rel/autodream-launch.notes" "unrelated files are never removed"
   thread_cleanup "$parent"
 }
 
@@ -9795,7 +9793,7 @@ _run test_threads_render_retries_when_state_changes_during_render
 _run test_threads_explore_launch_is_constrained
 _run test_threads_explore_quotes_paths_and_reports_launch_failure
 _run test_threads_explore_resolves_claude_from_path_and_checks_before_open
-_run test_threads_launcher_is_absolute_and_reaps_stale_files
+_run test_threads_launcher_is_private_and_removes_only_itself
 _run test_threads_list_uses_one_jq_process
 
 test_prune_worktrees_wiring(){
