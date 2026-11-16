@@ -8885,6 +8885,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -8958,6 +8959,8 @@ if scenario == "workspace":
     args = calls()[0]
     assert args[:2] == ["workspace", "create"], args
     assert args[args.index("--cwd") + 1] == str(repo), args
+    typed = args[args.index("--command") + 1]
+    assert re.fullmatch(r"/bin/bash '[^'\\\n]+'", typed), "cmux types the command into the login shell, which may be fish: " + typed
     launched = json.loads((root / "claude.json").read_text())
     assert launched["cwd"] == str(repo.resolve()), launched
     argv = launched["argv"]
@@ -9594,6 +9597,7 @@ test_threads_explore_launch_is_constrained(){
   if printf '%s\n' "$args" | grep -Eq 'PRIVATE_THREAD_(INDEX|REPORT)'; then inlined=true; fi
   assert_eq "$opened_path" "$root/dreams/threads.html" "opens local dashboard"
   assert_eq "$cmux_operation" new-split "opens a split"
+  if grep -Eq "^/bin/bash '[^'\\\\]+'\$" "$root/cmux.command"; then ok "command any login shell can parse"; else no "command any login shell can parse: $(head -c 200 "$root/cmux.command")"; fi
   assert_eq "$permission_mode" default "normal permission mode"
   assert_eq "$tools" "Read,Bash" "explorer toolset"
   assert_grep "$root/claude.args" '^--strict-mcp-config$' "MCP tools are disabled"
