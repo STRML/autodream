@@ -77,6 +77,52 @@ THREADS = [
     ('dream', 'Lately as a compact table', 'mostly_achieved', 'done'),
 ]
 
+# Threads whose sessions predate the findings above: (repo, title, kind, status, days ago, outcome).
+# Unfinished work older than seven days reads as Dropped.
+OLDER_THREADS = [
+    ('rgl', 'Keep placeholder size stable while dragging between breakpoints', 'work', 'open', 12,
+     'partially_achieved'),
+    ('drag', 'Support pointer capture on touch devices', 'work', 'open', 19, 'not_achieved'),
+    ('mlx', 'Speculative decoding with a draft model on one host', 'work', 'open', 26,
+     'unclear_from_transcript'),
+    ('resize', 'Port the demo site to Vite', 'work', 'open', 9, 'partially_achieved'),
+    ('dream', 'Weekly digest that rolls up seven nightly reports', 'idea', 'open', 15, 'not_achieved'),
+    ('rgl', 'Virtualize rows for grids over 1,000 items', 'idea', 'open', 33, 'not_achieved'),
+    ('omp', 'Per-model cost ceilings in the router', 'idea', 'open', 21, 'not_achieved'),
+    ('drag', 'Publish the package with provenance', 'work', 'done', 11, 'fully_achieved'),
+    ('dream', 'Shard the test suite across four CI jobs', 'work', 'closed_by_sam', 5, 'fully_achieved'),
+]
+
+LATEST_REPORT = '''# Autodream — {day}
+
+## Top patterns
+
+### Retries that never changed the input
+- **Severity**: medium
+- **Seen in**: 3 sessions across mlx-serve and oh-my-pi
+
+The same benchmark command ran four to six times in a row with identical flags after a failure.
+Each retry spent the full warmup again. Read the error before retrying, or change one variable per run.
+
+### Release steps done by hand
+- **Severity**: low
+- **Seen in**: 2 sessions in react-draggable and react-resizable
+
+Version bump, changelog and tag were typed out each time. A release script would save the round trips.
+
+## Open questions
+
+AUTODREAM_QUESTIONS_BEGIN
+1. **Turn on chunked triage for long sessions?** Two sessions passed 300 KB and were read as a
+   head and tail slice. Chunking reads all of them at about eight calls each.
+2. **Pin the benchmark harness flags?** The prefix-cache investigation reran with three different
+   context lengths; a pinned config would make nights comparable.
+AUTODREAM_QUESTIONS_END
+
+<!-- autodream:open-questions=2 -->
+'''
+
+
 
 def session_path(day, index):
     return HOME + '/.claude/projects/-Users-dev/' + day + '-' + str(index) + '.jsonl'
@@ -128,11 +174,14 @@ def main(root):
             'tool_loop\tall\t' + str(rng.randint(1, 3)) + '\t' + str(rng.randint(2, 5)) + '\t\n'
             'sandbox_friction\tall\t' + str(rng.randint(1, 4)) + '\t' + str(rng.randint(2, 6)) + '\t\n'
             'missed_skill\tall\t1\t1\t\n')
+        if ago == 0:
+            (dreams / (day + '.md')).write_text(LATEST_REPORT.format(day=day))
+            continue
         (dreams / (day + '.md')).write_text(
             '# Autodream — ' + day + '\n\n## Top patterns\n\n### Retries that never changed the input\n'
             '- **Severity**: medium\n\n## Open questions\n\nAUTODREAM_QUESTIONS_BEGIN\n'
             '1. **Turn on chunked triage for long sessions?**\nAUTODREAM_QUESTIONS_END\n\n'
-            '<!-- autodream:open-questions=' + ('2' if ago == 0 else '0') + ' -->\n')
+            '<!-- autodream:open-questions=1 -->\n')
     rows = []
     for number, (repo, title, outcome, status) in enumerate(THREADS):
         members = [value for (key_repo, _), value in hashes.items() if key_repo == repo][:2]
@@ -143,6 +192,18 @@ def main(root):
                    last_seen=max(day for day, _, _ in members))
         if status == 'done':
             row['done_by'] = 'linker'
+        rows.append(json.dumps(row))
+    for number, (repo, title, kind, status, ago, outcome) in enumerate(OLDER_THREADS, len(THREADS)):
+        day = (today - timedelta(days=ago)).isoformat()
+        path = session_path(day, 1000 + number)
+        row = dict(id='t-%08x' % (0xa11ce000 + number), kind=kind, repo='~' + REPOS[repo][len(HOME):],
+                   title=title, goal=title, status=status, last_seen=day,
+                   sessions=[dict(date=day, hash=hashlib.sha1(path.encode()).hexdigest()[:12],
+                                  session_path=path, outcome=outcome)])
+        if status == 'done':
+            row['done_by'] = 'linker'
+        elif status == 'closed_by_sam':
+            row['done_by'] = 'sam'
         rows.append(json.dumps(row))
     (install / 'threads.jsonl').write_text('\n'.join(rows) + '\n')
 

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
+from datetime import date, timedelta
 import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -383,6 +385,71 @@ class DataTests(unittest.TestCase):
         self.assertIn('artifacts changed while reading; retry', changed['degraded'])
         self.assertEqual(self.sessions(self.cache.summary('2026-11-14'))[0]['tool_calls'], 30)
 
+
+    def test_web_demo_build_answers_every_view(self):
+        out = self.root / 'site'
+        result = subprocess.run([sys.executable, str(REPO / 'docs/demo/build.py'), str(out)],
+                                capture_output=True, text=True, timeout=60,
+                                env=dict(os.environ, TMPDIR=str(self.root)))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        api = out / 'api'
+        lately = json.loads((api / 'lately.json').read_text())
+        self.assertEqual(len(lately['timeline']), 7)
+        self.assertTrue(all(night['projects'] and not night['degraded'] for night in lately['timeline']))
+        self.assertEqual(lately['newest_dream']['open_questions'], 2)
+        threads_file = json.loads((api / 'threads.json').read_text())
+        self.assertRegex(threads_file['as_of'], r'^[0-9]{4}-[0-9]{2}-[0-9]{2}$',
+                         'the age filter must count from the build day')
+        threads = threads_file['threads']
+        self.assertEqual({t['display_status'] for t in threads}, {'open', 'dropped', 'done', 'closed_by_sam'})
+        self.assertTrue(any(t['kind'] == 'idea' for t in threads))
+        dates = json.loads((api / 'dreams.json').read_text())['dates']
+        self.assertEqual(len(dates), 7)
+        self.assertTrue(all((api / 'dreams' / (day + '.json')).is_file() for day in dates))
+        self.assertEqual(len(json.loads((api / 'stats.json').read_text())['nights']), 7)
+        page = (out / 'index.html').read_text()
+        self.assertLess(page.index('web/demo-fetch.js'), page.index('web/app.js'))
+        self.assertNotIn('"/web/', page, 'paths must be relative for a Pages subpath')
+        self.assertNotIn('/Users/', (api / 'lately.json').read_text().replace('/Users/dev', ''),
+                         'no real home path may leak into the demo')
+
+    def test_web_demo_moves_dates_to_the_visitors_today(self):
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('no node')
+        script = r"""
+const vm = require('vm'), fs = require('fs');
+const pad = n => String(n).padStart(2, '0');
+const local = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+const today = new Date(); const built = new Date(today); built.setDate(today.getDate() - 3);
+const requested = [];
+const window = {DEMO_BUILT: local(built), fetch: async url => {
+  requested.push(String(url));
+  return new Response(JSON.stringify({day: local(built), at: local(built) + 'T01:02:03Z', hash: '0123456789ab'}));
+}};
+vm.runInNewContext(fs.readFileSync(process.argv[1], 'utf8'), {window, document: {baseURI: 'https://x.test/demo/'},
+  location: {href: 'https://x.test/demo/', origin: 'https://x.test'}, URL, Response, Date, JSON, Promise});
+(async () => {
+  const body = await (await window.fetch('/api/lately?days=7')).json();
+  const dream = await window.fetch('/api/dreams/' + local(today));
+  const action = await (await window.fetch('/api/threads/t-00000001/resume', {method: 'POST'})).json();
+  console.log(JSON.stringify({body, requested, action}));
+})();
+"""
+        result = subprocess.run([node, '-e', script, str(REPO / 'docs/demo/demo-fetch.js')],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = json.loads(result.stdout)
+        today = date.today()
+        built = today - timedelta(days=3)
+        self.assertEqual(out['body']['day'], today.isoformat())
+        self.assertEqual(out['body']['at'], today.isoformat() + 'T01:02:03Z')
+        self.assertEqual(out['body']['hash'], '0123456789ab')
+        self.assertTrue(out['requested'][0].endswith('/demo/api/lately.json'), out['requested'])
+        self.assertTrue(out['requested'][1].endswith('/demo/api/dreams/' + built.isoformat() + '.json'),
+                        out['requested'])
+        self.assertFalse(out['action']['ok'])
+        self.assertIn('demo', out['action']['message'])
 
 if __name__ == '__main__':
     result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(DataTests))

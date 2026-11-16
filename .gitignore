@@ -10,3 +10,4 @@ inbox/
 # every repo-wide grep matched them dozens of times over.
 .tmp/
 .claude/settings.local.json
+__pycache__/

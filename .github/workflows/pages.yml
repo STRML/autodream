@@ -1,0 +1,48 @@
+# Publishes the dashboard demo (docs/demo/build.py) to GitHub Pages. The demo runs the real
+# web/ files against JSON answers from the real data layer over a made-up install, so it is
+# rebuilt whenever either changes. Dates are moved to the visitor's today in the browser
+# (docs/demo/demo-fetch.js), so the weekly run only keeps the build itself exercised.
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - 'bin/autodream_web_data.py'
+      - 'bin/threads.sh'
+      - 'bin/threads-status.jq'
+      - 'bin/report-format.sh'
+      - 'bin/portable.sh'
+      - 'docs/demo/**'
+      - 'docs/screenshots/fixture.py'
+      - '.github/workflows/pages.yml'
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 tests/autodream-web-data.py
+      - run: python3 docs/demo/build.py "$RUNNER_TEMP/site"
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/site
+      - id: deployment
+        uses: actions/deploy-pages@v4

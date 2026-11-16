@@ -28,6 +28,8 @@ on:
       - '!LICENSE'
       - 'prompts/**'
       - 'adapters/**'
+      - 'docs/demo/**'
+      - 'docs/screenshots/fixture.py'
   pull_request:
     # ready_for_review is not a default type: without it, marking a draft ready starts nothing
     # and the job's draft skip would leave the PR with no test run.
@@ -40,6 +42,8 @@ on:
       - '!LICENSE'
       - 'prompts/**'
       - 'adapters/**'
+      - 'docs/demo/**'
+      - 'docs/screenshots/fixture.py'
 
 concurrency:
   group: tests-${{ github.event.pull_request.number || github.ref }}
