@@ -115,6 +115,29 @@ class DataTests(unittest.TestCase):
         self.assertTrue(all(value is None for value in night['activity'].values()))
         self.assertTrue(all(value is None for value in night['outcomes'].values()))
 
+    def test_web_stats_missing_sidecar_is_unmeasured_not_unreadable(self):
+        old, = self.worklist('/sessions/old.jsonl')
+        self.finding(old, stats=False)
+        night = self.stats_night()
+        self.assertEqual(night['degraded'], [], 'a night from before sidecars existed is not a read failure')
+        self.assertEqual(night['sessions_without_sidecar'], 1)
+        self.worklist('/sessions/old.jsonl', '/sessions/pending.jsonl')
+        night = self.stats_night()
+        self.assertEqual(night['sessions_without_sidecar'], 2,
+                         'a pending session with no sidecar is unmeasured for the same reason')
+        self.assertEqual(night['degraded'], [])
+        _, gated = self.worklist('/sessions/old.jsonl', '/sessions/gated.jsonl')
+        self.finding(gated, stats=False, skipped='below_noise_gate')
+        self.assertEqual(self.stats_night()['sessions_without_sidecar'], 1,
+                         'a gated session is left out of Stats, so its sidecar is not missed')
+        (self.day / (gated + '.json')).unlink()
+        self.worklist('/sessions/old.jsonl')
+        night = self.stats_night()
+        self.assertTrue(all(value is None for value in night['activity'].values()))
+        self.assertTrue(all(value is None for value in night['outcomes'].values()))
+        key = ('2026-11-14', 'stats')
+        self.assertIn(key, self.cache._nights, 'an unmeasured night must still be cached')
+
     def test_web_stats_unreadable_file_is_degraded_and_not_cached(self):
         self.finding()
         run_stats = self.day / 'run-stats.txt'
