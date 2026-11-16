@@ -39,7 +39,17 @@ def build(out):
     out = Path(out)
     if out.exists():
         sys.exit(f'{out} exists; pass a new directory')
-    built = date.today().isoformat()
+    for _ in range(3):
+        built = date.today()
+        write_site(out, built.isoformat())
+        if date.today() == built:
+            return
+        shutil.rmtree(out)
+    sys.exit('the date kept changing during the build')
+
+
+def write_site(out, built):
+    """Every date in the site is relative to built; a build that crosses midnight is redone."""
     fixture = load('fixture', REPO / 'docs/screenshots/fixture.py')
     web_data = load('autodream_web_data', REPO / 'bin/autodream_web_data.py')
     with tempfile.TemporaryDirectory(prefix='autodream-demo.') as scratch:
