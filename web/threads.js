@@ -40,6 +40,47 @@ function copyCommand(command, button, label) {
   fallback();
 }
 
+const sortOrders = {
+  newest: function (a, b) { return byNewest(a, b); },
+  oldest: function (a, b) { return byNewest(b, a); },
+  sessions: function (a, b) { return b.sessions.length - a.sessions.length || byNewest(a, b); },
+  repo: function (a, b) { return (a.repo || "").localeCompare(b.repo || "") || byNewest(a, b); },
+  title: function (a, b) { return threadTitle(a).localeCompare(threadTitle(b)); }
+};
+
+function threadTitle(thread) { return thread.title || thread.goal || ""; }
+
+function byNewest(a, b) {
+  return (b.last_seen || "").localeCompare(a.last_seen || "") || threadTitle(a).localeCompare(threadTitle(b));
+}
+
+function latestOutcome(thread) {
+  const sessions = thread.sessions.slice().sort(function (a, b) {
+    return (a.date || "").localeCompare(b.date || "") || (a.hash || "").localeCompare(b.hash || "");
+  });
+  return sessions.length ? sessions[sessions.length - 1].outcome || "" : "";
+}
+
+function daysBefore(day, days) {
+  const date = new Date(day + "T00:00:00Z");
+  date.setUTCDate(date.getUTCDate() - days);
+  return date.toISOString().slice(0, 10);
+}
+
+function selectControl(label, options) {
+  const wrapper = document.createElement("label");
+  wrapper.textContent = label + " ";
+  const control = document.createElement("select");
+  options.forEach(function (pair) {
+    const option = document.createElement("option");
+    option.value = pair[0];
+    option.textContent = pair[1];
+    control.appendChild(option);
+  });
+  wrapper.appendChild(control);
+  return {label: wrapper, select: control};
+}
+
 function mountThreads(root, data, onAction, getActionState) {
   const viewNames = ["Dropped", "Open", "Ideas", "Done"];
   let activeView = "Dropped";
@@ -63,22 +104,40 @@ function mountThreads(root, data, onAction, getActionState) {
   const repoLabel = element("label", "", "Repo ");
   const repo = element("select");
   repoLabel.appendChild(repo);
-  inputs.append(searchLabel, repoLabel);
+  const sort = selectControl("Sort", [["newest", "Last seen, newest"], ["oldest", "Last seen, oldest"],
+    ["sessions", "Most sessions"], ["repo", "Repository"], ["title", "Title"]]);
+  const outcome = selectControl("Outcome", [["", "Any latest outcome"], ["not_achieved", "Not achieved"],
+    ["partially_achieved", "Partially achieved"], ["unclear_from_transcript", "Unclear"],
+    ["achieved", "Fully or mostly achieved"]]);
+  const age = selectControl("Last seen", [["", "Any time"], ["7", "Within 7 days"],
+    ["30", "Within 30 days"], ["90", "Within 90 days"]]);
+  inputs.append(searchLabel, repoLabel, sort.label, outcome.label, age.label);
   const views = element("nav");
   views.setAttribute("aria-label", "Thread views");
   controls.append(generated, inputs, views);
   const list = element("div", "thread-list");
+  const shown = element("p", "thread-shown");
+  shown.setAttribute("aria-live", "polite");
   const empty = element("p", "thread-empty", "No threads in this view.");
-  container.append(heading, controls, list, empty);
+  container.append(heading, controls, shown, list, empty);
   root.replaceChildren(container);
 
   function render() {
     const query = search.value.toLocaleLowerCase();
     const repoFilter = repo.value;
-    const filtered = data.threads.filter(function (thread) {
+    const wanted = outcome.select.value;
+    const since = age.select.value ?
+      daysBefore(data.as_of || new Date().toISOString().slice(0, 10), Number(age.select.value)) : "";
+    const inView = data.threads.filter(function (thread) { return isInView(thread, activeView); });
+    const filtered = inView.filter(function (thread) {
       const text = [thread.title, thread.goal, thread.repo, thread.id].join(" ").toLocaleLowerCase();
-      return isInView(thread, activeView) && (!query || text.includes(query)) && (!repoFilter || thread.repo === repoFilter);
-    });
+      const last = latestOutcome(thread);
+      const outcomeMatches = !wanted || (wanted === "achieved" ?
+        last === "fully_achieved" || last === "mostly_achieved" : last === wanted);
+      return (!query || text.includes(query)) && (!repoFilter || thread.repo === repoFilter) &&
+        outcomeMatches && (!since || (thread.last_seen || "") >= since);
+    }).sort(sortOrders[sort.select.value] || sortOrders.newest);
+    shown.textContent = filtered.length === inView.length ? "" : filtered.length + " of " + inView.length + " shown";
     Array.from(views.children).forEach(function (tab) {
       const name = tab.dataset.view;
       const amount = data.threads.filter(function (thread) { return isInView(thread, name); }).length;
@@ -179,12 +238,16 @@ function mountThreads(root, data, onAction, getActionState) {
     activeView = viewNames.find(function (name) { return isInView(thread, name); });
     search.value = "";
     repo.value = "";
+    outcome.select.value = "";
+    age.select.value = "";
     Array.from(views.children).forEach(function (button) { button.setAttribute("aria-pressed", String(button.dataset.view === activeView)); });
     render();
     document.getElementById(id)?.scrollIntoView({block: "nearest"});
   }
   search.addEventListener("input", render);
-  repo.addEventListener("change", render);
+  [repo, sort.select, outcome.select, age.select].forEach(function (control) {
+    control.addEventListener("change", render);
+  });
   update(data);
   return {element: container, update, select, render};
 }

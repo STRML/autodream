@@ -15,6 +15,8 @@
 .thread-view .meta, .thread-view .goal { margin: .3rem 0; color: GrayText; }
 .thread-view .actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .6rem; }
 .thread-view .thread-empty { color: GrayText; padding: 1rem 0; }
+.thread-view .thread-shown { color: GrayText; font-size: .85rem; margin: .6rem 0 0; }
+.thread-view .thread-shown:empty { display: none; }
 .thread-view .action-result { flex-basis: 100%; }
 .thread-view textarea { width: 100%; min-height: 12rem; }
 .thread-view button:disabled { cursor: wait; opacity: .65; }

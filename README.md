@@ -127,7 +127,7 @@ stays stopped after a successful exit, including when another process owns its p
 |---|---|
 | Lately | Recent projects and top-level sessions |
 | Dreams | The nightly report archive |
-| Threads | Dropped, Open, Ideas and Done tabs with counts; each card has Resume and Move to |
+| Threads | Dropped, Open, Ideas and Done tabs with counts; search, repo, latest outcome and last-seen filters; sort by last seen, sessions, repo or title; each card has Resume and Move to |
 | Progress | Live lock ownership and elapsed time, refreshed every 5 seconds |
 | Stats | Nightly activity, outcomes, category findings and pipeline health |
 
