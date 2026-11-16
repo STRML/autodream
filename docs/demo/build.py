@@ -7,7 +7,7 @@ Writes the synthetic install from docs/screenshots/fixture.py, answers every das
 route with the real data layer (bin/autodream_web_data.py), and saves each answer as JSON.
 The page is web/index.html with web/*.js and web/*.css unchanged, plus demo-fetch.js, which
 serves those files in place of the local server. Thread actions answer with a demo notice.
-Every date is relative to the build day, so the Pages workflow rebuilds daily.
+Every date is relative to the build day; demo-fetch.js moves them to the visitor's today.
 """
 from datetime import date
 import importlib.util
@@ -39,6 +39,7 @@ def build(out):
     out = Path(out)
     if out.exists():
         sys.exit(f'{out} exists; pass a new directory')
+    built = date.today().isoformat()
     fixture = load('fixture', REPO / 'docs/screenshots/fixture.py')
     web_data = load('autodream_web_data', REPO / 'bin/autodream_web_data.py')
     with tempfile.TemporaryDirectory(prefix='autodream-demo.') as scratch:
@@ -54,7 +55,7 @@ def build(out):
         write_json(api / 'lately.json', cache.lately(7))
         write_json(api / 'stats.json', cache.stats())
         write_json(api / 'progress.json', cache.progress(time.time()))
-        write_json(api / 'threads.json', dict(as_of=date.today().isoformat(),
+        write_json(api / 'threads.json', dict(as_of=built,
                                                threads=[dict(row, display_status=row['status'])
                                                         for row in threads]))
         dates = cache.dream_dates()
@@ -68,7 +69,8 @@ def build(out):
     page = (REPO / 'web/index.html').read_text()
     page = page.replace('href="/web/', 'href="web/').replace('src="/web/', 'src="web/')
     page = page.replace('<script src="web/threads.js"',
-                        '<script src="web/demo-fetch.js"></script>\n  <script src="web/threads.js"', 1)
+                        f'<script>window.DEMO_BUILT = "{built}";</script>\n'
+                        '  <script src="web/demo-fetch.js"></script>\n  <script src="web/threads.js"', 1)
     page = page.replace('<body>', '<body>\n  <p class="demo-banner">Demo with made-up data. '
                         'autodream runs on your own Mac; see '
                         '<a href="https://github.com/STRML/autodream">github.com/STRML/autodream</a>.</p>', 1)

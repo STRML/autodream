@@ -1,7 +1,7 @@
 # Publishes the dashboard demo (docs/demo/build.py) to GitHub Pages. The demo runs the real
 # web/ files against JSON answers from the real data layer over a made-up install, so it is
-# rebuilt whenever either changes, and daily because Lately shows the trailing seven days and
-# thread statuses age by date: a build is right for the day it ran.
+# rebuilt whenever either changes. Dates are moved to the visitor's today in the browser
+# (docs/demo/demo-fetch.js), so the weekly run only keeps the build itself exercised.
 name: pages
 
 on:
@@ -18,7 +18,7 @@ on:
       - 'docs/screenshots/fixture.py'
       - '.github/workflows/pages.yml'
   schedule:
-    - cron: '17 0 * * *'
+    - cron: '17 6 * * 1'
   workflow_dispatch:
 
 permissions:
