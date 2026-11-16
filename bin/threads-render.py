@@ -29,6 +29,9 @@ def valid_thread(item):
         )
         and item.get("status") in {"open", "done", "closed_by_sam"}
         and (item.get("done_by") is None or isinstance(item.get("done_by"), str))
+        and (item.get("kept_open") is None
+             or (isinstance(item["kept_open"], str)
+                 and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", item["kept_open"]) is not None))
         and isinstance(item.get("last_seen"), str)
         and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", item["last_seen"]) is not None
     )

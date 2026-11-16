@@ -441,31 +441,39 @@ check(content.querySelector('article').id === row.id, 'title deep link must sele
 check(content.textContent.includes(hostile), 'thread text missing');
 check(content.querySelector('.meta').textContent.includes('1 session ·'), 'singular session label missing');
 check(!content.querySelector('img,script'), 'thread text became markup');
-let close = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Close');
-check(close, 'Close action missing');
+let close = Array.from(content.querySelectorAll('.actions button')).find(b => b.textContent === 'Done');
+check(close, 'Move to Done missing');
+const moveGroup = content.querySelector('article [role=group]');
+check(moveGroup && moveGroup.getAttribute('aria-labelledby') &&
+  document.getElementById(moveGroup.getAttribute('aria-labelledby')).textContent === 'Move to', 'Move to group must be labelled');
+check(Array.from(moveGroup.querySelectorAll('button')).map(b => b.textContent).join() === 'Open,Ideas,Done',
+  'a Dropped card offers every target');
+check(!content.querySelector('.thread-counts'), 'the separate counts line is gone');
+check(content.querySelector('nav button[data-view="Dropped"]').textContent === 'Dropped 1', 'tabs carry counts');
 let release;
 pending = new Promise(resolve => { release = resolve; });
-let action = performThreadAction(row.id, 'close', close);
+let action = performThreadAction(row.id, 'move-done', close);
 close = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Working…');
 check(close && close.disabled, 'button must be disabled during request');
 release(); await action; pending = null;
-close = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Close');
+close = Array.from(content.querySelectorAll('.actions button')).find(b => b.textContent === 'Done');
 check(close && !close.disabled, 'busy button must be usable again');
 check(content.textContent.includes('busy, retry'), 'failure missing beside action');
 check(calls.filter(c => c.options.method === 'POST').every(c =>
   c.options.headers['X-Autodream'] === '1' && c.options.credentials === 'same-origin'), 'POST credential/header missing');
 row = {...row,status:'closed_by_sam',display_status:'closed_by_sam'};
-result = {ok:true,id:row.id,action:'close'}; httpStatus = 200;
-await performThreadAction(row.id, 'close', close);
-const done = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Done');
-done.click();
+result = {ok:true,id:row.id,action:'move-done'}; httpStatus = 200;
+await performThreadAction(row.id, 'move-done', close);
+content.querySelector('nav button[data-view="Done"]').click();
 check(content.querySelector('article').textContent.includes('closed_by_sam'), 'close must refetch state');
-let reopen = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Reopen');
-check(reopen, 'Reopen action missing');
+let reopen = Array.from(content.querySelectorAll('.actions button')).find(b => b.textContent === 'Open');
+check(reopen, 'Move to Open missing');
+check(Array.from(content.querySelectorAll('article [role=group] button')).map(b => b.textContent).join() === 'Open,Ideas',
+  'a Done card does not offer Done');
 row = {...row,status:'open',display_status:'open'};
-result = {ok:true,id:row.id,action:'reopen'};
-await performThreadAction(row.id, 'reopen', reopen);
-Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Open').click();
+result = {ok:true,id:row.id,action:'move-open'};
+await performThreadAction(row.id, 'move-open', reopen);
+content.querySelector('nav button[data-view="Open"]').click();
 check(content.querySelector('article').textContent.includes('open'), 'reopen must refetch state');
 const resume = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Resume');
 result = {ok:false,error:'cmux_unavailable',message:'cmux is unavailable',brief:'Resume brief <repo> & text'};
@@ -505,8 +513,8 @@ window.fetch = async function(path, options = {}) {
 await loadView('threads');
 const search = content.querySelector('input[type=search]');
 let ready = new Promise(resolve => { started = resolve; });
-let close = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Close');
-let action = performThreadAction(row.id, 'close', close);
+let close = Array.from(content.querySelectorAll('.actions button')).find(b => b.textContent === 'Done');
+let action = performThreadAction(row.id, 'move-done', close);
 await ready;
 search.value = 'thread';
 search.dispatchEvent(new Event('input'));
@@ -514,23 +522,23 @@ close = Array.from(content.querySelectorAll('button')).find(b => b.textContent =
 check(close && close.disabled, 'a search render must preserve the in-flight action');
 release();
 await action;
-close = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Close');
+close = Array.from(content.querySelectorAll('.actions button')).find(b => b.textContent === 'Done');
 check(close && !close.disabled, 'ordinary failure must allow retry after rerender');
 check(content.textContent.includes('busy, retry'), 'failure must survive a search render');
 
 httpStatus = 200;
-response = {ok:true,id:row.id,action:'close'};
+response = {ok:true,id:row.id,action:'move-done'};
 row = {...row,status:'closed_by_sam',display_status:'closed_by_sam'};
 ready = new Promise(resolve => { started = resolve; });
-close = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Close');
-action = performThreadAction(row.id, 'close', close);
+close = Array.from(content.querySelectorAll('.actions button')).find(b => b.textContent === 'Done');
+action = performThreadAction(row.id, 'move-done', close);
 await ready;
 search.value = 'thread';
 search.dispatchEvent(new Event('input'));
 release();
 await action;
 check(threadReads === 2, 'successful action must refresh even after search replaces its button');
-check(content.querySelector('.thread-counts').textContent.includes('Done (1)'),
+check(content.querySelector('nav button[data-view="Done"]').textContent === 'Done 1',
   'successful action must render the refreshed status');
 ''')
 
@@ -551,15 +559,15 @@ window.fetch = async function(path, options = {}) {
 };
 await loadView('threads');
 const ready = new Promise(resolve => { started = resolve; });
-const close = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Close');
-const action = performThreadAction(row.id, 'close', close);
+const close = Array.from(content.querySelectorAll('.actions button')).find(b => b.textContent === 'Done');
+const action = performThreadAction(row.id, 'move-done', close);
 await ready;
 await loadView('threads', row.id);
 check(Array.from(content.querySelectorAll('button')).some(b => b.textContent === 'Working…'),
   'a reloaded threads view must show the pending action');
 release();
 await action;
-const after = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Close');
+const after = Array.from(content.querySelectorAll('.actions button')).find(b => b.textContent === 'Done');
 check(after && !after.disabled, 'pending state must clear on the reloaded view');
 check(content.textContent.includes('busy, retry'), 'failure must show on the reloaded view');
 ''')
@@ -577,7 +585,7 @@ window.fetch = async function(path, options = {}) {
     started();
     await new Promise(resolve => { release = resolve; });
     row = {...row,status:'closed_by_sam',display_status:'closed_by_sam'};
-    return {ok:true,status:200,json:async () => ({ok:true,id:row.id,action:'close'})};
+    return {ok:true,status:200,json:async () => ({ok:true,id:row.id,action:'move-done'})};
   }
   threadReads++;
   if (threadReads === 2) return {ok:false,status:500,json:async () => ({})};
@@ -585,14 +593,14 @@ window.fetch = async function(path, options = {}) {
 };
 await loadView('threads', row.id);
 const ready = new Promise(resolve => { started = resolve; });
-const close = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Close');
-const action = performThreadAction(row.id, 'close', close);
+const close = Array.from(content.querySelectorAll('.actions button')).find(b => b.textContent === 'Done');
+const action = performThreadAction(row.id, 'move-done', close);
 await ready;
 await loadView('threads');
 release();
 await action;
 check(threadReads === 3, 'a successful action must refresh after a failed Threads navigation');
-check(content.querySelector('.thread-counts').textContent.includes('Done (1)'),
+check(content.querySelector('nav button[data-view="Done"]').textContent === 'Done 1',
   'the refreshed status must replace the stale card');
 ''')
 
@@ -608,7 +616,7 @@ let threadReads = 0;
 window.fetch = async function(path, options = {}) {
   if (options.method === 'POST') {
     row = {...row,status:'closed_by_sam',display_status:'closed_by_sam'};
-    return {ok:true,status:200,json:async () => ({ok:true,id:row.id,action:'close'})};
+    return {ok:true,status:200,json:async () => ({ok:true,id:row.id,action:'move-done'})};
   }
   threadReads++;
   if (threadReads === 2) {
@@ -620,8 +628,8 @@ window.fetch = async function(path, options = {}) {
   return {ok:true,status:200,json:async () => ({threads:[row]})};
 };
 await loadView('threads');
-const close = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Close');
-const action = performThreadAction(row.id, 'close', close);
+const close = Array.from(content.querySelectorAll('.actions button')).find(b => b.textContent === 'Done');
+const action = performThreadAction(row.id, 'move-done', close);
 await refreshStart;
 await loadView('threads');
 releaseRefresh();
@@ -631,7 +639,7 @@ check(content.textContent.includes('Action succeeded. Refresh'),
 check(!Array.from(content.querySelectorAll('.actions button')).some(b => !b.disabled),
   'a stale card must not offer another action');
 await loadView('threads');
-check(content.querySelector('.thread-counts').textContent.includes('Done (1)'),
+check(content.querySelector('nav button[data-view="Done"]').textContent === 'Done 1',
   'a later Threads load must render the new status');
 check(!content.textContent.includes('Action succeeded. Refresh'),
   'a later Threads load must clear the stale notice');
@@ -649,7 +657,7 @@ let threadReads = 0;
 window.fetch = async function(path, options = {}) {
   if (options.method === 'POST') {
     row = {...row,status:'closed_by_sam',display_status:'closed_by_sam'};
-    return {ok:true,status:200,json:async () => ({ok:true,id:row.id,action:'close'})};
+    return {ok:true,status:200,json:async () => ({ok:true,id:row.id,action:'move-done'})};
   }
   if (path === '/api/dreams') return {ok:false,status:500,json:async () => ({})};
   threadReads++;
@@ -660,8 +668,8 @@ window.fetch = async function(path, options = {}) {
   return {ok:true,status:200,json:async () => ({threads:[row]})};
 };
 await loadView('threads');
-const close = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Close');
-const action = performThreadAction(row.id, 'close', close);
+const close = Array.from(content.querySelectorAll('.actions button')).find(b => b.textContent === 'Done');
+const action = performThreadAction(row.id, 'move-done', close);
 await refreshStart;
 await loadView('dreams');
 releaseRefresh();
@@ -683,7 +691,7 @@ let threadReads = 0;
 window.fetch = async function(path, options = {}) {
   if (options.method === 'POST') {
     row = {...row,status:'closed_by_sam',display_status:'closed_by_sam'};
-    return {ok:true,status:200,json:async () => ({ok:true,id:row.id,action:'close'})};
+    return {ok:true,status:200,json:async () => ({ok:true,id:row.id,action:'move-done'})};
   }
   threadReads++;
   const snapshot = {threads:[row]};
@@ -694,16 +702,16 @@ window.fetch = async function(path, options = {}) {
   return {ok:true,status:200,json:async () => snapshot};
 };
 await loadView('threads');
-const close = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Close');
-const action = performThreadAction(row.id, 'close', close);
+const close = Array.from(content.querySelectorAll('.actions button')).find(b => b.textContent === 'Done');
+const action = performThreadAction(row.id, 'move-done', close);
 await refreshStart;
 await loadView('threads');
 releaseRefresh();
 await action;
-check(content.querySelector('.thread-counts').textContent.includes('Done (1)'), 'the newer load must render');
+check(content.querySelector('nav button[data-view="Done"]').textContent === 'Done 1', 'the newer load must render');
 check(!content.textContent.includes('Action succeeded. Refresh'), 'a newer load must clear the guard');
-Array.from(content.querySelectorAll('nav button')).find(b => b.textContent === 'Done').click();
-const reopen = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Reopen');
+content.querySelector('nav button[data-view="Done"]').click();
+const reopen = Array.from(content.querySelectorAll('.actions button')).find(b => b.textContent === 'Open');
 check(reopen && !reopen.disabled, 'a fresh card must not stay guarded');
 ''')
 
@@ -723,7 +731,7 @@ window.fetch = async function(path, options = {}) {
   if (options.method === 'POST') {
     postStarted();
     await new Promise(resolve => { releasePost = resolve; });
-    return {ok:true,status:200,json:async () => ({ok:true,id:row.id,action:'close'})};
+    return {ok:true,status:200,json:async () => ({ok:true,id:row.id,action:'move-done'})};
   }
   if (path === '/api/threads') {
     threadReads++;
@@ -737,8 +745,8 @@ window.fetch = async function(path, options = {}) {
 history.replaceState(null, '', '#threads');
 await loadView('threads');
 let started = new Promise(resolve => { postStarted = resolve; });
-const close = Array.from(content.querySelectorAll('button')).find(b => b.textContent === 'Close');
-const action = performThreadAction(row.id, 'close', close);
+const close = Array.from(content.querySelectorAll('.actions button')).find(b => b.textContent === 'Done');
+const action = performThreadAction(row.id, 'move-done', close);
 await started;
 history.replaceState(null, '', '#dreams');
 const dreams = loadView('dreams');
@@ -796,7 +804,7 @@ check(root.querySelectorAll('article').length === 1, 'Dropped default missing');
 check(root.querySelector('h2').textContent === 'Alpha <repo>', 'literal title missing');
 check(root.textContent.includes('__THREADS_JS__ __THREADS_CSS__ __THREADS_JSON__'), 'data must not expand template markers');
 check(!root.querySelector('repo,img,script'), 'title became HTML');
-check(root.querySelector('.thread-counts').textContent.includes('Ideas (1)'), 'counts missing');
+check(root.querySelector('nav button[data-view="Ideas"]').textContent === 'Ideas 1' && !root.querySelector('.thread-counts'), 'counts missing');
 const search = root.querySelector('input');
 search.value = 'absent'; search.dispatchEvent(new Event('input'));
 check(!root.querySelector('article'), 'search must filter');
@@ -805,13 +813,13 @@ const repo = root.querySelector('select');
 repo.value = '/repo/beta'; repo.dispatchEvent(new Event('change'));
 check(!root.querySelector('article'), 'repo must filter');
 repo.value = ''; repo.dispatchEvent(new Event('change'));
-Array.from(root.querySelectorAll('nav button')).find(b => b.textContent === 'Done').click();
+root.querySelector('nav button[data-view="Done"]').click();
 check(root.querySelector('h2').textContent === 'Closed alpha', 'Done filter missing');
 let copied;
 Object.defineProperty(navigator, 'clipboard', {value:{writeText:async text => { copied = text; }}});
-Array.from(root.querySelectorAll('button')).find(b => b.textContent === 'Copy reopen command').click();
+Array.from(root.querySelectorAll('button')).find(b => b.textContent === 'Copy move open command').click();
 await Promise.resolve();
-check(copied === 'threads.sh reopen t-00000003', 'static callback must copy CLI command');
+check(copied === 'threads.sh move t-00000003 open', 'static callback must copy the move command');
 check(root.textContent.includes('Copied'), 'copy result missing');
 ''', standalone=page.read_text())
 

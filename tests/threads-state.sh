@@ -52,6 +52,55 @@ test_threads_close_and_reopen() {
   assert_eq "$(state_json "$dir" t-00000001 | jq -r .done_by)" null "reopen clears closure attribution"
 }
 
+listed_status() { AUTODREAM_DIR="$1" "$THREADS" list --json | jq -r --arg id "$2" '.[] | select(.id == $id) | .status'; }
+
+test_threads_move_targets() {
+  local dir="$TMP/move" row before rc
+  seed "$dir"
+  assert_eq "$(listed_status "$dir" t-00000001)" dropped "an old unfinished work thread starts dropped"
+  AUTODREAM_DIR="$dir" "$THREADS" move t-00000001 idea >/dev/null 2>&1
+  row=$(state_json "$dir" t-00000001)
+  assert_eq "$(printf '%s' "$row" | jq -c '[.kind, .status, has("done_by"), has("kept_open")]')" '["idea","open",false,false]' "move idea stores an open idea"
+  assert_eq "$(printf '%s' "$row" | jq -r '.sessions[0].kind')" work "move freezes a legacy session's provenance"
+  assert_eq "$(listed_status "$dir" t-00000001)" open "an idea is never dropped"
+  AUTODREAM_DIR="$dir" "$THREADS" move t-00000001 done >/dev/null 2>&1
+  row=$(state_json "$dir" t-00000001)
+  assert_eq "$(printf '%s' "$row" | jq -c '[.kind, .status, .done_by]')" '["idea","closed_by_sam","sam"]' "move done closes as Sam"
+  AUTODREAM_DIR="$dir" "$THREADS" move t-00000001 open >/dev/null 2>&1
+  row=$(state_json "$dir" t-00000001)
+  assert_eq "$(printf '%s' "$row" | jq -c '[.kind, .status, has("done_by"), .kept_open]')" "[\"work\",\"open\",false,\"$AS_OF\"]" "move open keeps the thread open from today"
+  assert_eq "$(printf '%s' "$row" | jq -r '.sessions[0].kind')" work "a moved session keeps its frozen provenance"
+  assert_eq "$(listed_status "$dir" t-00000001)" open "kept_open holds an old thread out of Dropped"
+  before=$(cat "$dir/threads.jsonl")
+  AUTODREAM_DIR="$dir" "$THREADS" move t-00000001 dropped >/dev/null 2>&1
+  rc=$?
+  assert_eq "$rc" 2 "an unknown move target is refused"
+  AUTODREAM_DIR="$dir" "$THREADS" move t-00000001 >/dev/null 2>&1
+  rc=$?
+  assert_eq "$rc" 2 "a move without a target is refused"
+  assert_eq "$(cat "$dir/threads.jsonl")" "$before" "refused moves leave state untouched"
+}
+
+test_threads_kept_open_expires_and_validates() {
+  local dir="$TMP/kept-open" old rc
+  seed "$dir"
+  old=$(pdate_shift "$AS_OF" -8 d) || return 1
+  jq -c --arg old "$old" 'if .id == "t-00000001" then .kept_open = $old else . end' "$dir/threads.jsonl" > "$dir/next" && mv "$dir/next" "$dir/threads.jsonl"
+  assert_eq "$(listed_status "$dir" t-00000001)" dropped "a kept_open older than the cutoff no longer holds the thread"
+  jq -c --arg seven "$(pdate_shift "$AS_OF" -7 d)" 'if .id == "t-00000001" then .kept_open = $seven else . end' "$dir/threads.jsonl" > "$dir/next" && mv "$dir/next" "$dir/threads.jsonl"
+  assert_eq "$(listed_status "$dir" t-00000001)" open "a kept_open inside the cutoff holds the thread"
+  AUTODREAM_DIR="$dir" DREAMS_DIR="$dir/dreams" "$THREADS" render >/dev/null 2>&1
+  rc=$?
+  assert_eq "$rc" 0 "the renderer accepts kept_open"
+  jq -c 'if .id == "t-00000001" then .kept_open = "yesterday" else . end' "$dir/threads.jsonl" > "$dir/next" && mv "$dir/next" "$dir/threads.jsonl"
+  AUTODREAM_DIR="$dir" "$THREADS" list --json >/dev/null 2>&1
+  rc=$?
+  assert_nonzero "$rc" "a malformed kept_open is malformed state"
+  python3 "$REPO/bin/threads-render.py" "$dir/threads.jsonl" "$dir/bad.html" --as-of "$AS_OF" >/dev/null 2>&1
+  rc=$?
+  assert_nonzero "$rc" "the renderer rejects a malformed kept_open"
+}
+
 test_threads_state_write_is_atomic() {
   local dir="$TMP/atomic" before after_failed_write after_failed_rename shim
   seed "$dir"
@@ -516,6 +565,8 @@ test_threads_missing_python_refuses_writes() {
 
 for test_name in \
   test_threads_close_and_reopen \
+  test_threads_move_targets \
+  test_threads_kept_open_expires_and_validates \
   test_threads_state_write_is_atomic \
   test_threads_cli_refuses_unreadable_state \
   test_threads_list_computes_dropped \

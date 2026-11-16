@@ -552,7 +552,7 @@ l1_chunks_elided threads_linked threads_unassigned threads_unmeasured""".split()
     def test_web_actions_require_origin_and_header(self):
         self.seed_actions()
         before = self.state_path.read_bytes()
-        for action in ("close", "reopen", "resume"):
+        for action in ("move-open", "move-idea", "move-done", "resume"):
             path = "/api/threads/t-00000001/" + action
             self.assertEqual(self.request("POST", path, origin=self.origin,
                 headers={"X-Autodream": "1"}).status, 401)
@@ -566,7 +566,7 @@ l1_chunks_elided threads_linked threads_unassigned threads_unmeasured""".split()
                 self.assertEqual(response.status, 403)
         self.assertEqual(self.state_path.read_bytes(), before)
         self.assertFalse(self.creates.exists())
-        self.assertEqual(self.action("close").status, 200, "thread action routes are absent")
+        self.assertEqual(self.action("move-done").status, 200, "thread action routes are absent")
 
     def test_web_validates_action_paths(self):
         self.seed_actions()
@@ -574,29 +574,37 @@ l1_chunks_elided threads_linked threads_unassigned threads_unmeasured""".split()
         shell_side_effect = self.root / "unwanted"
         injected_id = "t-00000001;touch%20" + quote(str(shell_side_effect), safe="")
         for ident in ("bad", "t-0000000g", injected_id, "%24(touch%20unwanted)"):
-            self.assertEqual(self.action("close", ident).status, 400)
-        self.assertEqual(self.action("close", "t-ffffffff").status, 404)
-        self.assertEqual(self.action("delete").status, 404)
+            self.assertEqual(self.action("move-done", ident).status, 400)
+        self.assertEqual(self.action("move-done", "t-ffffffff").status, 404)
+        for action in ("delete", "move-dropped", "move-", "move"):
+            self.assertEqual(self.action(action).status, 404)
         self.assertEqual(self.state_path.read_bytes(), before)
         self.assertFalse(shell_side_effect.exists())
         self.assertFalse(self.creates.exists())
 
-    def test_web_close_reopen_use_real_threads_cli(self):
+    def test_web_move_targets_use_real_threads_cli(self):
         self.seed_actions()
         listing = self.request("GET", "/api/threads", cookie=self.cookie)
         self.assertEqual(listing.status, 200, "thread list route is absent")
         row = json.loads(listing.text)["threads"][0]
         self.assertEqual((row["status"], row["display_status"]), ("dropped", "dropped"))
         self.assertEqual(row["title"], self.thread["title"])
-        for action, stored_status in (("close", "closed_by_sam"), ("reopen", "open")):
+        for action, expected, shown in (
+                ("move-done", {"kind": "work", "status": "closed_by_sam", "done_by": "sam"}, "closed_by_sam"),
+                ("move-idea", {"kind": "idea", "status": "open"}, "open"),
+                ("move-open", {"kind": "work", "status": "open"}, "open")):
             response = self.action(action)
             self.assertEqual(response.status, 200, response.text)
             self.assertEqual(json.loads(response.text), {"ok": True, "id": self.thread["id"], "action": action})
             stored = json.loads(self.state_path.read_text())
-            self.assertEqual(stored["status"], stored_status)
-            self.assertEqual(stored.get("done_by"), "sam" if action == "close" else None)
+            self.assertEqual({key: stored.get(key) for key in expected}, expected)
+            if action != "move-done":
+                self.assertNotIn("done_by", stored)
+            self.assertEqual("kept_open" in stored, action == "move-open")
             derived = json.loads(self.request("GET", "/api/threads", cookie=self.cookie).text)["threads"][0]
-            self.assertEqual(derived["display_status"], "closed_by_sam" if action == "close" else "dropped")
+            self.assertEqual(derived["display_status"], shown)
+        for retired in ("close", "reopen"):
+            self.assertEqual(self.action(retired).status, 404)
         self.assertFalse(self.creates.exists())
 
     def test_web_busy_thread_lock_returns_409(self):
@@ -604,7 +612,7 @@ l1_chunks_elided threads_linked threads_unassigned threads_unmeasured""".split()
         before = self.state_path.read_bytes()
         with Path(str(self.state_path) + ".flock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            response = self.action("close")
+            response = self.action("move-done")
         self.assertEqual(response.status, 409, response.text)
         self.assertEqual(json.loads(response.text), {"ok": False, "error": "busy", "message": "busy, retry"})
         self.assertEqual(self.state_path.read_bytes(), before)
@@ -643,7 +651,7 @@ l1_chunks_elided threads_linked threads_unassigned threads_unmeasured""".split()
         before = self.state_path.read_bytes()
         try:
             with mock.patch.object(module, "run_bounded") as run:
-                for action, deadline in (("close", 30), ("reopen", 30), ("resume", 20)):
+                for action, deadline in (("move-open", 30), ("move-idea", 30), ("move-done", 30), ("resume", 20)):
                     run.side_effect = subprocess.TimeoutExpired("threads.sh", deadline)
                     response = self.action(action)
                     self.assertEqual(response.status, 504)
@@ -652,9 +660,9 @@ l1_chunks_elided threads_linked threads_unassigned threads_unmeasured""".split()
                     self.assertEqual(error["error"], "timeout")
                     self.assertIn("outcome is unknown", error["message"])
                     self.assertIn("Refresh", error["message"])
-                    argv = ["/bin/bash", str(REPO / "bin/threads.sh"), action, self.thread["id"]]
-                    if action == "resume":
-                        argv.append("--launch")
+                    argv = ["/bin/bash", str(REPO / "bin/threads.sh"), "resume", self.thread["id"], "--launch"]
+                    if action != "resume":
+                        argv = ["/bin/bash", str(REPO / "bin/threads.sh"), "move", self.thread["id"], action[5:]]
                     self.assertEqual(run.call_args.args, (argv,))
                     self.assertEqual(run.call_args.kwargs["timeout"], deadline)
                 run.side_effect = None
@@ -671,7 +679,7 @@ l1_chunks_elided threads_linked threads_unassigned threads_unmeasured""".split()
                     if rc in (69, 70):
                         self.assertEqual(data["brief"], "Copyable brief")
                 run.side_effect = OSError("cannot execute")
-                response = self.action("close")
+                response = self.action("move-done")
                 self.assertEqual(response.status, 503)
                 self.assertEqual(json.loads(response.text)["error"], "command_unavailable")
             self.assertEqual(self.state_path.read_bytes(), before)

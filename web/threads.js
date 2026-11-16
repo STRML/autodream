@@ -7,6 +7,17 @@ function isInView(thread, view) {
   return thread.display_status === "done" || thread.display_status === "closed_by_sam";
 }
 
+const moveTargets = [
+  {view: "Open", action: "move-open", target: "open"},
+  {view: "Ideas", action: "move-idea", target: "idea"},
+  {view: "Done", action: "move-done", target: "done"}
+];
+
+function threadCommand(cli, id, action) {
+  const move = moveTargets.find(function (item) { return item.action === action; });
+  return move ? cli + " move " + id + " " + move.target : cli + " " + action + " " + id;
+}
+
 function copyCommand(command, button, label) {
   if (!command) return;
   const copied = function () {
@@ -56,11 +67,9 @@ function mountThreads(root, data, onAction, getActionState) {
   const views = element("nav");
   views.setAttribute("aria-label", "Thread views");
   controls.append(generated, inputs, views);
-  const counts = element("div", "thread-counts");
-  counts.setAttribute("aria-live", "polite");
   const list = element("div", "thread-list");
   const empty = element("p", "thread-empty", "No threads in this view.");
-  container.append(heading, controls, counts, list, empty);
+  container.append(heading, controls, list, empty);
   root.replaceChildren(container);
 
   function render() {
@@ -70,12 +79,10 @@ function mountThreads(root, data, onAction, getActionState) {
       const text = [thread.title, thread.goal, thread.repo, thread.id].join(" ").toLocaleLowerCase();
       return isInView(thread, activeView) && (!query || text.includes(query)) && (!repoFilter || thread.repo === repoFilter);
     });
-    counts.replaceChildren();
-    viewNames.forEach(function (name) {
+    Array.from(views.children).forEach(function (tab) {
+      const name = tab.dataset.view;
       const amount = data.threads.filter(function (thread) { return isInView(thread, name); }).length;
-      const label = document.createElement("span");
-      label.textContent = name + " (" + amount + ")";
-      counts.appendChild(label);
+      tab.replaceChildren(document.createTextNode(name + " "), element("span", "count", String(amount)));
     });
     list.replaceChildren();
     filtered.forEach(function (thread) {
@@ -92,23 +99,30 @@ function mountThreads(root, data, onAction, getActionState) {
       const actions = document.createElement("div");
       actions.className = "actions";
       if (/^t-[0-9a-f]{8}$/.test(thread.id)) {
-        const finished = ["done", "closed_by_sam"].includes(thread.display_status);
-        const names = finished ? ["resume", "reopen"] : ["resume", "close"];
-        names.forEach(function (action) {
-          const label = data.cli ? "Copy " + action + " command" : action[0].toUpperCase() + action.slice(1);
-          const state = getActionState ? getActionState(thread.id) : null;
+        const state = getActionState ? getActionState(thread.id) : null;
+        const actionButton = function (action, label) {
           const button = document.createElement("button");
           button.type = "button";
           button.textContent = state?.pending && state.action === action ? "Working…" :
             state?.requiresRefresh ? "Refresh to check state" : label;
           button.disabled = Boolean(state?.pending || state?.requiresRefresh);
           button.addEventListener("click", function () { onAction(thread.id, action, button); });
-          actions.appendChild(button);
+          return button;
+        };
+        actions.appendChild(actionButton("resume", data.cli ? "Copy resume command" : "Resume"));
+        const current = viewNames.find(function (name) { return isInView(thread, name); });
+        const moveLabel = element("span", "move-label", "Move to");
+        moveLabel.id = "move-to-" + thread.id;
+        const move = element("div", "move-to");
+        move.setAttribute("role", "group");
+        move.setAttribute("aria-labelledby", moveLabel.id);
+        moveTargets.filter(function (item) { return item.view !== current; }).forEach(function (item) {
+          move.appendChild(actionButton(item.action, data.cli ? "Copy move " + item.target + " command" : item.view));
         });
+        actions.append(moveLabel, move);
         const result = document.createElement("p");
         result.className = "action-result";
         result.setAttribute("role", "status");
-        const state = getActionState ? getActionState(thread.id) : null;
         if (state?.message) result.appendChild(element("span", "", state.message));
         if (state?.brief) {
           const brief = element("textarea");
@@ -131,7 +145,7 @@ function mountThreads(root, data, onAction, getActionState) {
   viewNames.forEach(function (name, index) {
     const button = document.createElement("button");
     button.type = "button";
-    button.textContent = name;
+    button.dataset.view = name;
     button.setAttribute("aria-pressed", String(index === 0));
     button.addEventListener("click", function () {
       activeView = name;
@@ -165,7 +179,7 @@ function mountThreads(root, data, onAction, getActionState) {
     activeView = viewNames.find(function (name) { return isInView(thread, name); });
     search.value = "";
     repo.value = "";
-    Array.from(views.children).forEach(function (button) { button.setAttribute("aria-pressed", String(button.textContent === activeView)); });
+    Array.from(views.children).forEach(function (button) { button.setAttribute("aria-pressed", String(button.dataset.view === activeView)); });
     render();
     document.getElementById(id)?.scrollIntoView({block: "nearest"});
   }

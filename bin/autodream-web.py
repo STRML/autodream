@@ -97,6 +97,12 @@ def identity_proof(token, nonce):
     return hmac.new(token.encode("ascii"), nonce.encode("ascii"), hashlib.sha256).hexdigest()
 
 
+THREAD_ACTIONS = {
+    "resume": lambda ident: ["resume", ident, "--launch"],
+    "move-open": lambda ident: ["move", ident, "open"],
+    "move-idea": lambda ident: ["move", ident, "idea"],
+    "move-done": lambda ident: ["move", ident, "done"],
+}
 # A service started before web-port existed may still serve the old default.
 PRE_RECORD_PORT = 8765
 
@@ -293,7 +299,7 @@ class AutodreamHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlsplit(self.path).path
         match = re.fullmatch(r"/api/threads/([^/]+)/([^/]+)", path)
-        if match is None or match[2] not in {"close", "reopen", "resume"}:
+        if match is None or match[2] not in THREAD_ACTIONS:
             self.action_error(404, "not_found", "Unknown thread action")
             return
         ident, action = match.groups()
@@ -306,9 +312,7 @@ class AutodreamHandler(BaseHTTPRequestHandler):
         if not any(row["id"] == ident for row in rows):
             self.action_error(404, "not_found", "Unknown thread id")
             return
-        argv = ["/bin/bash", str(Path(__file__).resolve().with_name("threads.sh")), action, ident]
-        if action == "resume":
-            argv.append("--launch")
+        argv = ["/bin/bash", str(Path(__file__).resolve().with_name("threads.sh"))] + THREAD_ACTIONS[action](ident)
         try:
             root = self.server.data.root
             result = run_bounded(argv, timeout=20 if action == "resume" else 30,

@@ -122,7 +122,7 @@ stays stopped after a successful exit, including when another process owns its p
 |---|---|
 | Lately | Recent projects and top-level sessions |
 | Dreams | The nightly report archive |
-| Threads | Dropped work and ideas, with Resume, Close and Reopen |
+| Threads | Dropped, Open, Ideas and Done tabs with counts; each card has Resume and Move to |
 | Progress | Live lock ownership and elapsed time, refreshed every 5 seconds |
 | Stats | Nightly activity, outcomes, category findings and pipeline health |
 
@@ -424,16 +424,31 @@ third arrive without forking the pipeline.
 The nightly run links eligible sessions into a local thread index at
 `~/.claude/autodream/threads.jsonl`. Each JSONL record stores `id`, `kind`, `repo`,
 `title`, `goal`, `sessions` (date, session hash, transcript path and outcome),
-`status`, `done_by` and `last_seen`. Dropped status is computed when read: an open
-thread whose newest outcome is unfinished and older than
-`AUTODREAM_THREADS_DROPPED_DAYS` (default 7) is shown. No watermark is stored; every
-run catches up eligible unlinked sessions from the trailing 14 days.
+`status`, `done_by`, `last_seen` and, after a move to Open, `kept_open`. Dropped status
+is computed when read: an open work thread is dropped when its newest outcome is
+unfinished and both that session and `kept_open` are older than
+`AUTODREAM_THREADS_DROPPED_DAYS` (default 7). An idea is never dropped, so the nightly
+report's Dropped section lists work only. No watermark is stored; every run catches up
+eligible unlinked sessions from the trailing 14 days.
+
+`move` files a thread under one view:
+
+| Target | Stored change | Shown as |
+|---|---|---|
+| `open` | `kind=work`, `status=open`, no `done_by`, `kept_open=<today>` | Open until 7 days pass with no newer session or move |
+| `idea` | `kind=idea`, `status=open`, no `done_by` or `kept_open` | Ideas, the "someday, not in my queue" list |
+| `done` | `status=closed_by_sam`, `done_by=sam` | Done |
+
+`close` and `reopen` are aliases for `move ID done` and `move ID open`. A move also
+writes each session's own `kind` when the record has neither a kind nor a candidate
+handle, so the linker still knows a work session from an idea after the thread's kind
+changes.
 
 ```sh
 ~/.claude/autodream/threads.sh list
 ~/.claude/autodream/threads.sh search 'release plan'
-~/.claude/autodream/threads.sh close t-0123abcd
-~/.claude/autodream/threads.sh reopen t-0123abcd
+~/.claude/autodream/threads.sh move t-0123abcd idea
+~/.claude/autodream/threads.sh move t-0123abcd done
 ~/.claude/autodream/threads.sh resume t-0123abcd
 ~/.claude/autodream/threads.sh resume t-0123abcd --launch
 ~/.claude/autodream/threads.sh explore
@@ -476,7 +491,7 @@ in `threads_close_refused`. Closed idea threads remain closed when later session
 describe the idea differently.
 
 A day split across linker calls can rarely create duplicate threads. Use
-`threads.sh close <id>` to close the duplicate.
+`threads.sh move <id> done` to close the duplicate.
 
 The linker settings are `AUTODREAM_THREADS_ENGINE` (default `claude`),
 `AUTODREAM_THREADS_MODEL` (default `claude-haiku-5-5`),

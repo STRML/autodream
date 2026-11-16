@@ -15,7 +15,7 @@
 "use strict";
 const data = JSON.parse(document.getElementById("threads-data").textContent);
 mountThreads(document.getElementById("thread-root"), data, function (id, action, button) {
-  copyCommand(data.cli + " " + action + " " + id, button, button.textContent);
+  copyCommand(threadCommand(data.cli, id, action), button, button.textContent);
 });
 </script>
 </body>
