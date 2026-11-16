@@ -222,17 +222,16 @@ function goalCell(project, night, threadLinks) {
   return cell;
 }
 
-function latelyTable(night, threadLinks) {
+function latelyTable(night, threadLinks, names) {
   const table = node('table', undefined, 'lately-table');
   const head = node('tr');
   for (const label of ['Repo', 'Sess', 'Time', 'Outcomes', 'Goal']) head.append(node('th', label));
   const thead = node('thead');
   thead.append(head);
   const tbody = node('tbody');
-  const names = shortRepoNames(night.projects.map(project => project.repo || project.project));
-  night.projects.forEach((project, index) => {
+  night.projects.forEach(project => {
     const row = node('tr', undefined, 'project-row');
-    const repo = node('td', names[index], 'project-repo');
+    const repo = node('td', names.get(project.repo || project.project) ?? '—', 'project-repo');
     repo.title = project.repo || project.project || '';
     const sessions = node('td', measured(project.session_count ?? project.sessions.length), 'project-sessions');
     sessions.append(node('span', ' sessions', 'cell-label'));
@@ -261,6 +260,9 @@ function renderLately(data) {
   if (data.timeline.some(night => night.projects.length)) {
     content.append(node('p', OUTCOME_GLYPHS.map(([, glyph, label]) => glyph + ' ' + label).join(' · '), 'outcome-legend'));
   }
+  const repos = [...new Set(data.timeline.flatMap(night => night.projects.map(project => project.repo || project.project)))];
+  const shortNames = shortRepoNames(repos);
+  const names = new Map(repos.map((repo, index) => [repo, shortNames[index]]));
   for (const night of data.timeline) {
     const section = node('section');
     section.append(node('h2', night.date));
@@ -268,7 +270,7 @@ function renderLately(data) {
     if (!night.projects.length) {
       section.append(node('p', night.degraded?.length ? 'Session summary is incomplete.' : 'No top-level sessions.'));
     } else {
-      section.append(latelyTable(night, data.thread_links || []));
+      section.append(latelyTable(night, data.thread_links || [], names));
     }
     content.append(section);
   }

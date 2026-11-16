@@ -407,6 +407,11 @@ check(Array.from(document.querySelectorAll('.sessions li .metrics')).map(m => m.
 check(shortRepoNames(['/a/frontend', '/b/frontend', '/c/api', '~']).join('|') === 'a/frontend|b/frontend|api|~',
   'colliding repo names must be lengthened until unique');
 check(shortRepoNames(['/x/a/b', '/x/a/b']).join('|') === '/x/a/b|/x/a/b', 'identical paths fall back to the full path');
+renderLately({days:7,timeline:[
+  {date:'2026-11-15',projects:[{repo:'/a/frontend',session_count:1,sessions:[]}]},
+  {date:'2026-11-14',projects:[{repo:'/b/frontend',session_count:1,sessions:[]}]}],threads:null,newest_dream:null});
+check(Array.from(document.querySelectorAll('.project-repo')).map(c => c.textContent).join('|') === 'a/frontend|b/frontend',
+  'repo names must be unique across nights, not only within one');
 ''')
 
     def test_web_thread_buttons_show_action_results(self):
