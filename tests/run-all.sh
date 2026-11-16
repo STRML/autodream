@@ -9641,6 +9641,26 @@ test_threads_explore_quotes_paths_and_reports_launch_failure(){
   thread_cleanup "$parent"
 }
 
+test_threads_launcher_is_absolute_and_reaps_stale_files(){
+  echo "# threads: the launcher path is absolute and old unrun launchers are removed"
+  local parent made stale fresh
+  parent=$(mktemp -d "${TMPDIR:-/tmp}/ccad.XXXXXX")
+  mkdir -p "$parent/rel"
+  stale="$parent/rel/autodream-launch.stale1"
+  fresh="$parent/rel/autodream-launch.fresh1"
+  : > "$stale"; : > "$fresh"
+  touch -t 202001010000 "$stale"
+  sed -n -e '/^threads_error()/p' -e '/^threads_launcher() {/,/^}/p' "$REPO/bin/threads.sh" > "$parent/launcher.sh"
+  made=$(cd "$parent" && TMPDIR=rel /bin/bash -c '. "$1"; threads_launcher "true"' _ "$parent/launcher.sh")
+  case $made in /*) ok "relative TMPDIR is skipped for an absolute path" ;; *) no "relative TMPDIR is skipped for an absolute path (got $made)" ;; esac
+  rm -f -- "$made"
+  made=$(TMPDIR="$parent/rel" /bin/bash -c '. "$1"; threads_launcher "true"' _ "$parent/launcher.sh")
+  assert_no_file "$stale" "a launcher older than an hour is removed"
+  assert_file "$fresh" "a recent launcher is kept"
+  rm -f -- "$made"
+  thread_cleanup "$parent"
+}
+
 test_threads_explore_resolves_claude_from_path_and_checks_before_open(){
   echo "# threads: explore resolves Claude from PATH and checks all launch tools before opening"
   local root open_bin cmux_bin path_claude opened marker rc
@@ -9771,6 +9791,7 @@ _run test_threads_render_retries_when_state_changes_during_render
 _run test_threads_explore_launch_is_constrained
 _run test_threads_explore_quotes_paths_and_reports_launch_failure
 _run test_threads_explore_resolves_claude_from_path_and_checks_before_open
+_run test_threads_launcher_is_absolute_and_reaps_stale_files
 _run test_threads_list_uses_one_jq_process
 
 test_prune_worktrees_wiring(){
