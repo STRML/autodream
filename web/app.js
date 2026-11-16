@@ -154,6 +154,96 @@ function appendNotices(parent, data) {
   }
 }
 
+const OUTCOME_GLYPHS = [['fully_or_mostly', '✓', 'done'], ['partially', '◐', 'partial'],
+  ['not_achieved', '✗', 'not achieved'], ['unclear', '?', 'unclear'], ['unmeasured', '○', 'unmeasured']];
+
+function shortRepoNames(repos) {
+  const split = repos.map(repo => String(repo || '').split('/').filter(Boolean));
+  return split.map((parts, index) => {
+    if (!parts.length) return String(repos[index] || '—');
+    for (let depth = 1; depth <= parts.length; depth++) {
+      const name = parts.slice(-depth).join('/');
+      if (split.every((other, j) => j === index || other.slice(-depth).join('/') !== name)) return name;
+    }
+    return String(repos[index]);
+  });
+}
+
+function totalMinutes(sessions) {
+  if (!sessions.length || sessions.some(session => typeof session.duration_minutes !== 'number')) return null;
+  return sessions.reduce((sum, session) => sum + session.duration_minutes, 0);
+}
+
+function duration(minutes) {
+  if (typeof minutes !== 'number') return '—';
+  if (minutes < 60) return Math.round(minutes) + 'm';
+  const hours = minutes / 60;
+  return (hours < 10 ? hours.toFixed(1).replace(/\.0$/, '') : Math.round(hours)) + 'h';
+}
+
+function outcomeCell(outcomes) {
+  const cell = node('td', undefined, 'project-outcomes');
+  for (const [key, glyph, label] of OUTCOME_GLYPHS) {
+    const value = outcomes?.[key];
+    const count = node('span', glyph + ' ' + measured(value), value === 0 ? 'outcome-count zero' : 'outcome-count');
+    count.dataset.outcome = key;
+    count.title = label;
+    cell.append(count);
+  }
+  return cell;
+}
+
+function sessionLine(session) {
+  const item = node('li');
+  const glyph = ({fully_achieved: '✓', mostly_achieved: '✓', partially_achieved: '◐',
+    not_achieved: '✗', unclear_from_transcript: '?'})[session.outcome] || '○';
+  item.append(node('span', glyph, 'session-outcome'));
+  item.append(node('span', measured(session.goal), 'goal'));
+  const words = outcomeLabel(session.outcome).replace(/^\S+ /, '');
+  item.append(node('span', `${words} · ${duration(session.duration_minutes)} · ${measured(session.user_messages)} msgs · ${measured(session.tool_calls)} tools`, 'metrics'));
+  return item;
+}
+
+function goalCell(project, night, threadLinks) {
+  const cell = node('td', undefined, 'project-goal');
+  const details = node('details');
+  details.append(node('summary', measured(project.latest_goal ?? project.sessions[0]?.goal)));
+  const list = node('ul', undefined, 'sessions');
+  for (const session of project.sessions) list.append(sessionLine(session));
+  details.append(list);
+  cell.append(details);
+  for (const thread of threadLinks) {
+    if (!/^t-[0-9a-f]{8}$/.test(thread.id) || !thread.sessions.some(source =>
+      source.date === night.date && project.sessions.some(session => session.hash === source.hash))) continue;
+    const link = node('a', thread.title, 'thread-link');
+    link.href = '#threads/' + thread.id;
+    cell.append(link);
+  }
+  return cell;
+}
+
+function latelyTable(night, threadLinks, names) {
+  const table = node('table', undefined, 'lately-table');
+  const head = node('tr');
+  for (const label of ['Repo', 'Sess', 'Time', 'Outcomes', 'Goal']) head.append(node('th', label));
+  const thead = node('thead');
+  thead.append(head);
+  const tbody = node('tbody');
+  night.projects.forEach(project => {
+    const row = node('tr', undefined, 'project-row');
+    const repo = node('td', names.get(project.repo || project.project) ?? '—', 'project-repo');
+    repo.title = project.repo || project.project || '';
+    const sessions = node('td', measured(project.session_count ?? project.sessions.length), 'project-sessions');
+    sessions.append(node('span', ' sessions', 'cell-label'));
+    row.append(repo, sessions,
+      node('td', duration(totalMinutes(project.sessions)), 'project-minutes'),
+      outcomeCell(project.outcomes), goalCell(project, night, threadLinks));
+    tbody.append(row);
+  });
+  table.append(thead, tbody);
+  return table;
+}
+
 function renderLately(data) {
   const content = document.getElementById('content');
   content.replaceChildren(node('h1', 'Lately'), node('p', 'Your last ' + data.days + ' days in AI.', 'intro'));
@@ -167,46 +257,20 @@ function renderLately(data) {
     appendNotices(content, data.newest_dream);
   }
   if (!data.timeline.length) content.append(node('p', 'No recent session artifacts. Dreams keeps the report archive.'));
+  if (data.timeline.some(night => night.projects.length)) {
+    content.append(node('p', OUTCOME_GLYPHS.map(([, glyph, label]) => glyph + ' ' + label).join(' · '), 'outcome-legend'));
+  }
+  const repos = [...new Set(data.timeline.flatMap(night => night.projects.map(project => project.repo || project.project)))];
+  const shortNames = shortRepoNames(repos);
+  const names = new Map(repos.map((repo, index) => [repo, shortNames[index]]));
   for (const night of data.timeline) {
     const section = node('section');
     section.append(node('h2', night.date));
     appendNotices(section, night);
-    if (!night.projects.length) section.append(node('p', night.degraded?.length ?
-      'Session summary is incomplete.' : 'No top-level sessions.'));
-    for (const project of night.projects) {
-      const row = node('article', undefined, 'project-row');
-      row.append(node('h3', project.repo || project.project));
-      const outcomes = project.outcomes || {};
-      row.append(node('p', `${project.session_count ?? project.sessions.length} sessions · ` +
-        `✓ ${measured(outcomes.fully_or_mostly)} fully/mostly · ` +
-        `◐ ${measured(outcomes.partially)} partially · ` +
-        `✗ ${measured(outcomes.not_achieved)} not achieved · ` +
-        `? ${measured(outcomes.unclear)} unclear · ` +
-        `? ${measured(outcomes.unmeasured)} unmeasured`, 'project-outcomes'));
-      const latestGoal = project.latest_goal ?? project.sessions[0]?.goal;
-      row.append(node('p', measured(latestGoal), 'project-goal'));
-      for (const thread of data.thread_links || []) {
-        if (!/^t-[0-9a-f]{8}$/.test(thread.id) || !thread.sessions.some(source =>
-          source.date === night.date && project.sessions.some(session => session.hash === source.hash))) continue;
-        const link = node('a', thread.title);
-        link.href = '#threads/' + thread.id;
-        const threadLink = node('p');
-        threadLink.append(link);
-        row.append(threadLink);
-      }
-      const details = node('details');
-      details.append(node('summary', `Sessions (${project.session_count ?? project.sessions.length})`));
-      const list = node('ul', undefined, 'sessions');
-      for (const session of project.sessions) {
-        const item = node('li');
-        item.append(node('p', measured(session.goal), 'goal'));
-        item.append(node('p', outcomeLabel(session.outcome), 'outcome'));
-        item.append(node('p', `${measured(session.user_messages)} user messages · ${measured(session.tool_calls)} tool calls · ${measured(session.duration_minutes)} minutes`, 'metrics'));
-        list.append(item);
-      }
-      details.append(list);
-      row.append(details);
-      section.append(row);
+    if (!night.projects.length) {
+      section.append(node('p', night.degraded?.length ? 'Session summary is incomplete.' : 'No top-level sessions.'));
+    } else {
+      section.append(latelyTable(night, data.thread_links || [], names));
     }
     content.append(section);
   }
