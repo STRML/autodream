@@ -7,7 +7,9 @@ Writes the synthetic install from docs/screenshots/fixture.py, answers every das
 route with the real data layer (bin/autodream_web_data.py), and saves each answer as JSON.
 The page is web/index.html with web/*.js and web/*.css unchanged, plus demo-fetch.js, which
 serves those files in place of the local server. Thread actions answer with a demo notice.
+Every date is relative to the build day, so the Pages workflow rebuilds daily.
 """
+from datetime import date
 import importlib.util
 import json
 import os
@@ -52,7 +54,8 @@ def build(out):
         write_json(api / 'lately.json', cache.lately(7))
         write_json(api / 'stats.json', cache.stats())
         write_json(api / 'progress.json', cache.progress(time.time()))
-        write_json(api / 'threads.json', dict(threads=[dict(row, display_status=row['status'])
+        write_json(api / 'threads.json', dict(as_of=date.today().isoformat(),
+                                               threads=[dict(row, display_status=row['status'])
                                                         for row in threads]))
         dates = cache.dream_dates()
         write_json(api / 'dreams.json', dates)

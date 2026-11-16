@@ -395,7 +395,10 @@ class DataTests(unittest.TestCase):
         self.assertEqual(len(lately['timeline']), 7)
         self.assertTrue(all(night['projects'] and not night['degraded'] for night in lately['timeline']))
         self.assertEqual(lately['newest_dream']['open_questions'], 2)
-        threads = json.loads((api / 'threads.json').read_text())['threads']
+        threads_file = json.loads((api / 'threads.json').read_text())
+        self.assertRegex(threads_file['as_of'], r'^[0-9]{4}-[0-9]{2}-[0-9]{2}$',
+                         'the age filter must count from the build day')
+        threads = threads_file['threads']
         self.assertEqual({t['display_status'] for t in threads}, {'open', 'dropped', 'done', 'closed_by_sam'})
         self.assertTrue(any(t['kind'] == 'idea' for t in threads))
         dates = json.loads((api / 'dreams.json').read_text())['dates']

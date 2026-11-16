@@ -181,7 +181,7 @@ def main(root):
             '# Autodream — ' + day + '\n\n## Top patterns\n\n### Retries that never changed the input\n'
             '- **Severity**: medium\n\n## Open questions\n\nAUTODREAM_QUESTIONS_BEGIN\n'
             '1. **Turn on chunked triage for long sessions?**\nAUTODREAM_QUESTIONS_END\n\n'
-            '<!-- autodream:open-questions=0 -->\n')
+            '<!-- autodream:open-questions=1 -->\n')
     rows = []
     for number, (repo, title, outcome, status) in enumerate(THREADS):
         members = [value for (key_repo, _), value in hashes.items() if key_repo == repo][:2]
