@@ -9646,9 +9646,12 @@ test_threads_launcher_is_absolute_and_reaps_stale_files(){
   local parent made stale fresh
   parent=$(mktemp -d "${TMPDIR:-/tmp}/ccad.XXXXXX")
   mkdir -p "$parent/rel"
-  stale="$parent/rel/autodream-launch.stale1"
-  fresh="$parent/rel/autodream-launch.fresh1"
+  mkdir -m 700 "$parent/rel/autodream-launch"
+  stale="$parent/rel/autodream-launch/launch.stale1"
+  fresh="$parent/rel/autodream-launch/launch.fresh1"
   : > "$stale"; : > "$fresh"
+  : > "$parent/rel/autodream-launch.notes"
+  touch -t 202001010000 "$parent/rel/autodream-launch.notes"
   touch -t 202001010000 "$stale"
   sed -n -e '/^threads_error()/p' -e '/^threads_launcher() {/,/^}/p' "$REPO/bin/threads.sh" > "$parent/launcher.sh"
   made=$(cd "$parent" && TMPDIR=rel /bin/bash -c '. "$1"; threads_launcher "true"' _ "$parent/launcher.sh")
@@ -9657,6 +9660,7 @@ test_threads_launcher_is_absolute_and_reaps_stale_files(){
   made=$(TMPDIR="$parent/rel" /bin/bash -c '. "$1"; threads_launcher "true"' _ "$parent/launcher.sh")
   assert_no_file "$stale" "a launcher older than an hour is removed"
   assert_file "$fresh" "a recent launcher is kept"
+  assert_file "$parent/rel/autodream-launch.notes" "files outside the launcher directory are never removed"
   rm -f -- "$made"
   thread_cleanup "$parent"
 }

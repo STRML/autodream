@@ -357,14 +357,18 @@ threads_render() {
 # parse bash's $'...' quoting. Write the bash command to a 0600 file and hand cmux only
 # "/bin/bash '<file>'", which every shell reads the same. The file removes itself on start.
 # Prints the file path; it holds no quote or backslash, so the single quotes are safe. The
-# path is absolute because the pane may start in another directory, and a launcher left by a
-# pane that closed before running it is removed by the next launch after an hour.
+# path is absolute because the pane may start in another directory. Launchers live in a
+# private autodream-launch directory the user owns, so the next launch can remove one an
+# hour old (a pane closed before running it) without touching anyone else's files.
 threads_launcher() {
-  local dir file
-  for dir in "${TMPDIR:-/tmp}" /tmp; do
-    case $dir in /*) ;; *) continue ;; esac
-    find "$dir" -maxdepth 1 -name 'autodream-launch.*' -type f -mmin +60 -exec rm -f -- {} + 2>/dev/null || true
-    file=$(mktemp "${dir%/}/autodream-launch.XXXXXX" 2>/dev/null) || continue
+  local base dir file
+  for base in "${TMPDIR:-/tmp}" /tmp; do
+    case $base in /*) ;; *) continue ;; esac
+    dir="${base%/}/autodream-launch"
+    mkdir -m 700 "$dir" 2>/dev/null
+    [ -d "$dir" ] && [ ! -L "$dir" ] && [ -O "$dir" ] || continue
+    find "$dir" -maxdepth 1 -name 'launch.*' -type f -mmin +60 -exec rm -f -- {} + 2>/dev/null || true
+    file=$(mktemp "$dir/launch.XXXXXX" 2>/dev/null) || continue
     case $file in *"'"*|*\\*) rm -f -- "$file"; continue ;; esac
     if printf '%s\n' '#!/bin/bash' 'rm -f -- "$0"' "exec $1" > "$file"; then
       printf '%s\n' "$file"
