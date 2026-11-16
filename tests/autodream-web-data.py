@@ -115,6 +115,17 @@ class DataTests(unittest.TestCase):
         self.assertTrue(all(value is None for value in night['activity'].values()))
         self.assertTrue(all(value is None for value in night['outcomes'].values()))
 
+    def test_web_stats_missing_sidecar_is_unmeasured_not_unreadable(self):
+        old, = self.worklist('/sessions/old.jsonl')
+        self.finding(old, stats=False)
+        night = self.stats_night()
+        self.assertEqual(night['degraded'], [], 'a night from before sidecars existed is not a read failure')
+        self.assertEqual(night['sessions_without_sidecar'], 1)
+        self.assertTrue(all(value is None for value in night['activity'].values()))
+        self.assertTrue(all(value is None for value in night['outcomes'].values()))
+        key = ('2026-11-14', 'stats')
+        self.assertIn(key, self.cache._nights, 'an unmeasured night must still be cached')
+
     def test_web_stats_unreadable_file_is_degraded_and_not_cached(self):
         self.finding()
         run_stats = self.day / 'run-stats.txt'

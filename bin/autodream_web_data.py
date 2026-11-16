@@ -95,6 +95,7 @@ def build_night_stats(date, directory):
     activity = dict(user_messages=[], tool_calls=[], duration_minutes=[])
     outcomes = []
     degraded, unreadable = [], set()
+    without_sidecar = 0
     for session in night_sessions(directory, unreadable):
         path = directory / (session + '.json')
         if not path.exists():
@@ -106,7 +107,10 @@ def build_night_stats(date, directory):
         finding = read_object(path, degraded, unreadable)
         if finding.get('skipped') == 'below_noise_gate':
             continue
-        stats = read_object(path.with_name(path.stem + '.stats.json'), degraded, unreadable)
+        stats_path = path.with_name(path.stem + '.stats.json')
+        if not stats_path.exists():
+            without_sidecar += 1
+        stats = read_object(stats_path, degraded, unreadable) if stats_path.exists() else {}
         provenance = [stats[key] for key in ('nested', 'isSidechain') if key in stats]
         if any(value is True for value in provenance):
             continue
@@ -127,6 +131,7 @@ def build_night_stats(date, directory):
                 activity=totals,
                 outcomes={key: outcomes.count(key) if measured_outcomes else None for key in sorted(OUTCOMES)},
                 categories=read_categories(directory / 'categories.tsv'),
+                sessions_without_sidecar=without_sidecar,
                 degraded=['Could not read ' + name + '.' for name in sorted(unreadable)])
 
 
