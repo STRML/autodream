@@ -51,6 +51,17 @@ if [ -z "$AUTODREAM_DIR" ]; then
   fi
 fi
 TAGS_FILE="${AUTODREAM_TAGS_FILE:-$AUTODREAM_DIR/tags.jsonl}"
+
+# Installed copies are symlinks into the repo's bin/, so the helpers are found next to the
+# link (installed tree) or next to its target (repo checkout).
+_self_dir="$(dirname "${BASH_SOURCE[0]}")"
+_real_dir="$(dirname "$(readlink "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")"
+_pp="$_self_dir/portable.sh"
+[ -r "$_pp" ] || _pp="$_real_dir/portable.sh"
+# shellcheck source=/dev/null
+. "$_pp"
+LINEARIZE="$_self_dir/adapters/omp/linearize.sh"
+[ -r "$LINEARIZE" ] || LINEARIZE="$_real_dir/../adapters/omp/linearize.sh"
 LOCK="$TAGS_FILE.lock"
 
 say()  { printf '%s\n' "$*"; }
@@ -63,7 +74,7 @@ acquire_lock() {
   local i=0
   while ! mkdir "$LOCK" 2>/dev/null; do
     if [ -d "$LOCK" ]; then
-      local age; age=$(( $(date +%s) - $(stat -f %m "$LOCK" 2>/dev/null || date +%s) ))
+      local age; age=$(( $(date +%s) - $(pstat_mtime "$LOCK" || date +%s) ))
       if [ "$age" -gt 60 ]; then rmdir "$LOCK" 2>/dev/null || true; continue; fi
     fi
     i=$(( i + 1 ))
@@ -171,6 +182,7 @@ newest_session() { # $1=harness $2=cwd $3=physical cwd
   esac
   [ -d "$root" ] || return 0
   # Sorted by mtime, newest first, bounded: a bucket holds hundreds of sessions.
+  local cand m
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     case "$harness" in
@@ -181,8 +193,9 @@ newest_session() { # $1=harness $2=cwd $3=physical cwd
       printf '%s' "$f"
       return 0
     fi
-  done < <(find "$root" -mindepth "$depth" -maxdepth "$depth" -type f -name "$find_name" -mtime -14 \
-             -exec stat -f '%m %N' {} + 2>/dev/null | sort -rn | head -80 | cut -d' ' -f2-)
+  done < <(find "$root" -mindepth "$depth" -maxdepth "$depth" -type f -name "$find_name" -mtime -14 2>/dev/null \
+             | while IFS= read -r cand; do m="$(pstat_mtime "$cand")" && printf '%s %s\n' "$m" "$cand"; done \
+             | sort -rn | head -80 | cut -d' ' -f2-)
   return 0
 }
 
@@ -211,19 +224,30 @@ cmd_last() {
   local session picked
   case "$harness" in
     codex)
-      session="$(head -1 "$file" | jq -r '.payload.id // .payload.session_id // empty')"
+      session="$(head -1 "$file" | jq -rR 'fromjson? | .payload.id // .payload.session_id // empty')"
       # A user message has no id in a Codex rollout, so its timestamp stands in; the turns Codex
       # injects as user messages (environment context, instructions) start with `<`.
       picked="$(jq -c -s --arg role "$role" '
         map(select(.type == "response_item" and .payload.type == "message" and .payload.role == $role)
             | {id: (.payload.id // .timestamp), text: ([.payload.content[]? | .text // empty] | join("\n"))}
-            | select(.text != "" and ($role == "assistant" or (.text | startswith("<") | not)))) | last // empty' "$file")" ;;
+            | select(.text != "" and ($role == "assistant" or (.text | startswith("<") | not)))) | last // empty' "$file")" \
+        || die 1 "$file is not readable JSON lines; nothing was changed" ;;
     omp)
-      session="$(head -5 "$file" | jq -r 'select(.type == "session") | .id // empty' | head -1)"
+      session="$(head -5 "$file" | jq -rR 'fromjson? | select(.type == "session") | .id // empty' | head -1)"
+      [ -n "$session" ] || die 1 "$file has no session id, so it is not a $harness session"
+      # The file is a tree that keeps every branch the user backed out of; read only the live
+      # chain, and refuse rather than fall back to the raw file when it cannot be walked.
+      [ -r "$LINEARIZE" ] || die 1 "cannot find adapters/omp/linearize.sh next to this script"
+      local live; live="$(mktemp "${TMPDIR:-/tmp}/autodream-focus.XXXXXX")"
+      if ! bash "$LINEARIZE" "$file" "$live" 2>/dev/null; then
+        rm -f "$live"; die 1 "$file could not be read as a single OMP conversation; nothing was changed"
+      fi
+      # A user-role message attributed to the agent (a steering or injected turn) is not the human's.
       picked="$(jq -c -s --arg role "$role" '
-        map(select(.type == "message" and .message.role == $role)
+        map(select(.type == "message" and .message.role == $role and .message.attribution != "agent")
             | {id: .id, text: (.message.content | if type == "string" then . else ([.[]? | select(.type == "text") | .text] | join("\n")) end)}
-            | select(.text != "")) | last // empty' "$file")" ;;
+            | select(.text != "")) | last // empty' "$live")"
+      rm -f "$live" ;;
   esac
   [ -n "$session" ] || die 1 "$file has no session id, so it is not a $harness session"
   [ -n "$picked" ] || die 1 "no $role message with text in $file"

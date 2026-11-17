@@ -823,6 +823,26 @@ test_focus_cli_last_omp(){
   rm -rf "$root"
 }
 
+test_focus_cli_last_omp_reads_the_live_branch(){
+  echo "# autodream-focus.sh last: OMP's last human turn on the live branch, not an abandoned one or an agent's"
+  local root; root=$(setup_env); local f="$root/s.jsonl"
+  m(){ # $1=id $2=parent $3=role $4=text [$5=attribution]
+    jq -cn --arg id "$1" --arg p "$2" --arg r "$3" --arg t "$4" --arg a "${5:-}" \
+      '{type:"message",id:$id,parentId:(if $p == "" then null else $p end),message:({role:$r,content:$t} + (if $a == "" then {} else {attribution:$a} end))}' >> "$f"
+  }
+  jq -cn --arg cwd "$root" '{type:"session",version:3,id:"live",timestamp:"2020-01-02T12:00:00.000Z",cwd:$cwd}' > "$f"
+  m u1 "" user "first"; m a1 u1 assistant "one"; m u2 a1 user "kept question"; m a2 u2 assistant "two"
+  m u3 a1 user "abandoned question"; m a3 u3 assistant "abandoned reply"
+  m u4 a2 user "steering note" agent; m a4 u4 assistant "four"
+  focus_cli "$root" last --harness omp --file "$f" --role user >/dev/null
+  assert_eq "$(jq -r '[.id, .text] | join("|")' "$root/autodream/tags.jsonl")" "live:u2|kept question" "the abandoned branch and the agent-attributed turn are both skipped"
+  local out rc=0; printf '{"type":"session","version":3,"id":"bad","cwd":"/x"}\nnot json\n' > "$root/bad.jsonl"
+  out=$(focus_cli "$root" last --harness omp --file "$root/bad.jsonl" 2>&1) || rc=$?
+  assert_eq "$rc" "1" "a file that cannot be walked is refused"
+  assert_grep_str "$out" "could not be read as a single OMP conversation" "and says why, instead of reading the raw file"
+  rm -rf "$root"
+}
+
 test_focus_cli_last_without_a_session(){
   echo "# autodream-focus.sh last: no session for the directory is a plain error"
   local root; root=$(setup_env)
@@ -837,7 +857,7 @@ test_focus_tag_uses_the_recorded_harness_and_transcript(){
   echo "# focus tags: a tag from OMP or Codex names its harness and its own session file"
   local root; root=$(setup_env); mk_session "$root" s1
   mkdir -p "$root/elsewhere"; : > "$root/elsewhere/real.jsonl"
-  local at; at=$(date -u -r "$(date -j -f '%Y-%m-%d %H:%M' "$DATE 12:00" +%s)" +%Y-%m-%dT%H:%M:%S.000Z)
+  local at; at=$(focus_at "$DATE" 12:00)
   jq -cn --arg a "$at" --arg t "$root/elsewhere/real.jsonl" '{id:"cx:1",session:"cx",uuid:"1",role:"assistant",text:"codex reply",cwd:"/p",taggedAt:$a,harness:"codex",transcript:$t}' >> "$root/autodream/tags.jsonl"
   jq -cn --arg a "$at" --arg t "$root/elsewhere/gone.jsonl" '{id:"om:1",session:"om",uuid:"1",role:"assistant",text:"omp reply",cwd:"/p",taggedAt:$a,harness:"omp",transcript:$t}' >> "$root/autodream/tags.jsonl"
   jq -cn --arg a "$at" '{id:"ev:1",session:"ev",uuid:"1",role:"assistant",text:"evil path",cwd:"/p",taggedAt:$a,harness:"omp",transcript:"/etc/passwd"}' >> "$root/autodream/tags.jsonl"
@@ -3639,6 +3659,7 @@ _run test_focus_cli_usage_errors
 _run test_focus_cli_reclaims_a_stale_lock
 _run test_focus_cli_last_codex
 _run test_focus_cli_last_omp
+_run test_focus_cli_last_omp_reads_the_live_branch
 _run test_focus_cli_last_without_a_session
 _run test_focus_tag_uses_the_recorded_harness_and_transcript
 _run test_force_rebuild_failed_l2_does_not_consume
