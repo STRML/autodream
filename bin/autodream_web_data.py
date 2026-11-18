@@ -48,11 +48,15 @@ def read_allowed_run_stats(path):
     return result
 
 
+CATEGORY_FIELDS = ['category', 'severity', 'sessions', 'findings', 'example_hashes']
+CATEGORY_WEIGHT_FIELDS = ['sessions_real', 'sessions_sandbox', 'weighted']
+
+
 def read_categories(path):
     try:
         with Path(path).open(encoding='utf-8', newline='') as stream:
             reader = csv.DictReader(stream, delimiter='\t')
-            if reader.fieldnames != ['category', 'severity', 'sessions', 'findings', 'example_hashes']:
+            if reader.fieldnames not in (CATEGORY_FIELDS, CATEGORY_FIELDS + CATEGORY_WEIGHT_FIELDS):
                 return None
             rows, seen = [], set()
             for row in reader:
