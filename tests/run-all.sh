@@ -10068,6 +10068,28 @@ test_remote_sync_missing_remote_path_is_a_failure(){
   rm -rf "$root"
 }
 
+test_remote_sync_cause_skips_local_shell_noise(){
+  echo "# remote sync: the cause is rsync's or ssh's own line, not noise an ssh config's Match exec prints first"
+  local root; root=$(setup_env); rs_env "$root"
+  printf '23\n' > "$root/rsync.rc"
+  printf "/bin/bash: line 1: 73235 Alarm clock: 14 perl -e 'ualarm 300000; exec @ARGV' nc -z studio2.local 22 2> /dev/null\nrsync(79269): error: .claude/projects/: (l)stat: No such file or directory\n" > "$root/rsync.err"
+  assert_eq "$(rs_helper "$root" studio2 studio2.invalid:.claude/projects)" \
+    'failed (rsync(79269): error: .claude/projects/: (l)stat: No such file or directory)' "a missing root names rsync's error"
+  printf '255\n' > "$root/rsync.rc"
+  printf "/bin/bash: line 1: 1 Alarm clock: 14 nc -z studio2.local 22\nu@studio2: Permission denied (publickey).\nrsync: connection unexpectedly closed (0 bytes received so far) [Receiver]\n" > "$root/rsync.err"
+  assert_eq "$(rs_helper "$root" studio2 studio2.invalid:p)" \
+    'failed (u@studio2: Permission denied (publickey).)' "an auth failure names ssh's error"
+  printf '255\n' > "$root/rsync.rc"
+  printf 'something no rule knows\n' > "$root/rsync.err"
+  assert_eq "$(rs_helper "$root" studio2 studio2.invalid:p)" \
+    'failed (something no rule knows)' "with no tool line the first line still counts"
+  printf '255\n' > "$root/rsync.rc"
+  printf "/bin/bash: line 1: 1 Alarm clock: 14 nc -z studio2.local 22\nWarning: Connection refused\n" > "$root/rsync.err"
+  assert_eq "$(rs_helper "$root" studio2 studio2.invalid:p)" \
+    'failed (rsync exited 255)' "a warning-only tool line never falls back to the noise"
+  rm -rf "$root"
+}
+
 test_remote_sync_refused_when_the_claude_adapter_is_off(){
   echo "# remote sync: with the claude adapter not enabled no mirror would be scanned, so no host is synced or called ok"
   local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"; stub_notify "$root"
@@ -10277,6 +10299,7 @@ _run test_remote_sync_invalid_entries_are_refused
 _run test_remote_sync_unreachable_host_keeps_and_scans_the_mirror
 _run test_remote_sync_auth_failure_fails_fast
 _run test_remote_sync_missing_remote_path_is_a_failure
+_run test_remote_sync_cause_skips_local_shell_noise
 _run test_remote_sync_refused_when_the_claude_adapter_is_off
 _run test_remote_sync_timeout_leaves_no_session_from_a_temp_file
 _run test_remote_sync_vanished_file_is_partial_and_counts_as_success
