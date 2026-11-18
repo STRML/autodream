@@ -76,11 +76,33 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
+      # Depth 2: on a PR the checkout is the test merge, whose first parent is the base, so
+      # HEAD^1..HEAD is exactly what the PR changes.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      # A PR that changes only the web dashboard runs only its suite (.github/ci-scope.sh lists
+      # what counts, tests/ci-scope.sh pins it). Pushes to main, a diff that fails, and any path
+      # the selector does not know all run the whole suite.
+      - name: scope
+        id: scope
+        run: |
+          scope=full
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            scope=$(bash .github/ci-scope.sh HEAD^1 HEAD)
+          fi
+          echo "scope: $scope"
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
+
+      - name: web suite only
+        if: steps.scope.outputs.scope == 'web' && matrix.shard == 0
+        run: bash tests/autodream-web.sh
 
       # gtimeout: four oversized-gate assertions look for GNU timeout under that name,
       # which is how it is installed on a Mac. On Linux it is plain `timeout`.
       - name: check deps
+        if: steps.scope.outputs.scope == 'full'
         run: |
           jq --version
           python3 --version
@@ -89,6 +111,7 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: run-all, shard ${{ matrix.shard }} of 8
+        if: steps.scope.outputs.scope == 'full'
         env:
           RUNALL_TIMES: ${{ runner.temp }}/times.txt
         run: RUNALL_SHARD=${{ matrix.shard }}/8 bash tests/run-all.sh
@@ -132,7 +155,7 @@ jobs:
       # cannot afford a swallowed exit code, and that is the class shellcheck
       # actually catches (SC2164, SC2155).
       - name: shellcheck bin + install
-        run: shellcheck --severity=warning bin/*.sh adapters/*/*.sh install.sh
+        run: shellcheck --severity=warning bin/*.sh adapters/*/*.sh install.sh .github/*.sh
 
       # Test code is held at `error` only. tests/run-all.sh has ~24 SC2155
       # hits from `local x=$(cmd)` in assertion helpers, where masking a return
