@@ -46,8 +46,10 @@ def runs_in(since, until):
 def jobs_of(run_id, cache):
     path = os.path.join(cache, "jobs-%d.json" % run_id)
     if not os.path.exists(path):
-        with open(path, "w") as f:
-            json.dump(gh("repos/%s/actions/runs/%d/jobs?per_page=100" % (REPO, run_id)), f)
+        jobs = gh("repos/%s/actions/runs/%d/jobs?per_page=100" % (REPO, run_id))
+        with open(path + ".tmp", "w") as f:
+            json.dump(jobs, f)
+        os.replace(path + ".tmp", path)
     with open(path) as f:
         return json.load(f)["jobs"]
 
