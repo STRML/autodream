@@ -10,7 +10,7 @@ name: launchd
 # skills/autodream/SKILL.md is in it too: tests/install-skill.sh reads its `name:` line through
 # the link install.sh makes, and this list is the only CI that runs that suite (#178).
 #
-# A weekly run does the whole suite on macOS, under the stock bash 3.2 the nightly uses.
+# A weekly run does the whole suite on macOS, in four shards, under the stock bash 3.2 the nightly uses.
 # Bash 3.2 and BSD tools are where this repo's silent failures have come from (an empty
 # array under `set -u`, a BSD-only flag), and a push that touches none of the paths below
 # would otherwise never see them.
@@ -87,6 +87,40 @@ jobs:
           done
           exit $rc
 
-      - name: full suite on macOS (weekly or by hand)
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-        run: bash tests/run-all.sh
+  # The whole suite on macOS, weekly or by hand, in four shards like tests.yml. As one step it
+  # outgrew the job's 20-minute timeout: 19m58s on 2026-11-02, then cancelled at 20m on 11-09 and
+  # 11-16, so two weeks passed with no full run under bash 3.2. /bin/bash, not the runner's `bash`,
+  # because the runner puts Homebrew's bash 5 first on PATH and bash 3.2 is what the nightly uses.
+  # Keep the matrix and the /4 in step: tests/shard.sh fails if they disagree.
+  full:
+    name: full suite (${{ matrix.shard }}/4)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: check deps
+        run: |
+          jq --version
+          python3 --version
+          command -v gtimeout >/dev/null 2>&1 || brew install coreutils
+          /bin/bash --version | head -1
+
+      - name: run-all, shard ${{ matrix.shard }} of 4
+        env:
+          RUNALL_TIMES: ${{ runner.temp }}/times.txt
+        run: RUNALL_SHARD=${{ matrix.shard }}/4 /bin/bash tests/run-all.sh
+
+      - name: slowest entries in this shard
+        if: always()
+        env:
+          RUNALL_TIMES: ${{ runner.temp }}/times.txt
+        run: |
+          test -f "$RUNALL_TIMES" || { echo "no timings written"; exit 0; }
+          awk '{ t += $1 } END { print "total seconds in tests and suites: " t }' "$RUNALL_TIMES"
+          sort -rn "$RUNALL_TIMES" | head -12
