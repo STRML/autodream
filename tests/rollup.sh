@@ -224,35 +224,41 @@ sbx 9 cat_mixed:medium "$SBX_KEY-trig--691z12n"; sbx 10 cat_mixed:medium "$SBX_K
 sbx 12 cat_lookalike:low "$SBX_KEY-trig-4paa91wm-repo"
 sbx 13 cat_lookalike:low -Users-x-T-trig-parser
 sbx 14 cat_lookalike:low proj
+sbx 15 cat_lookalike:low "$SBX_KEY-trig-4paa91wm-repo"
+printf '{"session_path": "/s/16.jsonl", "findings": [' > "$F/$(h 16).json"; sidecar 16 false false false; source_row 16 claude
 for i in 20 21 22; do sbx "$i" cat_sandonly:low proj; jq -c '.findings += [{category:"cat_floor",severity:"low",what:"w"}]' "$F/$(h "$i").json" > "$T/s.json" && mv "$T/s.json" "$F/$(h "$i").json"; done
 sbx 23 cat_sandonly:low proj; sbx 24 cat_sandonly:low proj
 sbx 31 cat_sandonly:low proj; sidecar 31 true true true; printf '%s\t%s\n' "$(h 31)" "$(h 20)" > "$F/fanouts.tsv"
 gated 40; sidecar 40 false false false; source_row 40 claude
-SBX_CWDS=$(
-  for i in 3 4 5; do printf '%s\t%s/trig-4paa91wm/repo\n' "$(h "$i")" "$SBX_CWD"; done
-  for i in 6 7 8; do printf '%s\t?\n' "$(h "$i")"; done
-  for i in 20 21 22 23 24 31 40; do printf '%s\t%s/trig-zz%s\n' "$(h "$i")" "$SBX_CWD" "$i"; done
-  printf '%s\t/Users/x/code/a\n' "$(h 1)"
-  printf '%s\t/Users/x/T/trig-parser\n' "$(h 2)"
-  printf '%s\t/Users/x/T/trig-parser\n' "$(h 12)"
-  printf '%s\t%s/trig-abc/repo/sub\n' "$(h 14)" "$SBX_CWD")
+SBX_ROWS=$(
+  for i in 3 4 5; do printf '%s\tproj\t%s/trig-4paa91wm/repo\n' "$(h "$i")" "$SBX_CWD"; done
+  for i in 6 7 8; do printf '%s\t%s-trig-4paa91wm-repo\t?\n' "$(h "$i")" "$SBX_KEY"; done
+  for i in 20 21 22 23 24 31 40; do printf '%s\tproj\t%s/trig-zz%s\n' "$(h "$i")" "$SBX_CWD" "$i"; done
+  printf '%s\t-Users-x-code-a\t/Users/x/code/a\n' "$(h 1)"
+  printf '%s\t-Users-x-T-trig-parser\t/Users/x/T/trig-parser\n' "$(h 2)"
+  printf '%s\t-Users-x-T-trig-parser\t/Users/x/T/trig-parser\n' "$(h 12)"
+  printf '%s\tproj\t%s/trig-abc/repo/sub\n' "$(h 14)" "$SBX_CWD"
+  printf '%s\t-Users-x-code-b\t?\n' "$(h 15)"
+  printf '%s\t%s-trig-4paa91wm-repo\t?\n' "$(h 16)" "$SBX_KEY")
 OUT3="$T/out3"; mkdir -p "$OUT3"
-summary=$(AUTODREAM_SESSION_CWDS="$SBX_CWDS" "$BIN" "$F" "$OUT3" 2>/dev/null)
+summary=$(AUTODREAM_SESSION_ROWS="$SBX_ROWS" "$BIN" "$F" "$OUT3" 2>/dev/null)
 R3="$OUT3/rollup.tsv"; C3="$OUT3/categories.tsv"
 sbx_of(){ awk -F'\t' -v k="$1" '($1 "") == (k "") {print $20}' "$R3"; }
 yes_list(){ tail -n +2 "$R3" | awk -F'\t' '$20 == "yes" {print $1}' | tr '\n' ' '; }
-assert_eq "$(yes_list)" "$(for i in 3 4 5 6 7 8 9 10 11 20 21 22 23 24 31 40; do printf '%s ' "$(h "$i")"; done)" "sandbox rows: cwd match, key match with an unknown or missing cwd, gated and advisor rows too"
+assert_eq "$(yes_list)" "$(for i in 3 4 5 6 7 8 9 10 11 16 20 21 22 23 24 31 40; do printf '%s ' "$(h "$i")"; done)" "sandbox rows: cwd match, key match with an unknown or missing cwd, gated and advisor rows too"
 assert_eq "$(sbx_of "$(h 2)")/$(sbx_of "$(h 13)")" "no/no" "/Users/x/T/trig-parser is not a sandbox, by cwd or by key"
 assert_eq "$(sbx_of "$(h 12)")" "no" "a known real cwd wins over a sandbox-shaped project key"
 assert_eq "$(sbx_of "$(h 14)")" "no" "a path below trig-*/repo is not the sandbox itself"
+assert_eq "$(sbx_of "$(h 15)")" "no" "the runner's project key beats a sandbox-shaped one the findings JSON carries"
+assert_eq "$(sbx_of "$(h 16)")" "yes" "an unreadable findings JSON, with no project of its own, is still found by the runner's key"
 assert_eq "$(sbx_of "$(h 9)")/$(sbx_of "$(h 8)")" "yes/yes" "bucket shapes seen on disk: trig--691z12n and trig-3mhiuw-j-repo"
-assert_eq "$summary" "rollup: rows=21 triaged=20 gated=1 error=0 unreadable=0 ungated=20 categories=4 findings=23 advisor_tool_findings=0 sandbox_sessions=15" "the summary counts ungated sandbox sessions"
+assert_eq "$summary" "rollup: rows=23 triaged=21 gated=1 error=0 unreadable=1 ungated=22 categories=4 findings=24 advisor_tool_findings=0 sandbox_sessions=16" "the summary counts ungated sandbox sessions"
 crow(){ awk -F'\t' -v c="$1" -v v="$2" '$1 == c && $2 == v {print $3 "/" $6 "/" $7 "/" $8}' "$C3"; }
 assert_eq "$(crow cat_mixed all)" "11/2/9/4" "mixed: sessions, real, sandbox, weighted = real + floor(sandbox/4)"
 assert_eq "$(crow cat_mixed high)/$(crow cat_mixed medium)" "2/2/0/2/9/0/9/2" "each severity row splits on its own"
 assert_eq "$(crow cat_sandonly all)" "5/0/5/1" "sandbox-only: real 0, and an advisor counts under its sandbox parent once"
 assert_eq "$(crow cat_floor all)" "3/0/3/0" "three sandbox sessions weigh nothing: the quotient rounds down"
-assert_eq "$(crow cat_lookalike all)" "3/3/0/3" "look-alike paths keep full weight"
+assert_eq "$(crow cat_lookalike all)" "4/4/0/4" "look-alike paths keep full weight"
 assert_eq "$(head -1 "$C3" | cut -f6-8)" "$(printf 'sessions_real\tsessions_sandbox\tweighted')" "the new columns are named"
 F=$F_MAIN
 

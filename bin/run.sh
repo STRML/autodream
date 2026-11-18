@@ -2864,9 +2864,9 @@ write_rollup() {
     printf 'rollup: helper missing\n' >> "$FINDINGS_DIR/run-stats.txt"
     return 0
   fi
-  # The source map and the session cwds, built before any model ran, not sessions-source.txt or
-  # session-cwds.tsv, which an L1 worker can rewrite or L2 can reach.
-  out=$(AUTODREAM_SOURCE_MAP="${AUTODREAM_SOURCE_MAP:-}" AUTODREAM_SESSION_CWDS="${SESSION_CWDS_TSV:-}" \
+  # The source map and the session rows (hash, bucket, cwd), built before any model ran, not
+  # sessions-source.txt or session-cwds.tsv, which an L1 worker can rewrite.
+  out=$(AUTODREAM_SOURCE_MAP="${AUTODREAM_SOURCE_MAP:-}" AUTODREAM_SESSION_ROWS="${SESSION_ROWS:-}" \
     bash "$ROLLUP" "$FINDINGS_DIR" 2>>"$RUN_LOG" | tail -1)
   case "$out" in
     "rollup: rows="*) ;;

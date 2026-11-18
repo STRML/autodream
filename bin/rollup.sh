@@ -41,11 +41,12 @@
 # comes from a harness that does not measure it (omp).
 # sandbox is yes for a skill-creator trigger eval run, no otherwise. Those run `claude -p` from
 # /private/var/folders/<x>/<y>/T/trig-<id>/repo, so the bucket is -private-var-folders-...-T-trig-<id>[-repo].
-# The session's real cwd decides, from AUTODREAM_SESSION_CWDS (hash<TAB>cwd rows the runner built
-# from the session paths before any model ran; ? means unknown). Only an unknown cwd falls back to
-# the project key, which the runner overwrote from the session's bucket, anchored at both ends (an
-# ordinary checkout at /Users/x/T/trig-parser is not a sandbox). The trial dirs are deleted after
-# a run, so the cwd often cannot be resolved and the key is what decides.
+# The session's real cwd decides, from AUTODREAM_SESSION_ROWS (hash, project, cwd rows the runner
+# built from the session paths before any model ran; ? means unknown). Only an unknown cwd falls
+# back to the project key, anchored at both ends (an ordinary checkout at /Users/x/T/trig-parser
+# is not a sandbox): the runner's key for the session, else the row's own, which is blank when the
+# findings JSON does not parse. The trial dirs are deleted after a run, so the cwd often cannot be
+# resolved and the key is what decides.
 # categories.tsv counts a session once as real or sandbox: weighted = sessions_real +
 # floor(sessions_sandbox / 4), and sessions = sessions_real + sessions_sandbox.
 # Text cells are escaped by jq's @tsv, so a tab or newline in a value never breaks a row.
@@ -150,14 +151,20 @@ session_hashes() {
 join_source_parent() {
   awk -F'\t' -v OFS='\t' -v src="$DIR/sessions-source.txt" -v fan="$DIR/fanouts.tsv" '
     function sandbox(h, project) {
-      if ((h in cwd) && cwd[h] != "" && cwd[h] != "?") return (cwd[h] ~ cwdpat) ? "yes" : "no"
+      if (h in trusted) {
+        project = key[h]
+        if (cwd[h] != "" && cwd[h] != "?") return (cwd[h] ~ cwdpat) ? "yes" : "no"
+      }
       return (project ~ keypat) ? "yes" : "no"
     }
     BEGIN {
       cwdpat = "^/private/var/folders/.+/T/trig-[^/]+(/repo)?$"
       keypat = "^-private-var-folders-.+-T-trig-[A-Za-z0-9_-]+$"
-      n = split(ENVIRON["AUTODREAM_SESSION_CWDS"], rows, "\n")
-      for (i = 1; i <= n; i++) { split(rows[i], a, "\t"); if (a[1] != "" && !(a[1] in cwd)) cwd[a[1]] = a[2] }
+      n = split(ENVIRON["AUTODREAM_SESSION_ROWS"], rows, "\n")
+      for (i = 1; i <= n; i++) {
+        split(rows[i], a, "\t")
+        if (a[1] != "" && !(a[1] in trusted)) { trusted[a[1]] = 1; key[a[1]] = a[2]; cwd[a[1]] = a[3] }
+      }
       if (ENVIRON["AUTODREAM_SOURCE_MAP"] != "") {
         n = split(ENVIRON["AUTODREAM_SOURCE_MAP"], lines, "\n")
         for (i = 1; i <= n; i++) { split(lines[i], a, "\t"); if (a[1] != "" && !(a[1] in s)) s[a[1]] = a[2] }

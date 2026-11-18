@@ -3531,7 +3531,8 @@ test_prompt_counts_from_the_rollup(){
   assert_grep   "$P" '`sandbox_shape_denies`' "PROMPT.md names the sandbox_shape_denies column"
   assert_grep   "$P" 'sandbox_shape_denies_min' "and reads its threshold from run-stats.txt"
   assert_grep   "$P" 'Rank by `weighted`, never by `sessions`' "PROMPT.md ranks by the weighted count the runner computed"
-  assert_grep   "$P" 'A pattern with `sessions_real` 0 is sandbox-only; read that from the tally' "and reads sandbox-only from the tally, not from the capped examples"
+  assert_grep   "$P" 'A whole-category pattern with `sessions_real` 0 is sandbox-only; read that from the tally' "and reads sandbox-only from the tally, not from the capped examples"
+  assert_grep   "$P" "its category's .sessions_real. says nothing about it" "and a narrower pattern is judged from its own sessions, not its category's tally"
   assert_nogrep "$P" '[-]T-trig-' "and holds no second copy of the sandbox predicate, which rollup.sh owns"
 }
 
