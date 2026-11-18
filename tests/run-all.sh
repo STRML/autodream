@@ -8881,6 +8881,8 @@ test_threads_cleanup_removes_own_tmp_without_trash(){
     /bin/bash "$REPO/bin/threads.sh" update "$DATE" < "$root/group-rows.jsonl" > "$root/update.out" 2>&1
   AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" PATH="$shim:$PATH" TMPDIR="$root/tmp" \
     /bin/bash "$REPO/bin/threads.sh" report "$DATE" > "$root/report.md" 2>&1
+  assert_grep "$root/update.out" '^threads_link: failed$' "update ran its group pipeline"
+  assert_grep "$root/report.md" '^## Dropped threads' "report ran to its render step"
   calls=$(cat "$root/trash-calls.txt" 2>/dev/null)
   left=$(ls -A "$root/tmp")
   assert_eq "$calls" "" "threads.sh never calls trash on its own temp paths"
