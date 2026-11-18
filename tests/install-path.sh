@@ -198,6 +198,14 @@ P=$(plist_path "$(nightly_plist)")
 has_dir "$P" "$SANDBOX/dev" && no "the environment-only OMP_BIN dir stays out of the PATH" || ok "the environment-only OMP_BIN dir stays out of the PATH"
 has_dir "$P" "$SANDBOX/omp-home" && ok "omp is found on PATH as the job will find it" || no "omp is found on PATH as the job will find it"
 
+echo "# rsync's dir is in the PATH, so AUTODREAM_REMOTE_ROOTS syncs with the rsync the shell uses (#226)"
+new_sandbox
+mkdir -p "$SANDBOX/rsync-home"; fake "$SANDBOX/rsync-home/rsync"
+run_install "$SANDBOX/shim:$SANDBOX/rsync-home:$SANDBOX/bin:/usr/bin:/bin" AUTODREAM_EPHEMERAL_DIRS= -- "$SANDBOX/target"; rc=$?
+assert_eq "$rc" "0" "the install succeeds"
+P=$(plist_path "$(nightly_plist)")
+has_dir "$P" "$SANDBOX/rsync-home" && ok "rsync's dir is in the nightly PATH" || no "rsync's dir is in the nightly PATH ($P)"
+
 echo "# --adapters all reaches every real adapter, and never the _fixture one"
 new_sandbox
 mkdir -p "$SANDBOX/omp-home"; fake "$SANDBOX/omp-home/omp"

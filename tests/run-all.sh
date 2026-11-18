@@ -28,6 +28,8 @@ THREADS_TEST_TIMEOUT_BIN=$(command -v timeout 2>/dev/null || command -v gtimeout
 # Point every run at a path that does not exist; the pin tests override it with
 # tests/mock-shared-memory.sh.
 export SHARED_MEMORY_BIN="$HERE/no-such-shared-memory"
+# A developer's own remote roots must never reach a test run: the remote_sync tests set it themselves.
+unset AUTODREAM_REMOTE_ROOTS
 DATE=2020-01-02          # fixed target date; sessions are touched into this day
 STAMP=202001021200       # touch -t form of DATE at noon
 
@@ -9892,6 +9894,312 @@ _run test_l2_diag_written_on_exit_137
 _run test_l2_diag_long_command_lines_keep_the_sections_intact
 _run test_l2_diag_absent_on_other_outcomes
 _run test_l2_diag_probes_never_fail_or_stall_the_run
+
+# ---- Remote session roots: AUTODREAM_REMOTE_ROOTS pulls another host's transcripts (#226) ----
+# A fake rsync stands in for the real one. It logs its argv, copies every *.jsonl under the path
+# after the host prefix (cp -p, so mtimes survive), then prints rsync.<host>.err (else rsync.err)
+# and exits rsync.<host>.rc (else rsync.rc, else 0). The ssh beside it only logs and fails, so a
+# call that escaped the fake shows up in ssh.log, and every target is a *.invalid host anyway.
+rs_env(){ # $1=root -> a remote store at $1/studio and the shims at $1/rsshim
+  local r="$1"
+  mkdir -p "$r/studio/proj-r/tool-results" "$r/rsshim"
+  printf '%s\n' '{"type":"user","cwd":"/tmp/proj-r","message":{"content":"remote task"}}' \
+    '{"type":"user","message":{"content":"keep going"}}' > "$r/studio/proj-r/r1.jsonl"
+  touch -t "$STAMP" "$r/studio/proj-r/r1.jsonl"
+  printf 'tool output\n' > "$r/studio/proj-r/tool-results/t.txt"
+  cat > "$r/rsshim/rsync" <<'RSYNC_SHIM'
+#!/bin/bash
+R=$(cd "$(dirname "$0")/.." && pwd)
+printf '%s\n' "$*" >> "$R/rsync.log"
+n=$#; src=${@:$((n - 1)):1}; dst=${!n}
+host=${src%%:*}; src=${src#*:}
+rc=$(cat "$R/rsync.$host.rc" 2>/dev/null || cat "$R/rsync.rc" 2>/dev/null || echo 0)
+if [ "$rc" = 0 ] || [ "$rc" = 24 ]; then
+  ( cd "$src" 2>/dev/null && find . -type f -name '*.jsonl' ) | while IFS= read -r f; do
+    mkdir -p "$dst/$(dirname "$f")" && cp -p "$src/$f" "$dst/$f"
+  done
+fi
+if [ -f "$R/rsync.strand" ]; then
+  mkdir -p "$dst/proj-r"
+  printf '{"type":"user","message":{"content":"half' > "$dst/proj-r/.r2.jsonl.Xy12Zw"
+  touch -t 202001021200 "$dst/proj-r/.r2.jsonl.Xy12Zw"
+fi
+if [ -f "$R/rsync.$host.err" ]; then cat "$R/rsync.$host.err" >&2; elif [ -f "$R/rsync.err" ]; then cat "$R/rsync.err" >&2; fi
+exit "$rc"
+RSYNC_SHIM
+  printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s/ssh.log"\necho "ssh shim: no real host" >&2\nexit 255\n' "$r" > "$r/rsshim/ssh"
+  chmod +x "$r/rsshim/rsync" "$r/rsshim/ssh"
+}
+rs_run(){ PATH="$1/rsshim:$PATH" run_dream "$1"; }   # $1=root
+rs_mirror(){ printf '%s' "$1/autodream/remote/$2/projects"; }   # $1=root $2=label
+rs_stats(){ printf '%s' "$(fdir "$1")/run-stats.txt"; }
+rs_helper(){ # $1=root $2=label $3=target -> the helper's status line, against the fake rsync
+  PATH="$1/rsshim:$PATH" /bin/bash "$REPO/bin/remote-sync.sh" "$2" "$3" "$1/m/$2" 2>/dev/null
+}
+rs_seed_mirror(){ # $1=root $2=label: a session left in the mirror by an earlier sync
+  local m; m=$(rs_mirror "$1" "$2"); mkdir -p "$m/proj-r"
+  cp -p "$1/studio/proj-r/r1.jsonl" "$m/proj-r/r0.jsonl"
+}
+rs_today(){ date +%Y-%m-%d; }
+rs_lines(){ [ -f "$1" ] && wc -l < "$1" | tr -d ' ' || echo 0; }
+
+test_remote_sync_off_changes_nothing(){
+  echo "# remote sync: AUTODREAM_REMOTE_ROOTS unset calls no rsync, makes no mirror and keeps the local roots"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  rs_run "$root"
+  assert_grep "$(rs_stats "$root")" '^remote_sync: off$' "run-stats says the sync is off"
+  assert_no_file "$root/rsync.log" "rsync is never called"
+  assert_no_file "$root/autodream/remote" "no mirror is made"
+  assert_grep "$(rs_stats "$root")" "^session_roots_list: $root/projects\$" "the roots are the local ones"
+  assert_nonempty "$root/dreams/$DATE.md" "the report is written"
+  rm -rf "$root"
+}
+
+test_remote_sync_invalid_entries_are_refused(){
+  echo "# remote sync: a malformed entry is refused before any ssh, warned about, and the valid one still syncs"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  AUTODREAM_REMOTE_ROOTS="noequals bad/label=x.invalid:/p nocolon=x.invalid ..=x.invalid:/p dash=-oProxyCommand=x:/p studio2=studio2.invalid:$root/studio studio2=y.invalid:/p" \
+    rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_sync_invalid: invalid$' "an entry with no label or a bad one reads invalid"
+  assert_grep "$rs" '^remote_sync_nocolon: invalid$' "an entry with no path reads invalid"
+  assert_grep "$rs" '^remote_sync_dash: invalid$' "a target that would be read as an ssh option reads invalid"
+  assert_grep "$rs" '^remote_sync_studio2: ok$' "the valid entry still syncs"
+  assert_eq "$(rs_lines "$root/rsync.log")" "1" "rsync ran once, for the valid entry only"
+  assert_grep "$root/run.out" 'WARNING: AUTODREAM_REMOTE_ROOTS entry' "each refusal is logged as a warning"
+  rm -rf "$root"
+}
+
+test_remote_sync_unreachable_host_keeps_and_scans_the_mirror(){
+  echo "# remote sync: an unreachable host fails with ssh's cause, keeps the old mirror and still triages it"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"; rs_seed_mirror "$root" studio2
+  printf '2019-12-31\n' > "$root/autodream/remote/studio2/last-ok"
+  printf '255\n' > "$root/rsync.rc"
+  printf 'ssh: connect to host studio2.invalid port 22: Operation timed out\nrsync: connection unexpectedly closed (0 bytes received so far) [Receiver]\n' > "$root/rsync.err"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_sync_studio2: failed$' "the host reads failed"
+  assert_grep "$rs" '^remote_sync_studio2_cause: ssh: connect to host studio2.invalid port 22: Operation timed out$' "the cause is ssh's own line"
+  assert_grep "$rs" '^remote_sync_studio2_last_ok: 2019-12-31$' "the last good sync is named"
+  assert_file "$(fdir "$root")/$(hash_of "$(rs_mirror "$root" studio2)/proj-r/r0.jsonl").json" "the kept mirror is still triaged"
+  assert_eq "$(cat "$root/run.exit")" "0" "a down host does not fail the run"
+  assert_nogrep "$rs" '^network_deferred: yes' "and does not defer the date"
+  rm -rf "$root"
+}
+
+test_remote_sync_auth_failure_fails_fast(){
+  echo "# remote sync: a refused key fails without a prompt (BatchMode) and quotes ssh"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  printf '255\n' > "$root/rsync.rc"
+  printf 'Warning: Permanently added studio2.invalid to the list of known hosts.\nsam@studio2.invalid: Permission denied (publickey).\nrsync: connection unexpectedly closed (0 bytes received so far) [Receiver]\n' > "$root/rsync.err"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_sync_studio2: failed$' "the host reads failed"
+  assert_grep "$rs" '^remote_sync_studio2_cause: sam@studio2.invalid: Permission denied (publickey).$' "the cause skips ssh's warning and quotes the refusal"
+  assert_grep "$rs" '^remote_sync_studio2_last_ok: never$' "a host never synced reads never"
+  assert_grep "$root/rsync.log" 'BatchMode=yes' "ssh runs in batch mode, so it cannot prompt"
+  assert_grep "$root/rsync.log" 'ConnectTimeout=10' "and gives up on a dead host"
+  rm -rf "$root"
+}
+
+test_remote_sync_missing_remote_path_is_a_failure(){
+  echo "# remote sync: a remote root that does not exist is failed (rsync 23), not partial"
+  local root; root=$(setup_env); rs_env "$root"
+  printf '23\n' > "$root/rsync.rc"
+  printf 'rsync: [sender] change_dir "/home/u/.claude/projects" failed: No such file or directory (2)\nrsync error: some files/attrs were not transferred (see previous errors) (code 23) at main.c(1416) [sender=3.5.2]\n' > "$root/rsync.err"
+  assert_eq "$(rs_helper "$root" studio2 studio2.invalid:/home/u/.claude/projects)" \
+    'failed (rsync: [sender] change_dir "/home/u/.claude/projects" failed: No such file or directory (2))' "GNU rsync's wording is failed"
+  printf 'rsync(81058): error: /home/u/.claude/projects/: (l)stat: No such file or directory\n' > "$root/rsync.err"
+  assert_eq "$(rs_helper "$root" studio2 studio2.invalid:/home/u/.claude/projects)" \
+    'failed (rsync(81058): error: /home/u/.claude/projects/: (l)stat: No such file or directory)' "openrsync's wording is failed"
+  printf 'rsync: [sender] send_files failed to open "/home/u/p/a.jsonl": Permission denied (13)\n' > "$root/rsync.err"
+  assert_eq "$(rs_helper "$root" studio2 studio2.invalid:/home/u/p)" \
+    'partial (rsync: [sender] send_files failed to open "/home/u/p/a.jsonl": Permission denied (13))' "one unreadable file is partial"
+  rm -rf "$root"
+}
+
+test_remote_sync_timeout_leaves_no_session_from_a_temp_file(){
+  echo "# remote sync: a copy that times out is failed (timeout), and its stranded temp file is never enumerated"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  printf '30\n' > "$root/rsync.rc"; : > "$root/rsync.strand"
+  printf '[receiver] io timeout after 60 seconds -- exiting\nrsync error: timeout in data send/receive (code 30) at io.c(197) [receiver=3.2.7]\n' > "$root/rsync.err"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_sync_studio2: failed$' "the host reads failed"
+  assert_grep "$rs" '^remote_sync_studio2_cause: timeout$' "the cause is the timeout"
+  assert_file "$(rs_mirror "$root" studio2)/proj-r/.r2.jsonl.Xy12Zw" "the temp file is in the mirror"
+  assert_nogrep "$(fdir "$root")/sessions.txt.raw" 'r2.jsonl' "and it is not enumerated"
+  rm -rf "$root"
+}
+
+test_remote_sync_vanished_file_is_partial_and_counts_as_success(){
+  echo "# remote sync: a file vanishing mid-copy (rsync 24) is partial, the rest lands, and no banner is posted"
+  local root; root=$(setup_env); rs_env "$root"; stub_notify "$root"
+  printf '24\n' > "$root/rsync.rc"
+  printf 'file has vanished: "/home/u/p/proj-r/r9.jsonl"\nrsync warning: some files vanished before they could be transferred (code 24) at main.c(1338) [sender=3.2.7]\n' > "$root/rsync.err"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_sync_studio2: partial$' "the host reads partial"
+  assert_grep "$rs" '^remote_sync_studio2_cause: file has vanished: "/home/u/p/proj-r/r9.jsonl"$' "the cause names the file"
+  assert_grep "$rs" "^remote_sync_studio2_last_ok: $(rs_today)\$" "a partial sync stamps last_ok"
+  assert_file "$(fdir "$root")/$(hash_of "$(rs_mirror "$root" studio2)/proj-r/r1.jsonl").json" "the session that landed is triaged"
+  assert_nogrep "$root/notify-args.txt" '^--warning' "partial is not a failure for the banner"
+  rm -rf "$root"
+}
+
+test_remote_sync_torn_last_line_is_triaged(){
+  echo "# remote sync: a transcript copied mid-append (torn last line) is still triaged"
+  local root; root=$(setup_env); rs_env "$root"
+  printf '{"type":"assistant","message":{"content":[{"type":"text","text":"half' >> "$root/studio/proj-r/r1.jsonl"
+  touch -t "$STAMP" "$root/studio/proj-r/r1.jsonl"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  local f; f="$(fdir "$root")/$(hash_of "$(rs_mirror "$root" studio2)/proj-r/r1.jsonl").json"
+  assert_file "$f" "the torn transcript has a findings JSON"
+  jq -e 'has("error") | not' "$f" >/dev/null 2>&1 && ok "and it is not an error record" || no "and it is not an error record ($(cat "$f" 2>/dev/null | head -c 200))"
+  rm -rf "$root"
+}
+
+test_remote_sync_keeps_transcripts_deleted_on_the_remote(){
+  echo "# remote sync: a transcript deleted on the remote stays in the mirror (no --delete)"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  local m; m=$(rs_mirror "$root" studio2)
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_file "$m/proj-r/r1.jsonl" "the first sync copies the transcript"
+  remove_path "$root/studio/proj-r/r1.jsonl"
+  AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_lines "$root/rsync.log")" "2" "the second run synced again"
+  assert_file "$m/proj-r/r1.jsonl" "the mirror keeps the deleted transcript"
+  assert_nogrep "$root/rsync.log" 'delete' "rsync is never asked to delete"
+  rm -rf "$root"
+}
+
+test_remote_sync_first_sync_copies_transcripts_with_their_mtimes(){
+  echo "# remote sync: the first sync copies transcripts only, keeps mtimes, logs its time and joins the roots"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  local rs m; rs=$(rs_stats "$root"); m=$(rs_mirror "$root" studio2)
+  assert_grep "$rs" '^remote_sync: on$' "run-stats says the sync is on"
+  assert_grep "$rs" '^remote_sync_studio2: ok$' "the host reads ok"
+  assert_grep "$rs" "^remote_sync_studio2_last_ok: $(rs_today)\$" "last_ok is stamped"
+  assert_grep "$rs" "^session_roots_list: $root/projects:$m\$" "the mirror joins the session roots"
+  assert_file "$(fdir "$root")/$(hash_of "$m/proj-r/r1.jsonl").json" "the remote session is triaged on its own day"
+  assert_file "$(fdir "$root")/$(hash_of "$root/projects/proj-a/s1.jsonl").json" "and the local one still is"
+  assert_grep "$root/rsync.log" "^-rt --timeout=60 " "rsync keeps mtimes and has an I/O timeout"
+  assert_grep "$root/rsync.log" "include=\*/ --include=\*.jsonl --exclude=\* --prune-empty-dirs" "only transcripts are asked for"
+  assert_grep "$root/rsync.log" "studio2.invalid:$root/studio/ $m/\$" "from the remote path into the mirror"
+  assert_grep "$root/run.out" 'remote sync studio2: ok in [0-9]*s' "the sync time is logged"
+  assert_no_file "$root/ssh.log" "nothing reached ssh outside rsync"
+  rm -rf "$root"
+}
+
+test_remote_sync_lock_held_skips_the_sync(){
+  echo "# remote sync: a mirror another live run is syncing is skipped, and its sessions are still scanned"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"; rs_seed_mirror "$root" studio2
+  local lock="$root/autodream/locks/remote-studio2.lock"; mkdir -p "$lock"
+  printf '%s\n' "$$" > "$lock/pid"; ps -o lstart= -p "$$" | tr -s ' ' > "$lock/start"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_grep "$(rs_stats "$root")" '^remote_sync_studio2: skipped_locked$' "the host reads skipped_locked"
+  assert_no_file "$root/rsync.log" "rsync is not run into a mirror another run holds"
+  assert_file "$(fdir "$root")/$(hash_of "$(rs_mirror "$root" studio2)/proj-r/r0.jsonl").json" "the mirror is still triaged"
+  assert_eq "$(cat "$lock/pid" 2>/dev/null)" "$$" "the holder's lock is left alone"
+  rm -rf "$root"
+}
+
+test_remote_sync_reclaims_a_stale_lock(){
+  echo "# remote sync: a lock left by a killed run is reclaimed and the sync runs"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  local lock="$root/autodream/locks/remote-studio2.lock" dead; mkdir -p "$lock"
+  /bin/sh -c 'exit 0' & dead=$!; wait "$dead"
+  printf '%s\n' "$dead" > "$lock/pid"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_grep "$(rs_stats "$root")" '^remote_sync_studio2: ok$' "the host reads ok after the reclaim"
+  assert_eq "$(rs_lines "$root/rsync.log")" "1" "rsync ran"
+  assert_no_file "$lock" "the lock is released after the sync"
+  rm -rf "$root"
+}
+
+test_remote_sync_every_remote_failed_posts_one_banner(){
+  echo "# remote sync: every remote failing posts one warning naming the first failure, and the report still lands"
+  local root; root=$(setup_env); rs_env "$root"; stub_notify "$root"
+  printf '255\n' > "$root/rsync.a.invalid.rc"; printf '255\n' > "$root/rsync.b.invalid.rc"
+  printf 'ssh: Could not resolve hostname a.invalid: nodename nor servname provided\n' > "$root/rsync.a.invalid.err"
+  printf 'ssh: Could not resolve hostname b.invalid: nodename nor servname provided\n' > "$root/rsync.b.invalid.err"
+  AUTODREAM_REMOTE_ROOTS="a=a.invalid:$root/studio b=b.invalid:$root/studio" rs_run "$root"
+  local args="$root/notify-args.txt"
+  assert_eq "$(grep -c '^--warning ' "$args" 2>/dev/null)" "1" "exactly one warning is posted"
+  assert_grep "$args" "^--warning $DATE .*all 2 .*a: ssh: Could not resolve hostname a.invalid.* remote-sync\$" "it says every remote failed, names the first and has its own group"
+  assert_nogrep "$args" '^--failure' "it is not a failed run"
+  assert_nonempty "$root/dreams/$DATE.md" "the report is written"
+  assert_nogrep "$root/dreams/$DATE.md" 'No session files were modified' "the stub does not call it an empty night"
+  assert_grep "$root/dreams/$DATE.md" 'remote host' "it says the remote hosts were not read"
+  rm -rf "$root"
+}
+
+test_remote_sync_one_remote_failed_posts_no_banner(){
+  echo "# remote sync: one remote failing while another syncs posts no banner"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"; stub_notify "$root"
+  printf '255\n' > "$root/rsync.b.invalid.rc"
+  printf 'ssh: connect to host b.invalid port 22: No route to host\n' > "$root/rsync.b.invalid.err"
+  AUTODREAM_REMOTE_ROOTS="a=a.invalid:$root/studio b=b.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_sync_a: ok$' "the good host syncs"
+  assert_grep "$rs" '^remote_sync_b: failed$' "the bad host reads failed"
+  assert_nogrep "$root/notify-args.txt" '^--warning' "no banner"
+  rm -rf "$root"
+}
+
+test_remote_sync_missing_rsync_or_ssh_fails_cleanly(){
+  echo "# remote sync: no rsync or no ssh on PATH is a failure that says which, never a crash"
+  local root; root=$(setup_env); mkdir -p "$root/empty" "$root/onlyrsync"
+  printf '#!/bin/bash\nexit 0\n' > "$root/onlyrsync/rsync"; chmod +x "$root/onlyrsync/rsync"
+  local out
+  out=$(PATH="$root/empty" /bin/bash "$REPO/bin/remote-sync.sh" studio2 studio2.invalid:/p "$root/m" 2>&1)
+  assert_eq "$out" "failed (rsync not found)" "no rsync"
+  out=$(PATH="$root/onlyrsync" /bin/bash "$REPO/bin/remote-sync.sh" studio2 studio2.invalid:/p "$root/m" 2>&1)
+  assert_eq "$out" "failed (ssh not found)" "no ssh"
+  rm -rf "$root"
+}
+
+test_remote_sync_not_run_once_the_report_is_done(){
+  echo "# remote sync: a catch-up trigger for a finished date returns before the sync"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_lines "$root/rsync.log")" "1" "the first run syncs"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_grep "$root/run.out" 'nothing to do' "the second run is a no-op"
+  assert_eq "$(rs_lines "$root/rsync.log")" "1" "and it does not sync again"
+  rm -rf "$root"
+}
+
+test_remote_sync_session_in_both_trees_is_enumerated_twice(){
+  echo "# remote sync: the same session in the local tree and the mirror is enumerated from both (known double triage)"
+  local root; root=$(setup_env); rs_env "$root"
+  mkdir -p "$root/projects/proj-r"; cp -p "$root/studio/proj-r/r1.jsonl" "$root/projects/proj-r/r1.jsonl"
+  SESSION_ROOTS="$root/projects" AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  local m; m=$(rs_mirror "$root" studio2)
+  assert_grep "$(rs_stats "$root")" "^session_roots_list: $root/projects:$m\$" "an explicit SESSION_ROOTS still gets the mirror"
+  assert_grep "$(fdir "$root")/sessions.txt" "^$root/projects/proj-r/r1.jsonl\$" "the local copy is enumerated"
+  assert_grep "$(fdir "$root")/sessions.txt" "^$m/proj-r/r1.jsonl\$" "and so is the mirrored one"
+  rm -rf "$root"
+}
+
+_run test_remote_sync_off_changes_nothing
+_run test_remote_sync_invalid_entries_are_refused
+_run test_remote_sync_unreachable_host_keeps_and_scans_the_mirror
+_run test_remote_sync_auth_failure_fails_fast
+_run test_remote_sync_missing_remote_path_is_a_failure
+_run test_remote_sync_timeout_leaves_no_session_from_a_temp_file
+_run test_remote_sync_vanished_file_is_partial_and_counts_as_success
+_run test_remote_sync_torn_last_line_is_triaged
+_run test_remote_sync_keeps_transcripts_deleted_on_the_remote
+_run test_remote_sync_first_sync_copies_transcripts_with_their_mtimes
+_run test_remote_sync_lock_held_skips_the_sync
+_run test_remote_sync_reclaims_a_stale_lock
+_run test_remote_sync_every_remote_failed_posts_one_banner
+_run test_remote_sync_one_remote_failed_posts_no_banner
+_run test_remote_sync_missing_rsync_or_ssh_fails_cleanly
+_run test_remote_sync_not_run_once_the_report_is_done
+_run test_remote_sync_session_in_both_trees_is_enumerated_twice
 
 [ -z "$_list" ] || exit 0
 echo

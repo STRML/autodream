@@ -47,6 +47,63 @@ the sessions had moved to the other buckets. The fix is multi-root scanning:
 - run-stats carries `session_roots` (count) + `session_roots_list` so a regression to
   single-root scanning is visible from the artifact.
 
+## Remote hosts: a one-way pull, not a shared filesystem (#226)
+
+Sessions also run on a Studio (headless, under herdr), and a Claude session there writes to the
+Studio's own `~/.claude/projects`. Without a sync that work drops out of the report with no warning,
+the same blackout as 2026-08-03..06. A network mount was rejected: it puts every live session's
+appends on a filesystem that drops whenever the laptop sleeps or the Studio reboots for an update.
+A pull is read-only on the remote and needs only sshd there.
+
+- **Config.** `AUTODREAM_REMOTE_ROOTS` holds space-separated `label=ssh-target:path` entries, for
+  example `studio2=studio2:.claude/projects` (the path is relative to the remote home). Unset means
+  off, and a run then differs from one without the feature by the single `remote_sync: off` line.
+- **`bin/remote-sync.sh <label> <target:path> <mirror>`** runs `rsync -rt --timeout=60` over
+  `ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=2`,
+  asks for `*.jsonl` only (`--include='*/' --include='*.jsonl' --exclude='*' --prune-empty-dirs`),
+  and never passes `--delete`. `-t` matters: enumeration's lower bound is the mtime. It prints one
+  line: `ok`, `partial (<cause>)`, `failed (<cause>)` or `invalid (<why>)`. The cause comes from
+  `err_cause_line` in `bin/err-cause.sh`, the cleaner the changelog sections use too.
+- **Exit 23 is split.** rsync 24 (a file vanished) is partial. 23 is partial too, except that both
+  GNU rsync (`change_dir "…" failed`) and openrsync (`(l)stat: No such file`) also return 23 when
+  the remote root does not exist, and that is a host with nothing to read, so it is `failed`.
+- **Validation before ssh.** run.sh refuses a label outside `[A-Za-z0-9._-]+`, `.`, `..` and a
+  repeated label. The helper refuses a host or path that starts with `-` (ssh would read it as an
+  option) or holds a character outside the set a projects path needs, because openrsync does not
+  quote the path for the remote shell.
+- **Where it runs.** `sync_remote_roots` sits below the idempotency guard and the run lock, so a
+  catch-up trigger never reaches ssh, and above enumeration. It sets globals and is never called
+  inside `$(...)`. Every mirror that exists (`$AUTODREAM_DIR/remote/<label>/projects`, synced this
+  run or kept from an earlier one) is appended to `SESSION_ROOTS`, including an explicit
+  `SESSION_ROOTS`. The mirror is not under `$HOME/.claude*`, so root-probe never reports it as an
+  unasked folder.
+- **Lock.** `$AUTODREAM_DIR/locks/remote-<label>.lock` uses the run lock's helpers
+  (`acquire_lock`, `lock_holder_state`, `reclaim_lock`, `release_lock`, each taking the lock dir),
+  so a dead holder is reclaimed the same way. A live holder makes the step report `skipped_locked`
+  and still scan the mirror: the nightly and an `autodream-now.sh` run for another date take
+  different run locks and would otherwise rsync into one directory at once.
+- **Reporting.** run-stats gets `remote_sync: off|on` and, per label, `remote_sync_<label>`
+  (`ok|partial|failed|skipped_locked|invalid`), `remote_sync_<label>_cause` and
+  `remote_sync_<label>_last_ok` (stamped in `remote/<label>/last-ok` on ok and partial, else
+  `never`). Both run-stats blocks carry them. PROMPT.md's self-audit names every label that is not
+  `ok`. When every entry failed or was invalid, `notify.sh --warning` posts one banner in its own
+  `remote-sync` group, so it cannot replace the changelog warning. A failure never defers the date
+  (a down Studio is not a down model provider) and never aborts the run. On a night with no
+  sessions the stub report says the remote hosts were not read instead of calling it empty.
+- **A killed copy.** rsync writes each file to a dot-named temp (`.name.jsonl.XXXXXX`) and renames
+  it, so a file is old or new, never torn by rsync, and a stranded temp is not `*.jsonl`. A file
+  copied while the remote session was appending can end in a torn line; session-window and the
+  stats tolerate it, and the next night copies the whole file.
+- **Known double triage.** A session resumed on the Studio from a laptop transcript has the same
+  session id in both trees, and both copies are enumerated (different paths, so different hashes).
+  The day cut keeps only each copy's records inside the day, so on the day the session moved, the
+  part written before the move is triaged twice. Deduping across trees is out of scope (#226).
+- **Tests.** The `test_remote_sync_*` cases in `tests/run-all.sh` put a fake `rsync` (logs argv,
+  copies `*.jsonl` with `cp -p`, exits with a per-host code and stderr) and a logging `ssh` that
+  always fails first on PATH, and every target is a `*.invalid` host. The missing-tool case runs
+  the helper with a PATH that holds no rsync, because run.sh appends `/usr/bin` to PATH.
+  `install.sh` resolves `rsync` into the plist PATH beside claude, git and bash.
+
 ## Where state lives
 
 All under `$AUTODREAM_DIR` (default `~/.claude/autodream/`) except the reports:
@@ -75,6 +132,7 @@ All under `$AUTODREAM_DIR` (default `~/.claude/autodream/`) except the reports:
 - `findings/YYYY-MM-DD/unindexed-roots.txt` — Claude folders (`~/.claude*/projects`) that exist but are not indexed, for the self-audit section. Written before the idempotency guard so a catch-up no-op still reports folders that appeared since setup.
 - `findings/YYYY-MM-DD/triage-candidates.{md,tsv}` — touched GitHub repos whose untriaged open issues cleared `AUTODREAM_TRIAGE_MIN`, written by `bin/triage-candidates.sh` from the runner's own session rows (never a findings JSON). L2 only copies the `.md` into "Repos to triage"; the counting and the cooldown (`triage-suggested.tsv`) are the script's, and `tests/triage-candidates.sh` pins each row of its failure matrix. The `.tsv` has one row per repo with status `candidate`, `below`, `cooldown` or `skipped` and the reason.
 - `findings/YYYY-MM-DD/worktree-prune.{md,tsv}` — what `bin/prune-worktrees.sh` removed, kept and skipped that night, one TSV row per worktree (`action<TAB>repo<TAB>branch<TAB>path<TAB>reason`). The step is opt-in through `AUTODREAM_PRUNE_ROOTS`; the proof rules and keep rules are in the script header and the README, and `tests/prune-worktrees.sh` pins each one. It deletes remote branches, so a new rule there needs a test that pins a KEEP before it needs one that pins a removal.
+- `remote/<label>/projects/` and `remote/<label>/last-ok` — the mirror of a host named in `AUTODREAM_REMOTE_ROOTS` and the date of its last good sync (see "Remote hosts"). Never pruned: the mirror keeps transcripts the remote deleted.
 - `root-choices.conf` — the per-folder index decision (`~/.claude-ds4/projects=index`), written by `bin/root-probe.sh` at install time. The primary `~/.claude/projects` is always indexed.
 - `cache/claude-code/` — persistent clone of `anthropics/claude-code` for the changelog.
 - `logs/run-YYYY-MM-DD.log` — full run log (run.sh tees here). `logs/launchd.{out,err}.log` — launchd's capture.

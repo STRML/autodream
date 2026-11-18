@@ -176,6 +176,8 @@ link "$REPO_DIR/bin/preflight.sh"             "$TARGET/preflight.sh"
 link "$REPO_DIR/bin/report-format.sh"          "$TARGET/report-format.sh"
 link "$REPO_DIR/bin/l2-prompt.sh"              "$TARGET/l2-prompt.sh"
 link "$REPO_DIR/bin/pending-triage.sh"        "$TARGET/pending-triage.sh"
+link "$REPO_DIR/bin/remote-sync.sh"           "$TARGET/remote-sync.sh"
+link "$REPO_DIR/bin/err-cause.sh"             "$TARGET/err-cause.sh"
 # The adapters TREE, not individual files: run.sh resolves adapters/<name>/adapter.sh
 # relative to the script dir, so the whole directory has to be reachable from the
 # install target. Without this the installed runner silently takes the legacy inline
@@ -547,7 +549,8 @@ install_schedule() {
   fi
 
   # launchd agents start with a minimal PATH; seed it with the dirs of the tools
-  # the pipeline shells out to (claude, git, bash) plus the usual suspects.
+  # the pipeline shells out to (claude, git, bash, and rsync for AUTODREAM_REMOTE_ROOTS) plus the
+  # usual suspects.
   local path_dirs="" tool b d CLAUDE_BIN_ABS="" clean_path="" skipped_dirs="" old_ifs="$IFS"
   # Resolve every tool against PATH minus the temp-dir entries, so neither the plist PATH nor
   # the pinned CLAUDE_BIN can come from a shim that will not exist at 03:15.
@@ -559,7 +562,7 @@ install_schedule() {
   done
   IFS="$old_ifs"
   [ -z "$skipped_dirs" ] || echo "  note: ignoring PATH entries under a temp directory (launchd will not have them): $skipped_dirs"
-  for tool in claude git bash; do
+  for tool in claude git bash rsync; do
     if b="$(PATH="$clean_path" command -v "$tool" 2>/dev/null)"; then
       if [ "$tool" = "claude" ] && [ -n "$b" ]; then
         # review.sh preflights the EXACT binary path (it aborts if CLAUDE_BIN is not -x), and its

@@ -92,6 +92,12 @@
 #                        another engine. The L1 model defaults to that engine's manifest l1_model.
 #   AUTODREAM_SESSION_ROOTS_<NAME>  colon-separated session roots for one adapter other than
 #                        claude, in place of its manifest's defaults   default: the manifest's
+#   AUTODREAM_REMOTE_ROOTS  space-separated label=ssh-target:path entries for other hosts whose
+#                        Claude transcripts this run pulls one way (bin/remote-sync.sh, rsync over
+#                        ssh with BatchMode) into $AUTODREAM_DIR/remote/<label>/projects and scans
+#                        with the claude roots, e.g. "studio2=studio2:.claude/projects". The label is
+#                        [A-Za-z0-9._-]+. A host that fails is a run-stats line, never a deferred
+#                        date; every host failing posts one warning   default: unset (off)
 #   AUTODREAM_REQUIRE_LOGIN  space-separated key=value pairs the login of every engine the run uses
 #                        must match before it is handed anything; keys provider, auth, plan,
 #                        account, as the engine's whoami verb reports them (claude: claude auth
@@ -338,6 +344,10 @@ _lib=$(find_lib adapters.sh) && { # shellcheck source=/dev/null
 # The report contract (marker and sentinel). Not optional: an unfound lib would turn every read of
 # a report into "command not found", so stop before any work instead of after L1.
 _lib=$(find_lib report-format.sh) || { echo "FATAL: report-format.sh not found beside run.sh or its link target" >&2; exit 1; }
+# shellcheck source=/dev/null
+. "$_lib"
+# The cause line of a failed git or rsync, quoted the same way in every report surface.
+_lib=$(find_lib err-cause.sh) || { echo "FATAL: err-cause.sh not found beside run.sh or its link target" >&2; exit 1; }
 # shellcheck source=/dev/null
 . "$_lib"
 PREFLIGHT=$(find_lib preflight.sh) || PREFLIGHT="$SCRIPT_DIR/preflight.sh"
@@ -1478,22 +1488,6 @@ changelog_git() { # $1=owned (yes|no), then git's arguments
   git "$@"
 }
 
-# The stderr line that names why git failed, made safe to quote inside one markdown line.
-# The FIRST line that is not blank, a hint or a warning (any case: OpenSSH prints
-# "Warning: Permanently added ..." ahead of "Permission denied"): git puts the cause first and its
-# boilerplate advice last ("Please make sure you have the correct access rights / and the
-# repository exists."), so the last line says nothing. Backticks and angle brackets would open
-# a code span or an HTML tag in the section L2 reads, so they are swapped out; length is capped.
-changelog_err_line() { # $1=stderr file
-  local line
-  line=$(tr -d '\r' < "$1" 2>/dev/null \
-    | grep -v -i -e '^[[:space:]]*$' -e '^[[:space:]]*hint:' -e '^[[:space:]]*warning:' \
-    | head -n 1 | tr '\t`<>' " '()" | tr -d '\000-\037\177' \
-    | sed 's/[[:space:]][[:space:]]*/ /g; s/^ //; s/ $//')
-  [ "${#line}" -le 200 ] || line="${line:0:197}..."
-  printf '%s' "$line"
-}
-
 # A source that could not be checked: say so in its section, with git's reason when there is
 # one, and remember the run's first failure for changelog_window's warning.
 changelog_fail() { # $1=name $2=what failed $3=git's reason (may be empty) $4=out
@@ -1512,7 +1506,7 @@ changelog_step() { # $1=name $2=what failed $3=out, then the command
   errf=$(mktemp "${TMPDIR:-/tmp}/clerr.XXXXXX" 2>/dev/null) || errf=/dev/null
   "$@" 2>"$errf" || rc=1
   cat "$errf" >> "$RUN_LOG" 2>/dev/null
-  [ "$rc" -eq 0 ] || changelog_fail "$name" "$what" "$(changelog_err_line "$errf")" "$out"
+  [ "$rc" -eq 0 ] || changelog_fail "$name" "$what" "$(err_cause_line "$errf")" "$out"
   [ "$errf" = /dev/null ] || rm -f "$errf"
   return "$rc"
 }
@@ -1932,57 +1926,161 @@ sweep_stranded_pins() {
 # pid now belongs to a different process, is reclaimed. The lock sits outside the findings
 # dir, so clearing a date's findings for a clean rebuild cannot release it under a live run.
 RUN_LOCK="$AUTODREAM_DIR/locks/run-$TARGET_DATE.lock"
+LOCK_HOLDER=""
 
 proc_start() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '; }
 
+# The mkdir locks: the per-date run lock below and the per-label remote sync lock. Each takes the
+# lock directory as $1.
 # 0 = the lock's holder is alive, 1 = gone (stale), 2 = the holder has not written its pid yet.
-run_lock_holder_state() {
+lock_holder_state() { # $1=lock dir
   local pid start
-  pid=$(cat "$RUN_LOCK/pid" 2>/dev/null) || pid=""
+  pid=$(cat "$1/pid" 2>/dev/null) || pid=""
   [ -n "$pid" ] || return 2
   kill -0 "$pid" 2>/dev/null || return 1
-  start=$(cat "$RUN_LOCK/start" 2>/dev/null) || start=""
+  start=$(cat "$1/start" 2>/dev/null) || start=""
   # No recorded start (ps unavailable): the live pid is all there is to go on.
   [ -z "$start" ] || [ "$(proc_start "$pid")" = "$start" ]
 }
 
 # Move the stale lock aside (rename is atomic, so one reclaimer wins) rather than rmdir it:
 # a second reclaimer that judged the same stale holder must not delete the winner's NEW lock.
-reclaim_run_lock() { # $1=the pid judged stale ("" when none was ever written)
-  local dead="$RUN_LOCK.stale.$$"
-  mv "$RUN_LOCK" "$dead" 2>/dev/null || return 0
-  if [ "$(cat "$dead/pid" 2>/dev/null)" = "$1" ]; then
+reclaim_lock() { # $1=lock dir $2=the pid judged stale ("" when none was ever written)
+  local dead="$1.stale.$$"
+  mv "$1" "$dead" 2>/dev/null || return 0
+  if [ "$(cat "$dead/pid" 2>/dev/null)" = "$2" ]; then
     rm -rf "$dead"
     return 0
   fi
   # We moved a lock that a faster reclaimer had already replaced. Put it back.
-  mv "$dead" "$RUN_LOCK" 2>/dev/null || { log "WARNING: could not restore another run's lock from $dead"; return 0; }
+  mv "$dead" "$1" 2>/dev/null || { log "WARNING: could not restore another run's lock from $dead"; return 0; }
 }
 
-# 0 = taken, 1 = another live run holds it. A lock directory that cannot be made at all
-# (read-only state dir) does not stop the night: an unlocked run is the old behaviour.
-acquire_run_lock() {
-  mkdir -p "$(dirname "$RUN_LOCK")" 2>/dev/null || { log "WARNING: could not create $(dirname "$RUN_LOCK"); running without the per-date lock"; return 0; }
+# 0 = taken, 1 = another live run holds it (its pid in LOCK_HOLDER), 3 = the lock's directory
+# cannot be made at all (a read-only state dir).
+acquire_lock() { # $1=lock dir
+  mkdir -p "$(dirname "$1")" 2>/dev/null || return 3
   local tries=0 st pid
-  until mkdir "$RUN_LOCK" 2>/dev/null; do
-    pid=$(cat "$RUN_LOCK/pid" 2>/dev/null) || pid=""
-    run_lock_holder_state; st=$?
-    [ "$st" -ne 0 ] || { RUN_LOCK_HOLDER="$pid"; return 1; }
+  until mkdir "$1" 2>/dev/null; do
+    pid=$(cat "$1/pid" 2>/dev/null) || pid=""
+    lock_holder_state "$1"; st=$?
+    [ "$st" -ne 0 ] || { LOCK_HOLDER="$pid"; return 1; }
     tries=$((tries + 1))
     if [ "$st" -eq 2 ] && [ "$tries" -le 3 ]; then sleep 1; continue; fi
-    reclaim_run_lock "$pid"
-    [ "$tries" -lt 8 ] || { RUN_LOCK_HOLDER="${pid:-unknown}"; return 1; }
+    reclaim_lock "$1" "$pid"
+    [ "$tries" -lt 8 ] || { LOCK_HOLDER="${pid:-unknown}"; return 1; }
   done
-  printf '%s\n' "$$" > "$RUN_LOCK/pid"
-  proc_start "$$" > "$RUN_LOCK/start"
+  printf '%s\n' "$$" > "$1/pid"
+  proc_start "$$" > "$1/start"
   return 0
 }
 
-# Only the owner removes it. This is also installed as the EXIT trap, which a run that never
-# took the lock reaches too, and which must not touch the holder's.
-release_run_lock() {
-  [ "$(cat "$RUN_LOCK/pid" 2>/dev/null)" = "$$" ] || return 0
-  rm -rf "$RUN_LOCK"
+# Only the owner removes it.
+release_lock() { # $1=lock dir
+  [ "$(cat "$1/pid" 2>/dev/null)" = "$$" ] || return 0
+  rm -rf "$1"
+}
+
+# 0 = taken, 1 = another live run holds it. A lock directory that cannot be made at all does not
+# stop the night: an unlocked run is the old behaviour.
+acquire_run_lock() {
+  local rc=0
+  acquire_lock "$RUN_LOCK" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    3) log "WARNING: could not create $(dirname "$RUN_LOCK"); running without the per-date lock"; return 0 ;;
+    *) RUN_LOCK_HOLDER="$LOCK_HOLDER"; return 1 ;;
+  esac
+}
+
+# This is also installed as the EXIT trap, which a run that never took the lock reaches too, and
+# which must not touch the holder's.
+release_run_lock() { release_lock "$RUN_LOCK"; }
+
+# ---- Remote session roots (#226) ----
+# AUTODREAM_REMOTE_ROOTS names other hosts whose ~/.claude/projects this run should read, as
+# space-separated label=ssh-target:path entries. Each is pulled one way by remote-sync.sh into
+# $AUTODREAM_DIR/remote/<label>/projects, and every mirror that exists, synced this run or kept from
+# an earlier one, joins SESSION_ROOTS for the claude adapter. Runs below the idempotency guard (a
+# catch-up trigger never reaches ssh) and above enumeration. A failed host never defers the date
+# and never stops the run: it is a line in run-stats.txt, and a banner when every host failed.
+# Results go to globals, not stdout, so this is called directly and never inside $(...).
+REMOTE_SYNC_LINES=""   # run-stats lines, written into both run-stats blocks
+REMOTE_SYNC_TOTAL=0    # entries configured
+REMOTE_SYNC_BAD=0      # entries that did not sync this run: failed or invalid
+remote_sync_stat() { REMOTE_SYNC_LINES="${REMOTE_SYNC_LINES}$1"$'\n'; }
+
+# $1=entry $2=key $3=why: an entry refused before any ssh.
+remote_sync_refuse() {
+  log "WARNING: AUTODREAM_REMOTE_ROOTS entry '$1' refused ($3); it is not synced"
+  remote_sync_stat "remote_sync_$2: invalid"
+  remote_sync_stat "remote_sync_$2_cause: $3"
+  REMOTE_SYNC_BAD=$((REMOTE_SYNC_BAD + 1))
+  [ -n "$REMOTE_SYNC_FIRST_ERR" ] || REMOTE_SYNC_FIRST_ERR="$2: invalid ($3)"
+}
+
+# $1=label $2=target: sync one host under its lock, record its keys, add its mirror to the roots.
+remote_sync_one() {
+  local label="$1" spec="$2" dir="$AUTODREAM_DIR/remote/$1" lock="$AUTODREAM_DIR/locks/remote-$1.lock"
+  local mirror="$AUTODREAM_DIR/remote/$1/projects" status="" word cause="" last t0=$SECONDS rc=0
+  if [ -z "$REMOTE_SYNC_HELPER" ]; then
+    status="failed (remote-sync.sh not found)"
+  else
+    acquire_lock "$lock" || rc=$?
+    case "$rc" in
+      0) status=$(bash "$REMOTE_SYNC_HELPER" "$label" "$spec" "$mirror" 2>>"$RUN_LOG")
+         release_lock "$lock" ;;
+      1) status="skipped_locked (pid ${LOCK_HOLDER:-unknown} holds $lock)" ;;
+      *) status="failed (cannot create $(dirname "$lock"))" ;;
+    esac
+  fi
+  [ -n "$status" ] || status="failed (remote-sync.sh printed nothing)"
+  word=${status%% *}
+  case "$status" in *" ("*")") cause=${status#* (}; cause=${cause%)} ;; esac
+  case "$word" in
+    ok|partial)
+      mkdir -p "$dir" 2>/dev/null && printf '%s\n' "$(date +%Y-%m-%d)" > "$dir/last-ok.tmp.$$" \
+        && mv -f "$dir/last-ok.tmp.$$" "$dir/last-ok" ;;
+    skipped_locked) cause="" ;;
+    invalid) REMOTE_SYNC_BAD=$((REMOTE_SYNC_BAD + 1)) ;;
+    *) word=failed; REMOTE_SYNC_BAD=$((REMOTE_SYNC_BAD + 1)) ;;
+  esac
+  case "$word" in failed|invalid) [ -n "$REMOTE_SYNC_FIRST_ERR" ] || REMOTE_SYNC_FIRST_ERR="$label: ${cause:-$word}" ;; esac
+  last=$(head -n 1 "$dir/last-ok" 2>/dev/null) || last=""
+  remote_sync_stat "remote_sync_$label: $word"
+  remote_sync_stat "remote_sync_${label}_cause: $cause"
+  remote_sync_stat "remote_sync_${label}_last_ok: ${last:-never}"
+  log "remote sync $label: $status in $((SECONDS - t0))s"
+  [ ! -d "$mirror" ] || SESSION_ROOTS="${SESSION_ROOTS:+$SESSION_ROOTS:}$mirror"
+}
+
+sync_remote_roots() {
+  if [ -z "${AUTODREAM_REMOTE_ROOTS:-}" ]; then remote_sync_stat "remote_sync: off"; return 0; fi
+  remote_sync_stat "remote_sync: on"
+  local entries=() entry label seen=" "
+  REMOTE_SYNC_FIRST_ERR=""
+  REMOTE_SYNC_HELPER=$(find_lib remote-sync.sh) || REMOTE_SYNC_HELPER=""
+  read -r -a entries <<< "$AUTODREAM_REMOTE_ROOTS"
+  for entry in ${entries[@]+"${entries[@]}"}; do
+    REMOTE_SYNC_TOTAL=$((REMOTE_SYNC_TOTAL + 1))
+    case "$entry" in *=*) label=${entry%%=*} ;; *) remote_sync_refuse "$entry" invalid "no label=target"; continue ;; esac
+    case "$label" in
+      ''|.|..|*[!A-Za-z0-9._-]*) remote_sync_refuse "$entry" invalid "label must match [A-Za-z0-9._-]+"; continue ;;
+    esac
+    case "$seen" in *" $label "*) remote_sync_refuse "$entry" invalid "label $label is used twice"; continue ;; esac
+    seen="$seen$label "
+    remote_sync_one "$label" "${entry#*=}"
+  done
+  log "session roots with remote mirrors: ${SESSION_ROOTS//:/, }"
+  # Every host failing is a broken path (lost key, renamed host, no route), and the per-host lines
+  # sit in run-stats.txt until the report, so it gets a banner of its own group. One failing does
+  # not; a host another run is syncing is not a failure.
+  [ "$REMOTE_SYNC_TOTAL" -gt 0 ] && [ "$REMOTE_SYNC_BAD" -eq "$REMOTE_SYNC_TOTAL" ] || return 0
+  log "remote sync: all $REMOTE_SYNC_TOTAL remote(s) failed"
+  [ -x "$AUTODREAM_DIR/notify.sh" ] || return 0
+  "$AUTODREAM_DIR/notify.sh" --warning "$TARGET_DATE" \
+    "remote session sync failed for all $REMOTE_SYNC_TOTAL remote(s), so their sessions may be missing from the report; first: $REMOTE_SYNC_FIRST_ERR" remote-sync \
+    || log "remote sync warning notification returned non-zero (continuing)"
 }
 
 # $1=adapter name $2=session path -> the project the session belongs to: the directory
@@ -3687,6 +3785,9 @@ run() {
     log "WARNING: preflight not readable at $PREFLIGHT; the shared-dependency check did NOT run"
   fi
 
+  # ---- Remote hosts' transcripts, pulled into local mirrors (#226) ----
+  sync_remote_roots
+
   # ---- Enumerate sessions modified during the target day ----
   if [ "$WINDOW_ON" = 1 ]; then
     log "scanning for sessions with a record between $TARGET_DATE and $NEXT_DATE (placed by the timestamps inside each transcript; a file with none by its mtime)..."
@@ -3816,6 +3917,7 @@ run() {
       printf 'roots_failed: %s\n' "$ROOTS_FAILED"
       printf 'session_roots: %s\n' "$(( $(printf '%s' "$SESSION_ROOTS" | tr -cd ':' | wc -c) + 1 ))"
       printf 'session_roots_list: %s\n' "$SESSION_ROOTS"
+      printf '%s' "$REMOTE_SYNC_LINES"
       printf 'adapters_rejected: %s\n' "$(adapters_rejected 2>/dev/null)"
       printf 'adapters_enabled: %s\n' "$(printf '%s' "$ENABLED_ADAPTERS" | tr ' ' ',' | sed 's/,$//')"
       printf 'sessions_by_source: %s\n' "${SESSIONS_BY_SOURCE:-none}"
@@ -3895,6 +3997,11 @@ $( if [ "${ROOTS_FAILED:-0}" -gt 0 ] || [ "${ROOTS_UNAVAILABLE:-0}" -gt 0 ]; the
      # entirely, so measuring against that under-reported how many were configured.
      printf '%s of %s configured session root(s) were unreadable or failed to enumerate, so this run did not read the whole store. Nothing was triaged from what it did read. See roots_failed and roots_unavailable in run-stats.txt — whether this was an empty night is unknown.' \
        "$(( ROOTS_FAILED + ROOTS_UNAVAILABLE ))" "$ROOTS_CONFIGURED"
+   elif [ "$REMOTE_SYNC_BAD" -gt 0 ]; then
+     # A remote host that did not sync was not read this run, so an empty night is a claim
+     # this run cannot make about it.
+     printf '%s of %s remote host(s) in AUTODREAM_REMOTE_ROOTS could not be synced, so their sessions from this day may be missing. See remote_sync_* in run-stats.txt — whether this was an empty night is unknown.' \
+       "$REMOTE_SYNC_BAD" "$REMOTE_SYNC_TOTAL"
    elif [ "$RAW" -eq 0 ] && [ "$refused" -eq 0 ] && [ "$OUT_OF_WINDOW" -gt 0 ]; then
      # Files were modified since the day began, so "none were modified" is false. They
      # hold no record inside the day, which makes this a quiet day for them to be quiet
@@ -4502,6 +4609,7 @@ PY
     printf 'runner_dirty: %s\n' "$RUNNER_DIRTY"
     printf 'session_roots: %s\n' "$SESSION_ROOT_COUNT"
     printf 'session_roots_list: %s\n' "$SESSION_ROOTS"
+    printf '%s' "$REMOTE_SYNC_LINES"
     printf 'sessions_found_raw: %s\n' "$RAW"
     # Paths dropped at enumeration because a line-based sessions.txt cannot hold
     # them. Recorded rather than left implicit: a nonzero value here means a real

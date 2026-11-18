@@ -15,6 +15,8 @@ bin/run.sh  TARGET_DATE
       ├─ probe_roots: resolve SESSION_ROOTS (env/config | PROJECTS_DIR | root-probe autodetect)
       │     └─ write findings/<date>/unindexed-roots.txt (folders found but not indexed; before guard)
       ├─ preflight.sh: hard-dep gate (jq, shasum, realpath, find, the L2 engine) — fatal before any scan
+      ├─ sync_remote_roots: remote-sync.sh rsyncs each AUTODREAM_REMOTE_ROOTS host (one way, *.jsonl only)
+      │     into remote/<label>/projects under a per-label lock; every existing mirror joins SESSION_ROOTS
       ├─ adapters.sh: load adapters/<name>/ (manifest.json validated, basename = identity, realpath-contained)
       │     └─ refusals recorded to a FILE (adapters_rejected); accepting none is fatal
       ├─ enumerate: adapter_run <name> enumerate <root> <date> <next> → NUL-delimited paths
@@ -79,6 +81,8 @@ charts with accessible labels and value tables. Category totals use severity=all
 | `bin/lib-install-dir.sh` | `resolve_install_dir`: the one install-dir resolver (env, else the script's own directory when it holds `config` or `PROMPT.md`, else `~/.claude/autodream`). Used by `autodream-note`, `vault-notes`, `review`, `autodream-now`, `question-streaks`, `notify` |
 | `bin/preflight.sh` | shared-dependency gate, run before anything is enumerated. Fatal on a missing hard dep rather than a quiet empty night |
 | `bin/autodream-now.sh` | run NOW via a transient one-shot launchd agent (escapes the ~10-min cap on bg tasks/ssh). `[DATE] [--force] [--watch] [--dry-run]`. RunAtLoad only (no kickstart → no double run); picks the scheduled plist that runs `run.sh` for its label namespace |
+| `bin/remote-sync.sh` | one-way pull of a remote host's transcripts: `<label> <target:path> <mirror>`, rsync over BatchMode ssh, `*.jsonl` only, no `--delete`; prints `ok` / `partial (cause)` / `failed (cause)` / `invalid (why)` |
+| `bin/err-cause.sh` | `err_cause_line`: the first meaningful stderr line, cleaned for one markdown line (changelog sections, remote sync causes) |
 | `bin/prune-self-sessions.sh` | self-session predicate (single source of truth): list / `--delete` / `--filter` |
 | `bin/oversized-gate.sh` | recompute the #12 measurement gate over a trailing window from the sidecars/findings on disk (`--days N`, or explicit findings dirs). Recovers dates whose `run-stats.txt` predates the counters; artifacts only, no model calls |
 | `bin/question-streaks.sh` | counts how many consecutive reports asked each open question, keyed by its bold title, and escalates stale ones with a second banner. `update <report> [findings-dir]` / `status` / `clear all\|<key>`. State in `$AUTODREAM_DIR/question-streaks.tsv`. |
@@ -119,6 +123,7 @@ All optional; full list (with defaults) is documented in `bin/run.sh`'s header. 
 |---|---|---|
 | `CLAUDE_BIN` | `$HOME/.local/bin/claude` | path to `claude` CLI |
 | `SESSION_ROOTS` | autodetected | colon-separated dirs to scan for session JSONLs (every `$HOME/.claude*/projects`). Wins over `PROJECTS_DIR` |
+| `AUTODREAM_REMOTE_ROOTS` | unset (off) | space-separated `label=ssh-target:path` hosts pulled into local mirrors and scanned with the claude roots |
 | `PROJECTS_DIR` | `$HOME/.claude/projects` | single root, kept for compat (one dir); `WORK_BUCKET` isolation is keyed off this |
 | `AUTODREAM_DIR` | `$HOME/.claude/autodream` | scripts + runtime state |
 | `DREAMS_DIR` | `$HOME/.claude/dreams` | where reports are written |
