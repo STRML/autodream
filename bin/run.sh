@@ -3006,9 +3006,10 @@ write_rollup() {
     printf 'rollup: helper missing\n' >> "$FINDINGS_DIR/run-stats.txt"
     return 0
   fi
-  # The source map built before any model ran, not sessions-source.txt, which an L1 worker can
-  # rewrite.
-  out=$(AUTODREAM_SOURCE_MAP="${AUTODREAM_SOURCE_MAP:-}" bash "$ROLLUP" "$FINDINGS_DIR" 2>>"$RUN_LOG" | tail -1)
+  # The source map and the session rows (hash, bucket, cwd), built before any model ran, not
+  # sessions-source.txt or session-cwds.tsv, which an L1 worker can rewrite.
+  out=$(AUTODREAM_SOURCE_MAP="${AUTODREAM_SOURCE_MAP:-}" AUTODREAM_SESSION_ROWS="${SESSION_ROWS:-}" \
+    bash "$ROLLUP" "$FINDINGS_DIR" 2>>"$RUN_LOG" | tail -1)
   case "$out" in
     "rollup: rows="*) ;;
     *) log "WARNING: rollup.sh failed; L2 has no rollup.tsv to count from"
@@ -3018,7 +3019,8 @@ write_rollup() {
        return 0 ;;
   esac
   log "$out"
-  printf '%s\n' "${out#rollup: }" | tr ' ' '\n' | sed -n 's/^\([a-z_]*\)=\([0-9]*\)$/rollup_\1: \2/p' >> "$FINDINGS_DIR/run-stats.txt"
+  printf '%s\n' "${out#rollup: }" | tr ' ' '\n' \
+    | sed -n -e 's/^sandbox_sessions=\([0-9]*\)$/sandbox_sessions: \1/p' -e 's/^\([a-z_]*\)=\([0-9]*\)$/rollup_\1: \2/p' >> "$FINDINGS_DIR/run-stats.txt"
   printf 'sandbox_shape_denies_min: %s\n' "$AUTODREAM_SANDBOX_SHAPE_MIN" >> "$FINDINGS_DIR/run-stats.txt"
 }
 

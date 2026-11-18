@@ -174,6 +174,14 @@ class DataTests(unittest.TestCase):
         categories.unlink()
         self.assertIsNone(self.stats_night()['categories'])
 
+    def test_web_stats_reads_categories_with_the_weighted_columns(self):
+        categories = self.day / 'categories.tsv'
+        categories.write_text('category\tseverity\tsessions\tfindings\texample_hashes\tsessions_real\tsessions_sandbox\tweighted\n'
+            'tool_loop\tall\t11\t12\ta,b\t2\t9\t4\n')
+        rows = self.stats_night()['categories']
+        self.assertEqual([(row['category'], row['sessions'], row['findings']) for row in rows],
+                         [('tool_loop', 11, 12)])
+
     def test_web_finished_that_day_uses_last_seen(self):
         rows = [dict(id='t-' + str(i).zfill(8), kind='work', repo='/repo', goal='Goal',
                      title='Title', status=status, last_seen=day, sessions=[])
