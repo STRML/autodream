@@ -53,15 +53,17 @@ permissions:
   contents: read
 
 jobs:
-  # The suite is split into four shards that run at once, each a quarter of the tests and unit
+  # The suite is split into eight shards that run at once, each an eighth of the tests and unit
   # suites chosen round-robin (RUNALL_SHARD=i/n in tests/run-all.sh; tests/shard.sh proves the
-  # shards partition the suite exactly). One job ran them all in 6 to 7 minutes of a run that took
-  # 9; the shards finish in about two. Keep the matrix and the /4 below in step: tests/shard.sh
-  # fails if they disagree, because a shard that no job runs is a quarter of the suite nobody runs.
+  # shards partition the suite exactly). At four shards each took 4 to 6 minutes by 2026-11-16 (the
+  # suite doubled in a month), and a shard spends only about 6 seconds outside its tests, so twice
+  # the shards halves the wait for about the same runner minutes. Keep the matrix and the /8 below in
+  # step: tests/shard.sh fails if they disagree, because a shard that no job runs is part of the
+  # suite nobody runs. docs/investigations/2026-11-17-ci-cost.md has the numbers.
   # The unit suites used to run a second time in their own step here. run-all.sh already runs every
   # one of them, so that step only repeated 47 seconds of work.
   shards:
-    name: test (${{ matrix.shard }}/4)
+    name: test (${{ matrix.shard }}/8)
     # Linux. The suites went through bin/portable.sh for the BSD and GNU date and stat, so
     # they no longer need a Mac. The suites that drive launchd (install, scheduler-label,
     # autodream-now) run in launchd.yml on macOS, and only when launchd files change.
@@ -72,7 +74,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       # Depth 2: on a PR the checkout is the test merge, whose first parent is the base, so
       # HEAD^1..HEAD is exactly what the PR changes.
@@ -108,11 +110,11 @@ jobs:
           ln -sf "$(command -v timeout)" "$HOME/.local/bin/gtimeout"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: run-all, shard ${{ matrix.shard }} of 4
+      - name: run-all, shard ${{ matrix.shard }} of 8
         if: steps.scope.outputs.scope == 'full'
         env:
           RUNALL_TIMES: ${{ runner.temp }}/times.txt
-        run: RUNALL_SHARD=${{ matrix.shard }}/4 bash tests/run-all.sh
+        run: RUNALL_SHARD=${{ matrix.shard }}/8 bash tests/run-all.sh
 
       # What this shard spent its time on, slowest first. Run on failure too: a slow shard is
       # exactly when this is wanted. The split is round-robin by position; if one shard keeps
@@ -126,7 +128,7 @@ jobs:
           awk '{ t += $1 } END { print "total seconds in tests and suites: " t }' "$RUNALL_TIMES"
           sort -rn "$RUNALL_TIMES" | head -12
 
-  # One check that stands for the four shards, under the name the single job always had, so
+  # One check that stands for the eight shards, under the name the single job always had, so
   # anything that waits on `test` keeps working. A draft PR skips the shards and so skips this.
   test:
     needs: shards
