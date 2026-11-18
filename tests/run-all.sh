@@ -8869,20 +8869,26 @@ test_threads_all_failed_groups_preserve_index(){
 
 test_threads_cleanup_removes_own_tmp_without_trash(){
   echo "# threads: a run removes its own mktemp paths itself and never sends them to the Trash"
-  local root shim cap calls left
+  local root shim cap calls left update_made report_made
   root=$(setup_env)
   thread_group_publish_fixture "$root" no
   shim="$root/trash-bin"; mkdir -p "$shim" "$root/tmp"
   printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/trash-calls.txt"\nexit 0\n' "$root" > "$shim/trash"
   chmod +x "$shim/trash"
+  printf '#!/bin/sh\np=$(/usr/bin/mktemp "$@") || exit $?\nprintf "%%s\\n" "$p" >> "%s/mktemp-paths.txt"\nprintf "%%s\\n" "$p"\n' "$root" > "$shim/mktemp"
+  chmod +x "$shim/mktemp"
   cap=$(( $(wc -c < "$REPO/prompts/THREAD_LINKER.md") + 1 ))
   MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_THREADS_MAX_INPUT="$cap" \
     AUTODREAM_DIR="$root/autodream" CLAUDE_BIN="$MOCK" PATH="$shim:$PATH" TMPDIR="$root/tmp" \
     /bin/bash "$REPO/bin/threads.sh" update "$DATE" < "$root/group-rows.jsonl" > "$root/update.out" 2>&1
+  update_made=$(grep -c "^$root/tmp/threads-update\." "$root/mktemp-paths.txt" 2>/dev/null)
   AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" PATH="$shim:$PATH" TMPDIR="$root/tmp" \
     /bin/bash "$REPO/bin/threads.sh" report "$DATE" > "$root/report.md" 2>&1
-  assert_grep "$root/update.out" '^threads_link: failed$' "update ran its group pipeline"
-  assert_grep "$root/report.md" '^## Dropped threads' "report ran to its render step"
+  report_made=$(grep -c "^$root/tmp/threads-report" "$root/mktemp-paths.txt" 2>/dev/null)
+  [ "${update_made:-0}" -gt 0 ] && update_made=yes || update_made=no
+  [ "${report_made:-0}" -gt 0 ] && report_made=yes || report_made=no
+  assert_eq "$update_made" yes "update made its temp directory under TMPDIR"
+  assert_eq "$report_made" yes "report made its temp files under TMPDIR"
   calls=$(cat "$root/trash-calls.txt" 2>/dev/null)
   left=$(ls -A "$root/tmp")
   assert_eq "$calls" "" "threads.sh never calls trash on its own temp paths"
