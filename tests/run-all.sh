@@ -9997,6 +9997,8 @@ test_remote_sync_auth_failure_fails_fast(){
   assert_grep "$rs" '^remote_sync_studio2: failed$' "the host reads failed"
   assert_grep "$rs" '^remote_sync_studio2_cause: sam@studio2.invalid: Permission denied (publickey).$' "the cause skips ssh's warning and quotes the refusal"
   assert_grep "$rs" '^remote_sync_studio2_last_ok: never$' "a host never synced reads never"
+  assert_no_file "$(rs_mirror "$root" studio2)" "a first sync that fails leaves no empty mirror"
+  assert_grep "$rs" "^session_roots_list: $root/projects\$" "so nothing joins the roots"
   assert_grep "$root/rsync.log" 'BatchMode=yes' "ssh runs in batch mode, so it cannot prompt"
   assert_grep "$root/rsync.log" 'ConnectTimeout=10' "and gives up on a dead host"
   rm -rf "$root"
@@ -10097,11 +10099,39 @@ test_remote_sync_lock_held_skips_the_sync(){
   local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"; rs_seed_mirror "$root" studio2
   local lock="$root/autodream/locks/remote-studio2.lock"; mkdir -p "$lock"
   printf '%s\n' "$$" > "$lock/pid"; ps -o lstart= -p "$$" | tr -s ' ' > "$lock/start"
-  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  AUTODREAM_REMOTE_LOCK_WAIT=1 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
   assert_grep "$(rs_stats "$root")" '^remote_sync_studio2: skipped_locked$' "the host reads skipped_locked"
+  assert_grep "$(rs_stats "$root")" "^remote_sync_studio2_cause: pid $$ still held" "the cause names the holder"
   assert_no_file "$root/rsync.log" "rsync is not run into a mirror another run holds"
   assert_file "$(fdir "$root")/$(hash_of "$(rs_mirror "$root" studio2)/proj-r/r0.jsonl").json" "the mirror is still triaged"
   assert_eq "$(cat "$lock/pid" 2>/dev/null)" "$$" "the holder's lock is left alone"
+  rm -rf "$root"
+}
+
+test_remote_sync_waits_for_a_lock_that_is_released(){
+  echo "# remote sync: a mirror another run is still copying into is waited for, then synced, never read half-copied"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  local lock="$root/autodream/locks/remote-studio2.lock" holder; mkdir -p "$lock"
+  sleep 3 & holder=$!
+  printf '%s\n' "$holder" > "$lock/pid"
+  AUTODREAM_REMOTE_LOCK_WAIT=30 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  wait "$holder" 2>/dev/null
+  assert_grep "$(rs_stats "$root")" '^remote_sync_studio2: ok$' "the host syncs once the holder is gone"
+  assert_eq "$(rs_lines "$root/rsync.log")" "1" "rsync ran after the wait"
+  assert_file "$(fdir "$root")/$(hash_of "$(rs_mirror "$root" studio2)/proj-r/r1.jsonl").json" "and the session it copied is triaged"
+  rm -rf "$root"
+}
+
+test_remote_sync_partial_empty_night_is_not_called_empty(){
+  echo "# remote sync: a partial sync on a night with nothing to triage is not reported as an empty night"
+  local root; root=$(setup_env); rs_env "$root"; stub_notify "$root"
+  remove_path "$root/studio/proj-r/r1.jsonl"
+  printf '24\n' > "$root/rsync.rc"
+  printf 'file has vanished: "/home/u/p/proj-r/r1.jsonl"\n' > "$root/rsync.err"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_nogrep "$root/dreams/$DATE.md" 'No session files were modified' "the stub does not call it an empty night"
+  assert_grep "$root/dreams/$DATE.md" 'not fully synced' "it says the host was not fully read"
+  assert_nogrep "$root/notify-args.txt" '^--warning' "and a partial sync still posts no banner"
   rm -rf "$root"
 }
 
@@ -10194,7 +10224,9 @@ _run test_remote_sync_torn_last_line_is_triaged
 _run test_remote_sync_keeps_transcripts_deleted_on_the_remote
 _run test_remote_sync_first_sync_copies_transcripts_with_their_mtimes
 _run test_remote_sync_lock_held_skips_the_sync
+_run test_remote_sync_waits_for_a_lock_that_is_released
 _run test_remote_sync_reclaims_a_stale_lock
+_run test_remote_sync_partial_empty_night_is_not_called_empty
 _run test_remote_sync_every_remote_failed_posts_one_banner
 _run test_remote_sync_one_remote_failed_posts_no_banner
 _run test_remote_sync_missing_rsync_or_ssh_fails_cleanly

@@ -98,6 +98,8 @@
 #                        with the claude roots, e.g. "studio2=studio2:.claude/projects". The label is
 #                        [A-Za-z0-9._-]+. A host that fails is a run-stats line, never a deferred
 #                        date; every host failing posts one warning   default: unset (off)
+#   AUTODREAM_REMOTE_LOCK_WAIT  seconds to wait for another run that is syncing the same host
+#                        before scanning its mirror as it stands (skipped_locked)   default: 600
 #   AUTODREAM_REQUIRE_LOGIN  space-separated key=value pairs the login of every engine the run uses
 #                        must match before it is handed anything; keys provider, auth, plan,
 #                        account, as the engine's whoami verb reports them (claude: claude auth
@@ -2008,6 +2010,9 @@ release_run_lock() { release_lock "$RUN_LOCK"; }
 REMOTE_SYNC_LINES=""   # run-stats lines, written into both run-stats blocks
 REMOTE_SYNC_TOTAL=0    # entries configured
 REMOTE_SYNC_BAD=0      # entries that did not sync this run: failed or invalid
+REMOTE_SYNC_SHORT=0    # entries whose mirror may be short tonight: BAD plus partial and skipped_locked
+REMOTE_SYNC_FIRST_ERR=""
+REMOTE_SYNC_HELPER=""
 remote_sync_stat() { REMOTE_SYNC_LINES="${REMOTE_SYNC_LINES}$1"$'\n'; }
 
 # $1=entry $2=key $3=why: an entry refused before any ssh.
@@ -2016,35 +2021,65 @@ remote_sync_refuse() {
   remote_sync_stat "remote_sync_$2: invalid"
   remote_sync_stat "remote_sync_$2_cause: $3"
   REMOTE_SYNC_BAD=$((REMOTE_SYNC_BAD + 1))
+  REMOTE_SYNC_SHORT=$((REMOTE_SYNC_SHORT + 1))
   [ -n "$REMOTE_SYNC_FIRST_ERR" ] || REMOTE_SYNC_FIRST_ERR="$2: invalid ($3)"
+}
+
+# $1=lock dir $2=seconds: 0 once the lock is free or its holder is gone, 1 if it is still held.
+# A run that scanned a mirror another run was still copying into would miss the files not yet
+# renamed into place, and the next day's mtime bound would never pick them up, so a held mirror
+# is waited for rather than read at once.
+wait_for_lock_release() {
+  local waited=0
+  while [ -d "$1" ]; do
+    lock_holder_state "$1" || return 0
+    [ "$waited" -lt "$2" ] || return 1
+    sleep 1; waited=$((waited + 1))
+  done
+  return 0
+}
+
+# $1=label $2=target $3=mirror $4=lock -> the helper's status line, synced under the lock.
+remote_sync_locked() {
+  local rc=0 wait="${AUTODREAM_REMOTE_LOCK_WAIT:-600}"
+  case "$wait" in ''|*[!0-9]*) wait=600 ;; esac
+  acquire_lock "$4" || rc=$?
+  if [ "$rc" -eq 1 ] && wait_for_lock_release "$4" "$((10#$wait))"; then
+    rc=0; acquire_lock "$4" || rc=$?
+  fi
+  case "$rc" in
+    0) bash "$REMOTE_SYNC_HELPER" "$1" "$2" "$3" 2>>"$RUN_LOG"
+       release_lock "$4" ;;
+    1) printf 'skipped_locked (pid %s still held %s after %ss)\n' "${LOCK_HOLDER:-unknown}" "$4" "$wait" ;;
+    *) printf 'failed (cannot create %s)\n' "$(dirname "$4")" ;;
+  esac
 }
 
 # $1=label $2=target: sync one host under its lock, record its keys, add its mirror to the roots.
 remote_sync_one() {
   local label="$1" spec="$2" dir="$AUTODREAM_DIR/remote/$1" lock="$AUTODREAM_DIR/locks/remote-$1.lock"
-  local mirror="$AUTODREAM_DIR/remote/$1/projects" status="" word cause="" last t0=$SECONDS rc=0
+  local mirror="$AUTODREAM_DIR/remote/$1/projects" status="" word cause="" last t0=$SECONDS
+  # remote_sync_locked runs inside $(...). $$ is still this run's pid there, so the lock it takes
+  # and releases is this run's.
   if [ -z "$REMOTE_SYNC_HELPER" ]; then
     status="failed (remote-sync.sh not found)"
   else
-    acquire_lock "$lock" || rc=$?
-    case "$rc" in
-      0) status=$(bash "$REMOTE_SYNC_HELPER" "$label" "$spec" "$mirror" 2>>"$RUN_LOG")
-         release_lock "$lock" ;;
-      1) status="skipped_locked (pid ${LOCK_HOLDER:-unknown} holds $lock)" ;;
-      *) status="failed (cannot create $(dirname "$lock"))" ;;
-    esac
+    status=$(remote_sync_locked "$label" "$spec" "$mirror" "$lock")
   fi
   [ -n "$status" ] || status="failed (remote-sync.sh printed nothing)"
   word=${status%% *}
   case "$status" in *" ("*")") cause=${status#* (}; cause=${cause%)} ;; esac
   case "$word" in
     ok|partial)
-      mkdir -p "$dir" 2>/dev/null && printf '%s\n' "$(date +%Y-%m-%d)" > "$dir/last-ok.tmp.$$" \
-        && mv -f "$dir/last-ok.tmp.$$" "$dir/last-ok" ;;
-    skipped_locked) cause="" ;;
+      if ! { mkdir -p "$dir" && printf '%s\n' "$(date +%Y-%m-%d)" > "$dir/last-ok.tmp.$$" \
+             && mv -f "$dir/last-ok.tmp.$$" "$dir/last-ok"; } 2>/dev/null; then
+        log "WARNING: remote sync $label: could not stamp $dir/last-ok"
+      fi ;;
+    skipped_locked) ;;
     invalid) REMOTE_SYNC_BAD=$((REMOTE_SYNC_BAD + 1)) ;;
     *) word=failed; REMOTE_SYNC_BAD=$((REMOTE_SYNC_BAD + 1)) ;;
   esac
+  [ "$word" = ok ] || REMOTE_SYNC_SHORT=$((REMOTE_SYNC_SHORT + 1))
   case "$word" in failed|invalid) [ -n "$REMOTE_SYNC_FIRST_ERR" ] || REMOTE_SYNC_FIRST_ERR="$label: ${cause:-$word}" ;; esac
   last=$(head -n 1 "$dir/last-ok" 2>/dev/null) || last=""
   remote_sync_stat "remote_sync_$label: $word"
@@ -3997,11 +4032,11 @@ $( if [ "${ROOTS_FAILED:-0}" -gt 0 ] || [ "${ROOTS_UNAVAILABLE:-0}" -gt 0 ]; the
      # entirely, so measuring against that under-reported how many were configured.
      printf '%s of %s configured session root(s) were unreadable or failed to enumerate, so this run did not read the whole store. Nothing was triaged from what it did read. See roots_failed and roots_unavailable in run-stats.txt — whether this was an empty night is unknown.' \
        "$(( ROOTS_FAILED + ROOTS_UNAVAILABLE ))" "$ROOTS_CONFIGURED"
-   elif [ "$REMOTE_SYNC_BAD" -gt 0 ]; then
-     # A remote host that did not sync was not read this run, so an empty night is a claim
-     # this run cannot make about it.
-     printf '%s of %s remote host(s) in AUTODREAM_REMOTE_ROOTS could not be synced, so their sessions from this day may be missing. See remote_sync_* in run-stats.txt — whether this was an empty night is unknown.' \
-       "$REMOTE_SYNC_BAD" "$REMOTE_SYNC_TOTAL"
+   elif [ "$REMOTE_SYNC_SHORT" -gt 0 ]; then
+     # A remote host that did not fully sync was not wholly read this run, so an empty night is
+     # a claim this run cannot make about it.
+     printf '%s of %s remote host(s) in AUTODREAM_REMOTE_ROOTS were not fully synced, so their sessions from this day may be missing. See remote_sync_* in run-stats.txt — whether this was an empty night is unknown.' \
+       "$REMOTE_SYNC_SHORT" "$REMOTE_SYNC_TOTAL"
    elif [ "$RAW" -eq 0 ] && [ "$refused" -eq 0 ] && [ "$OUT_OF_WINDOW" -gt 0 ]; then
      # Files were modified since the day began, so "none were modified" is false. They
      # hold no record inside the day, which makes this a quiet day for them to be quiet

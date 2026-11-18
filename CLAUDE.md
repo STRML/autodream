@@ -75,13 +75,17 @@ A pull is read-only on the remote and needs only sshd there.
   catch-up trigger never reaches ssh, and above enumeration. It sets globals and is never called
   inside `$(...)`. Every mirror that exists (`$AUTODREAM_DIR/remote/<label>/projects`, synced this
   run or kept from an earlier one) is appended to `SESSION_ROOTS`, including an explicit
-  `SESSION_ROOTS`. The mirror is not under `$HOME/.claude*`, so root-probe never reports it as an
-  unasked folder.
+  `SESSION_ROOTS`. The helper makes only the mirror's parent and rsync makes the mirror, so a
+  first sync that fails leaves no empty mirror in the roots. The mirror is not under
+  `$HOME/.claude*`, so root-probe never reports it as an unasked folder.
 - **Lock.** `$AUTODREAM_DIR/locks/remote-<label>.lock` uses the run lock's helpers
   (`acquire_lock`, `lock_holder_state`, `reclaim_lock`, `release_lock`, each taking the lock dir),
-  so a dead holder is reclaimed the same way. A live holder makes the step report `skipped_locked`
-  and still scan the mirror: the nightly and an `autodream-now.sh` run for another date take
-  different run locks and would otherwise rsync into one directory at once.
+  so a dead holder is reclaimed the same way. The nightly and an `autodream-now.sh` run for another
+  date take different run locks and would otherwise rsync into one directory at once. A live holder
+  is waited for (`AUTODREAM_REMOTE_LOCK_WAIT`, default 600 seconds) and the run then syncs itself,
+  because scanning a mirror mid-copy misses the files not yet renamed into place, and the next
+  day's mtime bound never picks them up. A holder still alive after the wait gives
+  `skipped_locked`, and the mirror is scanned as it stands.
 - **Reporting.** run-stats gets `remote_sync: off|on` and, per label, `remote_sync_<label>`
   (`ok|partial|failed|skipped_locked|invalid`), `remote_sync_<label>_cause` and
   `remote_sync_<label>_last_ok` (stamped in `remote/<label>/last-ok` on ok and partial, else
@@ -89,7 +93,8 @@ A pull is read-only on the remote and needs only sshd there.
   `ok`. When every entry failed or was invalid, `notify.sh --warning` posts one banner in its own
   `remote-sync` group, so it cannot replace the changelog warning. A failure never defers the date
   (a down Studio is not a down model provider) and never aborts the run. On a night with no
-  sessions the stub report says the remote hosts were not read instead of calling it empty.
+  sessions, any host that is not `ok` (failed, invalid, partial or skipped_locked) makes the stub
+  report say the host was not fully synced instead of calling the night empty.
 - **A killed copy.** rsync writes each file to a dot-named temp (`.name.jsonl.XXXXXX`) and renames
   it, so a file is old or new, never torn by rsync, and a stranded temp is not `*.jsonl`. A file
   copied while the remote session was appending can end in a torn line; session-window and the

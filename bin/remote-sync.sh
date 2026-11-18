@@ -49,7 +49,9 @@ fi
 # shellcheck source=/dev/null
 . "$lib" 2>/dev/null || { echo "failed (err-cause.sh not found beside remote-sync.sh)"; exit 1; }
 
-mkdir -p "$mirror" 2>/dev/null || { echo "failed (cannot create $mirror)"; exit 1; }
+# Only the parent: rsync makes the mirror itself, so a first sync that fails leaves no empty mirror
+# for the run to scan.
+mkdir -p "${mirror%/*}" 2>/dev/null || { echo "failed (cannot create ${mirror%/*})"; exit 1; }
 errf=$(mktemp "${TMPDIR:-/tmp}/remote-sync.XXXXXX") || { echo "failed (mktemp)"; exit 1; }
 trap 'rm -f "$errf"' EXIT
 
