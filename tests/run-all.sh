@@ -10062,6 +10062,10 @@ test_remote_sync_cause_skips_local_shell_noise(){
   printf 'something no rule knows\n' > "$root/rsync.err"
   assert_eq "$(rs_helper "$root" studio2 studio2.invalid:p)" \
     'failed (something no rule knows)' "with no tool line the first line still counts"
+  printf '255\n' > "$root/rsync.rc"
+  printf "/bin/bash: line 1: 1 Alarm clock: 14 nc -z studio2.local 22\nWarning: Connection refused\n" > "$root/rsync.err"
+  assert_eq "$(rs_helper "$root" studio2 studio2.invalid:p)" \
+    'failed (rsync exited 255)' "a warning-only tool line never falls back to the noise"
   rm -rf "$root"
 }
 

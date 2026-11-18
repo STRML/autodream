@@ -65,9 +65,13 @@ rc=$?
 cat "$errf" >&2
 # An ssh config's Match exec or ProxyCommand can print its own noise ahead of the real error
 # (a killed `nc -z` probe prints a bash "Alarm clock" line), so a line from rsync or ssh wins.
-cause=$(grep -E '^(open)?rsync[(:]|^ssh:|Permission denied|^Host key|Connection (refused|closed|reset|timed out)|Could not resolve|No route to host|Operation timed out' \
-  "$errf" 2>/dev/null | err_cause_line /dev/stdin)
-[ -n "$cause" ] || cause=$(err_cause_line "$errf")
+tool_lines=$(grep -E '^(open)?rsync[(:]|^ssh:|Permission denied|^Host key|Connection (refused|closed|reset|timed out)|Could not resolve|No route to host|Operation timed out' \
+  "$errf" 2>/dev/null)
+if [ -n "$tool_lines" ]; then
+  cause=$(printf '%s\n' "$tool_lines" | err_cause_line /dev/stdin)
+else
+  cause=$(err_cause_line "$errf")
+fi
 
 case "$rc" in
   0) echo ok; exit 0 ;;
