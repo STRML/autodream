@@ -7654,18 +7654,7 @@ test_l2_diag_long_command_lines_keep_the_sections_intact(){
   rm -rf "$root"
 }
 
-thread_cleanup(){
-  if command -v trash >/dev/null 2>&1; then
-    trash "$@"
-    return $?
-  fi
-  local path
-  for path in "$@"; do
-    [ -e "$path" ] || continue
-    find "$path" -depth -type f -exec unlink {} \; 2>/dev/null
-    find "$path" -depth -type d -exec rmdir {} \; 2>/dev/null
-  done
-}
+thread_cleanup(){ rm -rf -- "$@"; }
 thread_state(){ printf '%s/threads.jsonl' "$1/autodream"; }
 thread_call_count(){
   if [ -f "$1/threads-calls.txt" ]; then
@@ -8880,6 +8869,37 @@ test_threads_all_failed_groups_preserve_index(){
   thread_cleanup "$root"
 }
 
+test_threads_cleanup_removes_own_tmp_without_trash(){
+  echo "# threads: a run removes its own mktemp paths itself and never sends them to the Trash"
+  local root shim cap calls left made kind report_rc
+  root=$(setup_env)
+  thread_group_publish_fixture "$root" no
+  shim="$root/trash-bin"; mkdir -p "$shim" "$root/tmp"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/trash-calls.txt"\nexit 0\n' "$root" > "$shim/trash"
+  chmod +x "$shim/trash"
+  printf '#!/bin/sh\np=$(/usr/bin/mktemp "$@") || exit $?\nprintf "%%s\\n" "$p" >> "%s/mktemp-paths.txt"\nprintf "%%s\\n" "$p"\n' "$root" > "$shim/mktemp"
+  chmod +x "$shim/mktemp"
+  cap=$(( $(wc -c < "$REPO/prompts/THREAD_LINKER.md") + 1 ))
+  MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_THREADS_MAX_INPUT="$cap" \
+    AUTODREAM_DIR="$root/autodream" CLAUDE_BIN="$MOCK" PATH="$shim:$PATH" TMPDIR="$root/tmp" \
+    /bin/bash "$REPO/bin/threads.sh" update "$DATE" < "$root/group-rows.jsonl" > "$root/update.out" 2>&1
+  AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" PATH="$shim:$PATH" TMPDIR="$root/tmp" \
+    /bin/bash "$REPO/bin/threads.sh" report "$DATE" > "$root/report.md" 2>&1
+  report_rc=$?
+  for kind in threads-update threads-render-state threads-report threads-report-status; do
+    [ "$(grep -c "^$root/tmp/$kind\." "$root/mktemp-paths.txt" 2>/dev/null)" -gt 0 ] && made=yes || made=no
+    assert_eq "$made" yes "a run made a $kind temp path under TMPDIR"
+  done
+  assert_grep "$root/update.out" '^threads_groups_failed: 3$' "update worked through every group"
+  assert_eq "$report_rc" 0 "report exits 0"
+  assert_grep "$root/report.md" '^## Dropped threads' "report reached its render step"
+  calls=$(cat "$root/trash-calls.txt" 2>/dev/null)
+  left=$(ls -A "$root/tmp")
+  assert_eq "$calls" "" "threads.sh never calls trash on its own temp paths"
+  assert_eq "$left" "" "threads.sh leaves nothing behind in its TMPDIR"
+  thread_cleanup "$root"
+}
+
 test_threads_request_list_copy_failure_is_failed(){
   echo "# threads: request-list setup failure stops before linker calls"
   local root cap shim
@@ -9854,6 +9874,7 @@ _run test_threads_older_finished_session_does_not_close_newer_open_thread
 _run test_threads_counts_assignments_omitted_by_linker
 _run test_threads_publishes_good_groups_when_one_is_oversized
 _run test_threads_all_failed_groups_preserve_index
+_run test_threads_cleanup_removes_own_tmp_without_trash
 _run test_threads_request_list_copy_failure_is_failed
 _run test_threads_status_requires_published_assignments
 _run test_threads_resume_quotes_injected_goal
