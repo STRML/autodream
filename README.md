@@ -103,6 +103,20 @@ says so). The choices land in `~/.claude/autodream/root-choices.conf`, and the e
 set is written to `config` as `SESSION_ROOTS`. You can add or remove a folder later by
 editing that file and re-running `./install.sh`.
 
+Sessions that run on another Mac, such as a Studio running headless Claude sessions, live in
+that machine's `~/.claude/projects`. Name each host in `config`, and the nightly copies its
+transcripts over ssh before it scans:
+
+```bash
+AUTODREAM_REMOTE_ROOTS="studio2=studio2:.claude/projects"
+```
+
+Each entry is `label=ssh-target:path`, and several hosts are separated by spaces. The path
+is relative to the remote home. The ssh login must work without a prompt (a key in the agent,
+or one with no passphrase), because launchd runs the job. A host that is asleep or unreachable
+costs only its own sessions. The report names it, and when every host fails a warning banner
+does too.
+
 The schedule fires `run.sh` at 03:15 with morning catch-up triggers (06:15/09:15/12:15)
 in case the Mac was asleep; the idempotency guard makes all but the first a one-second
 no-op. To skip scheduling and only symlink the scripts:
