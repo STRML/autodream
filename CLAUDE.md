@@ -95,6 +95,11 @@ A pull is read-only on the remote and needs only sshd there.
   (a down Studio is not a down model provider) and never aborts the run. On a night with no
   sessions, any host that is not `ok` (failed, invalid, partial or skipped_locked) makes the stub
   report say the host was not fully synced instead of calling the night empty.
+- **What a failed host loses.** A finished report stops every later trigger at the guard, so
+  nothing syncs that date again, and the next night's mtime lower bound skips a transcript last
+  written on the failed day. Those sessions reach no report unless the date is rebuilt
+  (`autodream-now.sh <date> --force`), which the self-audit line tells the reader to do. Automatic
+  retry would need a sync above the guard, which the design rules out (#230).
 - **A killed copy.** rsync writes each file to a dot-named temp (`.name.jsonl.XXXXXX`) and renames
   it, so a file is old or new, never torn by rsync, and a stranded temp is not `*.jsonl`. A file
   copied while the remote session was appending can end in a torn line; session-window and the
