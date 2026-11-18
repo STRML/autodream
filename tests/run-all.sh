@@ -8869,7 +8869,7 @@ test_threads_all_failed_groups_preserve_index(){
 
 test_threads_cleanup_removes_own_tmp_without_trash(){
   echo "# threads: a run removes its own mktemp paths itself and never sends them to the Trash"
-  local root shim cap calls left update_made report_made
+  local root shim cap calls left made kind report_rc
   root=$(setup_env)
   thread_group_publish_fixture "$root" no
   shim="$root/trash-bin"; mkdir -p "$shim" "$root/tmp"
@@ -8881,14 +8881,16 @@ test_threads_cleanup_removes_own_tmp_without_trash(){
   MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_THREADS_MAX_INPUT="$cap" \
     AUTODREAM_DIR="$root/autodream" CLAUDE_BIN="$MOCK" PATH="$shim:$PATH" TMPDIR="$root/tmp" \
     /bin/bash "$REPO/bin/threads.sh" update "$DATE" < "$root/group-rows.jsonl" > "$root/update.out" 2>&1
-  update_made=$(grep -c "^$root/tmp/threads-update\." "$root/mktemp-paths.txt" 2>/dev/null)
   AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" PATH="$shim:$PATH" TMPDIR="$root/tmp" \
     /bin/bash "$REPO/bin/threads.sh" report "$DATE" > "$root/report.md" 2>&1
-  report_made=$(grep -c "^$root/tmp/threads-report" "$root/mktemp-paths.txt" 2>/dev/null)
-  [ "${update_made:-0}" -gt 0 ] && update_made=yes || update_made=no
-  [ "${report_made:-0}" -gt 0 ] && report_made=yes || report_made=no
-  assert_eq "$update_made" yes "update made its temp directory under TMPDIR"
-  assert_eq "$report_made" yes "report made its temp files under TMPDIR"
+  report_rc=$?
+  for kind in threads-update threads-render-state threads-report threads-report-status; do
+    [ "$(grep -c "^$root/tmp/$kind\." "$root/mktemp-paths.txt" 2>/dev/null)" -gt 0 ] && made=yes || made=no
+    assert_eq "$made" yes "a run made a $kind temp path under TMPDIR"
+  done
+  assert_grep "$root/update.out" '^threads_groups_failed: 3$' "update worked through every group"
+  assert_eq "$report_rc" 0 "report exits 0"
+  assert_grep "$root/report.md" '^## Dropped threads' "report reached its render step"
   calls=$(cat "$root/trash-calls.txt" 2>/dev/null)
   left=$(ls -A "$root/tmp")
   assert_eq "$calls" "" "threads.sh never calls trash on its own temp paths"
