@@ -70,7 +70,9 @@ A pull is read-only on the remote and needs only sshd there.
 - **Validation before ssh.** run.sh refuses a label outside `[A-Za-z0-9._-]+`, `.`, `..` and a
   repeated label. The helper refuses a host or path that starts with `-` (ssh would read it as an
   option) or holds a character outside the set a projects path needs, because openrsync does not
-  quote the path for the remote shell.
+  quote the path for the remote shell. The mirrors are claude roots, so with the claude adapter not
+  enabled every entry is refused as `invalid` (and the all-failed banner fires) rather than synced
+  and reported `ok` while nothing scans it.
 - **Where it runs.** `sync_remote_roots` sits below the idempotency guard and the run lock, so a
   catch-up trigger never reaches ssh, and above enumeration. It sets globals and is never called
   inside `$(...)`. Every mirror that exists (`$AUTODREAM_DIR/remote/<label>/projects`, synced this

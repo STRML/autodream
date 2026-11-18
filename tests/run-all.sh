@@ -10017,6 +10017,19 @@ test_remote_sync_missing_remote_path_is_a_failure(){
   printf 'rsync: [sender] send_files failed to open "/home/u/p/a.jsonl": Permission denied (13)\n' > "$root/rsync.err"
   assert_eq "$(rs_helper "$root" studio2 studio2.invalid:/home/u/p)" \
     'partial (rsync: [sender] send_files failed to open "/home/u/p/a.jsonl": Permission denied (13))' "one unreadable file is partial"
+  printf 'rsync: [sender] link_stat "/home/u/p/a.jsonl" failed: Permission denied (13)\n' > "$root/rsync.err"
+  assert_eq "$(rs_helper "$root" studio2 studio2.invalid:/home/u/p)" \
+    'partial (rsync: [sender] link_stat "/home/u/p/a.jsonl" failed: Permission denied (13))' "a file it cannot stat is partial too"
+  rm -rf "$root"
+}
+
+test_remote_sync_refused_when_the_claude_adapter_is_off(){
+  echo "# remote sync: with the claude adapter not enabled no mirror would be scanned, so no host is synced or called ok"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"; stub_notify "$root"
+  AUTODREAM_ADAPTERS=omp AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_no_file "$root/rsync.log" "rsync is not run"
+  assert_grep "$root/run.out" "refused (the claude adapter is not enabled" "the refusal is logged with its reason"
+  assert_grep "$root/notify-args.txt" '^--warning .*claude adapter is not enabled' "and the banner says why no host synced"
   rm -rf "$root"
 }
 
@@ -10218,6 +10231,7 @@ _run test_remote_sync_invalid_entries_are_refused
 _run test_remote_sync_unreachable_host_keeps_and_scans_the_mirror
 _run test_remote_sync_auth_failure_fails_fast
 _run test_remote_sync_missing_remote_path_is_a_failure
+_run test_remote_sync_refused_when_the_claude_adapter_is_off
 _run test_remote_sync_timeout_leaves_no_session_from_a_temp_file
 _run test_remote_sync_vanished_file_is_partial_and_counts_as_success
 _run test_remote_sync_torn_last_line_is_triaged

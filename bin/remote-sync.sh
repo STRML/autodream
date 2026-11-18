@@ -71,7 +71,7 @@ case "$rc" in
   23)
     # 23 is "some files were not transferred", which both rsyncs also return when the source
     # root itself does not exist. That is a host with nothing to read, not a partial copy.
-    if grep -qE 'change_dir .* failed|link_stat .* failed|\(l\)stat: No such file' "$errf"; then
+    if grep -qE '(change_dir|link_stat) .* failed: No such file|\(l\)stat: No such file' "$errf"; then
       printf 'failed (%s)\n' "${cause:-remote path not found}"; exit 1
     fi
     printf 'partial (%s)\n' "${cause:-some files were not transferred}"; exit 0 ;;

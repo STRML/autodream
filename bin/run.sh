@@ -2095,9 +2095,18 @@ sync_remote_roots() {
   local entries=() entry label seen=" "
   REMOTE_SYNC_FIRST_ERR=""
   REMOTE_SYNC_HELPER=$(find_lib remote-sync.sh) || REMOTE_SYNC_HELPER=""
+  # The mirrors are claude roots. With the claude adapter not enabled nothing would scan them, and
+  # a sync reported ok would hide a whole host's missing sessions, so every entry is refused.
+  local claude_on=1
+  resolve_enabled_adapters
+  case " $ENABLED_ADAPTERS " in *" claude "*) ;; *) claude_on=0 ;; esac
   read -r -a entries <<< "$AUTODREAM_REMOTE_ROOTS"
   for entry in ${entries[@]+"${entries[@]}"}; do
     REMOTE_SYNC_TOTAL=$((REMOTE_SYNC_TOTAL + 1))
+    if [ "$claude_on" = 0 ]; then
+      remote_sync_refuse "$entry" invalid "the claude adapter is not enabled (AUTODREAM_ADAPTERS), so no mirror would be scanned"
+      continue
+    fi
     case "$entry" in *=*) label=${entry%%=*} ;; *) remote_sync_refuse "$entry" invalid "no label=target"; continue ;; esac
     case "$label" in
       ''|.|..|*[!A-Za-z0-9._-]*) remote_sync_refuse "$entry" invalid "label must match [A-Za-z0-9._-]+"; continue ;;
