@@ -607,6 +607,7 @@ fatal_exit() {
     printf 'runner_dirty: %s\n' "$RUNNER_DIRTY"
     printf 'fatal: %s\n' "$reason"
     printf 'sessions_triaged: 0\n'
+    printf '%s' "${REMOTE_SYNC_LINES:-}"
   } > "$FINDINGS_DIR/run-stats.txt" 2>/dev/null || true
   notify_fatal "$reason"
   return 1
@@ -2007,7 +2008,7 @@ release_run_lock() { release_lock "$RUN_LOCK"; }
 # catch-up trigger never reaches ssh) and above enumeration. A failed host never defers the date
 # and never stops the run: it is a line in run-stats.txt, and a banner when every host failed.
 # Results go to globals, not stdout, so this is called directly and never inside $(...).
-REMOTE_SYNC_LINES=""   # run-stats lines, written into both run-stats blocks
+REMOTE_SYNC_LINES=""   # run-stats lines, written into every run-stats block
 REMOTE_SYNC_TOTAL=0    # entries configured
 REMOTE_SYNC_BAD=0      # entries that did not sync this run: failed or invalid
 REMOTE_SYNC_SHORT=0    # entries whose mirror may be short tonight: BAD plus partial and skipped_locked
@@ -2103,16 +2104,16 @@ sync_remote_roots() {
   read -r -a entries <<< "$AUTODREAM_REMOTE_ROOTS"
   for entry in ${entries[@]+"${entries[@]}"}; do
     REMOTE_SYNC_TOTAL=$((REMOTE_SYNC_TOTAL + 1))
-    if [ "$claude_on" = 0 ]; then
-      remote_sync_refuse "$entry" invalid "the claude adapter is not enabled (AUTODREAM_ADAPTERS), so no mirror would be scanned"
-      continue
-    fi
     case "$entry" in *=*) label=${entry%%=*} ;; *) remote_sync_refuse "$entry" invalid "no label=target"; continue ;; esac
     case "$label" in
       ''|.|..|*[!A-Za-z0-9._-]*) remote_sync_refuse "$entry" invalid "label must match [A-Za-z0-9._-]+"; continue ;;
     esac
     case "$seen" in *" $label "*) remote_sync_refuse "$entry" invalid "label $label is used twice"; continue ;; esac
     seen="$seen$label "
+    if [ "$claude_on" = 0 ]; then
+      remote_sync_refuse "$entry" "$label" "the claude adapter is not enabled (AUTODREAM_ADAPTERS), so no mirror would be scanned"
+      continue
+    fi
     remote_sync_one "$label" "${entry#*=}"
   done
   log "session roots with remote mirrors: ${SESSION_ROOTS//:/, }"
@@ -4655,7 +4656,7 @@ PY
     printf 'runner_dirty: %s\n' "$RUNNER_DIRTY"
     printf 'session_roots: %s\n' "$SESSION_ROOT_COUNT"
     printf 'session_roots_list: %s\n' "$SESSION_ROOTS"
-    printf '%s' "$REMOTE_SYNC_LINES"
+    printf '%s' "${REMOTE_SYNC_LINES:-}"
     printf 'sessions_found_raw: %s\n' "$RAW"
     # Paths dropped at enumeration because a line-based sessions.txt cannot hold
     # them. Recorded rather than left implicit: a nonzero value here means a real

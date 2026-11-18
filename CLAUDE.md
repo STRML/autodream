@@ -91,7 +91,7 @@ A pull is read-only on the remote and needs only sshd there.
 - **Reporting.** run-stats gets `remote_sync: off|on` and, per label, `remote_sync_<label>`
   (`ok|partial|failed|skipped_locked|invalid`), `remote_sync_<label>_cause` and
   `remote_sync_<label>_last_ok` (stamped in `remote/<label>/last-ok` on ok and partial, else
-  `never`). Both run-stats blocks carry them. PROMPT.md's self-audit names every label that is not
+  `never`). Every run-stats block carries them, the fatal one included. PROMPT.md's self-audit names every label that is not
   `ok`. When every entry failed or was invalid, `notify.sh --warning` posts one banner in its own
   `remote-sync` group, so it cannot replace the changelog warning. A failure never defers the date
   (a down Studio is not a down model provider) and never aborts the run. On a night with no

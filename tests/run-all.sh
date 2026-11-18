@@ -10053,7 +10053,8 @@ test_remote_sync_refused_when_the_claude_adapter_is_off(){
   AUTODREAM_ADAPTERS=omp AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
   assert_no_file "$root/rsync.log" "rsync is not run"
   assert_grep "$root/run.out" "refused (the claude adapter is not enabled" "the refusal is logged with its reason"
-  assert_grep "$root/notify-args.txt" '^--warning .*claude adapter is not enabled' "and the banner says why no host synced"
+  assert_grep "$root/notify-args.txt" '^--warning .*studio2: invalid (the claude adapter is not enabled' "and the banner names the host and why it did not sync"
+  assert_grep "$(rs_stats "$root")" '^remote_sync_studio2: invalid$' "run-stats names the host"
   rm -rf "$root"
 }
 
