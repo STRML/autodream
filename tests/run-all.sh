@@ -8632,7 +8632,7 @@ test_threads_reassignment_updates_dropped_status_and_report(){
     '{date:$date,hash:$hash,source:"claude",session_path:$path,cwd:$repo,repo:$repo,nested:false,user_message_count:2,measured:true}')
   printf '%s\n' "$source_row" | env AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" AUTODREAM_CONFIG="$root/no-config" \
     AUTODREAM_THREADS_STATE="$state" AUTODREAM_THREADS_ENGINE=claude AUTODREAM_THREADS_MODEL=claude-haiku-5-5 \
-    AUTODREAM_THREADS_TIMEOUT_BIN="$(command -v timeout)" AUTODREAM_ADAPTERS=claude \
+    AUTODREAM_THREADS_TIMEOUT_BIN="$THREADS_TEST_TIMEOUT_BIN" AUTODREAM_ADAPTERS=claude \
     THREADS_REFRESH_KEYS="$(printf '%s\t%s' "$DATE" "$hash")" CLAUDE_BIN="$MOCK" \
     MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap" /bin/bash "$REPO/bin/threads.sh" update "$DATE" > "$root/update.out"
   DATE=$previous_date; STAMP=$previous_stamp
