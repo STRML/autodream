@@ -2,6 +2,11 @@
 
 All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
+## 2026-11-18
+
+### Changed
+- **Top patterns count `trig-*` eval sandboxes at a quarter weight, and the runner does the counting.** Skill-creator trigger evals (`claude -p` from `/private/var/folders/<x>/<y>/T/trig-<id>/repo`) were 32 of 45 projects on 2026-11-17 and drove a `CLAUDE.md` proposal. `rollup.tsv` gains a last `sandbox` column (`yes` or `no`), decided from the session's real cwd and, when that dir is gone, from the project key, both anchored so an ordinary `/Users/x/T/trig-parser` checkout stays real. `categories.tsv` gains `sessions_real`, `sessions_sandbox` and `weighted` (`sessions_real + floor(sessions_sandbox / 4)`), and run-stats gains `sandbox_sessions`. `PROMPT.md` ranks by `weighted`, reads sandbox-only from `sessions_real == 0`, and keeps a sandbox-only pattern out of pins, `CLAUDE.md` or rules proposals, open questions and the top-3 projects.
+
 ## 2026-11-14
 
 ### Added

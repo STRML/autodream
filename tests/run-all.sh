@@ -3530,6 +3530,9 @@ test_prompt_counts_from_the_rollup(){
   assert_nogrep "$P" '\*\.json\.err' "a failed triage is found from the status column, not a *.json.err glob"
   assert_grep   "$P" '`sandbox_shape_denies`' "PROMPT.md names the sandbox_shape_denies column"
   assert_grep   "$P" 'sandbox_shape_denies_min' "and reads its threshold from run-stats.txt"
+  assert_grep   "$P" 'Rank by `weighted`, never by `sessions`' "PROMPT.md ranks by the weighted count the runner computed"
+  assert_grep   "$P" 'A pattern with `sessions_real` 0 is sandbox-only; read that from the tally' "and reads sandbox-only from the tally, not from the capped examples"
+  assert_nogrep "$P" '[-]T-trig-' "and holds no second copy of the sandbox predicate, which rollup.sh owns"
 }
 
 # The sandbox-shape guard's denies, counted by the runner (2026-11-03): #175 stopped L1 scoring
@@ -5621,6 +5624,26 @@ pins_run(){ # $1=root ; the mock CLI logs each call to $1/sm-calls.jsonl
   SHARED_MEMORY_BIN="$HERE/mock-shared-memory.sh" MOCK_SM_LOG="$1/sm-calls.jsonl" run_dream "$1"
 }
 sm_calls(){ if [ -f "$1/sm-calls.jsonl" ]; then wc -l < "$1/sm-calls.jsonl" | tr -d ' '; else echo 0; fi; }
+
+# A skill-creator trigger eval runs claude -p from /private/var/folders/<x>/<y>/T/trig-<id>/repo and
+# deletes the dir afterwards, so the runner cannot resolve its cwd and the bucket key decides.
+test_rollup_marks_trig_sandbox_sessions(){
+  echo "# rollup.tsv: a trig-* eval sandbox is marked, an ordinary T/trig-parser checkout is not"
+  local root; root=$(setup_env)
+  mk_session_with_cwd "$root" sbx /private/var/folders/c2/29g/4tv/T/trig-4paa91wm/repo
+  mk_session_with_cwd "$root" real /Users/x/T/trig-parser
+  run_dream "$root"
+  local d; d=$(fdir "$root")
+  local col; col=$(head -1 "$d/rollup.tsv" 2>/dev/null | tr '\t' '\n' | grep -n '^sandbox$' | cut -d: -f1)
+  assert_eq "${col:-none}" "20" "rollup.tsv has the sandbox column, last"
+  assert_eq "$(awk -F'\t' -v k="$(hash_of "$root/projects/-private-var-folders-c2-29g-4tv-T-trig-4paa91wm-repo/sbx.jsonl")" -v c="${col:-20}" '($1 "") == (k "") {print $c}' "$d/rollup.tsv")" "yes" "the sandbox session is marked yes"
+  assert_eq "$(awk -F'\t' -v k="$(hash_of "$root/projects/-Users-x-T-trig-parser/real.jsonl")" -v c="${col:-20}" '($1 "") == (k "") {print $c}' "$d/rollup.tsv")" "no" "the look-alike checkout is marked no"
+  assert_grep "$d/run-stats.txt" '^sandbox_sessions: 1$' "run-stats.txt carries the sandbox session count"
+  assert_eq "$(head -1 "$d/categories.tsv" | cut -f6-8)" "$(printf 'sessions_real\tsessions_sandbox\tweighted')" "categories.tsv carries the weighted columns"
+  rm -rf "$root"
+}
+
+_run test_rollup_marks_trig_sandbox_sessions
 
 test_normalize_project_survives_non_object_findings(){
   echo "# project normalization: a findings file that is valid JSON but not an object does not stop the rest (#73)"
