@@ -53,7 +53,7 @@ fi
 # for the run to scan.
 mkdir -p "${mirror%/*}" 2>/dev/null || { echo "failed (cannot create ${mirror%/*})"; exit 1; }
 errf=$(mktemp "${TMPDIR:-/tmp}/remote-sync.XXXXXX") || { echo "failed (mktemp)"; exit 1; }
-trap 'rm -f "$errf" "$errf.tool"' EXIT
+trap 'rm -f "$errf"' EXIT
 
 # BatchMode: no password or passphrase prompt, which under launchd would hang the night.
 # ConnectTimeout bounds a host that is asleep; the keepalives and --timeout bound a stalled copy.
@@ -65,9 +65,9 @@ rc=$?
 cat "$errf" >&2
 # An ssh config's Match exec or ProxyCommand can print its own noise ahead of the real error
 # (a killed `nc -z` probe prints a bash "Alarm clock" line), so a line from rsync or ssh wins.
-grep -E '^(open)?rsync[(:]|^ssh:|Permission denied|^Host key|Connection (refused|closed|reset|timed out)|Could not resolve|No route to host|Operation timed out' \
-  "$errf" > "$errf.tool" 2>/dev/null
-if [ -s "$errf.tool" ]; then cause=$(err_cause_line "$errf.tool"); else cause=$(err_cause_line "$errf"); fi
+cause=$(grep -E '^(open)?rsync[(:]|^ssh:|Permission denied|^Host key|Connection (refused|closed|reset|timed out)|Could not resolve|No route to host|Operation timed out' \
+  "$errf" 2>/dev/null | err_cause_line /dev/stdin)
+[ -n "$cause" ] || cause=$(err_cause_line "$errf")
 
 case "$rc" in
   0) echo ok; exit 0 ;;
