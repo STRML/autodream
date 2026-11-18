@@ -91,20 +91,30 @@ list 2/4 >/dev/null
 after=$(ls "${TMPDIR:-/tmp}" | grep -c '^ccad\.' || true)
 assert_eq "$after" "$before" "and left no test sandbox behind"
 
-echo "# the CI matrix runs every shard"
-# The matrix lists the shard indexes and the run line, the job name and the step name each carry
-# the count. If they disagree, a shard no job runs is a part of the suite nobody runs, and CI stays
-# green. This is the one thing the sharding cannot check from inside run-all.sh.
+echo "# the CI matrices run every shard"
+# Each sharded job lists the shard indexes in its matrix, and its run line, job name and step name
+# each carry the count. If they disagree, a shard no job runs is a part of the suite nobody runs,
+# and CI stays green. This is the one thing the sharding cannot check from inside run-all.sh.
+check_matrix(){   # <workflow file> <job-name prefix> <label>
+  local wf=$1 prefix=$2 label=$3 matrix n_cmd n_name n_step want k
+  matrix=$(sed -n 's/^ *shard: *\[\(.*\)\].*/\1/p' "$wf" | head -1 | tr -d ' ')
+  n_cmd=$(grep -o 'RUNALL_SHARD=\${{ matrix.shard }}/[0-9]*' "$wf" | head -1 | sed 's#.*/##')
+  n_name=$(grep -o "name: $prefix (\\\${{ matrix.shard }}/[0-9]*)" "$wf" | head -1 | sed 's#.*/##; s#)##')
+  n_step=$(grep -o 'shard \${{ matrix.shard }} of [0-9]*' "$wf" | head -1 | sed 's#.* of ##')
+  want=""; for ((k = 0; k < ${n_cmd:-0}; k++)); do want="${want:+$want,}$k"; done   # not seq -s,: BSD seq leaves a trailing comma
+  if [ -z "$n_cmd" ]; then no "$label: no RUNALL_SHARD run line"; return; fi
+  assert_eq "$matrix" "$want" "$label: the matrix lists shards 0 to $n_cmd-1, each once, with none missing"
+  assert_eq "$n_name" "$n_cmd" "$label: the job name carries the same count as the run line"
+  assert_eq "$n_step" "$n_cmd" "$label: and so does the step name"
+}
 WF="$REPO/.github/workflows/tests.yml"
-matrix=$(sed -n 's/^ *shard: *\[\(.*\)\].*/\1/p' "$WF" | head -1 | tr -d ' ')
-n_cmd=$(grep -o 'RUNALL_SHARD=\${{ matrix.shard }}/[0-9]*' "$WF" | head -1 | sed 's#.*/##')
-n_name=$(grep -o 'name: test (\${{ matrix.shard }}/[0-9]*)' "$WF" | head -1 | sed 's#.*/##; s#)##')
-n_step=$(grep -o 'shard \${{ matrix.shard }} of [0-9]*' "$WF" | head -1 | sed 's#.* of ##')
-want=""; for ((k = 0; k < ${n_cmd:-0}; k++)); do want="${want:+$want,}$k"; done   # not seq -s,: BSD seq leaves a trailing comma
-assert_eq "$matrix" "$want" "the matrix lists shards 0 to ${n_cmd:-?}-1, each once, with none missing"
-assert_eq "$n_name" "$n_cmd" "the job name carries the same count as the run line"
-assert_eq "$n_step" "$n_cmd" "and so does the step name"
+check_matrix "$WF" test tests.yml
 if grep -qE '^  test:' "$WF" && grep -qE '^    needs: shards' "$WF"; then ok "the \`test\` check still exists and waits on every shard"; else no "the aggregating \`test\` job is missing or does not need the shards"; fi
+# The weekly macOS run is the only full run under the stock bash 3.2 and BSD tools. As one job it
+# outgrew its timeout and was cancelled two weeks running, so it is sharded the same way.
+LWF="$REPO/.github/workflows/launchd.yml"
+check_matrix "$LWF" "full suite" launchd.yml
+grep -q '/bin/bash tests/run-all.sh' "$LWF" && ok "launchd.yml: the weekly suite runs under /bin/bash" || no "launchd.yml: the weekly suite does not run under /bin/bash"
 
 echo "# parallel runner refuses an inaccessible real-dreams ancestor"
 mkdir -p "$D/parallel-runner"
