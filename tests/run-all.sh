@@ -20,6 +20,9 @@ export HOME="$SUITE_TMP/home" DREAMS_DIR="$SUITE_TMP/dreams"
 mkdir -p "$HOME" "$DREAMS_DIR"
 RUN="$REPO/bin/run.sh"
 MOCK="$HERE/mock-claude.sh"
+# The GNU timeout the threads linker runs under. /usr/bin/timeout exists on Linux and on recent
+# macOS, but not on GitHub's macOS image, where Homebrew's coreutils provide it (issue #221).
+THREADS_TEST_TIMEOUT_BIN=$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || echo /usr/bin/timeout)
 # run.sh puts ~/.local/bin on PATH, where the real shared-memory CLI lives, so a
 # test whose L2 emits pins would store them in the developer's real Mnemopi.
 # Point every run at a path that does not exist; the pin tests override it with
@@ -8149,7 +8152,7 @@ thread_review_row(){
 thread_review_update(){
   local root=$1 mode=${2:-good}
   AUTODREAM_DIR="$root/autodream" AUTODREAM_CONFIG="$root/autodream/config" \
-    AUTODREAM_THREADS_TIMEOUT_BIN=/usr/bin/timeout CLAUDE_BIN="$MOCK" \
+    AUTODREAM_THREADS_TIMEOUT_BIN="$THREADS_TEST_TIMEOUT_BIN" CLAUDE_BIN="$MOCK" \
     MOCK_THREADS_MODE="$mode" MOCK_CAPTURE_DIR="$root/cap" \
     /bin/bash "$REPO/bin/threads.sh" update "$DATE" < "$root/rows.jsonl" > "$root/update.out" 2>&1
 }
@@ -9309,7 +9312,7 @@ test_threads_backfill_budget_uses_grown_index_request(){
 thread_review_backfill(){
   local root=$1 date=$2 budget=$3 mode=${4:-good}
   AUTODREAM_DIR="$root/autodream" PROJECTS_DIR="$root/projects" CLAUDE_BIN="$MOCK" \
-    AUTODREAM_THREADS_TIMEOUT_BIN=/usr/bin/timeout MOCK_THREADS_MODE="$mode" MOCK_CAPTURE_DIR="$root/cap" \
+    AUTODREAM_THREADS_TIMEOUT_BIN="$THREADS_TEST_TIMEOUT_BIN" MOCK_THREADS_MODE="$mode" MOCK_CAPTURE_DIR="$root/cap" \
     /bin/bash "$REPO/bin/threads.sh" backfill "$date" "$date" --max-calls "$budget" > "$root/backfill.out" 2>&1
 }
 
