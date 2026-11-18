@@ -71,6 +71,8 @@ Handle each harness independently — one dead source must never suppress the ot
 ## Top patterns (ranked)
 For each, ordered by (count × max-severity) descending, cap at 10. Start from `categories.tsv`: for a whole category, the `sessions` of its `all` row is the Count, the worst severity among its other rows is the Severity, and the `example_hashes` are the sessions to open for evidence. When a pattern is narrower than a whole category, count its distinct sessions from the `findings.tsv` rows whose `what` matches it, leave out the rows of advisor sessions (`is_advisor` true in `rollup.tsv`) in those three tool-behavior categories, and say how you narrowed it.
 
+**Eval-sandbox sessions count at a quarter weight** (Sam, 2026-11-18 triage). A `rollup.tsv` row whose `project` contains `-T-trig-` is a one-turn benchmark sandbox under `/private/var/folders`, not Sam's work. For each pattern, Count = non-sandbox sessions + sandbox sessions ÷ 4 (round down), and write both raw numbers beside it ("Count 3: 2 + 4 trig-*"). A pattern whose evidence is only sandbox sessions never ranks above one with any non-sandbox session, never drives a pin or a `CLAUDE.md` / `rules/*.md` proposal by itself, and never becomes an open question. Give the sandbox share one line in the Activity snapshot ("S of N sessions were trig-* sandboxes") and keep them out of the top-3 projects.
+
 ### [Pattern name]
 - **Category**: missed_skill | sandbox_friction | memory_miss | …
 - **Count**: how many sessions exhibited it
