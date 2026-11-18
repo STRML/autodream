@@ -47,6 +47,24 @@ assert_eq "$(scope README.md)" full "prose alone: nothing web changed, so nothin
 assert_eq "$(scope web/../bin/run.sh)" full "a path that climbs out of web/"
 assert_eq "$(printf '' | bash "$SCOPE" 2>/dev/null)" full "no changed paths at all"
 
+echo "# given a base and a head, it diffs them itself and sees both sides of a rename"
+# --name-only alone reports a rename by its new path only, so moving bin/run.sh into web/ read as a
+# web-only change. The selector now runs the diff, with --no-renames, so CI cannot pass it half.
+G=$(mktemp -d "${TMPDIR:-/tmp}/ciscope.XXXXXX")
+( cd "$G" && git init -q && git config user.email t@t && git config user.name t \
+  && mkdir bin web && printf 'echo run\n' > bin/run.sh && printf 'a{}\n' > web/app.css \
+  && git add -A && git commit -qm base && git tag base \
+  && git mv bin/run.sh web/run.sh && git commit -qm move && git tag moved \
+  && printf 'b{}\n' >> web/app.css && git commit -qam css && git tag css ) >/dev/null 2>&1
+if git -C "$G" rev-parse -q --verify css >/dev/null 2>&1; then
+  assert_eq "$(cd "$G" && bash "$SCOPE" base moved </dev/null 2>/dev/null)" full "moving bin/run.sh into web/ is not a web-only change"
+  assert_eq "$(cd "$G" && bash "$SCOPE" moved css </dev/null 2>/dev/null)" web "a real web-only diff is"
+  assert_eq "$(cd "$G" && bash "$SCOPE" base no-such-ref </dev/null 2>/dev/null)" full "a diff that fails"
+else
+  no "could not build the rename fixture repo"
+fi
+rm -rf "$G"
+
 echo "# every tracked web file is one the full suite never reads"
 # The oracle for the rule: a file the selector calls web must not be named by any code tests.yml's
 # full suite runs. web/threads.* fails this, which is why the selector excludes it. Left out of the

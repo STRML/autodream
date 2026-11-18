@@ -1,5 +1,11 @@
 #!/bin/bash
-# Reads a PR's changed paths, one per line, and prints `web` or `full`.
+# Prints `web` or `full` for a PR's changed paths.
+#
+#   .github/ci-scope.sh BASE HEAD    diff the two revisions (what tests.yml runs)
+#   .github/ci-scope.sh < paths      read changed paths, one per line
+#
+# The diff is --no-renames: plain --name-only reports a rename by its new path alone, so moving
+# bin/run.sh into web/ would read as a web-only change. The changed paths go to stderr.
 #
 # `web` means every path belongs to the web dashboard (or is prose markdown) and at least one is
 # web code, so tests.yml runs only tests/autodream-web.sh. Anything else prints `full`: a path with
@@ -13,6 +19,17 @@
 #   markdown under prompts/, adapters/ or skills/: the suites assert on what it says
 
 set -u
+
+if [ "$#" -eq 2 ]; then
+  if ! paths=$(git diff --name-only --no-renames "$1" "$2" 2>/dev/null); then
+    echo "ci-scope: git diff $1 $2 failed" >&2
+    echo full
+    exit 0
+  fi
+  printf '%s\n' "$paths" >&2
+  printf '%s\n' "$paths" | bash "$0"
+  exit 0
+fi
 
 web=0
 other=0

@@ -87,9 +87,8 @@ jobs:
         id: scope
         run: |
           scope=full
-          if [ "${{ github.event_name }}" = pull_request ] && files=$(git diff --name-only HEAD^1 HEAD); then
-            printf '%s\n' "$files"
-            scope=$(printf '%s\n' "$files" | bash .github/ci-scope.sh)
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            scope=$(bash .github/ci-scope.sh HEAD^1 HEAD)
           fi
           echo "scope: $scope"
           echo "scope=$scope" >> "$GITHUB_OUTPUT"
