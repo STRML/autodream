@@ -130,9 +130,9 @@ OUT="$T/out"; mkdir -p "$OUT"
 summary=$("$BIN" "$F" "$OUT" 2>"$T/err"); rc=$?
 assert_eq "$rc" "0" "exit 0"
 R="$OUT/rollup.tsv"; C="$OUT/categories.tsv"
-assert_eq "$(head -1 "$R")" "$(printf 'hash\tstatus\tproject\tsource\tnested\tis_advisor\tparent\toutcome\tuser_message_count\tturn_count\ttool_call_count\tduration_minutes\tmodels_used\tfindings\tskills_invoked_count\tskills_invoked_counts\tskills_authored\tinstructions_given_count\tsandbox_shape_denies')" "rollup.tsv opens with its header"
+assert_eq "$(head -1 "$R")" "$(printf 'hash\tstatus\tproject\tsource\tnested\tis_advisor\tparent\toutcome\tuser_message_count\tturn_count\ttool_call_count\tduration_minutes\tmodels_used\tfindings\tskills_invoked_count\tskills_invoked_counts\tskills_authored\tinstructions_given_count\tsandbox_shape_denies\tsandbox')" "rollup.tsv opens with its header"
 assert_eq "$(tail -n +2 "$R" | wc -l | tr -d ' ')" "224" "one row per session, 224 of them"
-assert_eq "$(awk -F'\t' 'NF != 19' "$R" | wc -l | tr -d ' ')" "0" "every row has 19 columns, a tab inside a project included"
+assert_eq "$(awk -F'\t' 'NF != 20' "$R" | wc -l | tr -d ' ')" "0" "every row has 20 columns, a tab inside a project included"
 assert_eq "$(tail -n +2 "$R" | cut -f1 | sort -u | wc -l | tr -d ' ')" "224" "no session appears twice"
 assert_eq "$(tail -n +2 "$R" | cut -f1 | LC_ALL=C sort -c 2>&1 && echo sorted)" "sorted" "rows are in hash order"
 assert_eq "$(grep -c "$(h 999)" "$R")" "0" "a findings JSON moved to outside-worklist/ is not a row"
@@ -194,7 +194,7 @@ assert_eq "$(col "$(h 242)" 19)" "3" "an unparseable findings JSON still carries
 assert_eq "$(tail -n +2 "$R" | awk -F'\t' '$19 != "" && $19 + 0 >= 10' | cut -f1 | tr '\n' ' ')" "$(h 4) $(h 9) " "two sessions at or over 10"
 
 echo "# categories.tsv tallies every finding"
-assert_eq "$(head -1 "$C")" "$(printf 'category\tseverity\tsessions\tfindings\texample_hashes')" "categories.tsv opens with its header"
+assert_eq "$(head -1 "$C")" "$(printf 'category\tseverity\tsessions\tfindings\texample_hashes\tsessions_real\tsessions_sandbox\tweighted')" "categories.tsv opens with its header"
 assert_eq "$(tail -n +2 "$C" | cut -f1-4)" "$(printf 'sandbox_friction\tall\t101\t101\nsandbox_friction\tlow\t101\t101\ntool_loop\tall\t20\t20\ntool_loop\tmedium\t20\t20\nmissed_skill\tall\t10\t12\nmissed_skill\thigh\t10\t11\nmissed_skill\tlow\t1\t1\nmemory_miss\tall\t2\t3\nmemory_miss\tmedium\t1\t2\nmemory_miss\tunknown\t1\t1')" "exact counts: all counts a session once across severities, an advisor counts under its parent, and its tool-behavior findings not at all"
 assert_eq "$(awk -F'\t' '$1 == "missed_skill" && $2 == "high" {print $5}' "$C")" "$(h 1),$(h 2),$(h 3),$(h 4),$(h 5)" "up to five example hashes, in hash order"
 assert_eq "$(awk -F'\t' '$1 == "memory_miss" && $2 == "all" {print $5}' "$C")" "$(h 2),$(h 232),$(h 233)" "fewer when fewer sessions have it, and an advisor's example is its own hash"
@@ -205,7 +205,56 @@ assert_eq "$(head -1 "$FT")" "$(printf 'hash\tcategory\tseverity\twhat')" "findi
 assert_eq "$(tail -n +2 "$FT" | wc -l | tr -d ' ')" "138" "138 findings, advisors' included"
 assert_eq "$(awk -F'\t' -v k="$(h 50)" '($1 "") == (k "")' "$FT")" "$(printf '%s\tsandbox_friction\tlow\tx' "$(h 50)")" "hash, category, severity and what"
 assert_eq "$(awk -F'\t' 'NF != 4' "$FT" | wc -l | tr -d ' ')" "0" "every row has four columns"
-assert_eq "$summary" "rollup: rows=224 triaged=125 gated=95 error=1 unreadable=3 ungated=129 categories=4 findings=138 advisor_tool_findings=2" "a one-line summary on stdout"
+assert_eq "$summary" "rollup: rows=224 triaged=125 gated=95 error=1 unreadable=3 ungated=129 categories=4 findings=138 advisor_tool_findings=2 sandbox_sessions=0" "a one-line summary on stdout"
+
+echo "# a session in a trig-* eval sandbox is marked from its real cwd, else from an anchored project key"
+assert_eq "$(tail -n +2 "$R" | cut -f20 | sort -u | tr '\n' ' ')" "no " "with no cwd map and no sandbox-shaped project, no row is a sandbox"
+F_MAIN=$F; F="$T/fs"; mkdir -p "$F"
+SBX_KEY=-private-var-folders-c2-29g2958n6t92169z-4tvmsb80000gn-T
+SBX_CWD=/private/var/folders/c2/29g2958n6t92169z/T
+sbx(){ # NUM CATEGORY:SEVERITY PROJECT
+  triaged "$1" "$(jq -cn --arg c "${2%%:*}" --arg s "${2##*:}" '[{category:$c,severity:$s,what:"w"}]')" "$3"
+  sidecar "$1" false false false; source_row "$1" claude
+}
+sbx 1 cat_mixed:high -Users-x-code-a
+sbx 2 cat_mixed:high -Users-x-T-trig-parser
+sbx 3 cat_mixed:medium proj; sbx 4 cat_mixed:medium proj; sbx 5 cat_mixed:medium proj
+sbx 6 cat_mixed:medium "$SBX_KEY-trig-4paa91wm-repo"; sbx 7 cat_mixed:medium "$SBX_KEY-trig-26zei511"; sbx 8 cat_mixed:medium "$SBX_KEY-trig-3mhiuw-j-repo"
+sbx 9 cat_mixed:medium "$SBX_KEY-trig--691z12n"; sbx 10 cat_mixed:medium "$SBX_KEY-trig-3vf22ogg"; sbx 11 cat_mixed:medium "$SBX_KEY-trig-4paa91wm-repo"
+sbx 12 cat_lookalike:low "$SBX_KEY-trig-4paa91wm-repo"
+sbx 13 cat_lookalike:low -Users-x-T-trig-parser
+sbx 14 cat_lookalike:low proj
+for i in 20 21 22; do sbx "$i" cat_sandonly:low proj; jq -c '.findings += [{category:"cat_floor",severity:"low",what:"w"}]' "$F/$(h "$i").json" > "$T/s.json" && mv "$T/s.json" "$F/$(h "$i").json"; done
+sbx 23 cat_sandonly:low proj; sbx 24 cat_sandonly:low proj
+sbx 31 cat_sandonly:low proj; sidecar 31 true true true; printf '%s\t%s\n' "$(h 31)" "$(h 20)" > "$F/fanouts.tsv"
+gated 40; sidecar 40 false false false; source_row 40 claude
+SBX_CWDS=$(
+  for i in 3 4 5; do printf '%s\t%s/trig-4paa91wm/repo\n' "$(h "$i")" "$SBX_CWD"; done
+  for i in 6 7 8; do printf '%s\t?\n' "$(h "$i")"; done
+  for i in 20 21 22 23 24 31 40; do printf '%s\t%s/trig-zz%s\n' "$(h "$i")" "$SBX_CWD" "$i"; done
+  printf '%s\t/Users/x/code/a\n' "$(h 1)"
+  printf '%s\t/Users/x/T/trig-parser\n' "$(h 2)"
+  printf '%s\t/Users/x/T/trig-parser\n' "$(h 12)"
+  printf '%s\t%s/trig-abc/repo/sub\n' "$(h 14)" "$SBX_CWD")
+OUT3="$T/out3"; mkdir -p "$OUT3"
+summary=$(AUTODREAM_SESSION_CWDS="$SBX_CWDS" "$BIN" "$F" "$OUT3" 2>/dev/null)
+R3="$OUT3/rollup.tsv"; C3="$OUT3/categories.tsv"
+sbx_of(){ awk -F'\t' -v k="$1" '($1 "") == (k "") {print $20}' "$R3"; }
+yes_list(){ tail -n +2 "$R3" | awk -F'\t' '$20 == "yes" {print $1}' | tr '\n' ' '; }
+assert_eq "$(yes_list)" "$(for i in 3 4 5 6 7 8 9 10 11 20 21 22 23 24 31 40; do printf '%s ' "$(h "$i")"; done)" "sandbox rows: cwd match, key match with an unknown or missing cwd, gated and advisor rows too"
+assert_eq "$(sbx_of "$(h 2)")/$(sbx_of "$(h 13)")" "no/no" "/Users/x/T/trig-parser is not a sandbox, by cwd or by key"
+assert_eq "$(sbx_of "$(h 12)")" "no" "a known real cwd wins over a sandbox-shaped project key"
+assert_eq "$(sbx_of "$(h 14)")" "no" "a path below trig-*/repo is not the sandbox itself"
+assert_eq "$(sbx_of "$(h 9)")/$(sbx_of "$(h 8)")" "yes/yes" "bucket shapes seen on disk: trig--691z12n and trig-3mhiuw-j-repo"
+assert_eq "$summary" "rollup: rows=21 triaged=20 gated=1 error=0 unreadable=0 ungated=20 categories=4 findings=23 advisor_tool_findings=0 sandbox_sessions=15" "the summary counts ungated sandbox sessions"
+crow(){ awk -F'\t' -v c="$1" -v v="$2" '$1 == c && $2 == v {print $3 "/" $6 "/" $7 "/" $8}' "$C3"; }
+assert_eq "$(crow cat_mixed all)" "11/2/9/4" "mixed: sessions, real, sandbox, weighted = real + floor(sandbox/4)"
+assert_eq "$(crow cat_mixed high)/$(crow cat_mixed medium)" "2/2/0/2/9/0/9/2" "each severity row splits on its own"
+assert_eq "$(crow cat_sandonly all)" "5/0/5/1" "sandbox-only: real 0, and an advisor counts under its sandbox parent once"
+assert_eq "$(crow cat_floor all)" "3/0/3/0" "three sandbox sessions weigh nothing: the quotient rounds down"
+assert_eq "$(crow cat_lookalike all)" "3/3/0/3" "look-alike paths keep full weight"
+assert_eq "$(head -1 "$C3" | cut -f6-8)" "$(printf 'sessions_real\tsessions_sandbox\tweighted')" "the new columns are named"
+F=$F_MAIN
 
 echo "# the runner's in-memory source map wins over sessions-source.txt, which an L1 worker can rewrite"
 OUT2="$T/out2"; mkdir -p "$OUT2"
@@ -225,7 +274,7 @@ echo "# an empty findings dir writes header-only files"
 E="$T/empty"; mkdir -p "$E"
 summary=$("$BIN" "$E" 2>/dev/null); rc=$?
 assert_eq "$rc/$(wc -l < "$E/rollup.tsv" | tr -d ' ')/$(wc -l < "$E/categories.tsv" | tr -d ' ')/$(wc -l < "$E/findings.tsv" | tr -d ' ')" "0/1/1/1" "exit 0, one header line each"
-assert_eq "$summary" "rollup: rows=0 triaged=0 gated=0 error=0 unreadable=0 ungated=0 categories=0 findings=0 advisor_tool_findings=0" "and a zero summary"
+assert_eq "$summary" "rollup: rows=0 triaged=0 gated=0 error=0 unreadable=0 ungated=0 categories=0 findings=0 advisor_tool_findings=0 sandbox_sessions=0" "and a zero summary"
 
 echo "# a findings dir that is not there, or an output dir that cannot be written, fails loudly"
 "$BIN" "$T/nope" >/dev/null 2>&1; rc=$?

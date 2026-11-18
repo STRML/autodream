@@ -3,11 +3,12 @@
 #
 # Usage:  rollup.sh <findings-dir> [<out-dir>]      (out-dir defaults to the findings dir)
 # Writes: <out-dir>/rollup.tsv      header, then one row per session, ungated and gated alike
-#         <out-dir>/categories.tsv  header, then category, severity, sessions, findings, example hashes
+#         <out-dir>/categories.tsv  header, then category, severity, sessions, findings, example hashes,
+#                                   sessions_real, sessions_sandbox, weighted
 #         <out-dir>/findings.tsv    header, then hash, category, severity, what: one row per finding,
 #                                   so L2 can count a pattern narrower than a category
 # Stdout: one line, "rollup: rows=N triaged=N gated=N error=N unreadable=N ungated=N categories=N
-#         findings=N advisor_tool_findings=N"
+#         findings=N advisor_tool_findings=N sandbox_sessions=N"
 # Exit:   0 written, 1 a file could not be written, 2 usage (no such dir, no jq)
 #
 # Why. L2 reads with Glob and Read, and both stop at 200 entries. A findings dir holds three files
@@ -23,7 +24,7 @@
 # Columns of rollup.tsv:
 #   hash status project source nested is_advisor parent outcome user_message_count turn_count
 #   tool_call_count duration_minutes models_used findings skills_invoked_count skills_invoked_counts
-#   skills_authored instructions_given_count sandbox_shape_denies
+#   skills_authored instructions_given_count sandbox_shape_denies sandbox
 # status is triaged, gated (the noise gate's "skipped": "below_noise_gate" stub), error (the record
 # has an "error" key) or unreadable (the findings JSON does not parse, or its findings is not an
 # array, checked before the gate). Every status but gated is the set compute_fanout_stats in run.sh
@@ -38,6 +39,15 @@
 # sandbox_shape_denies is the sidecar's count of denies signed by the sandbox-shape guard. It is
 # blank, never 0, when the sidecar is missing, broken, predates the field, holds a non-number, or
 # comes from a harness that does not measure it (omp).
+# sandbox is yes for a skill-creator trigger eval run, no otherwise. Those run `claude -p` from
+# /private/var/folders/<x>/<y>/T/trig-<id>/repo, so the bucket is -private-var-folders-...-T-trig-<id>[-repo].
+# The session's real cwd decides, from AUTODREAM_SESSION_CWDS (hash<TAB>cwd rows the runner built
+# from the session paths before any model ran; ? means unknown). Only an unknown cwd falls back to
+# the project key, which the runner overwrote from the session's bucket, anchored at both ends (an
+# ordinary checkout at /Users/x/T/trig-parser is not a sandbox). The trial dirs are deleted after
+# a run, so the cwd often cannot be resolved and the key is what decides.
+# categories.tsv counts a session once as real or sandbox: weighted = sessions_real +
+# floor(sessions_sandbox / 4), and sessions = sessions_real + sessions_sandbox.
 # Text cells are escaped by jq's @tsv, so a tab or newline in a value never breaks a row.
 
 set -u
@@ -51,8 +61,8 @@ OUT=${2:-$DIR}
 [ -d "$OUT" ] || { echo "rollup.sh: no output dir: '${OUT}'" >&2; exit 2; }
 command -v jq >/dev/null 2>&1 || { echo "rollup.sh: jq not found" >&2; exit 2; }
 
-ROLLUP_HEADER='hash	status	project	source	nested	is_advisor	parent	outcome	user_message_count	turn_count	tool_call_count	duration_minutes	models_used	findings	skills_invoked_count	skills_invoked_counts	skills_authored	instructions_given_count	sandbox_shape_denies'
-CATEGORIES_HEADER='category	severity	sessions	findings	example_hashes'
+ROLLUP_HEADER='hash	status	project	source	nested	is_advisor	parent	outcome	user_message_count	turn_count	tool_call_count	duration_minutes	models_used	findings	skills_invoked_count	skills_invoked_counts	skills_authored	instructions_given_count	sandbox_shape_denies	sandbox'
+CATEGORIES_HEADER='category	severity	sessions	findings	example_hashes	sessions_real	sessions_sandbox	weighted'
 FINDINGS_HEADER='hash	category	severity	what'
 
 # One findings JSON (stdin: the record; $st: the sidecar, [] when missing or unreadable) -> an
@@ -133,13 +143,21 @@ session_hashes() {
   done | LC_ALL=C sort
 }
 
-# stdin: 17-column rows -> 19 columns, source after project and parent after is_advisor.
+# stdin: 17-column rows -> 20 columns, source after project, parent after is_advisor and sandbox last.
 # The source comes from AUTODREAM_SOURCE_MAP when the runner passes it: that map was built before
 # any model ran, and an L1 worker holds the Write tool and can rewrite sessions-source.txt. The
 # file is the fallback for a standalone run.
 join_source_parent() {
   awk -F'\t' -v OFS='\t' -v src="$DIR/sessions-source.txt" -v fan="$DIR/fanouts.tsv" '
+    function sandbox(h, project) {
+      if ((h in cwd) && cwd[h] != "" && cwd[h] != "?") return (cwd[h] ~ cwdpat) ? "yes" : "no"
+      return (project ~ keypat) ? "yes" : "no"
+    }
     BEGIN {
+      cwdpat = "^/private/var/folders/.+/T/trig-[^/]+(/repo)?$"
+      keypat = "^-private-var-folders-.+-T-trig-[A-Za-z0-9_-]+$"
+      n = split(ENVIRON["AUTODREAM_SESSION_CWDS"], rows, "\n")
+      for (i = 1; i <= n; i++) { split(rows[i], a, "\t"); if (a[1] != "" && !(a[1] in cwd)) cwd[a[1]] = a[2] }
       if (ENVIRON["AUTODREAM_SOURCE_MAP"] != "") {
         n = split(ENVIRON["AUTODREAM_SOURCE_MAP"], lines, "\n")
         for (i = 1; i <= n; i++) { split(lines[i], a, "\t"); if (a[1] != "" && !(a[1] in s)) s[a[1]] = a[2] }
@@ -148,12 +166,13 @@ join_source_parent() {
       }
       while ((getline line < fan) > 0) { split(line, a, "\t"); if (!(a[1] in p)) p[a[1]] = a[2] }
     }
-    { print $1, $2, $3, s[$1], $4, $5, p[$1], $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17 }'
+    { print $1, $2, $3, s[$1], $4, $5, p[$1], $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, sandbox($1, $3) }'
 }
 
 # stdin: rollup.tsv body -> categories.tsv body. One row per category and severity, plus one
 # row per category with severity "all", whose sessions column is the category's count across
-# severities (a session with a high and a low finding counts once there). An advisor's findings
+# severities (a session with a high and a low finding counts once there). Each counted session is
+# real or sandbox (column 20), and the owner's flag is the one that counts. An advisor's findings
 # are counted under its parent session, so a parent and its advisor with the same finding are one
 # session, as PROMPT.md asks; the example hashes stay the real ones. An advisor's tool-behavior
 # findings (sandbox_friction, tool_loop, missed_skill) are not counted at all: L1 suppresses them
@@ -164,16 +183,20 @@ tally_categories() {
     BEGIN { advisor_tool["sandbox_friction"]; advisor_tool["tool_loop"]; advisor_tool["missed_skill"] }
     $14 != "" {
       owner = ($6 == "true" && $7 != "") ? $7 : $1
+      sb = $20
       n = split($14, f, ",")
       for (i = 1; i <= n; i++) {
         c = f[i]; sub(/:[^:]*$/, "", c)
         if ($6 == "true" && (c in advisor_tool)) continue
-        count(f[i], owner, $1); count(c ":all", owner, $1)
+        count(f[i], owner, $1, sb); count(c ":all", owner, $1, sb)
       }
     }
-    function count(k, owner, h) {
+    function count(k, owner, h, sb) {
       findings[k]++
-      if (!((k, owner) in owned)) { owned[k, owner] = 1; sessions[k]++ }
+      if (!((k, owner) in owned)) {
+        owned[k, owner] = 1; sessions[k]++
+        if (sb == "yes") sandboxed[k]++; else real[k]++
+      }
       if (!((k, h) in shown) && examples[k] < 5) {
         shown[k, h] = 1; examples[k]++
         ex[k] = (ex[k] == "" ? h : ex[k] "," h)
@@ -184,7 +207,8 @@ tally_categories() {
       for (k in findings) {
         c = k; sub(/:[^:]*$/, "", c); v = k; sub(/^.*:/, "", v)
         r = (v in rank) ? rank[v] : 4
-        print findings[c ":all"], c, r, v, sessions[k], findings[k], ex[k]
+        print findings[c ":all"], c, r, v, sessions[k], findings[k], ex[k],
+          real[k] + 0, sandboxed[k] + 0, real[k] + int(sandboxed[k] / 4)
       }
     }' | LC_ALL=C sort -t "$(printf '\t')" -k1,1nr -k2,2 -k3,3n | cut -f2,4-
 }
@@ -223,12 +247,13 @@ printf '%s\n' "$BODY" | awk -F'\t' \
   -v finds="$(printf '%s\n' "$FINDS" | sed '/^$/d' | wc -l | tr -d ' ')" '
   NF {
     rows++; n[$2]++
+    if ($2 != "gated" && $20 == "yes") sbx++
     if ($6 == "true") {
       k = split($14, f, ",")
       for (i = 1; i <= k; i++) if (f[i] ~ /^(sandbox_friction|tool_loop|missed_skill):/) adv++
     }
   }
   END {
-    printf "rollup: rows=%d triaged=%d gated=%d error=%d unreadable=%d ungated=%d categories=%d findings=%d advisor_tool_findings=%d\n",
-      rows, n["triaged"], n["gated"], n["error"], n["unreadable"], rows - n["gated"], cats, finds, adv
+    printf "rollup: rows=%d triaged=%d gated=%d error=%d unreadable=%d ungated=%d categories=%d findings=%d advisor_tool_findings=%d sandbox_sessions=%d\n",
+      rows, n["triaged"], n["gated"], n["error"], n["unreadable"], rows - n["gated"], cats, finds, adv, sbx
   }'
