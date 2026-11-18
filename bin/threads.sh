@@ -962,12 +962,8 @@ PY
 threads_cleanup_tmp() {
   local path
   for path in "$@"; do
-    if command -v trash >/dev/null 2>&1; then
-      trash "$path" >/dev/null 2>&1 && continue
-    fi
-    [ -e "$path" ] || continue
-    find "$path" -depth -type f -exec unlink {} \; 2>/dev/null
-    find "$path" -depth -type d -exec rmdir {} \; 2>/dev/null
+    [ -n "$path" ] || continue
+    rm -rf -- "$path"
   done
 }
 
