@@ -133,6 +133,9 @@
 #                        inbox note surface + report publishing       default: unset (off)
 #   AUTODREAM_VAULT_BIN  override the resolved vault-notes.sh path, authoritative
 #   AUTODREAM_XBOOKMARKS_BIN override the resolved x-bookmarks.sh path, authoritative
+#   AUTODREAM_REPORTS_BIN    override the resolved report-scripts.sh path, authoritative
+#                            (the allowlist is $AUTODREAM_DIR/report-scripts.conf; the knobs
+#                            AUTODREAM_REPORT_TIMEOUT and AUTODREAM_REPORT_MAX_BYTES are in report-scripts.sh)
 #   AUTODREAM_PRUNE_ROOTS    colon-separated dirs to search for repos whose finished
 #                            worktrees and branches are pruned     default: unset (off)
 #   AUTODREAM_PRUNE_BIN      override the resolved prune-worktrees.sh path, authoritative
@@ -414,6 +417,14 @@ if [ -n "${AUTODREAM_XBOOKMARKS_BIN:-}" ]; then
 else
   XBOOKMARKS="$SCRIPT_DIR/x-bookmarks.sh"
   [ -x "$XBOOKMARKS" ] || XBOOKMARKS="$AUTODREAM_DIR/x-bookmarks.sh"
+fi
+# Report-script collector: runs the allowlisted commands operator notes ask for, because L2 has
+# Read and Glob only. A missing conf means no reports. Override is authoritative, as above.
+if [ -n "${AUTODREAM_REPORTS_BIN:-}" ]; then
+  REPORT_SCRIPTS="$AUTODREAM_REPORTS_BIN"
+else
+  REPORT_SCRIPTS="$SCRIPT_DIR/report-scripts.sh"
+  [ -x "$REPORT_SCRIPTS" ] || REPORT_SCRIPTS="$AUTODREAM_DIR/report-scripts.sh"
 fi
 # Worktree and branch pruner. Opt-in through AUTODREAM_PRUNE_ROOTS, so an install that
 # never sets it runs the helper as a no-op. Override is authoritative, as above.
@@ -3724,6 +3735,29 @@ unassembled_dates() {
     | sort | tail -n "$window")
   printf '%s|%s' "$out" "$legacy"
 }
+# The collector and the portable.sh it sources are code this run executes with the operator's
+# privileges, after L1 workers (which hold Write) have run. Their sha256 values are taken before
+# the first model call and checked again before the collector starts. Prints both hashes, one per
+# line, or fails when either file cannot be read or hashed (a failed hash is never "unchanged").
+report_collector_fingerprint() {
+  local f lib
+  lib="$(dirname "$REPORT_SCRIPTS")/portable.sh"
+  [ -r "$lib" ] || lib="$(dirname "$(readlink "$REPORT_SCRIPTS" 2>/dev/null || echo "$REPORT_SCRIPTS")")/portable.sh"
+  for f in "$REPORT_SCRIPTS" "$lib"; do
+    shasum -a 256 -- "$f" 2>/dev/null | cut -d' ' -f1 | grep -E '^[0-9a-f]{64}$' || return 1
+  done
+}
+
+# Whatever stops the collector from finishing must not leave an earlier run's report files in the
+# findings dir (a forced rerun keeps the directory): L2 would read the old index and answer a note
+# from output nobody collected tonight.
+# Returns 1 when the earlier files could not be removed or the new index not written: the caller
+# stops the run, because L2 would otherwise read last night's rows as tonight's.
+report_scripts_unavailable() { # $1=why
+  log "report scripts unavailable: $1"
+  find "$FINDINGS_DIR" -maxdepth 1 \( -name 'report-*.md' -o -name report-index.txt \) -exec rm -f {} + || return 1
+  printf '# report-scripts: unavailable (%s); nothing was collected\n' "$1" > "$FINDINGS_DIR/report-index.txt" || return 1
+}
 
 run() {
   log "===== autodream start: $(date) ====="
@@ -3916,6 +3950,8 @@ run() {
   log "found $RAW session files; excluded $EXCLUDED autodream-own, skipped $SKIPPED_EMPTY empty; $COUNT to triage; $OUT_OF_WINDOW out of window (modified since the day began, nothing inside it)"
 
   if [ "$COUNT" -eq 0 ]; then
+    # No L2 runs on this path, so no model reads a report file tonight: report scripts are not
+    # collected here, as operator notes and bookmarks are not.
     log "no sessions to triage; writing stub report and exiting"
     THREAD_SOURCE_ROWS=$(thread_source_rows "$(pdate_shift "$TARGET_DATE" -13 d)" "$TARGET_DATE" 2>/dev/null) || THREAD_SOURCE_ROWS=""
     THREADS_REFRESH_KEYS=""
@@ -4141,6 +4177,18 @@ EOF
       log "WARNING: could not read pins-applied.tsv; this run will not store memory pins"
       PINS_LEDGER_OK=0
     fi
+  fi
+
+  # The report-script allowlist gets the same treatment, for a worse reason: the collector
+  # EXECUTES what the conf names. An L1 worker reads untrusted transcripts and holds the Write
+  # tool, so it could rewrite the conf (or a script the conf names) and have the collector run
+  # the result with this user's privileges. The conf and each script's sha256 are held here,
+  # before the first model call, and the collector runs only what this snapshot lists.
+  REPORT_SNAPSHOT=""
+  REPORT_COLLECTOR_FP=""
+  if [ -x "$REPORT_SCRIPTS" ]; then
+    REPORT_COLLECTOR_FP=$(report_collector_fingerprint) || REPORT_COLLECTOR_FP=""
+    REPORT_SNAPSHOT=$(AUTODREAM_DIR="$AUTODREAM_DIR" "$REPORT_SCRIPTS" snapshot 2>/dev/null) || REPORT_SNAPSHOT="#unavailable"
   fi
 
   # ---- Layer 1: haiku triage, parallel, retried across sleep/network gaps ----
@@ -4884,6 +4932,29 @@ PY
     "$XBOOKMARKS" collect "$FINDINGS_DIR" || log "x-bookmark collection failed (continuing)"
   else
     log "x-bookmarks.sh not found at $XBOOKMARKS; skipping bookmark collection"
+  fi
+
+  # ---- Report scripts (writes report-<name>.md and report-index.txt for L2 to read) ----
+  # An operator note that asks for a command's output is answered from these files, because L2
+  # cannot run anything. Each allowlisted entry in $AUTODREAM_DIR/report-scripts.conf runs here
+  # with a timeout, and a failing one still writes its file with the failure as the content. A new
+  # report is a conf line, never a change to this file or the prompt. It runs from the snapshot taken
+  # before L1, never from the live conf. Best-effort, like the seams above.
+  REPORT_SEAM_OK=1
+  if [ ! -x "$REPORT_SCRIPTS" ]; then
+    report_scripts_unavailable "report-scripts.sh not found at $REPORT_SCRIPTS" || REPORT_SEAM_OK=0
+  elif [ -z "$REPORT_COLLECTOR_FP" ] || [ "$(report_collector_fingerprint)" != "$REPORT_COLLECTOR_FP" ]; then
+    report_scripts_unavailable "report-scripts.sh or portable.sh changed since the run started, or could not be hashed" || REPORT_SEAM_OK=0
+  else
+    REPORT_SNAPSHOT_FILE=$(mktemp "${TMPDIR:-/tmp}/report-snapshot.XXXXXX") \
+      && printf '%s\n' "${REPORT_SNAPSHOT:-#unavailable}" > "$REPORT_SNAPSHOT_FILE" \
+      && AUTODREAM_DIR="$AUTODREAM_DIR" "$REPORT_SCRIPTS" collect "$FINDINGS_DIR" "$REPORT_SNAPSHOT_FILE" \
+      || report_scripts_unavailable "report-script collection failed" || REPORT_SEAM_OK=0
+    rm -f "${REPORT_SNAPSHOT_FILE:-}"
+  fi
+  if [ "$REPORT_SEAM_OK" != 1 ]; then
+    log_fatal "cannot clear the earlier run's report files in $FINDINGS_DIR; refusing to let L2 read them as tonight's"
+    fatal_exit; return 1
   fi
 
   # ---- Was the queryId scraping walk actually exercised tonight? (#38) ----
