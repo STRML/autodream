@@ -65,10 +65,15 @@ AUTODREAM_DIR="${AUTODREAM_DIR:-$HOME/.claude/autodream}"
 CONF="$AUTODREAM_DIR/report-scripts.conf"
 TIMEOUT_S="${AUTODREAM_REPORT_TIMEOUT:-60}"
 MAX_BYTES="${AUTODREAM_REPORT_MAX_BYTES:-100000}"
-case "$TIMEOUT_S" in ''|*[!0-9]*|0) TIMEOUT_S=60 ;; esac
-case "$MAX_BYTES" in ''|*[!0-9]*|0) MAX_BYTES=100000 ;; esac
+case "$TIMEOUT_S" in ''|*[!0-9]*) TIMEOUT_S=60 ;; esac
+case "$MAX_BYTES" in ''|*[!0-9]*) MAX_BYTES=100000 ;; esac
 KILL_GRACE="${AUTODREAM_REPORT_KILL_GRACE:-5}"
-case "$KILL_GRACE" in ''|*[!0-9]*|0) KILL_GRACE=5 ;; esac
+case "$KILL_GRACE" in ''|*[!0-9]*) KILL_GRACE=5 ;; esac
+# 10#: a value with a leading zero (08) is a number here, not a bad octal that aborts the collector.
+TIMEOUT_S=$((10#$TIMEOUT_S)); MAX_BYTES=$((10#$MAX_BYTES)); KILL_GRACE=$((10#$KILL_GRACE))
+[ "$TIMEOUT_S" -gt 0 ] || TIMEOUT_S=60
+[ "$MAX_BYTES" -gt 0 ] || MAX_BYTES=100000
+[ "$KILL_GRACE" -gt 0 ] || KILL_GRACE=5
 FILE_LIMIT_KB=$((MAX_BYTES * 4 / 1024 + 1))
 if [ -n "${AUTODREAM_REPORT_TIMEOUT_BIN+x}" ]; then TIMEOUT_BIN="$AUTODREAM_REPORT_TIMEOUT_BIN"
 else TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"; fi
@@ -90,13 +95,21 @@ hash_of() {
   shasum -a 256 -- "$1" 2>/dev/null | cut -d' ' -f1 | grep -E '^[0-9a-f]{64}$' || printf -- '-'
 }
 
+# $1=signal name, $2=pid -> the signal to the process and every descendant, children first
+kill_tree() {
+  local c
+  for c in $(pgrep -P "$2" 2>/dev/null); do kill_tree "$1" "$c"; done
+  kill -s "$1" "$2" 2>/dev/null
+}
+
 # $1=seconds, rest=command -> runs it bounded: TERM at the timeout, KILL KILL_GRACE seconds later.
-# A command that traps or ignores TERM must not be able to hold the nightly run.
+# A command that traps or ignores TERM must not be able to hold the nightly run, and the processes
+# it started must not outlive it (the timeout binary signals the whole group; the watchdog walks the tree).
 run_bounded() {
   local secs="$1" pid wd rc; shift
   if [ -n "$TIMEOUT_BIN" ]; then "$TIMEOUT_BIN" -k "$KILL_GRACE" "$secs" "$@"; return $?; fi
   "$@" & pid=$!
-  ( sleep "$secs"; kill "$pid" 2>/dev/null; sleep "$KILL_GRACE"; kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 & wd=$!
+  ( sleep "$secs"; kill_tree TERM "$pid"; sleep "$KILL_GRACE"; kill_tree KILL "$pid" ) >/dev/null 2>&1 & wd=$!
   wait "$pid"; rc=$?
   kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
   return "$rc"
@@ -121,7 +134,8 @@ collect() {
   [ -n "$fdir" ] && [ -d "$fdir" ] && [ -w "$fdir" ] || { echo "report-scripts: findings dir not writable: $fdir" >&2; return 1; }
   local work; work=$(mktemp -d "${TMPDIR:-/tmp}/report-scripts.XXXXXX") || { echo "report-scripts: no temp dir" >&2; return 1; }
   # A rerun of the same date must not leave the report of an entry that has left the conf.
-  find "$fdir" -maxdepth 1 \( -name 'report-*.md' -o -name report-index.txt \) -exec rm -f {} +
+  find "$fdir" -maxdepth 1 \( -name 'report-*.md' -o -name report-index.txt \) -exec rm -f {} + \
+    || { echo "report-scripts: could not remove the earlier report files in $fdir" >&2; rm -rf "$work"; return 1; }
 
   local rows="$work/rows" n=0 line want lineno=0 name path cmd_text rc t0 reason status out err lname wfail=0 now
   local -a words args
@@ -223,23 +237,24 @@ collect() {
 write_report() {
   local fdir="$1" name="$2" cmd="$3" exit_text="$4" failure="$5" out="$6" err="$7"
   local tmp="$fdir/.report-$name.tmp" size=0
-  {
-    printf '# report-%s: %s | %s | %s\n' "$name" "$cmd" "$exit_text" "$(utc_now)"
-    [ -n "$failure" ] && printf '%s\n' "$failure"
-    if [ -n "$out" ] && [ -f "$out" ]; then
-      size=$(wc -c < "$out" | tr -d ' ')
-      if [ "$size" -gt "$MAX_BYTES" ]; then
-        head -c "$MAX_BYTES" "$out"
-        printf '\n[truncated at %s of %s bytes]\n' "$MAX_BYTES" "$size"
-      else
-        cat "$out"
-      fi
+  # Every write is checked on its own: the status of a brace group is its last command, and a
+  # full disk can fail an earlier write while a later one succeeds.
+  printf '# report-%s: %s | %s | %s\n' "$name" "$cmd" "$exit_text" "$(utc_now)" > "$tmp" || return 1
+  if [ -n "$failure" ]; then printf '%s\n' "$failure" >> "$tmp" || return 1; fi
+  if [ -n "$out" ] && [ -f "$out" ]; then
+    size=$(wc -c < "$out" | tr -d ' ')
+    if [ "$size" -gt "$MAX_BYTES" ]; then
+      head -c "$MAX_BYTES" "$out" >> "$tmp" || return 1
+      printf '\n[truncated at %s of %s bytes]\n' "$MAX_BYTES" "$size" >> "$tmp" || return 1
+    else
+      cat "$out" >> "$tmp" || return 1
     fi
-    if [ -n "$failure" ] && [ -n "$err" ] && [ -s "$err" ]; then
-      printf -- '--- stderr (last 20 lines) ---\n'
-      tail -n 20 "$err" | head -c 4000
-    fi
-  } > "$tmp" && mv "$tmp" "$fdir/report-$name.md"
+  fi
+  if [ -n "$failure" ] && [ -n "$err" ] && [ -s "$err" ]; then
+    printf -- '--- stderr (last 20 lines) ---\n' >> "$tmp" || return 1
+    tail -n 20 "$err" | head -c 4000 >> "$tmp" || return 1
+  fi
+  mv "$tmp" "$fdir/report-$name.md"
 }
 
 case "${1:-}" in

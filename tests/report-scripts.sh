@@ -141,6 +141,36 @@ AUTODREAM_REPORT_TIMEOUT_BIN="" TMO=1 KG=1 collect
 [ $((SECONDS - t0)) -lt 20 ] && ok "watchdog: collector returned in $((SECONDS - t0))s" || no "the built-in watchdog did not KILL a TERM-ignoring command"
 assert_eq "$(row deaf)" "timeout" "watchdog: row says timeout"
 
+echo "# a timed-out command's own children do not outlive it (timeout binary and watchdog)"
+for mode in bin watchdog; do
+  new_case "kids_$mode"
+  mk_script "$SCRIPTS/kids.sh" <<SH
+#!/bin/bash
+sleep 300 &
+echo \$! > "$C/kid.pid"
+wait
+SH
+  printf 'kids %s\n' "$SCRIPTS/kids.sh" > "$CONF"
+  if [ "$mode" = watchdog ]; then
+    pgrep -P $$ > /dev/null 2>&1; [ $? -le 1 ] || { ok "watchdog: skipped, pgrep cannot read the process table here (the sandbox); CI and launchd can"; continue; }
+    AUTODREAM_REPORT_TIMEOUT_BIN="" TMO=1 KG=1 collect
+  else TMO=1 KG=1 collect; fi
+  kid=$(cat "$C/kid.pid" 2>/dev/null); gone=no
+  for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$kid" 2>/dev/null || { gone=yes; break; }; sleep 0.3; done
+  [ "$gone" = yes ] && ok "$mode: the command's child is gone after the timeout" || { no "$mode: the command's child (pid $kid) outlived the timeout"; kill "$kid" 2>/dev/null; }
+done
+
+echo "# a byte cap with a leading zero is a number, not a bad octal"
+new_case octal
+mk_script "$SCRIPTS/o.sh" <<'SH'
+#!/bin/bash
+echo octal ok
+SH
+printf 'o %s\n' "$SCRIPTS/o.sh" > "$CONF"
+HOME="$C/home" AUTODREAM_DIR="$C/ad" AUTODREAM_REPORT_MAX_BYTES=08 AUTODREAM_REPORT_TIMEOUT=09 AUTODREAM_REPORT_KILL_GRACE=08 bash "$BIN" collect "$F" > "$C/collect.out" 2> "$C/collect.err"
+assert_eq "$?" "0" "MAX_BYTES=08 TIMEOUT=09 KILL_GRACE=08 do not abort the collector"
+assert_grep "$F/report-o.md" 'octal ok' "and the report is written"
+
 echo "# missing and non-executable scripts"
 new_case missing
 mk_script "$SCRIPTS/noexec.sh" <<'SH'
@@ -364,6 +394,22 @@ printf '#unavailable\n' > "$C/snap"
 snap_collect
 assert_no_file "$F/report-good.md" "an unavailable snapshot runs nothing, even with a good conf on disk"
 assert_grep "$F/report-index.txt" 'unavailable' "and the index says the allowlist was unavailable, not that none is configured"
+
+echo "# a write that fails is a write-failed row, not an ok row for a missing or cut-off report"
+new_case partial
+mk_script "$SCRIPTS/p.sh" <<'SH'
+#!/bin/bash
+echo hi
+SH
+long=$(head -c 1200 /dev/zero | tr '\0' 'a')
+printf 'p %s %s\n' "$SCRIPTS/p.sh" "$long" > "$CONF"
+HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" snapshot > "$C/snap" 2> /dev/null
+# SIGXFSZ ignored and a 1 KB file limit: the report's header line (the command is 1.2 KB) cannot be
+# written, while the short index row for a failed write can. The old code wrapped every write in one
+# brace group, whose status is its last command, and recorded an ok row for the report that was not there.
+( trap '' XFSZ; ulimit -f 1; HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" collect "$F" "$C/snap" > "$C/collect.out" 2> "$C/collect.err" )
+assert_eq "$?" "1" "a report that cannot be written makes collect exit 1"
+assert_eq "$(row p)" "write-failed" "and its index row says write-failed"
 
 echo "# a report that cannot be written is a loud failure, not an ok row"
 new_case wfail

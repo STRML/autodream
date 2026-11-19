@@ -3742,6 +3742,16 @@ EOF
   assert_grep    "$(fdir "$root")/report-index.txt" 'could not be hashed' "and the index says so"
   rm -rf "$root"
 }
+test_report_scripts_earlier_files_that_cannot_be_cleared_stop_the_run(){
+  echo "# report scripts: stale files from an earlier run that cannot be removed stop the run instead of reaching L2"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  # A non-empty directory where the index belongs: rm -f cannot remove it.
+  mkdir -p "$(fdir "$root")/report-index.txt/x"
+  run_dream "$root"
+  assert_grep    "$root/autodream/logs/run-$DATE.log" 'refusing to let L2 read them' "the log says why the run stopped"
+  assert_no_file "$root/dreams/$DATE.md" "no report is written over a stale index"
+  rm -rf "$root"
+}
 test_report_scripts_prompt_names_the_index_by_exact_path(){
   echo "# report scripts: PROMPT.md reads report-index.txt by exact path and never globs the findings dir"
   assert_grep "$REPO/prompts/PROMPT.md" '<findings-dir>/report-index.txt' "PROMPT.md names the index path"
@@ -10431,6 +10441,7 @@ _run test_report_scripts_no_conf_still_writes_the_index
 _run test_report_scripts_a_broken_or_missing_collector_never_aborts_the_run
 _run test_report_scripts_a_conf_rewritten_after_the_snapshot_runs_nothing_new
 _run test_report_scripts_a_collector_changed_after_the_run_started_is_not_executed
+_run test_report_scripts_earlier_files_that_cannot_be_cleared_stop_the_run
 _run test_report_scripts_prompt_names_the_index_by_exact_path
 
 [ -z "$_list" ] || exit 0
