@@ -4154,6 +4154,16 @@ EOF
     fi
   fi
 
+  # The report-script allowlist gets the same treatment, for a worse reason: the collector
+  # EXECUTES what the conf names. An L1 worker reads untrusted transcripts and holds the Write
+  # tool, so it could rewrite the conf (or a script the conf names) and have the collector run
+  # the result with this user's privileges. The conf and each script's sha256 are held here,
+  # before the first model call, and the collector runs only what this snapshot lists.
+  REPORT_SNAPSHOT=""
+  if [ -x "$REPORT_SCRIPTS" ]; then
+    REPORT_SNAPSHOT=$(AUTODREAM_DIR="$AUTODREAM_DIR" "$REPORT_SCRIPTS" snapshot 2>/dev/null) || REPORT_SNAPSHOT="#unavailable"
+  fi
+
   # ---- Layer 1: haiku triage, parallel, retried across sleep/network gaps ----
   # Lean-query env (claude-cells internal/claude/query.go pattern): keep subscription
   # OAuth auth but strip per-call bloat — no CLAUDE.md auto-load, no telemetry/error
@@ -4901,9 +4911,14 @@ PY
   # An operator note that asks for a command's output is answered from these files, because L2
   # cannot run anything. Each allowlisted entry in $AUTODREAM_DIR/report-scripts.conf runs here
   # with a timeout, and a failing one still writes its file with the failure as the content. A new
-  # report is a conf line, never a change to this file or the prompt. Best-effort, like the seams above.
+  # report is a conf line, never a change to this file or the prompt. It runs from the snapshot taken
+  # before L1, never from the live conf. Best-effort, like the seams above.
   if [ -x "$REPORT_SCRIPTS" ]; then
-    AUTODREAM_DIR="$AUTODREAM_DIR" "$REPORT_SCRIPTS" collect "$FINDINGS_DIR" || log "report-script collection failed (continuing)"
+    REPORT_SNAPSHOT_FILE=$(mktemp "${TMPDIR:-/tmp}/report-snapshot.XXXXXX") \
+      && printf '%s\n' "${REPORT_SNAPSHOT:-#unavailable}" > "$REPORT_SNAPSHOT_FILE" \
+      && AUTODREAM_DIR="$AUTODREAM_DIR" "$REPORT_SCRIPTS" collect "$FINDINGS_DIR" "$REPORT_SNAPSHOT_FILE" \
+      || log "report-script collection failed (continuing)"
+    rm -f "${REPORT_SNAPSHOT_FILE:-}"
   else
     log "report-scripts.sh not found at $REPORT_SCRIPTS; skipping report-script collection"
   fi

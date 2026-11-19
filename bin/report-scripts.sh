@@ -17,6 +17,16 @@
 #   no `;`. A missing conf is "no reports", never an error. Only the operator edits the conf, so an
 #   operator note (which can come from a phone or a transcript) can never widen what runs.
 #
+# THE ALLOWLIST IS SNAPSHOT BEFORE ANY MODEL RUNS
+#
+# An L1 worker reads untrusted transcripts and holds the Write tool, so it could rewrite the conf, or a
+# script the conf names, and this collector would then run the result with the operator's privileges.
+# run.sh therefore calls `snapshot` before the first model call and keeps the output in memory, then
+# hands it back to `collect`. The snapshot is each entry's line plus the sha256 of its script. `collect`
+# runs only what the snapshot lists, and refuses (status `changed`, nothing executed) a script whose
+# hash differs now, or that did not exist when the snapshot was taken. A `collect` with no snapshot
+# (by hand) reads the conf and checks nothing, because nothing has run since you wrote it.
+#
 # THE FAILURE IS THE CONTENT
 #
 # A non-zero exit, a timeout, a missing or non-executable script, a relative path: each still writes
@@ -28,7 +38,8 @@
 # directory listing stops at 200 entries). It lists every entry, its status and its file.
 #
 # Usage:
-#   report-scripts.sh collect <findings-dir>
+#   report-scripts.sh snapshot                          print the snapshot (run.sh holds it in memory)
+#   report-scripts.sh collect <findings-dir> [snapshot-file]
 #
 # Config (env):
 #   AUTODREAM_DIR                 default $HOME/.claude/autodream
@@ -53,41 +64,75 @@ case "$MAX_BYTES" in ''|*[!0-9]*|0) MAX_BYTES=100000 ;; esac
 
 utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+# $1=path as written in the conf -> the absolute path it means ("~/" is HOME, anything else is kept)
+expand_path() {
+  case "$1" in
+    \~/*) printf '%s' "$HOME/${1#\~/}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# $1=expanded path -> sha256 of the file, or "-" when it is not a readable absolute-path file
+hash_of() {
+  case "$1" in /*) ;; *) printf -- '-'; return 0 ;; esac
+  [ -f "$1" ] && [ -r "$1" ] || { printf -- '-'; return 0; }
+  shasum -a 256 -- "$1" 2>/dev/null | cut -d' ' -f1 | grep -E '^[0-9a-f]{64}$' || printf -- '-'
+}
+
+# Prints "#present" or "#absent" for the conf, then "<sha256 or ->\t<conf line>" per entry line.
+snapshot() {
+  [ -f "$CONF" ] || { printf '#absent\n'; return 0; }
+  printf '#present\n'
+  local line w2
+  while IFS= read -r line || [ -n "$line" ]; do
+    set -- $line
+    [ $# -gt 0 ] || continue
+    case "$1" in '#'*) continue ;; esac
+    w2="${2:-}"
+    printf '%s\t%s\n' "$(hash_of "$(expand_path "$w2")")" "$line"
+  done < "$CONF"
+}
+
 collect() {
-  local fdir="${1:-}"
+  local fdir="${1:-}" snapfile="${2:-}" checked=1
   [ -n "$fdir" ] && [ -d "$fdir" ] && [ -w "$fdir" ] || { echo "report-scripts: findings dir not writable: $fdir" >&2; return 1; }
   local work; work=$(mktemp -d "${TMPDIR:-/tmp}/report-scripts.XXXXXX") || { echo "report-scripts: no temp dir" >&2; return 1; }
   # A rerun of the same date must not leave the report of an entry that has left the conf.
   find "$fdir" -maxdepth 1 \( -name 'report-*.md' -o -name report-index.txt \) -exec rm -f {} +
 
-  local rows="$work/rows" n=0 line lineno=0 name path cmd_text rc t0 reason status out err
+  local rows="$work/rows" n=0 line want lineno=0 name path cmd_text rc t0 reason status out err lname
   local -a words args
   : > "$rows"
   local seen=" "
 
-  if [ -f "$CONF" ]; then
-    while IFS= read -r line || [ -n "$line" ]; do
+  # No snapshot means a manual run: read the conf now and skip the hash check.
+  if [ -z "$snapfile" ]; then snapfile="$work/snapshot"; snapshot > "$snapfile"; checked=0; fi
+  local state; state=$(sed -n 1p "$snapfile" 2>/dev/null)
+
+  if [ "$state" = "#present" ]; then
+    while IFS=$'\t' read -r want line || [ -n "$line" ]; do
+      case "$want" in '#'*) continue ;; esac
       lineno=$((lineno + 1))
       read -r -a words <<< "$line"
       [ "${#words[@]}" -gt 0 ] || continue
-      case "${words[0]}" in '#'*) continue ;; esac
       n=$((n + 1))
       name="${words[0]}"
       if ! printf '%s' "$name" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
-        printf '(line %s)\tinvalid\t-\tname "%s" is not [A-Za-z0-9._-]\n' "$lineno" "$name" >> "$rows"; continue
+        printf '(entry %s)\tinvalid\t-\tname "%s" is not [A-Za-z0-9._-]\n' "$lineno" "$name" >> "$rows"; continue
       fi
-      case "$seen" in *" $name "*)
-        printf '%s\tinvalid\t-\tduplicate name, the first entry keeps report-%s.md\n' "$name" "$name" >> "$rows"; continue ;;
+      # Compared lowercased: Foo and foo are one file on a case-insensitive filesystem.
+      lname=$(printf '%s' "$name" | tr 'A-Z' 'a-z')
+      case "$seen" in *" $lname "*)
+        printf '%s\tinvalid\t-\tduplicate name (names are compared ignoring case), the first entry keeps its file\n' "$name" >> "$rows"; continue ;;
       esac
-      seen="$seen$name "
+      seen="$seen$lname "
       if [ "${#words[@]}" -lt 2 ]; then
         write_report "$fdir" "$name" "(no command)" "not run" "FAILED: the entry has a name and no script path" "" ""
         printf '%s\tinvalid\t%s/report-%s.md\tno script path\n' "$name" "$fdir" "$name" >> "$rows"; continue
       fi
-      path="${words[1]}"
+      path=$(expand_path "${words[1]}")
       args=("${words[@]:2}")
       cmd_text="${words[*]:1}"
-      case "$path" in "~/"*) path="$HOME/${path#\~/}" ;; esac
 
       status=ok; reason=""; rc=0; out="$work/out.$n"; err="$work/err.$n"; : > "$out"; : > "$err"
       case "$path" in
@@ -96,6 +141,9 @@ collect() {
       esac
       if [ "$status" = ok ] && [ ! -f "$path" ]; then status=missing; reason="FAILED: script not found: $path"; fi
       if [ "$status" = ok ] && [ ! -x "$path" ]; then status=missing; reason="FAILED: script is not executable: $path"; fi
+      if [ "$status" = ok ] && [ "$checked" = 1 ] && [ "$(hash_of "$path")" != "$want" ]; then
+        status=changed; reason="FAILED: the script changed since this run started (or did not exist then); not run: $path"
+      fi
       if [ "$status" != ok ]; then
         write_report "$fdir" "$name" "$cmd_text" "not run" "$reason" "" ""
         printf '%s\t%s\t%s/report-%s.md\t%s\n' "$name" "$status" "$fdir" "$name" "${reason#FAILED: }" >> "$rows"; continue
@@ -113,16 +161,16 @@ collect() {
       fi
       write_report "$fdir" "$name" "$cmd_text" "exit $rc" "$reason" "$out" "$err"
       printf '%s\t%s\t%s/report-%s.md\t%s\n' "$name" "$status" "$fdir" "$name" "$cmd_text" >> "$rows"
-    done < "$CONF"
+    done < <(sed 1d "$snapfile")
   fi
 
   local idx="$work/index"
   if [ "$n" -eq 0 ]; then
-    if [ -f "$CONF" ]; then
-      printf '# report-scripts: none configured (%s has no entries)\n' "$CONF" > "$idx"
-    else
-      printf '# report-scripts: none configured (no %s)\n' "$CONF" > "$idx"
-    fi
+    case "$state" in
+      '#present') printf '# report-scripts: none configured (%s has no entries)\n' "$CONF" > "$idx" ;;
+      '#absent') printf '# report-scripts: none configured (no %s)\n' "$CONF" > "$idx" ;;
+      *) printf '# report-scripts: unavailable (the allowlist %s could not be snapshotted before the run, so nothing was run)\n' "$CONF" > "$idx" ;;
+    esac
   else
     printf '# report-scripts: %s entries from %s; columns: name, status, file, detail\n' "$n" "$CONF" > "$idx"
     cat "$rows" >> "$idx"
@@ -156,6 +204,7 @@ write_report() {
 }
 
 case "${1:-}" in
+  snapshot) snapshot; exit $? ;;
   collect) shift; collect "$@"; exit $? ;;
-  *) echo "usage: report-scripts.sh collect <findings-dir>" >&2; exit 64 ;;
+  *) echo "usage: report-scripts.sh snapshot | collect <findings-dir> [snapshot-file]" >&2; exit 64 ;;
 esac

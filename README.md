@@ -342,8 +342,11 @@ command, exit code and UTC time, then stdout, capped at `AUTODREAM_REPORT_MAX_BY
 `report-index.txt`, which lists every entry and its status. A script that exits non-zero, times
 out, is missing or is not executable still gets its file, with `FAILED:` on the first line and
 its stderr, so the report shows the failure instead of nothing. A failing script never stops the run.
-Only you can edit the allowlist, so a note, which can come from a phone, cannot make the run
-execute anything new.
+A note, which can come from a phone, cannot make the run execute anything new. Neither can the
+model workers that read your transcripts: the run snapshots the conf and the sha256 of each listed
+script before any model starts, and runs only that. A script that changed since, or did not exist
+then, is not run and shows as `changed` in the index, so edit the conf or a script between nights,
+not during a run.
 
 `stop-check-counts.sh [--since-hours N]` ships as one such script: it counts the
 `~/.claude/stop-check/verdicts.jsonl` verdicts by kind inside the window (default 36 hours),

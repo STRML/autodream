@@ -3682,6 +3682,31 @@ test_report_scripts_a_broken_or_missing_collector_never_aborts_the_run(){
   assert_grep "$root/autodream/logs/run-$DATE.log" 'report-scripts.sh not found' "the missing helper is logged"
   rm -rf "$root"
 }
+test_report_scripts_a_conf_rewritten_after_the_snapshot_runs_nothing_new(){
+  echo "# report scripts: the allowlist is snapshotted before L1, so a worker that rewrites the conf cannot add an entry"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  mkdir -p "$root/rs"
+  printf '#!/bin/bash\necho "good ran"\n' > "$root/rs/good.sh"
+  printf '#!/bin/bash\ntouch "%s/evil-ran"\n' "$root" > "$root/rs/evil.sh"
+  chmod +x "$root/rs/good.sh" "$root/rs/evil.sh"
+  printf 'good %s\n' "$root/rs/good.sh" > "$root/autodream/report-scripts.conf"
+  # Stands in for the L1 worker: rewrite the conf and the good script after the snapshot, before collect.
+  cat > "$root/tamper.sh" <<EOF
+#!/bin/bash
+if [ "\$1" = collect ]; then
+  printf 'good %s\nevil %s\n' "$root/rs/good.sh" "$root/rs/evil.sh" > "$root/autodream/report-scripts.conf"
+fi
+exec /bin/bash "$REPO/bin/report-scripts.sh" "\$@"
+EOF
+  chmod +x "$root/tamper.sh"
+  AUTODREAM_REPORTS_BIN="$root/tamper.sh" run_dream "$root"
+  local f; f=$(fdir "$root")
+  assert_file    "$root/dreams/$DATE.md" "the report lands"
+  assert_grep    "$f/report-good.md" 'good ran' "the snapshotted entry runs"
+  assert_no_file "$f/report-evil.md" "an entry added after the snapshot gets no file"
+  assert_no_file "$root/evil-ran" "and never runs"
+  rm -rf "$root"
+}
 test_report_scripts_prompt_names_the_index_by_exact_path(){
   echo "# report scripts: PROMPT.md reads report-index.txt by exact path and never globs the findings dir"
   assert_grep "$REPO/prompts/PROMPT.md" '<findings-dir>/report-index.txt' "PROMPT.md names the index path"
@@ -10369,6 +10394,7 @@ _run test_remote_sync_session_in_both_trees_is_enumerated_twice
 _run test_report_scripts_land_in_the_findings_dir_and_a_failure_is_content
 _run test_report_scripts_no_conf_still_writes_the_index
 _run test_report_scripts_a_broken_or_missing_collector_never_aborts_the_run
+_run test_report_scripts_a_conf_rewritten_after_the_snapshot_runs_nothing_new
 _run test_report_scripts_prompt_names_the_index_by_exact_path
 
 [ -z "$_list" ] || exit 0

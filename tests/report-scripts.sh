@@ -236,6 +236,85 @@ rc=0
 HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" collect "$C/does/not/exist" > /dev/null 2> "$C/err" || rc=$?
 [ "$rc" -ne 0 ] && ok "missing findings dir exits non-zero" || no "missing findings dir exited 0"
 
+echo "# names that differ only by case are one name (they are one file on APFS)"
+new_case casedup
+mk_script "$SCRIPTS/c1.sh" <<'SH'
+#!/bin/bash
+echo first
+SH
+mk_script "$SCRIPTS/c2.sh" <<'SH'
+#!/bin/bash
+echo second
+SH
+printf 'Foo %s\nfoo %s\n' "$SCRIPTS/c1.sh" "$SCRIPTS/c2.sh" > "$CONF"
+collect
+assert_grep "$F/report-Foo.md" '^first$' "the first spelling keeps its file"
+assert_eq "$(row foo)" "invalid" "the second spelling is refused"
+assert_nogrep "$F/report-Foo.md" '^second$' "and never overwrites the first"
+
+echo "# the allowlist is a snapshot: a worker that rewrites the conf or a script after it cannot make the collector run anything new"
+snap_case(){ # $1=name; the conf lists one good script; takes the snapshot, as run.sh does before any model runs
+  new_case "$1"
+  mk_script "$SCRIPTS/good.sh" <<'SH'
+#!/bin/bash
+echo "good ran"
+SH
+  printf 'good %s\n' "$SCRIPTS/good.sh" > "$CONF"
+  HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" snapshot > "$C/snap" 2> "$C/snap.err"
+}
+snap_collect(){
+  HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" collect "$F" "$C/snap" > "$C/collect.out" 2> "$C/collect.err"
+  RC=$?
+}
+snap_case tamper_conf
+printf 'good %s\nevil %s\n' "$SCRIPTS/good.sh" "$SCRIPTS/evil.sh" > "$CONF"
+mk_script "$SCRIPTS/evil.sh" <<SH
+#!/bin/bash
+touch "$C/evil-ran"
+SH
+snap_collect
+assert_eq "$RC" "0" "collect with a snapshot exits 0"
+assert_grep "$F/report-good.md" 'good ran' "the snapshotted entry runs"
+assert_no_file "$F/report-evil.md" "an entry added to the conf after the snapshot gets no file"
+assert_no_file "$C/evil-ran" "and is never executed"
+assert_nogrep "$F/report-index.txt" 'evil' "and is not in the index"
+
+snap_case tamper_script
+printf '#!/bin/bash\ntouch "%s/evil-ran"\necho "good ran"\n' "$C" > "$SCRIPTS/good.sh"
+snap_collect
+assert_no_file "$C/evil-ran" "a script rewritten after the snapshot is not executed"
+assert_grep "$F/report-good.md" 'changed since this run started' "its file says why"
+assert_eq "$(row good)" "changed" "index row says changed"
+
+snap_case tamper_new_script
+printf 'later %s\n' "$SCRIPTS/later.sh" >> "$CONF"
+HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" snapshot > "$C/snap" 2> /dev/null
+mk_script "$SCRIPTS/later.sh" <<SH
+#!/bin/bash
+touch "$C/later-ran"
+SH
+snap_collect
+assert_no_file "$C/later-ran" "a script that did not exist at the snapshot is not run when it appears"
+assert_eq "$(row later)" "changed" "index row says changed"
+
+snap_case tamper_absent
+rm -f "$CONF"
+HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" snapshot > "$C/snap" 2> /dev/null
+printf 'good %s\n' "$SCRIPTS/good.sh" > "$CONF"
+snap_collect
+assert_no_file "$F/report-good.md" "a conf created after an absent snapshot is not read"
+assert_grep "$F/report-index.txt" 'none configured' "the index says none configured"
+
+snap_case snapshot_content
+assert_grep "$C/snap" '^#present$' "the snapshot says the conf was present"
+assert_grep "$C/snap" "^[0-9a-f]\{64\}	good $SCRIPTS/good.sh" "each entry carries the sha256 of its script"
+
+snap_case unavailable
+printf '#unavailable\n' > "$C/snap"
+snap_collect
+assert_no_file "$F/report-good.md" "an unavailable snapshot runs nothing, even with a good conf on disk"
+assert_grep "$F/report-index.txt" 'unavailable' "and the index says the allowlist was unavailable, not that none is configured"
+
 echo
 echo "passed: $pass   failed: $fail"
 [ "$fail" -eq 0 ]
