@@ -37,7 +37,7 @@ mk_script(){ # $1=path, then the script body on stdin
   cat > "$1"; chmod +x "$1"
 }
 collect(){ # runs the collector the way run.sh does; sets RC
-  HOME="$C/home" AUTODREAM_DIR="$C/ad" AUTODREAM_REPORT_TIMEOUT="${TMO:-60}" \
+  HOME="$C/home" AUTODREAM_DIR="$C/ad" AUTODREAM_REPORT_TIMEOUT="${TMO:-60}" AUTODREAM_REPORT_KILL_GRACE="${KG:-5}" \
     bash "$BIN" collect "$F" > "$C/collect.out" 2> "$C/collect.err"
   RC=$?
 }
@@ -116,6 +116,30 @@ assert_eq "$RC" "0" "a timed-out entry never fails the collector"
 assert_grep "$F/report-slow.md" 'timed out after 1s' "file says it timed out and for how long"
 assert_grep "$F/report-slow.md" 'started' "timeout keeps what was printed before the kill"
 assert_eq "$(row slow)" "timeout" "index row says timeout"
+
+echo "# a command that ignores TERM is KILLed after the grace period (the timeout binary, and the built-in watchdog)"
+new_case deaf
+mk_script "$SCRIPTS/deaf.sh" <<'SH'
+#!/bin/bash
+trap '' TERM
+while :; do sleep 1; done
+SH
+printf 'deaf %s\n' "$SCRIPTS/deaf.sh" > "$CONF"
+t0=$SECONDS
+TMO=1 KG=1 collect
+[ $((SECONDS - t0)) -lt 20 ] && ok "timeout -k: collector returned in $((SECONDS - t0))s" || no "a TERM-ignoring command held the collector"
+assert_eq "$(row deaf)" "timeout" "and its row says timeout"
+new_case deaf2
+mk_script "$SCRIPTS/deaf.sh" <<'SH'
+#!/bin/bash
+trap '' TERM
+while :; do sleep 1; done
+SH
+printf 'deaf %s\n' "$SCRIPTS/deaf.sh" > "$CONF"
+t0=$SECONDS
+AUTODREAM_REPORT_TIMEOUT_BIN="" TMO=1 KG=1 collect
+[ $((SECONDS - t0)) -lt 20 ] && ok "watchdog: collector returned in $((SECONDS - t0))s" || no "the built-in watchdog did not KILL a TERM-ignoring command"
+assert_eq "$(row deaf)" "timeout" "watchdog: row says timeout"
 
 echo "# missing and non-executable scripts"
 new_case missing
@@ -217,18 +241,28 @@ collect
 assert_no_file "$F/report-b.md" "a removed entry's old report is gone, L2 cannot read a stale answer"
 assert_file "$F/report-a.md" "the remaining entry is refreshed"
 
-echo "# output is capped"
+echo "# output is capped, in the report and while the command runs"
 new_case big
 mk_script "$SCRIPTS/big.sh" <<'SH'
 #!/bin/bash
-head -c 300000 /dev/zero | tr '\0' 'x'
+head -c 3000 /dev/zero | tr '\0' 'x'
 echo
 SH
 printf 'big %s\n' "$SCRIPTS/big.sh" > "$CONF"
 HOME="$C/home" AUTODREAM_DIR="$C/ad" AUTODREAM_REPORT_MAX_BYTES=1000 bash "$BIN" collect "$F" > /dev/null 2>&1
 sz=$(wc -c < "$F/report-big.md")
-[ "$sz" -lt 2500 ] && ok "a 300 KB report is cut to the cap (file is $sz bytes)" || no "report not capped ($sz bytes)"
+[ "$sz" -lt 2500 ] && ok "a 3 KB report is cut to the 1000-byte cap (file is $sz bytes)" || no "report not capped ($sz bytes)"
 assert_grep "$F/report-big.md" 'truncated' "the cut says so"
+new_case flood
+mk_script "$SCRIPTS/flood.sh" <<'SH'
+#!/bin/bash
+head -c 20000000 /dev/zero | tr '\0' 'x'
+SH
+printf 'flood %s\n' "$SCRIPTS/flood.sh" > "$CONF"
+HOME="$C/home" AUTODREAM_DIR="$C/ad" AUTODREAM_REPORT_MAX_BYTES=1000 bash "$BIN" collect "$F" > /dev/null 2>&1
+sz=$(wc -c < "$F/report-flood.md")
+[ "$sz" -lt 6000 ] && ok "a command that prints 20 MB is stopped long before it fills the disk (report is $sz bytes)" || no "a flooding command was not bounded ($sz bytes)"
+assert_eq "$(row flood)" "failed" "and its row says failed"
 
 echo "# an unwritable findings dir is a loud failure, not a silent one"
 new_case nofind
@@ -305,6 +339,22 @@ snap_collect
 assert_no_file "$F/report-good.md" "a conf created after an absent snapshot is not read"
 assert_grep "$F/report-index.txt" 'none configured' "the index says none configured"
 
+snap_case nohash
+printf '#present\n-\tgood %s\n' "$SCRIPTS/good.sh" > "$C/snap"
+snap_collect
+assert_grep "$F/report-good.md" 'could not be hashed' "a script the snapshot could not hash is refused, not waved through as unchanged"
+assert_eq "$(row good)" "changed" "row says changed"
+assert_nogrep "$F/report-good.md" '^good ran$' "and it did not run"
+
+snap_case hash_fails_twice
+mkdir -p "$C/shim"; printf '#!/bin/bash\nexit 1\n' > "$C/shim/shasum"; chmod +x "$C/shim/shasum"
+PATH="$C/shim:$PATH" HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" snapshot > "$C/snap" 2> /dev/null
+assert_grep "$C/snap" "^-	good " "with shasum failing the snapshot records no hash"
+printf '#!/bin/bash\ntouch "%s/ran-unverified"\n' "$C" > "$SCRIPTS/good.sh"
+PATH="$C/shim:$PATH" HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" collect "$F" "$C/snap" > /dev/null 2>&1
+assert_no_file "$C/ran-unverified" "a hash that fails on both sides is not read as unchanged, so a rewritten script does not run"
+assert_eq "$(row good)" "changed" "row says changed"
+
 snap_case snapshot_content
 assert_grep "$C/snap" '^#present$' "the snapshot says the conf was present"
 assert_grep "$C/snap" "^[0-9a-f]\{64\}	good $SCRIPTS/good.sh" "each entry carries the sha256 of its script"
@@ -314,6 +364,23 @@ printf '#unavailable\n' > "$C/snap"
 snap_collect
 assert_no_file "$F/report-good.md" "an unavailable snapshot runs nothing, even with a good conf on disk"
 assert_grep "$F/report-index.txt" 'unavailable' "and the index says the allowlist was unavailable, not that none is configured"
+
+echo "# a report that cannot be written is a loud failure, not an ok row"
+new_case wfail
+mk_script "$SCRIPTS/w.sh" <<'SH'
+#!/bin/bash
+echo hi
+SH
+printf 'w %s\n' "$SCRIPTS/w.sh" > "$CONF"
+mkdir "$F/.report-w.tmp"
+collect
+assert_eq "$RC" "1" "a report file that cannot be written makes collect exit 1"
+assert_eq "$(row w)" "write-failed" "and the index row says so, not ok"
+new_case wfail_idx
+printf 'w %s\n' "$SCRIPTS/w.sh" > "$CONF"
+ln -s "$C/nodir/x" "$F/.report-index.tmp"
+collect
+assert_eq "$RC" "1" "an index that cannot be written makes collect exit 1"
 
 echo
 echo "passed: $pass   failed: $fail"

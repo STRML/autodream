@@ -51,10 +51,10 @@ jq -nrR --argjson now "$now" --argjson hours "$hours" '
       | select($t != null)
       | {kind: $o.kind, t: $t} ] as $good
   | ($now - $hours * 3600) as $cutoff
-  | ($good | map(select(.t >= $cutoff))) as $recent
+  | ($good | map(select(.t >= $cutoff and .t <= $now))) as $recent
   | ($now | weekstart) as $thisweek
   | ([range(0; 8)] | map($thisweek - . * 7 * 86400) | reverse) as $weeks
-  | ($good | map(select((.t | weekstart) >= $weeks[0] and (.t | weekstart) <= $thisweek))) as $inweeks
+  | ($good | map(select((.t | weekstart) >= $weeks[0] and (.t | weekstart) <= $thisweek and .t <= $now))) as $inweeks
   | ($inweeks | map(.kind) | unique) as $kinds
   | "meta\t\($hours)\t\($cutoff | iso)\t\($now | iso)\t\(($lines | length) - ($good | length))",
     ($recent | group_by(.kind) | map({k: .[0].kind, n: length}) | sort_by(-.n, .k)[] | "kind\t\(.k)\t\(.n)"),

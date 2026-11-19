@@ -3672,14 +3672,22 @@ test_report_scripts_a_broken_or_missing_collector_never_aborts_the_run(){
   echo "# report scripts: a collector that fails, or is not installed, costs a log line and nothing else"
   local root; root=$(setup_env); mk_session "$root" sess1
   printf '#!/bin/bash\nexit 1\n' > "$root/collector.sh"; chmod +x "$root/collector.sh"
+  ln -s "$REPO/bin/portable.sh" "$root/portable.sh"
+  # A forced rerun keeps the findings dir: the earlier run's files must not survive a failed collect.
+  mkdir -p "$(fdir "$root")"; echo stale > "$(fdir "$root")/report-old.md"; echo stale > "$(fdir "$root")/report-index.txt"
   AUTODREAM_REPORTS_BIN="$root/collector.sh" run_dream "$root"
   assert_file "$root/dreams/$DATE.md" "the report lands when the collector exits 1"
   assert_grep "$root/autodream/logs/run-$DATE.log" 'report-script collection failed' "the failure is logged"
+  assert_no_file "$(fdir "$root")/report-old.md" "a failed collect leaves no report file from an earlier run"
+  assert_grep "$(fdir "$root")/report-index.txt" 'unavailable' "and the index says unavailable, not an earlier run's rows"
   rm -rf "$root"
   root=$(setup_env); mk_session "$root" sess1
+  mkdir -p "$(fdir "$root")"; echo stale > "$(fdir "$root")/report-old.md"; echo stale > "$(fdir "$root")/report-index.txt"
   AUTODREAM_REPORTS_BIN="$root/no-such-collector.sh" run_dream "$root"
   assert_file "$root/dreams/$DATE.md" "the report lands when the collector is not installed"
   assert_grep "$root/autodream/logs/run-$DATE.log" 'report-scripts.sh not found' "the missing helper is logged"
+  assert_no_file "$(fdir "$root")/report-old.md" "a missing collector leaves no report file from an earlier run"
+  assert_grep "$(fdir "$root")/report-index.txt" 'unavailable' "and the index says unavailable"
   rm -rf "$root"
 }
 test_report_scripts_a_conf_rewritten_after_the_snapshot_runs_nothing_new(){
@@ -3699,12 +3707,39 @@ fi
 exec /bin/bash "$REPO/bin/report-scripts.sh" "\$@"
 EOF
   chmod +x "$root/tamper.sh"
+  ln -s "$REPO/bin/portable.sh" "$root/portable.sh"
   AUTODREAM_REPORTS_BIN="$root/tamper.sh" run_dream "$root"
   local f; f=$(fdir "$root")
   assert_file    "$root/dreams/$DATE.md" "the report lands"
   assert_grep    "$f/report-good.md" 'good ran' "the snapshotted entry runs"
   assert_no_file "$f/report-evil.md" "an entry added after the snapshot gets no file"
   assert_no_file "$root/evil-ran" "and never runs"
+  rm -rf "$root"
+}
+test_report_scripts_a_collector_changed_after_the_run_started_is_not_executed(){
+  echo "# report scripts: the collector is hashed before L1 and checked again, so a worker that rewrites it gets nothing run"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  ln -s "$REPO/bin/portable.sh" "$root/portable.sh"
+  # A stand-in collector that rewrites itself during `snapshot`, which run.sh calls after it has
+  # fingerprinted the file: what an L1 worker with Write could do before the collector starts.
+  cat > "$root/collector.sh" <<EOF
+#!/bin/bash
+case "\$1" in
+  snapshot) echo '#absent'; echo '# tampered' >> "\$0" ;;
+  collect) touch "$root/collector-ran" ;;
+esac
+EOF
+  chmod +x "$root/collector.sh"
+  AUTODREAM_REPORTS_BIN="$root/collector.sh" run_dream "$root"
+  assert_file    "$root/dreams/$DATE.md" "the report still lands"
+  assert_no_file "$root/collector-ran" "a collector that changed after the fingerprint is not executed"
+  assert_grep    "$(fdir "$root")/report-index.txt" 'changed since the run started' "and the index says why"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" sess1
+  printf '#!/bin/bash\n[ "$1" = collect ] && touch "%s/collector-ran"\nexit 0\n' "$root" > "$root/collector.sh"; chmod +x "$root/collector.sh"
+  AUTODREAM_REPORTS_BIN="$root/collector.sh" run_dream "$root"
+  assert_no_file "$root/collector-ran" "a collector with no portable.sh beside it cannot be fingerprinted, so it is not executed"
+  assert_grep    "$(fdir "$root")/report-index.txt" 'could not be hashed' "and the index says so"
   rm -rf "$root"
 }
 test_report_scripts_prompt_names_the_index_by_exact_path(){
@@ -10395,6 +10430,7 @@ _run test_report_scripts_land_in_the_findings_dir_and_a_failure_is_content
 _run test_report_scripts_no_conf_still_writes_the_index
 _run test_report_scripts_a_broken_or_missing_collector_never_aborts_the_run
 _run test_report_scripts_a_conf_rewritten_after_the_snapshot_runs_nothing_new
+_run test_report_scripts_a_collector_changed_after_the_run_started_is_not_executed
 _run test_report_scripts_prompt_names_the_index_by_exact_path
 
 [ -z "$_list" ] || exit 0

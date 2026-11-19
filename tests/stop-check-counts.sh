@@ -41,6 +41,7 @@ cat > "$LOG" <<EOF
 {"kind":"bad","at":"2026-11-09T00:00:00Z",$M}
 {"kind":"ok","at":"2026-09-28T00:00:00Z",$M}
 {"kind":"ok","at":"2026-09-27T23:59:59Z",$M}
+{"kind":"bad","at":"2026-11-20T00:00:00Z",$M}
 not json at all
 {"kind":"ok",$M}
 {"kind":"ok","at":"garbage",$M}

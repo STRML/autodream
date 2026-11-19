@@ -45,6 +45,12 @@
 #   AUTODREAM_DIR                 default $HOME/.claude/autodream
 #   AUTODREAM_REPORT_TIMEOUT      seconds per entry, then killed            default 60
 #   AUTODREAM_REPORT_MAX_BYTES    cap on one report's body                  default 100000
+#                                 (a command is also limited to 4x this per file it writes, stdout
+#                                 and stderr included, so a command that never stops printing cannot
+#                                 fill the disk before its timeout)
+#   AUTODREAM_REPORT_KILL_GRACE   seconds between the TERM at the timeout and a KILL   default 5
+#   AUTODREAM_REPORT_TIMEOUT_BIN  the timeout binary; set and empty uses the built-in watchdog
+#                                 (default: timeout, then gtimeout, then the watchdog)
 
 set -u
 set -f   # args are literal words: a `*` in the conf must never glob
@@ -61,6 +67,11 @@ TIMEOUT_S="${AUTODREAM_REPORT_TIMEOUT:-60}"
 MAX_BYTES="${AUTODREAM_REPORT_MAX_BYTES:-100000}"
 case "$TIMEOUT_S" in ''|*[!0-9]*|0) TIMEOUT_S=60 ;; esac
 case "$MAX_BYTES" in ''|*[!0-9]*|0) MAX_BYTES=100000 ;; esac
+KILL_GRACE="${AUTODREAM_REPORT_KILL_GRACE:-5}"
+case "$KILL_GRACE" in ''|*[!0-9]*|0) KILL_GRACE=5 ;; esac
+FILE_LIMIT_KB=$((MAX_BYTES * 4 / 1024 + 1))
+if [ -n "${AUTODREAM_REPORT_TIMEOUT_BIN+x}" ]; then TIMEOUT_BIN="$AUTODREAM_REPORT_TIMEOUT_BIN"
+else TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"; fi
 
 utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
@@ -77,6 +88,18 @@ hash_of() {
   case "$1" in /*) ;; *) printf -- '-'; return 0 ;; esac
   [ -f "$1" ] && [ -r "$1" ] || { printf -- '-'; return 0; }
   shasum -a 256 -- "$1" 2>/dev/null | cut -d' ' -f1 | grep -E '^[0-9a-f]{64}$' || printf -- '-'
+}
+
+# $1=seconds, rest=command -> runs it bounded: TERM at the timeout, KILL KILL_GRACE seconds later.
+# A command that traps or ignores TERM must not be able to hold the nightly run.
+run_bounded() {
+  local secs="$1" pid wd rc; shift
+  if [ -n "$TIMEOUT_BIN" ]; then "$TIMEOUT_BIN" -k "$KILL_GRACE" "$secs" "$@"; return $?; fi
+  "$@" & pid=$!
+  ( sleep "$secs"; kill "$pid" 2>/dev/null; sleep "$KILL_GRACE"; kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 & wd=$!
+  wait "$pid"; rc=$?
+  kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
+  return "$rc"
 }
 
 # Prints "#present" or "#absent" for the conf, then "<sha256 or ->\t<conf line>" per entry line.
@@ -100,7 +123,7 @@ collect() {
   # A rerun of the same date must not leave the report of an entry that has left the conf.
   find "$fdir" -maxdepth 1 \( -name 'report-*.md' -o -name report-index.txt \) -exec rm -f {} +
 
-  local rows="$work/rows" n=0 line want lineno=0 name path cmd_text rc t0 reason status out err lname
+  local rows="$work/rows" n=0 line want lineno=0 name path cmd_text rc t0 reason status out err lname wfail=0 now
   local -a words args
   : > "$rows"
   local seen=" "
@@ -127,8 +150,12 @@ collect() {
       esac
       seen="$seen$lname "
       if [ "${#words[@]}" -lt 2 ]; then
-        write_report "$fdir" "$name" "(no command)" "not run" "FAILED: the entry has a name and no script path" "" ""
-        printf '%s\tinvalid\t%s/report-%s.md\tno script path\n' "$name" "$fdir" "$name" >> "$rows"; continue
+        if write_report "$fdir" "$name" "(no command)" "not run" "FAILED: the entry has a name and no script path" "" ""; then
+          printf '%s\tinvalid\t%s/report-%s.md\tno script path\n' "$name" "$fdir" "$name" >> "$rows"
+        else
+          wfail=1; printf '%s\twrite-failed\t-\tcould not write report-%s.md\n' "$name" "$name" >> "$rows"
+        fi
+        continue
       fi
       path=$(expand_path "${words[1]}")
       args=("${words[@]:2}")
@@ -141,16 +168,25 @@ collect() {
       esac
       if [ "$status" = ok ] && [ ! -f "$path" ]; then status=missing; reason="FAILED: script not found: $path"; fi
       if [ "$status" = ok ] && [ ! -x "$path" ]; then status=missing; reason="FAILED: script is not executable: $path"; fi
-      if [ "$status" = ok ] && [ "$checked" = 1 ] && [ "$(hash_of "$path")" != "$want" ]; then
-        status=changed; reason="FAILED: the script changed since this run started (or did not exist then); not run: $path"
+      if [ "$status" = ok ] && [ "$checked" = 1 ]; then
+        # Fail closed: run only when both hashes are real sha256 values and equal. A "-" on both
+        # sides (hashing failed twice) must never read as "unchanged".
+        now=$(hash_of "$path")
+        if ! printf '%s' "$want" | grep -Eq '^[0-9a-f]{64}$' || [ "$now" != "$want" ]; then
+          status=changed; reason="FAILED: the script changed since this run started, did not exist then, or could not be hashed; not run: $path"
+        fi
       fi
       if [ "$status" != ok ]; then
-        write_report "$fdir" "$name" "$cmd_text" "not run" "$reason" "" ""
-        printf '%s\t%s\t%s/report-%s.md\t%s\n' "$name" "$status" "$fdir" "$name" "${reason#FAILED: }" >> "$rows"; continue
+        if write_report "$fdir" "$name" "$cmd_text" "not run" "$reason" "" ""; then
+          printf '%s\t%s\t%s/report-%s.md\t%s\n' "$name" "$status" "$fdir" "$name" "${reason#FAILED: }" >> "$rows"
+        else
+          wfail=1; printf '%s\twrite-failed\t-\tcould not write report-%s.md\n' "$name" "$name" >> "$rows"
+        fi
+        continue
       fi
 
       t0=$SECONDS
-      ( cd "$HOME" 2>/dev/null || cd /; tmo "$TIMEOUT_S" "$path" ${args[@]+"${args[@]}"} ) < /dev/null > "$out" 2> "$err"
+      ( ulimit -f "$FILE_LIMIT_KB" 2>/dev/null; cd "$HOME" 2>/dev/null || cd /; run_bounded "$TIMEOUT_S" "$path" ${args[@]+"${args[@]}"} ) < /dev/null > "$out" 2> "$err"
       rc=$?
       if [ "$rc" -ne 0 ]; then
         if [ $((SECONDS - t0)) -ge "$TIMEOUT_S" ] && { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] || [ "$rc" -eq 143 ]; }; then
@@ -159,8 +195,11 @@ collect() {
           status=failed; reason="FAILED: exited $rc"
         fi
       fi
-      write_report "$fdir" "$name" "$cmd_text" "exit $rc" "$reason" "$out" "$err"
-      printf '%s\t%s\t%s/report-%s.md\t%s\n' "$name" "$status" "$fdir" "$name" "$cmd_text" >> "$rows"
+      if write_report "$fdir" "$name" "$cmd_text" "exit $rc" "$reason" "$out" "$err"; then
+        printf '%s\t%s\t%s/report-%s.md\t%s\n' "$name" "$status" "$fdir" "$name" "$cmd_text" >> "$rows"
+      else
+        wfail=1; printf '%s\twrite-failed\t-\tcould not write report-%s.md\n' "$name" "$name" >> "$rows"
+      fi
     done < <(sed 1d "$snapfile")
   fi
 
@@ -175,9 +214,9 @@ collect() {
     printf '# report-scripts: %s entries from %s; columns: name, status, file, detail\n' "$n" "$CONF" > "$idx"
     cat "$rows" >> "$idx"
   fi
-  cp "$idx" "$fdir/.report-index.tmp" && mv "$fdir/.report-index.tmp" "$fdir/report-index.txt"
+  cp "$idx" "$fdir/.report-index.tmp" && mv "$fdir/.report-index.tmp" "$fdir/report-index.txt" || wfail=1
   rm -rf "$work"
-  return 0
+  return "$wfail"
 }
 
 # write_report <fdir> <name> <command text> <exit text> <failure line or ""> <stdout file or ""> <stderr file or "">

@@ -3735,6 +3735,27 @@ unassembled_dates() {
     | sort | tail -n "$window")
   printf '%s|%s' "$out" "$legacy"
 }
+# The collector and the portable.sh it sources are code this run executes with the operator's
+# privileges, after L1 workers (which hold Write) have run. Their sha256 values are taken before
+# the first model call and checked again before the collector starts. Prints both hashes, one per
+# line, or fails when either file cannot be read or hashed (a failed hash is never "unchanged").
+report_collector_fingerprint() {
+  local f lib
+  lib="$(dirname "$REPORT_SCRIPTS")/portable.sh"
+  [ -r "$lib" ] || lib="$(dirname "$(readlink "$REPORT_SCRIPTS" 2>/dev/null || echo "$REPORT_SCRIPTS")")/portable.sh"
+  for f in "$REPORT_SCRIPTS" "$lib"; do
+    shasum -a 256 -- "$f" 2>/dev/null | cut -d' ' -f1 | grep -E '^[0-9a-f]{64}$' || return 1
+  done
+}
+
+# Whatever stops the collector from finishing must not leave an earlier run's report files in the
+# findings dir (a forced rerun keeps the directory): L2 would read the old index and answer a note
+# from output nobody collected tonight.
+report_scripts_unavailable() { # $1=why
+  find "$FINDINGS_DIR" -maxdepth 1 \( -name 'report-*.md' -o -name report-index.txt \) -exec rm -f {} + 2>/dev/null
+  printf '# report-scripts: unavailable (%s); nothing was collected\n' "$1" > "$FINDINGS_DIR/report-index.txt" 2>/dev/null || true
+  log "report scripts unavailable: $1"
+}
 
 run() {
   log "===== autodream start: $(date) ====="
@@ -4160,7 +4181,9 @@ EOF
   # the result with this user's privileges. The conf and each script's sha256 are held here,
   # before the first model call, and the collector runs only what this snapshot lists.
   REPORT_SNAPSHOT=""
+  REPORT_COLLECTOR_FP=""
   if [ -x "$REPORT_SCRIPTS" ]; then
+    REPORT_COLLECTOR_FP=$(report_collector_fingerprint) || REPORT_COLLECTOR_FP=""
     REPORT_SNAPSHOT=$(AUTODREAM_DIR="$AUTODREAM_DIR" "$REPORT_SCRIPTS" snapshot 2>/dev/null) || REPORT_SNAPSHOT="#unavailable"
   fi
 
@@ -4913,14 +4936,16 @@ PY
   # with a timeout, and a failing one still writes its file with the failure as the content. A new
   # report is a conf line, never a change to this file or the prompt. It runs from the snapshot taken
   # before L1, never from the live conf. Best-effort, like the seams above.
-  if [ -x "$REPORT_SCRIPTS" ]; then
+  if [ ! -x "$REPORT_SCRIPTS" ]; then
+    report_scripts_unavailable "report-scripts.sh not found at $REPORT_SCRIPTS"
+  elif [ -z "$REPORT_COLLECTOR_FP" ] || [ "$(report_collector_fingerprint)" != "$REPORT_COLLECTOR_FP" ]; then
+    report_scripts_unavailable "report-scripts.sh or portable.sh changed since the run started, or could not be hashed"
+  else
     REPORT_SNAPSHOT_FILE=$(mktemp "${TMPDIR:-/tmp}/report-snapshot.XXXXXX") \
       && printf '%s\n' "${REPORT_SNAPSHOT:-#unavailable}" > "$REPORT_SNAPSHOT_FILE" \
       && AUTODREAM_DIR="$AUTODREAM_DIR" "$REPORT_SCRIPTS" collect "$FINDINGS_DIR" "$REPORT_SNAPSHOT_FILE" \
-      || log "report-script collection failed (continuing)"
+      || report_scripts_unavailable "report-script collection failed"
     rm -f "${REPORT_SNAPSHOT_FILE:-}"
-  else
-    log "report-scripts.sh not found at $REPORT_SCRIPTS; skipping report-script collection"
   fi
 
   # ---- Was the queryId scraping walk actually exercised tonight? (#38) ----

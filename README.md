@@ -342,6 +342,8 @@ command, exit code and UTC time, then stdout, capped at `AUTODREAM_REPORT_MAX_BY
 `report-index.txt`, which lists every entry and its status. A script that exits non-zero, times
 out, is missing or is not executable still gets its file, with `FAILED:` on the first line and
 its stderr, so the report shows the failure instead of nothing. A failing script never stops the run.
+A script that ignores the timeout's TERM is killed five seconds later, and no file it writes can
+grow past four times the cap.
 A note, which can come from a phone, cannot make the run execute anything new. Neither can the
 model workers that read your transcripts: the run snapshots the conf and the sha256 of each listed
 script before any model starts, and runs only that. A script that changed since, or did not exist
