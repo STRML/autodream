@@ -310,6 +310,45 @@ Add `expires: YYYY-MM-DD` as YAML frontmatter to a note that should retire itsel
 note is only archived after a report actually read it, so a failed run leaves your
 inbox alone, and so does a note you write while a run is in flight.
 
+### Asking a note to run a command: report scripts
+
+The model that writes the report can read files and nothing else, so a note that says
+"run `review-gate-raises.sh` and quote the rows" cannot be answered by running it. Instead,
+the run executes an allowlist of commands before the model starts and the model reads what
+they printed. A note that asks for a command's output has to name an allowlisted entry.
+When it names none, the report's Operator notes section says so and names the line to add.
+
+The allowlist is `~/.claude/autodream/report-scripts.conf`, one entry per line. A missing
+file means no reports. `install.sh` does not create it.
+
+```bash
+# <name> <absolute path, or ~/...> [args...]       # a `#` line is a comment
+review-gate-raises ~/.claude/scripts/review-gate-raises.sh --since-hours 36
+stop-check-counts  ~/.claude/autodream/stop-check-counts.sh
+```
+
+To add a report script:
+
+1. Write an executable script that prints its rows to stdout and exits 0 when it worked. It
+   runs with no stdin, from `$HOME`, and is killed after 60 seconds (`AUTODREAM_REPORT_TIMEOUT`).
+2. Add one line to `report-scripts.conf`. The name is `[A-Za-z0-9._-]` and unique. Arguments
+   are literal words split on whitespace: no quotes, no `$VAR`, no globs, no `;`.
+3. Nothing else changes: no edit to `run.sh` or the prompt. Check it with
+   `~/.claude/autodream/report-scripts.sh collect <an existing findings dir>` and read
+   `report-index.txt` and `report-<name>.md` there.
+
+Each night's findings directory then holds `report-<name>.md` per entry (a header line with the
+command, exit code and UTC time, then stdout, capped at `AUTODREAM_REPORT_MAX_BYTES`, 100000) and
+`report-index.txt`, which lists every entry and its status. A script that exits non-zero, times
+out, is missing or is not executable still gets its file, with `FAILED:` on the first line and
+its stderr, so the report shows the failure instead of nothing. A failing script never stops the run.
+Only you can edit the allowlist, so a note, which can come from a phone, cannot make the run
+execute anything new.
+
+`stop-check-counts.sh [--since-hours N]` ships as one such script: it counts the
+`~/.claude/stop-check/verdicts.jsonl` verdicts by kind inside the window (default 36 hours),
+then prints an eight-week table by UTC week. It prints counts only, never the quoted text.
+
 ## Ideas from your X bookmarks
 
 Point autodream at your X bookmarks and the report gains an **Ideas from bookmarks**

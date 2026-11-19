@@ -133,6 +133,9 @@
 #                        inbox note surface + report publishing       default: unset (off)
 #   AUTODREAM_VAULT_BIN  override the resolved vault-notes.sh path, authoritative
 #   AUTODREAM_XBOOKMARKS_BIN override the resolved x-bookmarks.sh path, authoritative
+#   AUTODREAM_REPORTS_BIN    override the resolved report-scripts.sh path, authoritative
+#                            (the allowlist is $AUTODREAM_DIR/report-scripts.conf; the knobs
+#                            AUTODREAM_REPORT_TIMEOUT and AUTODREAM_REPORT_MAX_BYTES are in report-scripts.sh)
 #   AUTODREAM_PRUNE_ROOTS    colon-separated dirs to search for repos whose finished
 #                            worktrees and branches are pruned     default: unset (off)
 #   AUTODREAM_PRUNE_BIN      override the resolved prune-worktrees.sh path, authoritative
@@ -414,6 +417,14 @@ if [ -n "${AUTODREAM_XBOOKMARKS_BIN:-}" ]; then
 else
   XBOOKMARKS="$SCRIPT_DIR/x-bookmarks.sh"
   [ -x "$XBOOKMARKS" ] || XBOOKMARKS="$AUTODREAM_DIR/x-bookmarks.sh"
+fi
+# Report-script collector: runs the allowlisted commands operator notes ask for, because L2 has
+# Read and Glob only. A missing conf means no reports. Override is authoritative, as above.
+if [ -n "${AUTODREAM_REPORTS_BIN:-}" ]; then
+  REPORT_SCRIPTS="$AUTODREAM_REPORTS_BIN"
+else
+  REPORT_SCRIPTS="$SCRIPT_DIR/report-scripts.sh"
+  [ -x "$REPORT_SCRIPTS" ] || REPORT_SCRIPTS="$AUTODREAM_DIR/report-scripts.sh"
 fi
 # Worktree and branch pruner. Opt-in through AUTODREAM_PRUNE_ROOTS, so an install that
 # never sets it runs the helper as a no-op. Override is authoritative, as above.
@@ -4884,6 +4895,17 @@ PY
     "$XBOOKMARKS" collect "$FINDINGS_DIR" || log "x-bookmark collection failed (continuing)"
   else
     log "x-bookmarks.sh not found at $XBOOKMARKS; skipping bookmark collection"
+  fi
+
+  # ---- Report scripts (writes report-<name>.md and report-index.txt for L2 to read) ----
+  # An operator note that asks for a command's output is answered from these files, because L2
+  # cannot run anything. Each allowlisted entry in $AUTODREAM_DIR/report-scripts.conf runs here
+  # with a timeout, and a failing one still writes its file with the failure as the content. A new
+  # report is a conf line, never a change to this file or the prompt. Best-effort, like the seams above.
+  if [ -x "$REPORT_SCRIPTS" ]; then
+    AUTODREAM_DIR="$AUTODREAM_DIR" "$REPORT_SCRIPTS" collect "$FINDINGS_DIR" || log "report-script collection failed (continuing)"
+  else
+    log "report-scripts.sh not found at $REPORT_SCRIPTS; skipping report-script collection"
   fi
 
   # ---- Was the queryId scraping walk actually exercised tonight? (#38) ----

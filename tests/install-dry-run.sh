@@ -47,7 +47,7 @@ assert_eq "$(tree_of)" "$BEFORE" "the filesystem is byte-for-byte the same after
 assert_eq "$(sed '/^print /d' "$CALLS")" "" "launchctl only reads job ownership"
 assert_grep "$SANDBOX/install.out" "DRY RUN" "it says it is a dry run"
 assert_grep "$SANDBOX/install.out" "[dry-run] link $SANDBOX/target/autodream/run.sh -> $REPO/bin/run.sh" "it lists the links it would make"
-for f in bin/triage-dream.sh bin/dream-grounding.sh; do
+for f in bin/triage-dream.sh bin/dream-grounding.sh bin/report-scripts.sh bin/stop-check-counts.sh; do
   assert_grep "$SANDBOX/install.out" "[dry-run] link $SANDBOX/target/autodream/$(basename "$f") -> $REPO/$f" "it links $(basename "$f")"
 done
 assert_grep "$SANDBOX/install.out" "[dry-run] link $SANDBOX/target/autodream/TRIAGE_DREAM.md -> $REPO/prompts/TRIAGE_DREAM.md" "and the triage prompt"

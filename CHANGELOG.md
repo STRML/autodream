@@ -2,6 +2,12 @@
 
 All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
+## 2026-11-19
+
+### Added
+- **Report scripts: an operator note can ask for a command's output.** The model that writes the report has Read and Glob only, so a note such as "run `review-gate-raises.sh` and quote the rows" failed silently. `bin/report-scripts.sh` now runs every entry of `$AUTODREAM_DIR/report-scripts.conf` (`<name> <path> [args...]`) before the report is written and leaves `report-<name>.md` and `report-index.txt` in the findings dir, with a timeout, no stdin and no evaluation of arguments. A failing, timed-out or missing script still writes its file with the failure as the content, and never stops the run. PROMPT.md answers a note from those files, and says plainly when a note names a command no entry covers. A new report is one conf line.
+- **`bin/stop-check-counts.sh`**: a model-free report script counting the stop-check verdict log by kind in a window (default 36 hours) and by UTC week for eight weeks. Counts only.
+
 ## 2026-11-18
 
 ### Changed

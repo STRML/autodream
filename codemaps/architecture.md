@@ -31,6 +31,8 @@ bin/run.sh  TARGET_DATE
       │     l1_missing_count → wait_for_network → retry the still-missing
       │
       ├─ run-stats.txt          (self-audit telemetry)
+      ├─ report-scripts.sh collect → findings/<date>/report-index.txt + report-<name>.md
+      │     (each line of $AUTODREAM_DIR/report-scripts.conf, timeout, failure = content; L2 reads the index)
       ├─ changelog_window()      → findings/<date>/changelog-window.md  (git log -p on claude-code CHANGELOG)
       │
       ├─ rollup.sh → findings/<date>/rollup.tsv + categories.tsv + findings.tsv  (what L2 counts from)
@@ -74,6 +76,8 @@ charts with accessible labels and value tables. Category totals use severity=all
 | `bin/autodream-web.py` | authenticated local HTTP boundary, fixed static routes, read APIs and bounded thread actions |
 | `bin/autodream_web_data.py` | artifact readers and per-night cache; lock-derived Progress; allowlisted Stats with null measurements |
 | `web/app.js`, `web/app.css` | five-view navigation, safe markdown, Progress connectivity and SVG Stats charts |
+| `bin/report-scripts.sh` | the allowlist collector: runs each `report-scripts.conf` entry (no eval, no stdin, cwd HOME, timeout) and writes `report-<name>.md` + `report-index.txt`; a failure is the file's content |
+| `bin/stop-check-counts.sh` | model-free report script: stop-check verdict counts by kind in a window + eight UTC weeks |
 | `bin/run.sh` | orchestrator: guard, preflight, adapter load, enumerate+filter, L1 retry loop, changelog, L2 retry loop, pin apply, notify. Every fatal goes through `log_fatal`/`fatal_exit` (marker + banner) |
 | `adapters/<name>/` | one harness. `manifest.json` (DATA — jq-parsed, never sourced) + `adapter.sh` + `facts.md`. Subcommands: `enumerate normalize project stats slim is-self skills-inventory`; contract table in `docs/design/unify-harness-adapters-2026-08-23.md`. `_fixture` is test-only (leading `_` excludes it) |
 | `bin/adapters.sh` | adapter discovery + dispatch. Identity is the DIRECTORY BASENAME (dispatch builds a path from it), must agree with `manifest.name`; realpath containment; refusals go to a file because `adapters_list` runs inside `$(...)` |

@@ -3638,6 +3638,57 @@ if [ -z "$_list" ]; then
   echo "cc-autodream integration tests (mock claude)"
   echo
 fi
+# ---- Report scripts: allowlisted commands an operator note asked for, run before L2 ----
+# The seam under test is run.sh calling bin/report-scripts.sh and the result landing in the findings
+# dir under the names PROMPT.md reads. bin/report-scripts.sh's own matrix is tests/report-scripts.sh.
+test_report_scripts_land_in_the_findings_dir_and_a_failure_is_content(){
+  echo "# report scripts: a run writes report-<name>.md per entry; a failing one is content, the report still lands"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  mkdir -p "$root/rs"
+  printf '#!/bin/bash\necho "gate row 1"\n' > "$root/rs/good.sh"
+  printf '#!/bin/bash\necho "ledger unreadable" >&2\nexit 4\n' > "$root/rs/bad.sh"
+  chmod +x "$root/rs/good.sh" "$root/rs/bad.sh"
+  printf '# reports\ngood %s --since-hours 36\nbad %s\nghost %s\n' "$root/rs/good.sh" "$root/rs/bad.sh" "$root/rs/ghost.sh" \
+    > "$root/autodream/report-scripts.conf"
+  run_dream "$root"
+  local f; f=$(fdir "$root")
+  assert_file    "$root/dreams/$DATE.md"  "the report still lands with a failing report script"
+  assert_grep    "$f/report-good.md" '^gate row 1$' "a working entry's stdout is in report-good.md"
+  assert_grep    "$f/report-bad.md" 'FAILED: exited 4' "a failing entry writes its failure as the content"
+  assert_grep    "$f/report-bad.md" 'ledger unreadable' "and its stderr"
+  assert_grep    "$f/report-ghost.md" 'not found' "a missing script writes a file too"
+  assert_grep    "$f/report-index.txt" "$f/report-good.md" "the index names the exact path L2 reads"
+  rm -rf "$root"
+}
+test_report_scripts_no_conf_still_writes_the_index(){
+  echo "# report scripts: no conf is no reports, and the index says so (one shape for L2)"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  run_dream "$root"
+  assert_file "$root/dreams/$DATE.md" "the report lands"
+  assert_grep "$(fdir "$root")/report-index.txt" 'none configured' "index says none configured"
+  rm -rf "$root"
+}
+test_report_scripts_a_broken_or_missing_collector_never_aborts_the_run(){
+  echo "# report scripts: a collector that fails, or is not installed, costs a log line and nothing else"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  printf '#!/bin/bash\nexit 1\n' > "$root/collector.sh"; chmod +x "$root/collector.sh"
+  AUTODREAM_REPORTS_BIN="$root/collector.sh" run_dream "$root"
+  assert_file "$root/dreams/$DATE.md" "the report lands when the collector exits 1"
+  assert_grep "$root/autodream/logs/run-$DATE.log" 'report-script collection failed' "the failure is logged"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" sess1
+  AUTODREAM_REPORTS_BIN="$root/no-such-collector.sh" run_dream "$root"
+  assert_file "$root/dreams/$DATE.md" "the report lands when the collector is not installed"
+  assert_grep "$root/autodream/logs/run-$DATE.log" 'report-scripts.sh not found' "the missing helper is logged"
+  rm -rf "$root"
+}
+test_report_scripts_prompt_names_the_index_by_exact_path(){
+  echo "# report scripts: PROMPT.md reads report-index.txt by exact path and never globs the findings dir"
+  assert_grep "$REPO/prompts/PROMPT.md" '<findings-dir>/report-index.txt' "PROMPT.md names the index path"
+  assert_grep "$REPO/prompts/PROMPT.md" 'report-scripts.conf' "PROMPT.md names the allowlist file L2 points the operator at"
+  assert_nogrep "$REPO/prompts/PROMPT.md" 'Glob `report-' "PROMPT.md does not glob report files (a Glob stops at 200 entries)"
+}
+
 _run test_happy
 _run test_session_stats
 _run test_unreadable
@@ -7247,7 +7298,7 @@ if [ -z "$_list" ]; then
 fi
 # The suites that drive launchd need plutil and launchctl, so they run on macOS only (CI runs
 # them in launchd.yml, when a launchd file changes).
-_suites="portable rollup lib-project preflight adapters adapter-claude adapter-omp adapter-contract threads-state slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux review-prompt notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt autodream-web shard ci-scope"
+_suites="portable report-scripts stop-check-counts rollup lib-project preflight adapters adapter-claude adapter-omp adapter-contract threads-state slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux review-prompt notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt autodream-web shard ci-scope"
 [ "$(uname -s)" = Darwin ] && _suites="$_suites scheduler-label autodream-now install-review-agent install-web-agent install-dry-run install-dir install-skill"
 for _suite in $_suites; do
   _owns || continue
@@ -10315,6 +10366,10 @@ _run test_remote_sync_one_remote_failed_posts_no_banner
 _run test_remote_sync_missing_rsync_or_ssh_fails_cleanly
 _run test_remote_sync_not_run_once_the_report_is_done
 _run test_remote_sync_session_in_both_trees_is_enumerated_twice
+_run test_report_scripts_land_in_the_findings_dir_and_a_failure_is_content
+_run test_report_scripts_no_conf_still_writes_the_index
+_run test_report_scripts_a_broken_or_missing_collector_never_aborts_the_run
+_run test_report_scripts_prompt_names_the_index_by_exact_path
 
 [ -z "$_list" ] || exit 0
 echo
