@@ -583,6 +583,8 @@ the full history. Keep that operation separate from facet-only backfill.
 - `bin/adapters.sh` — adapter discovery, identity validation and containment
 - `bin/lib-project.sh` — the canonical project encoding and artifact hash every
   adapter must agree on
+- `bin/lib-lock.sh` — the mkdir lock the run, the remote sync and the question-streak
+  store share: a live holder keeps it, only a gone one is reclaimed
 - `bin/preflight.sh` — the shared-dependency gate, run before anything is enumerated
 
 For the internals — data flow, file map, state layout, environment overrides, the

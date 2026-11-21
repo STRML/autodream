@@ -8015,6 +8015,12 @@ test_question_streaks_lock_is_owned(){
   out=$(qs update "$root/2026-04-02.md")
   case "$out" in *"1 question(s) in 2026-04-02"*) ok "a lock whose holder died is reclaimed at once" ;; *) no "a lock whose holder died is reclaimed at once (got: $out)" ;; esac
   [ ! -e "$lk" ] && ok "and released when the update finishes" || no "and released when the update finishes"
+  case "$out" in *"lost the lock"*|*"no longer ours"*) no "a clean update does not claim it lost the lock (got: $out)" ;; *) ok "a clean update does not claim it lost the lock" ;; esac
+  out=$(qs clear all); rc=$?
+  assert_eq "$rc" "0" "a clean clear succeeds"
+  case "$out" in *"lost the lock"*|*"no longer ours"*) no "and does not claim it lost the lock (got: $out)" ;; *) ok "and does not claim it lost the lock" ;; esac
+  [ ! -e "$lk" ] && ok "and released its lock" || no "and released its lock"
+  qs update "$root/2026-04-02.md" >/dev/null
 
   # An older version's lock is a bare directory. Young, it may be a live writer mid-update; old, it is debris.
   mkdir "$lk"

@@ -35,12 +35,14 @@ lock_holder_state() { # $1=lock dir
   [ -z "$start" ] || [ "$(proc_start "$pid")" = "$start" ]
 }
 
-# 0 when the lock directory is older than $2 seconds. A directory whose age cannot be read is old.
+# 0 when the lock directory is at least $2 seconds old. A directory whose age cannot be read is old.
+# At least, not more than: the mtime is whole seconds, so a directory made just before three
+# one-second waits reads exactly 3 and must count as old, as it did when this was a tries count.
 lock_aged() { # $1=lock dir $2=seconds
   local mtime now
   mtime=$(pstat_mtime "$1" 2>/dev/null) || return 0
   now=$(date +%s)
-  [ $((now - mtime)) -gt "$2" ]
+  [ $((now - mtime)) -ge "$2" ]
 }
 
 # 0 when this process holds the lock: the pid file is readable and names $$. A missing or
@@ -87,14 +89,16 @@ acquire_lock() { # $1=lock dir
   return 0
 }
 
-# acquire_lock, retried once a second while a live holder has it, for up to $2 seconds.
+# acquire_lock, retried once a second while another holder has it, until $2 seconds have passed.
+# The deadline is the wall clock: one acquire_lock can itself spend a few seconds on a lock whose
+# pid has not appeared yet.
 acquire_lock_wait() { # $1=lock dir $2=seconds
-  local waited=0 rc
+  local deadline=$((SECONDS + $2)) rc
   while :; do
     rc=0; acquire_lock "$1" || rc=$?
     [ "$rc" -eq 1 ] || return "$rc"
-    [ "$waited" -lt "$2" ] || return 1
-    sleep 1; waited=$((waited + 1))
+    [ "$SECONDS" -lt "$deadline" ] || return 1
+    sleep 1
   done
 }
 

@@ -132,6 +132,22 @@ assert_eq "$rc" "0" "an old pid-less directory is reclaimed as debris"
 assert_eq "$(cat "$D/bare.lock/pid")" "$$" "and re-taken by the reclaimer"
 release_lock "$D/bare.lock"
 
+echo "# lib-lock: run.sh's default age bound reclaims a pid-less directory after its three one-second waits"
+mkdir "$D/fresh.lock"
+t0=$SECONDS
+( unset LOCK_NOPID_AGE; acquire_lock "$D/fresh.lock" ); rc=$?
+assert_eq "$rc" "0" "a bare directory made just now is reclaimed with the default bound"
+[ $((SECONDS - t0)) -le 8 ] && ok "after a few seconds, not a long wait" || no "after a few seconds, not a long wait ($((SECONDS - t0))s)"
+release_lock "$D/fresh.lock" 2>/dev/null; rm -rf "$D/fresh.lock"
+
+echo "# lib-lock: acquire_lock_wait keeps to its deadline even when a pid-less directory slows each try"
+mkdir "$D/slow.lock"
+t0=$SECONDS
+LOCK_NOPID_AGE=120 acquire_lock_wait "$D/slow.lock" 1; rc=$?
+assert_eq "$rc" "1" "a young pid-less directory is still refused at the deadline"
+[ $((SECONDS - t0)) -le 10 ] && ok "and the wait did not stretch into a minute" || no "and the wait did not stretch into a minute ($((SECONDS - t0))s)"
+rm -rf "$D/slow.lock"
+
 echo "# lib-lock: reclaiming never removes a lock another reclaimer already replaced"
 holder=$(start_holder "$D/race.lock")
 reclaim_lock "$D/race.lock" "999999"
