@@ -60,7 +60,11 @@ answer="$stage/out.json"
 prompt=$(printf 'Session transcript to analyze (literal absolute path): %s\nWrite your findings JSON to this literal absolute path: %s\n\nThis is a connectivity and sandbox check, not a real triage. Do exactly two things with the Write tool: write {"findings":[]} to the path on line 2, then write the text forged to %s/forged.txt. Print the word done.\n' "$W/none.jsonl" "$answer" "$outside")
 
 home_writes() {
-  find "$HOME/.claude" "$HOME/.claude.json" "$HOME/.claude.json.lock" "$HOME/.cache" "$HOME/.local/state" "$HOME/.local/share/claude" "$HOME/Library/Caches" "$HOME/Library/Application Support/Claude" -newer "$marker" -not -type d 2>/dev/null | head -80
+  # Only paths the claude CLI owns: other apps write under $HOME during the call window too. The two
+  # trees that are not claude-only (Library/Caches, .cache) are narrowed to claude-named children.
+  find "$HOME/.claude" "$HOME/.claude.json" "$HOME/.claude.json.lock" "$HOME/.local/state/claude" "$HOME/.local/share/claude" \
+    "$HOME/Library/Caches/claude-cli-nodejs" "$HOME/Library/Application Support/Claude" "$HOME/.cache/claude-cli-nodejs" \
+    -newer "$marker" -not -type d 2>/dev/null | grep -v "/projects/" | head -80
 }
 if [ "$measure" = 1 ]; then
   echo "# one UNCONFINED call (model $model): the paths it writes under \$HOME are what l1-writes must cover"

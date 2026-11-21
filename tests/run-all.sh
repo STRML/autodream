@@ -3139,6 +3139,15 @@ test_l1_forged_writes_are_refused_when_confined(){
   rm -rf "$root"
 }
 
+test_l1_work_bucket_is_wiped_before_l2(){
+  echo "# L1 confinement: the work bucket a worker may write is wiped when L1 ends, before L2 launches from it"
+  local root; root=$(setup_env); mk_session "$root" s1
+  MOCK_MODE=l1_plant_bucket MOCK_CAPTURE_DIR="$root/cap" run_dream "$root"
+  assert_file "$root/cap/l2-bucket.txt" "L2 ran and recorded what it found"
+  assert_eq "$(cat "$root/cap/l2-bucket.txt" 2>/dev/null)" "absent" "a file a worker left in the work bucket is gone by the time L2 starts"
+  rm -rf "$root"
+}
+
 test_l1_symlink_answer_is_not_read(){
   echo "# L1 confinement: an answer path that is a symlink is not copied, and fails like any missing answer"
   local root; root=$(setup_env); mk_session "$root" s1
@@ -3167,12 +3176,14 @@ test_l1_staging_failure_is_a_worker_failure_with_evidence(){
 test_l1_confine_names_the_engine_without_a_write_profile(){
   echo "# L1 confinement: an engine whose adapter declares no write profile is reported unconfined"
   local out
-  out=$(bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1); local rc=$?
+  # CLAUDE_CONFIG_DIR and the extras are the caller's, so the list is read with both unset.
+  out=$(env -u CLAUDE_CONFIG_DIR -u AUTODREAM_L1_WRITES_EXTRA -u AUTODREAM_WORK_BUCKET bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1); local rc=$?
   assert_eq "$rc" "0" "the claude adapter answers l1-writes"
-  case "$out" in *"/.claude.json*"*) ok "and lists the .claude.json prefix" ;; *) no "and lists the .claude.json prefix (got: $out)" ;; esac
-  case "$out" in *"/.claude/session-env"*) ok "and a state directory" ;; *) no "and a state directory (got: $out)" ;; esac
-  case "$out" in *"/autodream"*|*"/.claude/settings"*|*"/.claude/hooks"*|*"/.claude/skills"*|*"/.claude/plugins"*) no "and none of the code the next run executes (got: $out)" ;; *) ok "and none of the code the next run executes" ;; esac
-  out=$(AUTODREAM_WORK_BUCKET=/work/bucket bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1)
+  case "$out" in *"claude-cli-nodejs"*) ok "and lists the CLI cache" ;; *) no "and lists the CLI cache (got: $out)" ;; esac
+  case "$out" in *".claude.json"*|*"session-env"*|*"backups"*|*"/settings"*|*"/hooks"*|*"/skills"*|*"/plugins"*|*"/autodream"*) no "and none of the config, state or code a later session reads or runs (got: $out)" ;; *) ok "and none of the config, state or code a later session reads or runs" ;; esac
+  out=$(env -u CLAUDE_CONFIG_DIR AUTODREAM_L1_WRITES_EXTRA="/extra/one:/extra/two*" bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1)
+  case "$out" in *"/extra/one"*"/extra/two*"*) ok "an operator's AUTODREAM_L1_WRITES_EXTRA entries are added, a trailing * kept" ;; *) no "AUTODREAM_L1_WRITES_EXTRA entries are added (got: $out)" ;; esac
+  out=$(env -u CLAUDE_CONFIG_DIR AUTODREAM_WORK_BUCKET=/work/bucket bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1)
   case "$out" in *"/work/bucket"*) ok "the work bucket is writable when the runner names it" ;; *) no "the work bucket is writable when the runner names it (got: $out)" ;; esac
   bash "$REPO/adapters/omp/adapter.sh" l1-writes >/dev/null 2>&1; rc=$?
   assert_eq "$rc" "2" "the omp adapter declares no write profile, so its workers stay unconfined and run-stats says so"
@@ -4257,6 +4268,7 @@ _run test_l1_confine_degrades_loudly_when_the_tool_rejects_the_profile
 _run test_l1_confine_off_is_silent_and_a_working_tool_is_reported
 _run test_l1_forged_writes_are_refused_when_confined
 _run test_l1_symlink_answer_is_not_read
+_run test_l1_work_bucket_is_wiped_before_l2
 _run test_l1_staging_failure_is_a_worker_failure_with_evidence
 _run test_l1_confine_names_the_engine_without_a_write_profile
 _run test_run_lock_is_reclaimed_from_a_dead_holder

@@ -270,17 +270,23 @@ case "$cmd" in
 
   l1-writes) # -> the paths an L1 worker may write besides its staging directory, one per line
     # run.sh runs the worker under an OS sandbox that can write nothing else (#169, bin/l1-confine.sh),
-    # so this list is the whole of what the claude CLI is allowed to touch of its own: a directory
-    # is a subtree, a trailing * a prefix (.claude.json is rewritten through temp files and a lock
-    # directory beside it). It is NOT the config dir: $AUTODREAM_DIR lives under ~/.claude on a
-    # default install, and settings, hooks, skills and plugins there are code the next run would
-    # execute. An engine whose adapter has no such verb is not confined, and run-stats says so.
-    # Authentication is the keychain (a mach service), not a file this process writes.
-    cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-    printf '%s\n' "$cfg/session-env" "$cfg/todos" "$cfg/statsig" "$cfg/debug" "$cfg/backups"
-    if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then printf '%s\n' "$CLAUDE_CONFIG_DIR/.claude.json*"; else printf '%s\n' "$HOME/.claude.json*"; fi
-    # The isolated cwd's bucket: an AI-title stub lands there, and the runner wipes it.
+    # so this list is the whole of what the claude CLI is allowed to touch of its own. Default deny: a
+    # path is here only because a confined call needs it or it is a cache no later run executes.
+    #
+    # Deliberately NOT here, each a way for a prompt-injected worker to run code as the user later:
+    #   ~/.claude.json and its backups (mcpServers, allowedTools, enabledMcpjsonServers), the config dir's
+    #   settings, hooks, skills and plugins, session-env (sessionstart-hook env files a live session
+    #   sources), and the CLI's install dir (auto-update writes executables there).
+    # What is: the isolated work bucket (an AI-title stub lands there, and run.sh wipes it after L1 and
+    # again after L2) and the CLI's own cache, which holds logs and nothing that is read as code.
+    # A host whose confined call fails without something else names it in AUTODREAM_L1_WRITES_EXTRA
+    # (colon-separated, a trailing * is a prefix) and accepts that path's exposure; see docs/plans/
+    # 2026-11-21-l1-confine-write-list.md for how to find the paths and what each one costs.
     [ -z "${AUTODREAM_WORK_BUCKET:-}" ] || printf '%s\n' "$AUTODREAM_WORK_BUCKET"
+    printf '%s\n' "$HOME/Library/Caches/claude-cli-nodejs" "$HOME/.cache/claude-cli-nodejs"
+    old_ifs=$IFS; IFS=:
+    for extra in ${AUTODREAM_L1_WRITES_EXTRA:-}; do [ -n "$extra" ] && printf '%s\n' "$extra"; done
+    IFS=$old_ifs
     ;;
 
   l2-argv) # [$1=model] -> NUL-delimited argv for the L2 aggregator; the prompt arrives on stdin

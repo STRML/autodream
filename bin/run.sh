@@ -3101,6 +3101,9 @@ l1_confine_stat_lines() {
   printf 'l1_confined: %s\n' "$L1_CONFINED"
   printf 'l1_confine_tool: %s\n' "$L1_CONFINE_USING"
   printf 'l1_confine_reason: %s\n' "$L1_CONFINE_REASON"
+  # bwrap binds existing paths, so a prefix rule (a trailing *) covers the files that exist and not one
+  # created later; sandbox-exec has no such limit.
+  [ "$L1_CONFINE_USING" != bwrap ] || printf 'l1_confine_note: bwrap prefix rules bind existing files only\n'
   printf '%s' "$L1_CONFINE_STATS"
 }
 
@@ -4508,6 +4511,9 @@ EOF
   # Whatever a failed worker left in staging was kept for the retries, and the rounds are over.
   rm -rf "$L1_STAGE_ROOT" 2>/dev/null
   rmdir "$AUTODREAM_DIR/staging" 2>/dev/null
+  # The work bucket is writable by a confined L1 worker and is also L2's launch directory, so it is wiped
+  # here and not only after L2: whatever a worker left there must not be there for L2 to read.
+  clean_work_bucket
   L1_OK=$(findings_json_count)
   L1_FAIL=$(ls -1 "$FINDINGS_DIR"/*.json.err 2>/dev/null | wc -l | tr -d " ")
   # Leftovers this run's worklist does not own: see scan_worklist_leftovers.

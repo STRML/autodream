@@ -406,6 +406,9 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
       printf '{"session_path":"FORGED","findings":[]}' > "$fdir_l1/forged-new.json" 2>/dev/null
       printf '# FORGED\n' >> "$AUTODREAM_DIR/config" 2>/dev/null
       : > "$AUTODREAM_DIR/forged-marker" 2>/dev/null ;;
+    l1_plant_bucket)                    # a worker leaves a file in the isolated work bucket, which L2 launches from
+      write_findings
+      mkdir -p "$AUTODREAM_WORK_BUCKET" && : > "$AUTODREAM_WORK_BUCKET/planted" ;;
     l1_symlink_answer)                  # the answer path is a symlink to a file that is not findings
       ln -s "${MOCK_SYMLINK_TARGET:-/etc/hosts}" "$out" ;;
     l1_flaky)                           # fail the first dispatch per session, succeed on retry
@@ -451,6 +454,10 @@ else
     printf '%s\n' "$@" > "$MOCK_CAPTURE_DIR/l2-args.txt"
   fi
   rep=$(printf '%s' "$line2" | sed 's/^Report destination (literal absolute path): //')
+  # Whether a file a worker planted in the work bucket is still there when L2 starts.
+  if [ -n "${MOCK_CAPTURE_DIR:-}" ]; then
+    if [ -e "${AUTODREAM_WORK_BUCKET:-/nonexistent}/planted" ]; then echo present; else echo absent; fi > "$MOCK_CAPTURE_DIR/l2-bucket.txt"
+  fi
   case "$mode" in
     l2_exit143) printf 'Execution error'; exit 143 ;;
     l2_exit137) printf 'Execution error'; exit 137 ;;
