@@ -6,6 +6,7 @@ import os
 import pwd
 import selectors
 import socket
+import urllib.parse
 import urllib.request
 from pathlib import Path
 import shlex
@@ -51,9 +52,13 @@ def has_result(dom):
 CHROME_ATTEMPTS = ((1500, 25), (6000, 60), (20000, 120))
 
 
-def dump_dom(chrome, root, url, *, attempts=CHROME_ATTEMPTS, finished=has_result):
+def dump_dom(chrome, root, url, *, attempts=CHROME_ATTEMPTS, finished=has_result, before_retry=None):
+    # A retry must start from the state the first attempt started from: before_retry puts back
+    # anything the page's own run changed (a killed backend, a deleted single-use file).
     last = None
     for number, (budget, deadline) in enumerate(attempts):
+        if number and before_retry:
+            before_retry()
         try:
             result = subprocess.run([chrome, *(['--single-process'] if sys.platform == 'darwin' else []),
                 '--headless', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
@@ -99,6 +104,15 @@ class BrowserTests(unittest.TestCase):
             result, calls = run('slow')
             self.assertIn('data-result="PASS"', result.stdout)
             self.assertEqual(calls, ['1500', '6000'], 'an unfinished page gets a larger budget')
+            resets = []
+            log.write_text('')
+            os.environ['FAKE_MODE'] = 'slow'
+            try:
+                dump_dom(str(fake), root, 'http://127.0.0.1:1/', attempts=attempts,
+                         before_retry=lambda: resets.append(log.read_text().split()))
+            finally:
+                del os.environ['FAKE_MODE']
+            self.assertEqual(resets, [['1500']], 'before_retry runs once, between the first and second attempt')
             result, calls = run('hang')
             self.assertIn('data-result="PASS"', result.stdout)
             self.assertEqual(calls, ['1500', '6000'], 'a missed deadline gets another try')
@@ -202,7 +216,8 @@ document.body.dataset.result = 'PASS';
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
-                result = dump_dom(chrome, root, 'http://127.0.0.1:' + str(server.server_port))
+                result = dump_dom(chrome, root, 'http://127.0.0.1:' + str(server.server_port),
+                    before_retry=(lambda: (stop_backend(), start_backend())) if live_backend else None)
                 self.assertEqual(result.returncode, 0, result.stderr[-1000:])
                 self.assertIn('data-result="PASS"', result.stdout, result.stdout)
             finally:
@@ -242,7 +257,11 @@ document.body.dataset.result = 'PASS';
                 self.assertEqual(opened.returncode, 0, opened.stderr)
                 handoff = capture.read_text()
                 self.assertTrue(handoff.startswith('file://'), handoff)
-                result = dump_dom(chrome, root, handoff,
+                # The server deletes the handoff on the first login, so every Chrome retry
+                # reads its own copy of the page instead of a file that is already gone.
+                copy = root / 'handoff-copy.html'
+                copy.write_bytes(Path(urllib.parse.unquote(urllib.parse.urlsplit(handoff).path)).read_bytes())
+                result = dump_dom(chrome, root, copy.as_uri(),
                     finished=lambda dom: 'id="content"' in dom)
                 self.assertEqual(result.returncode, 0, result.stderr[-1000:])
                 self.assertNotIn('sign in', result.stdout, result.stdout[-1000:])
