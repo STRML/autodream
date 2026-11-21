@@ -80,45 +80,25 @@ write_owner() { # $1=lock dir
   return 0
 }
 
-# Copy a displaced lock's record into the lock directory that now holds the path. The pid goes in
-# with noclobber and the start time only after it: if the path was taken and its holder already wrote a
-# pid, nothing of ours lands on it, because a pid or start time written over another holder's record
-# would let the displaced holder and the new one both pass their ownership checks.
-put_back_record() { # $1=displaced dir $2=lock dir
-  if [ -s "$1/pid" ]; then
-    ( set -C; cat "$1/pid" > "$2/pid" ) 2>/dev/null || return 1
-    [ ! -s "$1/start" ] || cat "$1/start" > "$2/start" 2>/dev/null
-  fi
-  return 0
-}
-
-# Put a displaced lock back. The path is made first and the record put in with put_back_record: a
-# plain rename of the directory onto a path that has meanwhile been taken would nest it inside the new
-# holder's lock and call that restored. When the path is taken, or its holder wrote first, the displaced
-# directory stays where it is, named in the warning, and its holder finds lock_owned false at its next
-# check instead of sharing the lock.
-restore_lock() { # $1=displaced dir $2=lock dir
-  if mkdir "$2" 2>/dev/null && put_back_record "$1" "$2"; then
-    rm -rf "$1"
-    return 0
-  fi
-  lock_warn "WARNING: $2 was taken again while another run's lock was being put back; it is left at $1"
-  return 1
-}
-
-# Move the stale lock aside (rename is atomic, so one reclaimer wins) rather than rmdir it:
-# a second reclaimer that judged the same stale holder must not delete the winner's NEW lock.
-# Only a lock directory is moved: a regular file or a symlink at the path is not a lock.
+# Take a stale lock away. Reclaimers are serialized by a gate directory (lock.reclaim): one at a time
+# judges the lock again under the gate and moves it aside, so no reclaimer can move a lock that a faster
+# one has already replaced, and no lock is ever moved and then put back (every put-back was a window in
+# which a record landed on another holder's path, review rounds 1 to 3 of #192). A gate left by a
+# reclaimer that died is an empty directory with no meaning and is cleared once it is 30 seconds old.
+# The one judgment that can still be wrong is a pid-less directory whose holder was merely slower than
+# the age bound; that holder finds lock_owned false at its next check instead of sharing the lock.
+# Only a real directory is moved: a regular file or symlink at the path is not a lock.
 reclaim_lock() { # $1=lock dir $2=the pid judged stale ("" when none was ever written)
   [ -d "$1" ] && [ ! -L "$1" ] || return 0
-  local dead="$1.stale.$$.$SECONDS$RANDOM"
-  mv "$1" "$dead" 2>/dev/null || return 0
-  if [ "$(cat "$dead/pid" 2>/dev/null)" = "$2" ]; then
-    rm -rf "$dead"
-    return 0
+  local gate="$1.reclaim" cur dead
+  if [ -d "$gate" ] && lock_aged "$gate" 30; then rmdir "$gate" 2>/dev/null; fi
+  mkdir "$gate" 2>/dev/null || return 0
+  cur=$(cat "$1/pid" 2>/dev/null) || cur=""
+  if [ "$cur" = "$2" ] && { [ -z "$2" ] || ! lock_pid_alive "$2"; }; then
+    dead="$1.stale.$$.$SECONDS$RANDOM"
+    mv "$1" "$dead" 2>/dev/null && rm -rf "$dead"
   fi
-  # We moved a lock that a faster reclaimer had already replaced. Put it back.
-  restore_lock "$dead" "$1"
+  rmdir "$gate" 2>/dev/null
   return 0
 }
 
@@ -150,6 +130,8 @@ acquire_lock() { # $1=lock dir [$2=seconds]
     fi
     reclaim_lock "$1" "$pid"
     [ "$tries" -lt 8 ] || { LOCK_HOLDER="${pid:-unknown}"; return 1; }
+    # Still there: another reclaimer holds the gate. Give it a moment instead of spinning.
+    [ ! -d "$1" ] || sleep 1
   done
 }
 
