@@ -5109,6 +5109,10 @@ PY
   # Unread bookmarks become idea fuel: L2 cross-references what the user saved against
   # what they actually worked on. The script always exits 0 and always writes the file,
   # including a "not configured" stub, so this seam has exactly one shape for L2.
+  # The two record files are removed first: a rebuild of a date finds the earlier run's copies, and
+  # a collector that is missing or dies before rewriting them would otherwise have its predecessor's
+  # `browser` or `fresh` read below as tonight's.
+  rm -f "$FINDINGS_DIR/x-bookmarks-fetch.txt" "$FINDINGS_DIR/x-bookmarks-queryid.txt"
   if [ -x "$XBOOKMARKS" ]; then
     "$XBOOKMARKS" collect "$FINDINGS_DIR" || log "x-bookmark collection failed (continuing)"
   else
@@ -5129,6 +5133,20 @@ PY
     [ -n "$XQID_SOURCE" ] || XQID_SOURCE=not_attempted
   fi
   printf 'x_queryid_source: %s\n' "$XQID_SOURCE" >> "$FINDINGS_DIR/run-stats.txt"
+
+  # ---- Which path served the bookmarks tonight? (#166) ----
+  # `graphql` is the default path; `browser` means AUTODREAM_X_FETCH=browser read them off a
+  # logged-in profile; `fallback_graphql` means that browser path failed and GraphQL served
+  # (its cause is the second line of the file); `failed` and `not_attempted` say nothing
+  # served. Always emitted, like x_queryid_source, so absence only ever means an old runner.
+  XFETCH_PATH=not_attempted; XFETCH_CAUSE=""
+  if [ -s "$FINDINGS_DIR/x-bookmarks-fetch.txt" ]; then
+    XFETCH_PATH=$(sed -n 1p "$FINDINGS_DIR/x-bookmarks-fetch.txt" | tr -d '[:space:]')
+    XFETCH_CAUSE=$(sed -n 2p "$FINDINGS_DIR/x-bookmarks-fetch.txt" | tr '\t\r' '  ')
+    [ -n "$XFETCH_PATH" ] || XFETCH_PATH=not_attempted
+  fi
+  printf 'x_fetch_path: %s\n' "$XFETCH_PATH" >> "$FINDINGS_DIR/run-stats.txt"
+  [ -z "$XFETCH_CAUSE" ] || printf 'x_fetch_browser_cause: %s\n' "$XFETCH_CAUSE" >> "$FINDINGS_DIR/run-stats.txt"
 
   # ---- Finished worktrees and branches ----
   # Removes worktrees and local/remote branches whose PR merged (see prune-worktrees.sh for

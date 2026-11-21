@@ -8,13 +8,15 @@ from datetime import date, timedelta
 import http.client
 import hashlib
 import hmac
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import html
+from http.server import BaseHTTPRequestHandler
 import threading
 import importlib.util
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import selectors
 import socket
 import stat
@@ -32,6 +34,8 @@ import plistlib
 
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from loopback_http import ThreadingLoopbackHTTPServer
 COMMAND = REPO / "bin/autodream-web"
 SERVER = REPO / "bin/autodream-web.py"
 EXPECTED_CSP = (
@@ -283,8 +287,8 @@ class WebTests(unittest.TestCase):
             transcript.write(f"{method} {path.split('?')[0]} -> {result.status}\n")
         return result
 
-    def login(self):
-        response = self.request("GET", "/login?t=" + self.token)
+    def login(self, handoff=None):
+        response = self.request("GET", self.handoff_login_url(handoff) if handoff else "/login?t=" + self.token)
         self.assertEqual(response.status, 200)
         return response.headers["Set-Cookie"].split(";", 1)[0]
 
@@ -515,6 +519,15 @@ l1_chunks_elided threads_linked threads_unassigned threads_unmeasured""".split()
         with module.make_server(config, 0) as server:
             self.assertEqual(server.server_address[0], "127.0.0.1")
 
+    def test_web_bind_does_not_resolve_the_host_name(self):
+        module = self.load_module()
+        config = {"autodream_dir": self.install, "web_dir": self.install / "web"}
+        with mock.patch.object(socket, "getfqdn", side_effect=AssertionError("reverse DNS lookup")):
+            with module.make_server(config, 0) as server:
+                self.assertEqual(server.server_address[0], "127.0.0.1")
+                self.assertEqual(server.server_port, server.server_address[1])
+                self.assertEqual(server.origin, "http://127.0.0.1:" + str(server.server_port))
+
     def seed_actions(self):
         self.thread = {"id": "t-00000001", "kind": "work", "repo": str(self.root),
                        "title": "Title <repo>", "goal": "Goal $(touch unwanted)",
@@ -727,7 +740,7 @@ l1_chunks_elided threads_linked threads_unassigned threads_unmeasured""".split()
             def log_message(*args):
                 pass
 
-        with ThreadingHTTPServer(("127.0.0.1", 0), Foreign) as server:
+        with ThreadingLoopbackHTTPServer(("127.0.0.1", 0), Foreign) as server:
             worker = threading.Thread(target=server.serve_forever, daemon=True)
             worker.start()
             env = dict(self.env, AUTODREAM_WEB_PORT=str(server.server_port),
@@ -758,40 +771,126 @@ l1_chunks_elided threads_linked threads_unassigned threads_unmeasured""".split()
             self.assertEqual(self.request("GET", "/api/identify" + query).status, 400)
         self.assertEqual(self.request("GET", "/api/identify?nonce=" + nonce, host="evil.example").status, 421)
         self.assertEqual(self.request("HEAD", "/api/identify?nonce=" + nonce).status, 401)
-        shim = self.root / "opener"
-        shim.mkdir()
-        capture = self.root / "handoff.json"
-        opener = shim / ("open" if sys.platform == "darwin" else "xdg-open")
-        opener.write_text("#!" + sys.executable + "\n" +
-                          "import json, pathlib, sys\n" +
-                          "pathlib.Path(" + repr(str(capture)) + ").write_text(json.dumps({'argv': sys.argv}))\n")
-        opener.chmod(0o755)
-        handoff_path = self.install / "web-login.html"
+        legacy = self.install / "web-login.html"
         previous = self.root / "previous-handoff"
         previous.write_text("untouched")
-        handoff_path.symlink_to(previous)
-        result = self.run_command("open", env=dict(self.env, AUTODREAM_WEB_PORT=str(self.port),
-                                  PATH=str(shim) + os.pathsep + os.environ["PATH"]))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        handoff = json.loads(capture.read_text())
-        self.assertNotIn(self.token, " ".join(handoff["argv"]))
-        opened_path = Path(urllib.parse.unquote(urllib.parse.urlsplit(handoff["argv"][1]).path))
-        self.assertTrue(opened_path.exists(), "browser handoff must survive the opener returning")
-        self.assertEqual(opened_path, handoff_path)
+        legacy.symlink_to(previous)
+        os.utime(legacy, (1, 1), follow_symlinks=False)
+        handoff_path = self.open_handoff()
+        self.assertFalse(legacy.is_symlink() or legacy.exists(), "an old shared handoff is swept")
+        self.assertEqual(previous.read_text(), "untouched", "the sweep removes a link, never its target")
+        self.assertRegex(handoff_path.name, r"^web-login-[0-9a-f]{16}\.html$")
         self.assertFalse(handoff_path.is_symlink())
-        self.assertEqual(previous.read_text(), "untouched")
         self.assertEqual(stat.S_IMODE(handoff_path.stat().st_mode), 0o600)
         page = handoff_path.read_text()
         self.assertIn(self.origin + "/login?t=" + self.token, page)
+        self.assertIn("h=" + handoff_path.name[len("web-login-"):-len(".html")], page)
         self.assertIn('http-equiv="refresh"', page)
         for query in ("", "?t=wrong", "?t=" + self.token + "&t=wrong"):
             with self.subTest(query=query):
                 self.assertEqual(self.request("GET", "/login" + query).status, 401)
                 self.assertEqual(handoff_path.read_text(), page)
-        cookie = self.login()
+        cookie = self.login(handoff_path)
         self.assertFalse(handoff_path.exists())
         self.assertEqual(self.request("GET", "/", cookie=cookie).status, 200)
         self.login()
+
+    def open_handoff(self):
+        shim = self.root / ("opener-" + secrets.token_hex(4))
+        shim.mkdir()
+        capture = shim / "handoff.json"
+        opener = shim / ("open" if sys.platform == "darwin" else "xdg-open")
+        opener.write_text("#!" + sys.executable + "\n" +
+                          "import json, pathlib, sys\n" +
+                          "pathlib.Path(" + repr(str(capture)) + ").write_text(json.dumps({'argv': sys.argv}))\n")
+        opener.chmod(0o755)
+        result = self.run_command("open", env=dict(self.env, AUTODREAM_WEB_PORT=str(self.port),
+                                  PATH=str(shim) + os.pathsep + os.environ["PATH"]))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        argv = json.loads(capture.read_text())["argv"]
+        self.assertNotIn(self.token, " ".join(argv))
+        path = Path(urllib.parse.unquote(urllib.parse.urlsplit(argv[1]).path))
+        self.assertTrue(path.exists(), "browser handoff must survive the opener returning")
+        return path
+
+    def handoff_login_url(self, handoff):
+        refresh = re.search(r'url=([^"]+)"', handoff.read_text())
+        return html.unescape(refresh[1])[len(self.origin):]
+
+    def test_web_concurrent_opens_keep_separate_handoffs(self):
+        self.start_server()
+        first = self.open_handoff()
+        second = self.open_handoff()
+        self.assertNotEqual(first, second, "each open call gets its own handoff file")
+        self.assertTrue(first.exists() and second.exists(), "the second open must not replace the first")
+        first_login = self.handoff_login_url(first)
+        second_login = self.handoff_login_url(second)
+        self.assertEqual(self.request("GET", first_login).status, 200)
+        self.assertFalse(first.exists(), "a login deletes its own handoff")
+        self.assertTrue(second.exists(), "a login must not delete another call's handoff")
+        self.assertEqual(self.request("GET", second_login).status, 200)
+        self.assertFalse(second.exists())
+
+    def test_web_open_sweeps_only_stale_handoffs(self):
+        self.start_server()
+        stale = self.install / ("web-login-" + "a" * 16 + ".html")
+        fresh = self.install / ("web-login-" + "b" * 16 + ".html")
+        unrelated = self.install / "web-login-notes.txt"
+        for path in (stale, fresh, unrelated):
+            path.write_text("x")
+        os.utime(stale, (time.time() - 3600,) * 2)
+        os.utime(unrelated, (time.time() - 3600,) * 2)
+        self.open_handoff()
+        self.assertFalse(stale.exists(), "a handoff older than a few minutes is swept")
+        self.assertTrue(fresh.exists(), "a handoff another open call just wrote is not swept")
+        self.assertTrue(unrelated.exists(), "only handoff files are swept")
+
+    def test_web_failed_opener_leaves_no_handoff(self):
+        self.start_server()
+        shim = self.root / "failing-opener"
+        shim.mkdir()
+        opener = shim / ("open" if sys.platform == "darwin" else "xdg-open")
+        opener.write_text("#!/bin/sh\nexit 1\n")
+        opener.chmod(0o755)
+        result = self.run_command("open", env=dict(self.env, AUTODREAM_WEB_PORT=str(self.port),
+                                  PATH=str(shim) + os.pathsep + os.environ["PATH"]))
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(list(self.install.glob("web-login*.html")), [])
+
+    def test_web_handoff_is_readable_under_a_restrictive_umask(self):
+        self.start_server()
+        shim = self.root / "umask-opener"
+        shim.mkdir()
+        opener = shim / ("open" if sys.platform == "darwin" else "xdg-open")
+        opener.write_text("#!/bin/sh\nexit 0\n")
+        opener.chmod(0o755)
+        result = subprocess.run(["/bin/bash", str(COMMAND), "open"], capture_output=True, text=True,
+                                timeout=15, preexec_fn=lambda: os.umask(0o377),
+                                env=dict(self.env, AUTODREAM_WEB_PORT=str(self.port),
+                                         PATH=str(shim) + os.pathsep + os.environ["PATH"]))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        handoffs = list(self.install.glob("web-login-*.html"))
+        self.assertEqual(len(handoffs), 1)
+        self.assertEqual(stat.S_IMODE(handoffs[0].stat().st_mode), 0o600,
+                         "the caller's umask must not decide whether the browser can read the handoff")
+
+    def test_web_failed_handoff_write_leaves_no_file(self):
+        module = self.load_module()
+        with mock.patch.object(module.os, "fdopen", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                module.open_browser("/usr/bin/true", "http://127.0.0.1:1/login?t=x", self.install)
+        self.assertEqual(list(self.install.glob("web-login*.html")), [])
+
+    def test_web_login_handoff_id_cannot_delete_other_files(self):
+        self.start_server()
+        victim = self.root / "victim.html"
+        victim.write_text("keep")
+        self.assertEqual(self.request("GET", "/login?t=" + self.token + "&h=" + urllib.parse.quote(
+            "../../" + victim.stem)).status, 200)
+        self.assertEqual(self.request("GET", "/login?t=" + self.token + "&h=" + "c" * 16).status, 200,
+                         "an unknown handoff id is not a login failure")
+        self.assertEqual(self.request("GET", "/login?t=wrong&h=" + "c" * 16).status, 401)
+        self.assertEqual(victim.read_text(), "keep")
 
     def test_web_open_uses_config_and_environment_precedence(self):
         self.start_server()

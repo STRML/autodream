@@ -73,17 +73,23 @@ echo "# every tracked web file is one the full suite never reads"
 # runs on its own paths; and bin/autodream-web, the launcher only the web suite and those macOS
 # suites start.
 web_files=$(cd "$REPO" && git ls-files | while IFS= read -r p; do
-  [ "$(scope "$p")" = web ] && case "$p" in *.md) ;; *) printf '%s\n' "$p" ;; esac
+  if [ "$(scope "$p")" = web ] && [ "${p%.md}" = "$p" ]; then printf '%s\n' "$p"; fi
 done)
 [ -n "$web_files" ] && ok "some tracked files classify as web ($(printf '%s\n' "$web_files" | wc -l | tr -d ' '))" || no "no tracked file classifies as web"
 darwin_only=$(sed -n 's/.*Darwin \] && _suites="$_suites \(.*\)"$/\1/p' "$HERE/run-all.sh")
 [ -n "$darwin_only" ] && ok "run-all.sh's macOS-only suites are known ($darwin_only)" || no "could not read run-all.sh's macOS-only suites"
-readers=$(cd "$REPO" && git ls-files 'bin/*' 'adapters/*' 'prompts/*' 'tests/*.sh' 'tests/*.py' | while IFS= read -r p; do
-  [ "$(scope "$p")" = web ] && continue
-  case "$p" in tests/autodream-web.sh|tests/ci-scope.sh|bin/autodream-web) continue ;; esac
-  case " $darwin_only " in *" $(basename "$p" .sh) "*) continue ;; esac
-  printf '%s\n' "$p"
-done)
+# A function, not a loop inside $(...): bash 3.2 cannot parse a case pattern's `)` inside a command
+# substitution, which is the interpreter run-all.sh and launchd use on macOS.
+reader_paths() {
+  local p
+  cd "$REPO" && git ls-files 'bin/*' 'adapters/*' 'prompts/*' 'tests/*.sh' 'tests/*.py' | while IFS= read -r p; do
+    [ "$(scope "$p")" = web ] && continue
+    case "$p" in tests/autodream-web.sh|tests/ci-scope.sh|bin/autodream-web) continue ;; esac
+    case " $darwin_only " in *" $(basename "$p" .sh) "*) continue ;; esac
+    printf '%s\n' "$p"
+  done
+}
+readers=$(reader_paths)
 leaks=""
 for f in $web_files; do
   base=$(basename "$f")
