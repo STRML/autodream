@@ -677,6 +677,75 @@ test_browser_is_closed_on_every_outcome(){
   rm -rf "$root"
 }
 
+test_watchdog_does_not_fire_after_a_command_that_finished(){
+  echo "# a command that finished in time is never reported as timed out, and does not wait out the limit"
+  local root; root=$(bsetup)
+  # The watchdog used to sleep the whole limit in one call and kill that sleep on a normal exit,
+  # so its subshell ran its next statements (flag a timeout, signal the pid) before the parent
+  # killed it, and a good command could come back as exit 124. That race cannot be reproduced
+  # deterministically here (pkill cannot enumerate processes under the sandbox), so this pins
+  # the properties of the polling shape instead: every command in a run is a success with a
+  # 30 second limit, none is reported as a timeout, and the run does not wait the limit out.
+  local t0=$SECONDS
+  X_BROWSER_TIMEOUT=30 run_br "$root" collect "$root/findings"
+  local elapsed=$((SECONDS - t0))
+  assert_eq "$(fetch_path "$root/findings")" "browser" "every command was a success, so the path is browser"
+  assert_nogrep "$root/findings/x-bookmarks-fetch.txt" "timed out" "and no timeout is recorded"
+  [ "$elapsed" -lt 20 ] && ok "finished commands do not wait for the watchdog (${elapsed}s)" || no "the run took ${elapsed}s against a 30s limit"
+  rm -rf "$root"
+}
+
+# A HAR whose page-2 response is bad must not be read as a success for page 1: the older bookmarks
+# on page 2 would never be fetched again once page 1 is marked seen (the next night stops at the
+# first known id).
+partial_har_case(){ # $1=name
+  local name="$1" root cause_re
+  root=$(bsetup)
+  make_curl_shim "$root/bin"
+  printf '{"data":{"bookmark_timeline_v2":{"timeline":{"instructions":[]}}}}' > "$root/good2.json"
+  case "$name" in
+    page2_429)         make_har "$root/har.json" "200:$root/page.json" "429:$root/good2.json"; cause_re="429" ;;
+    page2_truncated)   printf '{"data":{"bookmark_tim' > "$root/bad2.json"
+                       make_har "$root/har.json" "200:$root/page.json" "200:$root/bad2.json"; cause_re="not valid JSON" ;;
+    page1_wrong_shape) printf '{"errors":[{"message":"schema changed"}]}' > "$root/bad1.json"
+                       make_har "$root/har.json" "200:$root/bad1.json"; cause_re="expected shape" ;;
+  esac
+  X_MAX_PAGES=2 run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "fallback_graphql" "$name: a bad response among the pages falls back"
+  assert_grep "$root/findings/x-bookmarks-fetch.txt" "$cause_re" "$name: the cause says why"
+  rm -rf "$root"
+  root=$(bsetup)
+  case "$name" in
+    page2_429)         make_har "$root/har.json" "200:$root/page.json" "429:$root/page.json" ;;
+    page2_truncated)   printf '{"data":{"bookmark_tim' > "$root/bad2.json"
+                       make_har "$root/har.json" "200:$root/page.json" "200:$root/bad2.json" ;;
+    page1_wrong_shape) printf '{"errors":[{"message":"schema changed"}]}' > "$root/bad1.json"
+                       make_har "$root/har.json" "200:$root/bad1.json" ;;
+  esac
+  X_CREDS_FILE="$root/does-not-exist" X_MAX_PAGES=2 run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "failed" "$name: with no fallback the night fails"
+  assert_eq "$(wc -l < "$root/state/seen.jsonl" | tr -d ' ')" "0" "$name: nothing from the good page was recorded as seen"
+  rm -rf "$root"
+}
+
+test_a_bad_response_in_the_har_is_not_a_partial_success(){
+  echo "# a bad, truncated or wrong-shape Bookmarks response fails the browser path as a whole"
+  local c
+  for c in page2_429 page2_truncated page1_wrong_shape; do partial_har_case "$c"; done
+  local root; root=$(bsetup)
+  printf '{"errors":[]}' > "$root/bad.json"
+  make_har "$root/har.json" "200:$root/page.json" "429:$root/bad.json"
+  X_MAX_PAGES=1 run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "browser" "a bad response past the X_MAX_PAGES cap is never read, so it cannot fail the night"
+  rm -rf "$root"
+  root=$(bsetup)
+  printf '{"data":{"bookmark_timeline_v2":{"timeline":{"instructions":[]}}}}' > "$root/empty.json"
+  make_har "$root/har.json" "200:$root/empty.json"
+  run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "browser" "a well-formed empty timeline is a success"
+  rm -rf "$root"
+}
+
 test_no_credential_reaches_the_browser_argv(){
   echo "# credentials never go in argv: the browser path does not carry the cookie values anywhere"
   local root; root=$(bsetup)
@@ -744,6 +813,8 @@ test_browser_failure_without_credentials_reports_the_browser_cause
 test_both_paths_failing_names_both
 test_browser_mode_is_not_configured_without_profile_or_credentials
 test_browser_is_closed_on_every_outcome
+test_watchdog_does_not_fire_after_a_command_that_finished
+test_a_bad_response_in_the_har_is_not_a_partial_success
 test_no_credential_reaches_the_browser_argv
 test_browser_login_opens_a_headed_profile
 test_status_names_the_fetch_mode

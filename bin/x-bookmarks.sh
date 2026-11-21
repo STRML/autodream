@@ -444,18 +444,30 @@ BROWSER_LOGIN_HINT="Log the profile in once with: x-bookmarks.sh browser-login"
 
 # Run a command for at most $1 seconds, stdout to $TMP/ab.out and stderr to $TMP/ab.err.
 # macOS ships no timeout(1), and a browser daemon that stops answering would otherwise hold the
-# whole nightly run. TERM first, KILL two seconds later; returns 124 when the limit fired. The
-# watchdog sleeps through `command -p` so a test that shims `sleep` cannot make it fire at once.
+# whole nightly run. TERM first, KILL two seconds later; returns 124 when the limit fired.
+#
+# The watchdog polls once a second and leaves as soon as the command is gone, so nothing ever
+# has to signal the watchdog's own sleep. An earlier shape slept the whole limit in one call and
+# killed that sleep on a normal exit; the watchdog subshell then ran its next statements before
+# the parent killed it, flagged a timeout and turned a good command into exit 124. The flag is
+# now set only while the command is still alive. It sleeps through `command -p` so a test that
+# shims `sleep` cannot make it fire at once.
 run_bounded() {
   local secs="$1"; shift
   local flag="$TMP/timed-out"; rm -f "$flag"
   "$@" > "$TMP/ab.out" 2> "$TMP/ab.err" &
   local pid=$!
-  ( command -p sleep "$secs"; : > "$flag"; kill -TERM "$pid"; command -p sleep 2; kill -KILL "$pid" ) >/dev/null 2>&1 &
+  ( i=0
+    while [ "$i" -lt "$secs" ]; do
+      command -p sleep 1
+      kill -0 "$pid" 2>/dev/null || exit 0
+      i=$(( i + 1 ))
+    done
+    : > "$flag"; kill -TERM "$pid"; command -p sleep 2; kill -KILL "$pid"
+  ) >/dev/null 2>&1 &
   local watchdog=$!
   wait "$pid" 2>/dev/null
   local rc=$?
-  pkill -P "$watchdog" 2>/dev/null
   kill "$watchdog" 2>/dev/null
   wait "$watchdog" 2>/dev/null
   [ -e "$flag" ] && return 124
@@ -527,36 +539,43 @@ browser_capture() {
   return 0
 }
 
-# Write each good Bookmarks response in the HAR to $2/NN.json, in the order the page made them.
-# Fails with the most specific reason it can name when there are none.
+# Write the Bookmarks responses in the HAR to $2/NN.json, in the order the page made them, up to
+# the X_MAX_PAGES that will be read. The set is all or nothing: one bad response among them (a
+# non-200 status, a body that is not JSON, JSON without the timeline) fails the whole extract
+# with the reason, because ingesting the good pages first would mark their bookmarks seen, and
+# the older ones on the bad page would never be fetched again (the next night stops at the first
+# known id). Responses past the cap are never read, so they cannot fail the night.
 browser_extract() {
   local har="$1" dir="$2"
   jq -e '.log.entries | type == "array"' "$har" >/dev/null 2>&1 \
     || { fail "the HAR export could not be read (not a HAR file)"; return 1; }
-  local rows="$TMP/har-rows.jsonl" n=0 bad_status="" line status body="$TMP/har-body"
+  local rows="$TMP/har-rows.jsonl" n=0 line status body="$TMP/har-body"
   jq -c '.log.entries[]
          | select((.request.method // "GET") == "GET")
          | select((.request.url // "") | test("/graphql/[^/]+/Bookmarks(\\?|$)"))
          | {status: (.response.status // 0),
             text: (if (.response.content.encoding // "") == "base64"
                    then ((.response.content.text // "") | (try @base64d catch ""))
-                   else (.response.content.text // "") end)}' "$har" > "$rows" 2>/dev/null
+                   else (.response.content.text // "") end)}' "$har" 2>/dev/null | head -n "$MAX_PAGES" > "$rows"
   mkdir -p "$dir"
   while IFS= read -r line; do
-    status=$(printf '%s' "$line" | jq -r '.status' 2>/dev/null)
-    if [ "$status" != 200 ]; then [ -n "$bad_status" ] || bad_status="$status"; continue; fi
-    printf '%s' "$line" | jq -r '.text' > "$body" 2>/dev/null
-    jq -e . "$body" >/dev/null 2>&1 || continue
     n=$(( n + 1 ))
+    status=$(printf '%s' "$line" | jq -r '.status' 2>/dev/null)
+    case "$status" in
+      200) : ;;
+      401|403) fail "X rejected the browser session (HTTP $status): the profile is logged out. $BROWSER_LOGIN_HINT"; return 1 ;;
+      429)     fail "X rate-limited the browser page (HTTP 429); it will be retried tomorrow"; return 1 ;;
+      *)       fail "X answered Bookmarks response $n of the browser page with HTTP $status"; return 1 ;;
+    esac
+    printf '%s' "$line" | jq -r '.text' > "$body" 2>/dev/null
+    jq -e . "$body" >/dev/null 2>&1 \
+      || { fail "Bookmarks response $n of the browser page was not valid JSON (truncated or cut off)"; return 1; }
+    jq -e '(.data.bookmark_timeline_v2.timeline.instructions | type) == "array"' "$body" >/dev/null 2>&1 \
+      || { fail "Bookmarks response $n of the browser page is not in the expected shape (no bookmark_timeline_v2 timeline; X may have changed the response)"; return 1; }
     cp "$body" "$dir/$(printf '%02d' "$n").json"
   done < "$rows"
   [ "$n" -gt 0 ] && return 0
-  case "$bad_status" in
-    401|403) fail "X rejected the browser session (HTTP $bad_status): the profile is logged out. $BROWSER_LOGIN_HINT" ;;
-    429)     fail "X rate-limited the browser page (HTTP 429); it will be retried tomorrow" ;;
-    '')      fail "the bookmarks page made no Bookmarks request that the HAR caught (X changed its page, or it did not finish loading within ${BROWSER_TIMEOUT}s)" ;;
-    *)       fail "X answered the browser page's Bookmarks request with HTTP $bad_status" ;;
-  esac
+  fail "the bookmarks page made no Bookmarks request that the HAR caught (X changed its page, or it did not finish loading within ${BROWSER_TIMEOUT}s)"
   return 1
 }
 
