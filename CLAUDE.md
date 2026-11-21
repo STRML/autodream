@@ -104,26 +104,44 @@ A pull is read-only on the remote and needs only sshd there.
   replaces the report, including any `## Triage decisions` the user wrote into it, and a sync above
   the guard would rerun L2 on every trigger while a host stays down. What happens instead is
   `remote_short_scan`, run at the end of `sync_remote_roots`. For each label whose sync was `ok` or
-  `partial` tonight it reads `findings/<date>/run-stats.txt` for the seven days before the target
-  date and writes `remote_short_dates_<label>: <dates>` (oldest first, `none` when empty) for every
-  date whose own run-stats has that label at `failed`, `invalid` or `skipped_locked`. PROMPT.md turns
-  each into a self-audit line and one open question titled `Rebuild the report dates missing <label>
-  sessions?` (a stable title per label, so the streak escalation applies), and a night with nothing
-  to triage names them in the stub report, because that path skips L2. The rules that keep it honest:
-  a label still failing tonight lists nothing (the host is down, and the banner covers it); a date
-  leaves the list when its own run-stats shows the label `ok`, which only a rebuild writes; only
-  labels configured tonight are read, so a renamed or removed host lists nothing; a night whose
-  findings dir exists but whose `run-stats.txt` is missing or unreadable is skipped and counted in
-  `remote_short_scan_unreadable` (a night with no findings dir did not run, and is not counted);
-  `partial` is not listed, because it names files re-read the next night.
+  `partial` tonight it reads the seven days before the target date and writes
+  `remote_short_dates_<label>: <dates>` (oldest first, `none` when empty). PROMPT.md turns each into
+  a self-audit line and one open question titled `Rebuild the report dates missing <label>
+  sessions?` (a stable title per label, so the streak escalation applies). A night with nothing to
+  triage skips L2, so the stub report carries the same question inside its sentinels with the marker
+  counting it (a "None" and a zero would read to `question-streaks.sh` as the question resolved),
+  plus a line when the scan itself could not read a night.
+  - **What says a date was short** is `findings/<date>/remote-short.txt`, one label per line, written
+    by `write_remote_short_marker` only when that date's run delivered a complete report (the stub
+    included), through a temp file and one rename. An empty file is a real answer: every label was
+    read. It is not run-stats.txt because a `--force` rebuild rewrites that file before L2 runs, so a
+    rebuild that synced fine and then deferred or failed in L2 would have read as cleared while the
+    old report still lacked the sessions. A date with no marker (a night from before it existed) falls
+    back to its run-stats lines (`failed`, `invalid`, `skipped_locked` or `partial`), which has the old
+    hole for that one night.
+  - **`partial` is listed**: rsync 23 can leave a file uncopied, and the next sync copies it with its
+    old mtime, which the next day's lower bound skips.
+  - **Refusals**: a malformed or repeated entry has no label and its run-stats key `invalid` can equal
+    a real host's label, so only real labels join the marker (an entry refused because the claude
+    adapter is off does).
+  - A label still failing tonight lists nothing (the host is down, and the banner covers it); only
+    labels configured tonight are read, so a renamed or removed host lists nothing; a night whose
+    findings dir exists but holds no readable marker or `run-stats.txt` is skipped and counted in
+    `remote_short_scan_unreadable` (a night with no findings dir did not run, and is not counted).
+    Each file is read once into memory, so a file that goes unreadable between a check and a read
+    cannot read as "no match".
 - **Hosts sync in parallel (#229).** `sync_remote_roots` validates every entry first, starts one
   `remote_sync_job` per valid label in the background, then reads the results in config order. Each
   label has its own lock and mirror, so the jobs share nothing, and with several hosts down the
   `ConnectTimeout` and `--timeout` waits overlap instead of adding up. A job cannot set the parent's
-  variables, so it leaves `<label>.status`, `.secs` and `.mirror` in a per-run temp dir
-  (`mktemp -d`, removed with `rm -rf`). A job that dies before writing reads `failed
-  (remote-sync.sh printed nothing)`; if the temp dir itself cannot be made, no job starts and every
-  valid entry reads `failed (cannot make a temp dir for the sync jobs)`. Run-stats lines, `SESSION_ROOTS` and the refusal warnings are
+  variables, so it leaves `<label>.status`, `.secs` and `.mirror` in a per-run job dir,
+  `$AUTODREAM_DIR/remote-jobs/<run pid>`, removed with `rm -rf` after the results are read. It is
+  under the install and not in `$TMPDIR` because a run killed while it waits skips every cleanup:
+  the next run removes the dirs of dead pids there and never a live one's. A job that dies before
+  writing reads `failed (remote-sync.sh printed nothing)`; if the job dir cannot be made, no job
+  starts and every valid entry reads `failed (cannot make a job dir for the sync jobs)`, and an
+  empty job-dir path is never joined to a result name, so nothing at `/0.status` can be read as a
+  result. Run-stats lines, `SESSION_ROOTS` and the refusal warnings are
   written in the second pass, in the order of `AUTODREAM_REMOTE_ROOTS`, so a refused entry keeps its
   place and the artifact does not depend on which host answered first. `bin/remote-sync.sh` is
   unchanged.
@@ -132,7 +150,9 @@ A pull is read-only on the remote and needs only sshd there.
   would be copied back the next night, and the mirror keeps transcripts the remote deleted on purpose.
   Disk is the only cost: the nightly `find` drops old files by the mtime bound cheaply. Every run
   writes `remote_mirror_files_<label>` and `remote_mirror_bytes_<label>` (the `*.jsonl` count and
-  byte sum, `0` and `0` before a first good sync, nothing for a refused entry), measured in the
+  byte sum, `0` and `0` before a first good sync, `unknown` and `unknown` when the walk or the count
+  failed (an unreadable subdirectory, a file gone mid-count), so a partial total never reads as a
+  measured size, nothing for a refused entry), measured in the
   background job, so the month of growth the retention question wanted accrues in the run-stats
   files without anyone remembering to look. Revisit pruning only when those numbers say the disk
   matters, and then a prune needs an rsync exclude for what it removed, not just a delete.
