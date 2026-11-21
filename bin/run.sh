@@ -2224,9 +2224,22 @@ write_remote_short_marker() {
 migrate_remote_short_marker() {
   local f="$FINDINGS_DIR/run-stats.txt" m="$FINDINGS_DIR/remote-short.txt" labels
   { [ ! -e "$m" ] && [ -r "$f" ]; } || return 0
-  labels=$(awk -F': ' '/^remote_sync_/ && ($2 == "failed" || $2 == "invalid" || $2 == "skipped_locked" || $2 == "partial") {
-      k = $1; sub(/^remote_sync_/, "", k)
-      if (k != "invalid" && k !~ /_(cause|last_ok)$/) print k }' "$f" 2>/dev/null) || return 0
+  # A key ending _cause or _last_ok is a label's own extra line when the label it names has a status
+  # line, and a label in its own right when it does not (a host called studio_cause), so the file is
+  # read twice: first for every key, then for the status lines.
+  labels=$(awk -F': ' '
+    /^remote_sync_/ { seen[$1] = 1; row[++n] = $0 }
+    END {
+      for (i = 1; i <= n; i++) {
+        split(row[i], p, ": ")
+        if (!(p[2] == "failed" || p[2] == "invalid" || p[2] == "skipped_locked" || p[2] == "partial")) continue
+        k = p[1]; sub(/^remote_sync_/, "", k)
+        if (k == "invalid") continue
+        if (k ~ /_cause$/ && (("remote_sync_" substr(k, 1, length(k) - 6)) in seen)) continue
+        if (k ~ /_last_ok$/ && (("remote_sync_" substr(k, 1, length(k) - 8)) in seen)) continue
+        print k
+      }
+    }' "$f" 2>/dev/null) || return 0
   [ -n "$labels" ] || return 0
   if printf '%s\n' "$labels" > "$m.tmp.$$" 2>/dev/null && mv -f "$m.tmp.$$" "$m" 2>/dev/null; then
     log "remote sync: kept the earlier run's short hosts for $TARGET_DATE in remote-short.txt before this run rewrites run-stats.txt"

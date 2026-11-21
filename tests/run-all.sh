@@ -10614,6 +10614,21 @@ test_remote_sync_failed_rebuild_of_a_pre_marker_night_keeps_the_date_listed(){
   rm -rf "$root"
 }
 
+test_remote_sync_pre_marker_migration_reads_a_label_that_ends_in_cause(){
+  echo "# remote sync: migrating an old run-stats keeps a host called studio_cause, and skips a label's own _cause line"
+  local root DATE=2020-01-02; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  rs_seed_stats "$root" 2020-01-02 'remote_sync_studio_cause: failed' \
+    'remote_sync_other: failed' 'remote_sync_other_cause: failed' 'remote_sync_other_last_ok: never'
+  MOCK_MODE=l2_fail AUTODREAM_L2_ATTEMPTS=1 AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="studio_cause=studio2.invalid:$root/studio" rs_run "$root"
+  local m; m="$(fdir "$root")/remote-short.txt"
+  assert_grep "$m" '^studio_cause$' "the host whose label ends in _cause is kept"
+  assert_grep "$m" '^other$' "a plain label is kept"
+  assert_nogrep "$m" '^other_cause$' "and the plain label's own cause line is not read as a host"
+  assert_nogrep "$m" '^other_last_ok$' "nor its last_ok line"
+  rm -rf "$root"
+}
+
+_run test_remote_sync_pre_marker_migration_reads_a_label_that_ends_in_cause
 _run test_remote_sync_failed_rebuild_of_a_pre_marker_night_keeps_the_date_listed
 _run test_remote_sync_no_job_dir_fails_each_host_and_says_why
 _run test_remote_sync_dead_runs_job_dirs_are_removed_and_live_ones_kept
