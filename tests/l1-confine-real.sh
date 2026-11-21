@@ -78,7 +78,16 @@ echo "# running one real call (model $model) under the sandbox prefix ${pre[0]}"
 rc=$?
 if [ "$rc" -eq 0 ]; then pass "the call exited 0 (authenticated, reached the network)"; else fail "the call exited $rc: $(head -c 300 "$W/stderr")"; fi
 if [ -s "$answer" ] && jq -e '.findings | type == "array"' "$answer" >/dev/null 2>&1; then pass "the answer is in the staging directory"; else fail "no answer in the staging directory"; fi
-if [ ! -e "$outside/forged.txt" ]; then pass "the write outside the staging directory was refused"; else fail "forged.txt was created outside the staging directory"; fi
+if [ ! -e "$outside/forged.txt" ]; then pass "the model's second write was not created (it may simply not have tried)"; else fail "forged.txt was created outside the staging directory"; fi
+# The refusal itself is checked with a command that certainly tries: the same prefix, a plain shell write.
+rm -f "$outside/forged.txt"
+if "${pre[@]}" /bin/sh -c 'printf x > "$1/forged.txt"' _ "$outside" >/dev/null 2>&1; then
+  fail "a shell under the sandbox prefix wrote outside the staging directory"
+elif [ -e "$outside/forged.txt" ]; then
+  fail "a shell under the sandbox prefix left a file outside the staging directory"
+else
+  pass "a write outside the staging directory, attempted under the same prefix, was refused"
+fi
 echo "# stdout: $(head -c 300 "$W/stdout")"
 
 echo "# files under \$HOME the engine wrote during the call (compare with l1-writes):"

@@ -284,9 +284,10 @@ case "$cmd" in
     # 2026-11-21-l1-confine-write-list.md for how to find the paths and what each one costs.
     [ -z "${AUTODREAM_WORK_BUCKET:-}" ] || printf '%s\n' "$AUTODREAM_WORK_BUCKET"
     printf '%s\n' "$HOME/Library/Caches/claude-cli-nodejs" "$HOME/.cache/claude-cli-nodejs"
-    old_ifs=$IFS; IFS=:
+    # Globbing off: an entry such as ~/.claude.json* must stay a prefix, not expand to the files that exist.
+    old_ifs=$IFS; IFS=:; set -f
     for extra in ${AUTODREAM_L1_WRITES_EXTRA:-}; do [ -n "$extra" ] && printf '%s\n' "$extra"; done
-    IFS=$old_ifs
+    set +f; IFS=$old_ifs
     ;;
 
   l2-argv) # [$1=model] -> NUL-delimited argv for the L2 aggregator; the prompt arrives on stdin

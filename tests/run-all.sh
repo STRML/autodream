@@ -3065,6 +3065,7 @@ test_l1_answers_are_staged_then_copied(){
   assert_nogrep "$root/cap/l1-stdin-$h.txt" "Write your findings JSON to this literal absolute path: .*/findings/" "and never the findings dir"
   assert_file "$(fdir "$root")/$h.json" "the runner copied the answer into the findings dir"
   assert_eq "$(jq -r '.outcome' "$(fdir "$root")/$h.json")" "fully_achieved" "and it is the worker's answer"
+  assert_eq "$(cat "$root/cap/l1-bucket-$h.txt" 2>/dev/null)" "yes" "the work bucket exists when the worker starts, so bwrap can bind it"
   assert_file "$(fdir "$root")/$h.json.served" "with its served verdict beside it"
   assert_no_file "$(fdir "$root")/$h.json.stage" "and no half-copied temp file"
   assert_eq "$(ls -A "$root/autodream/staging/run-$$" 2>/dev/null | wc -l | tr -d ' ')" "1" "a live run's staging root is left alone"
@@ -3183,6 +3184,11 @@ test_l1_confine_names_the_engine_without_a_write_profile(){
   case "$out" in *".claude.json"*|*"session-env"*|*"backups"*|*"/settings"*|*"/hooks"*|*"/skills"*|*"/plugins"*|*"/autodream"*) no "and none of the config, state or code a later session reads or runs (got: $out)" ;; *) ok "and none of the config, state or code a later session reads or runs" ;; esac
   out=$(env -u CLAUDE_CONFIG_DIR AUTODREAM_L1_WRITES_EXTRA="/extra/one:/extra/two*" bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1)
   case "$out" in *"/extra/one"*"/extra/two*"*) ok "an operator's AUTODREAM_L1_WRITES_EXTRA entries are added, a trailing * kept" ;; *) no "AUTODREAM_L1_WRITES_EXTRA entries are added (got: $out)" ;; esac
+  # A prefix that matches existing files must stay a prefix, not expand to them.
+  mkdir -p "$SUITE_TMP/globx"; : > "$SUITE_TMP/globx/a.json"; : > "$SUITE_TMP/globx/a.json.lock"
+  out=$(env -u CLAUDE_CONFIG_DIR AUTODREAM_L1_WRITES_EXTRA="$SUITE_TMP/globx/a.json*" bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1)
+  case "$out" in *"$SUITE_TMP/globx/a.json*"*) ok "an extra entry that matches files on disk stays a prefix" ;; *) no "an extra entry that matches files on disk stays a prefix (got: $out)" ;; esac
+  case "$out" in *"a.json.lock"*) no "and is not expanded to the files that match it" ;; *) ok "and is not expanded to the files that match it" ;; esac
   out=$(env -u CLAUDE_CONFIG_DIR AUTODREAM_WORK_BUCKET=/work/bucket bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1)
   case "$out" in *"/work/bucket"*) ok "the work bucket is writable when the runner names it" ;; *) no "the work bucket is writable when the runner names it (got: $out)" ;; esac
   bash "$REPO/adapters/omp/adapter.sh" l1-writes >/dev/null 2>&1; rc=$?

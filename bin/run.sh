@@ -4360,6 +4360,8 @@ EOF
 
   clean_work_bucket  # start clean: drop any stub left by a prior run's workers
   l1_confine_setup
+  # Under bwrap only a path that exists can be bound writable, and the bucket was just wiped.
+  mkdir -p "$WORK_BUCKET" 2>/dev/null
 
   # Pre-L1 cache snapshot: how many sessions in the worklist already have a valid
   # findings JSON before any worker runs. Without this, a re-run after a partial
