@@ -116,9 +116,12 @@ A pull is read-only on the remote and needs only sshd there.
     included), through a temp file and one rename. An empty file is a real answer: every label was
     read. It is not run-stats.txt because a `--force` rebuild rewrites that file before L2 runs, so a
     rebuild that synced fine and then deferred or failed in L2 would have read as cleared while the
-    old report still lacked the sessions. A date with no marker (a night from before it existed) falls
-    back to its run-stats lines (`failed`, `invalid`, `skipped_locked` or `partial`), which has the old
-    hole for that one night.
+    old report still lacked the sessions. "Delivered" means `L2_DELIVERED` (the sentinel) and
+    `report_complete` on the L2 path, and `report_complete` on the stub, so an interrupted write or a
+    degraded capture that could not be moved aside never clears it. A date with no marker (a night
+    from before it existed) falls back to its run-stats lines (`failed`, `invalid`, `skipped_locked`
+    or `partial`), and `migrate_remote_short_marker` copies those lines into a marker at the top of
+    `sync_remote_roots`, before a rebuild of that date rewrites run-stats.txt.
   - **`partial` is listed**: rsync 23 can leave a file uncopied, and the next sync copies it with its
     old mtime, which the next day's lower bound skips.
   - **Refusals**: a malformed or repeated entry has no label and its run-stats key `invalid` can equal

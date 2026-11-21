@@ -10600,6 +10600,21 @@ test_remote_sync_mirror_size_failure_is_unknown_not_zero(){
   rm -rf "$root"
 }
 
+test_remote_sync_failed_rebuild_of_a_pre_marker_night_keeps_the_date_listed(){
+  echo "# remote sync: a night from before remote-short.txt keeps its short host through a rebuild that delivers no report"
+  local root DATE=2020-01-02; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  rs_seed_stats "$root" 2020-01-02 'remote_sync_studio2: failed' 'remote_sync_studio2_cause: ssh: no route'
+  assert_no_file "$(fdir "$root")/remote-short.txt" "the night has only its old run-stats record"
+  MOCK_MODE=l2_fail AUTODREAM_L2_ATTEMPTS=1 AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_grep "$(rs_stats "$root")" '^remote_sync_studio2: ok$' "the rebuild rewrote run-stats with the host ok"
+  assert_grep "$(fdir "$root")/remote-short.txt" '^studio2$' "the old record was copied into the marker first"
+  DATE=2020-01-03
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_grep "$(rs_stats "$root")" '^remote_short_dates_studio2: 2020-01-02$' "so the next night still names the date"
+  rm -rf "$root"
+}
+
+_run test_remote_sync_failed_rebuild_of_a_pre_marker_night_keeps_the_date_listed
 _run test_remote_sync_no_job_dir_fails_each_host_and_says_why
 _run test_remote_sync_dead_runs_job_dirs_are_removed_and_live_ones_kept
 _run test_remote_sync_short_marker_wins_over_run_stats

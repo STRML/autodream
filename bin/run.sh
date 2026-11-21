@@ -2217,7 +2217,27 @@ write_remote_short_marker() {
     || { rm -f "$f.tmp.$$" 2>/dev/null; log "WARNING: could not write $f; this date will not be listed if a host was short"; }
 }
 
+# A night from before remote-short.txt existed keeps its record only in run-stats.txt, which a
+# forced rebuild rewrites before L2 runs. Copy it into the marker before this run can overwrite it,
+# so a rebuild that dies before a report still leaves the date listed. A night whose old run-stats
+# names no short label gets no marker, and a night that already has one is left alone.
+migrate_remote_short_marker() {
+  local f="$FINDINGS_DIR/run-stats.txt" m="$FINDINGS_DIR/remote-short.txt" labels
+  { [ ! -e "$m" ] && [ -r "$f" ]; } || return 0
+  labels=$(awk -F': ' '/^remote_sync_/ && ($2 == "failed" || $2 == "invalid" || $2 == "skipped_locked" || $2 == "partial") {
+      k = $1; sub(/^remote_sync_/, "", k)
+      if (k != "invalid" && k !~ /_(cause|last_ok)$/) print k }' "$f" 2>/dev/null) || return 0
+  [ -n "$labels" ] || return 0
+  if printf '%s\n' "$labels" > "$m.tmp.$$" 2>/dev/null && mv -f "$m.tmp.$$" "$m" 2>/dev/null; then
+    log "remote sync: kept the earlier run's short hosts for $TARGET_DATE in remote-short.txt before this run rewrites run-stats.txt"
+  else
+    rm -f "$m.tmp.$$" 2>/dev/null
+    log "WARNING: could not write $m from the earlier run-stats.txt"
+  fi
+}
+
 sync_remote_roots() {
+  migrate_remote_short_marker
   if [ -z "${AUTODREAM_REMOTE_ROOTS:-}" ]; then remote_sync_stat "remote_sync: off"; return 0; fi
   remote_sync_stat "remote_sync: on"
   local entries=() entry label seen=" " sdir="" n i
@@ -4263,7 +4283,7 @@ EOF
         { print }
       ' "$REPORT_PATH" > "$REPORT_PATH.threads" && mv "$REPORT_PATH.threads" "$REPORT_PATH"
     fi
-    [ ! -s "$REPORT_PATH" ] || write_remote_short_marker
+    if report_complete; then write_remote_short_marker; fi
     # A question-free report still counts as a report. Without this the streak
     # store would keep yesterday's questions alive across an empty night, and a
     # question that reappeared two reports later would be called consecutive when
@@ -5435,7 +5455,7 @@ PY
     log "report bytes: $(wc -c < "$REPORT_PATH" | tr -d ' ')"
     # The remote hosts this report did not fully read, recorded only now that a report stands
     # behind them. A run that died before this line leaves the date's earlier record in place.
-    ! report_complete || write_remote_short_marker
+    if [ "${L2_DELIVERED:-0}" = 1 ] && report_complete; then write_remote_short_marker; fi
 
     # ---- Escalate questions this report has now asked N nights running ----
     # Before the pins and notify.sh, deliberately: it only reads the report and writes one
