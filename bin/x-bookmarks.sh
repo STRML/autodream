@@ -111,6 +111,17 @@ fi
 CREDS_FILE="${X_CREDS_FILE:-$AUTODREAM_DIR/x-credentials}"
 STATE_DIR="${X_STATE_DIR:-$AUTODREAM_DIR/x-bookmarks}"
 MAX_PAGES="${X_MAX_PAGES:-3}"
+# A cap that is not a positive number made every `[ "$page" -le "$MAX_PAGES" ]` an error, which
+# both paths read as "the cap is reached": an empty fetch, or a capture accepted as complete.
+case "$MAX_PAGES" in
+  ''|*[!0-9]*) _mp_bad=1 ;;
+  *) MAX_PAGES=$((10#$MAX_PAGES)); _mp_bad=0; [ "$MAX_PAGES" -ge 1 ] || _mp_bad=1 ;;
+esac
+if [ "$_mp_bad" = 1 ]; then
+  echo "x-bookmarks: X_MAX_PAGES=${X_MAX_PAGES:-} is not a positive number; using 3" >&2
+  MAX_PAGES=3
+fi
+unset _mp_bad
 MAX_UNREAD="${X_MAX_UNREAD:-40}"
 MAX_TEXT="${X_MAX_TEXT:-800}"
 QUERYID_TTL="${X_QUERYID_TTL:-86400}"
@@ -400,10 +411,14 @@ parse_page() {
   ' "$TMP/page.json" 2>/dev/null
 }
 
+# The bottom cursor of the page in $TMP/page.json, empty when the page has none. The exit status
+# is jq's: a failure is NOT "no cursor", and callers must not read it as the end of the timeline.
+# entryId goes through tostring because X is not guaranteed to send a string there, and
+# `startswith` on a number is a jq error.
 next_cursor() {
   jq -r '
     [ (.data.bookmark_timeline_v2.timeline.instructions // [])[] | (.entries // [])[]
-      | select((.content.cursorType == "Bottom") or ((.entryId // "") | startswith("cursor-bottom")))
+      | select((.content.cursorType == "Bottom") or (((.entryId // "") | tostring) | startswith("cursor-bottom")))
       | .content.value ] | (.[0] // "")
   ' "$TMP/page.json" 2>/dev/null
 }
@@ -448,7 +463,7 @@ fetch_new() {
     [ "$rc" -ne 3 ] || return 1
     [ "$rc" -eq 0 ] || break
 
-    cursor=$(next_cursor)
+    cursor=$(next_cursor) || { fail "could not read the next-page cursor of a Bookmarks response (its timeline has an unexpected shape)"; return 1; }
     [ -n "$cursor" ] || break
     page=$(( page + 1 ))
     # The reference paces pages; do not look like a scraper. Only wait when another page follows:
@@ -590,11 +605,14 @@ browser_row_problem() {
 # row; with none, fail()s and returns 1.
 browser_pick_row() {
   local rows="$1" cursor="$2" cands="$TMP/har-cands.jsonl" line cause first=""
+  # `.cursor` was read out of the request's own variables parameter when the rows were built, so
+  # the comparison is of values. A substring test of the whole URL matched a cursor of 20 against
+  # the page size in every URL (count%22%3A20) and took page one for its own next page.
   if [ -z "$cursor" ]; then
-    jq -c 'select((.url | test("cursor")) | not)' "$rows" > "$cands" 2>/dev/null
+    jq -c 'select(.cursor == "")' "$rows" > "$cands" 2>/dev/null
   else
     jq -c --arg c "$cursor" --arg e "$(printf '%s' "$cursor" | jq -sRr @uri)" \
-      'select((.url | contains($e)) or (.url | contains($c)))' "$rows" > "$cands" 2>/dev/null
+      'select(.cursor != "" and (.cursor == $e or .cursor == $c))' "$rows" > "$cands" 2>/dev/null
   fi
   while IFS= read -r line; do
     if cause=$(browser_row_problem "$line"); then
@@ -622,11 +640,14 @@ browser_read_pages() {
   local har="$1" rows="$TMP/har-rows.jsonl" row rc page=1 cursor=""
   jq -e '.log.entries | type == "array"' "$har" >/dev/null 2>&1 \
     || { fail "the HAR export could not be read (not a HAR file)"; return 1; }
-  jq -c '.log.entries[]
+  jq -c 'def cursor_of: (.request.url | capture("[?&]variables=(?<v>[^&]*)")? // {v: ""}).v
+           | ((capture("%22cursor%22%3A%22(?<c>(?:[^%]|%(?!22))*)%22")?
+               // capture("\"cursor\":\"(?<c>[^\"]*)\"")? // {c: ""}).c);
+         .log.entries[]
          | select((.request.method // "GET") == "GET")
          | select(((.request.url // "") | type) == "string")
          | select(.request.url | test("/graphql/[^/]+/Bookmarks(\\?|$)"))
-         | {url: .request.url, status: (.response.status // 0),
+         | {url: .request.url, cursor: cursor_of, status: (.response.status // 0),
             text: (if (.response.content.encoding // "") == "base64"
                    then ((.response.content.text // "") | (try @base64d catch ""))
                    else (.response.content.text // "") end)}' "$har" > "$rows" 2>/dev/null \
@@ -639,7 +660,7 @@ browser_read_pages() {
     [ "$rc" -ne 3 ] || return 1
     [ "$rc" -eq 0 ] || return 0
     [ "$page" -lt "$MAX_PAGES" ] || return 0
-    cursor=$(next_cursor)
+    cursor=$(next_cursor) || { fail "could not read the next-page cursor of a Bookmarks response (its timeline has an unexpected shape)"; return 1; }
     [ -n "$cursor" ] || return 0
     page=$(( page + 1 ))
   done
@@ -655,10 +676,10 @@ browser_lock() {
   while ! mkdir "$BROWSER_LOCK" 2>/dev/null; do
     holder=$(cat "$BROWSER_LOCK/pid" 2>/dev/null)
     if [ -n "$holder" ]; then
-      kill -0 "$holder" 2>/dev/null || { rm -rf "$BROWSER_LOCK"; continue; }
+      kill -0 "$holder" 2>/dev/null || { browser_lock_reap "$holder"; continue; }
     else
       age=$(( $(date +%s) - $(pstat_mtime "$BROWSER_LOCK" || echo 0) ))
-      if [ "$age" -gt 300 ]; then rm -rf "$BROWSER_LOCK"; continue; fi
+      if [ "$age" -gt 300 ]; then browser_lock_reap ""; continue; fi
     fi
     [ "$waited" -lt "$BROWSER_LOCK_WAIT" ] \
       || { fail "another x-bookmarks run holds the browser profile (pid ${holder:-unknown}); waited ${waited}s"; return 1; }
@@ -669,8 +690,22 @@ browser_lock() {
   BROWSER_LOCK_HELD=1
   return 0
 }
+# Remove a lock whose holder ($1, "" for one that never wrote a pid) is gone. Two runs can both
+# decide the same lock is stale, and `rm -rf` by path lets the slower one delete the lock the
+# faster one has just taken. The rename is atomic, so only one reaper gets the directory; it then
+# checks that what it holds is the lock it judged stale, and puts it back if it is not.
+browser_lock_reap() {
+  local grave="$BROWSER_LOCK.reap.$$"
+  mv "$BROWSER_LOCK" "$grave" 2>/dev/null || return 0
+  if [ "$(cat "$grave/pid" 2>/dev/null)" = "$1" ]; then rm -rf "$grave"; return 0; fi
+  mv "$grave" "$BROWSER_LOCK" 2>/dev/null || rm -rf "$grave"
+  return 0
+}
+# Only the owner removes it: after a reap and re-take by another run, the pid file names that run.
 browser_unlock() {
-  [ "$BROWSER_LOCK_HELD" = 1 ] && rm -rf "$BROWSER_LOCK"
+  if [ "$BROWSER_LOCK_HELD" = 1 ] && [ "$(cat "$BROWSER_LOCK/pid" 2>/dev/null)" = "$$" ]; then
+    rm -rf "$BROWSER_LOCK"
+  fi
   BROWSER_LOCK_HELD=0
   return 0
 }

@@ -430,6 +430,7 @@ case "$1 ${2:-}" in
   "network har") name="har-$3" ;;
   "get url") name="get-url" ;;
 esac
+if [ "$name" = open ] && [ -n "${AB_STEAL_LOCK:-}" ]; then printf '%s\n' "$AB_STEAL_PID" > "$AB_STEAL_LOCK/pid"; fi
 [ "${AB_HANG:-}" = "$name" ] && exec /bin/sleep 30
 if [ "${AB_FAIL:-}" = "$name" ]; then echo "agent-browser: simulated $name failure" >&2; exit 1; fi
 case "$name" in
@@ -468,7 +469,7 @@ make_har(){
       cur="${rest#*:}"; [ "$cur" != "-" ] || cur=""
     fi
     entries=$(jq -c --argjson s "$status" --rawfile b "$file" --arg c "$cur" \
-      '. + [{request:{method:"GET",url:("https://x.com/i/api/graphql/RANDOMQID/Bookmarks?variables=" + ((if $c == "" then {count:20,includePromotedContent:false} else {count:20,includePromotedContent:false,cursor:$c} end) | tojson | @uri))},response:{status:$s,content:{mimeType:"application/json",text:$b}}}]' <<<"$entries")
+      '. + [{request:{method:"GET",url:("https://x.com/i/api/graphql/RANDOMQID/Bookmarks?variables=" + ((if $c == "" then {count:20,includePromotedContent:false} else {count:20,includePromotedContent:false,cursor:$c} end) | tojson | @uri) + "&features=%7B%22cursor_ui_enabled%22%3Atrue%7D")},response:{status:$s,content:{mimeType:"application/json",text:$b}}}]' <<<"$entries")
   done
   jq -n --argjson e "$entries" '{log:{version:"1.2",entries:$e}}' > "$out"
 }
@@ -806,6 +807,59 @@ test_duplicate_responses_do_not_count_as_pages(){
   rm -rf "$root"
 }
 
+test_the_cursor_is_matched_as_a_value_not_a_substring(){
+  echo "# the next page is the request whose variables carry the cursor, never one that merely contains its text"
+  local root; root=$(bsetup)
+  make_curl_shim "$root/bin"
+  # A bottom cursor of 20 is also the page size in every request URL (count%22%3A20). Matching the
+  # URL as a substring read page one as its own next page and accepted a capture that had no page two.
+  jq '(.. | objects | select(.cursorType? == "Bottom") | .value) = "20"' "$root/page.json" > "$root/page-c20.json"
+  make_har "$root/har.json" "200:$root/page-c20.json"
+  X_MAX_PAGES=2 run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "fallback_graphql" "page one is not taken for its own next page"
+  assert_grep "$root/findings/x-bookmarks-fetch.txt" "no response to" "and the cause says the next page never loaded"
+  rm -rf "$root"
+  root=$(bsetup)
+  jq '(.. | objects | select(.cursorType? == "Bottom") | .value) = "20"' "$root/page.json" > "$root/page-c20.json"
+  make_page2 "$root"
+  make_har "$root/har.json" "200:$root/page-c20.json" "200:$root/page2.json:20"
+  X_MAX_PAGES=2 run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "browser" "the real page two, whose request carries cursor 20, is found"
+  assert_grep "$root/findings/x-bookmarks.md" "page two post" "and read"
+  rm -rf "$root"
+  # A numeric entryId on a timeline entry must not hide the bottom cursor from next_cursor.
+  root=$(bsetup)
+  make_curl_shim "$root/bin"
+  jq '.data.bookmark_timeline_v2.timeline.instructions[0].entries += [{"entryId":5,"content":{"entryType":"TimelineTimelineItem"}}]' "$root/page.json" > "$root/page-num.json"
+  make_har "$root/har.json" "200:$root/page-num.json"
+  X_MAX_PAGES=2 run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "fallback_graphql" "a numeric entryId does not turn a cursor into 'end of timeline'"
+  rm -rf "$root"
+}
+
+test_x_max_pages_must_be_a_positive_number(){
+  echo "# a garbage X_MAX_PAGES is replaced, not read as 'the cap is already reached'"
+  local root; root=$(bsetup)
+  make_curl_shim "$root/bin"
+  X_MAX_PAGES=abc run_br "$root" collect "$root/findings"
+  assert_grep "$root/out.txt" "X_MAX_PAGES" "the output names the bad value"
+  assert_eq "$(fetch_path "$root/findings")" "fallback_graphql" "the default cap of 3 applies, so a one-page capture with a cursor is incomplete"
+  rm -rf "$root"
+  root=$(setup)
+  X_MAX_PAGES=0 run_bm "$root" collect "$root/findings"
+  assert_grep "$root/findings/x-bookmarks.md" "the newer post" "the GraphQL path reads pages with a replaced cap too"
+  rm -rf "$root"
+}
+
+test_unlock_only_removes_the_lock_it_holds(){
+  echo "# a lock another run now owns is left alone at the end of this one"
+  local root; root=$(bsetup)
+  mkdir -p "$root/other"; : > "$root/other/marker"
+  AB_STEAL_LOCK="$root/locks/x-browser.lock" AB_STEAL_PID="$$" run_br "$root" collect "$root/findings"
+  assert_eq "$(cat "$root/locks/x-browser.lock/pid" 2>/dev/null)" "$$" "the lock now owned by another pid survives this run's cleanup"
+  rm -rf "$root"
+}
+
 test_a_parse_error_is_not_an_empty_page(){
   echo "# a response jq cannot parse fails the fetch instead of ending the paging as complete"
   local root; root=$(bsetup)
@@ -983,6 +1037,9 @@ test_watchdog_does_not_fire_after_a_command_that_finished
 test_a_bad_response_in_the_har_is_not_a_partial_success
 test_an_incomplete_capture_is_not_a_success
 test_duplicate_responses_do_not_count_as_pages
+test_the_cursor_is_matched_as_a_value_not_a_substring
+test_x_max_pages_must_be_a_positive_number
+test_unlock_only_removes_the_lock_it_holds
 test_a_parse_error_is_not_an_empty_page
 test_a_failed_graphql_page_leaves_no_partial_state
 test_two_runs_do_not_share_the_browser
