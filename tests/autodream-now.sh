@@ -132,6 +132,8 @@ case "$OUT" in *"✓"*) nope "it never says ✓ for a capture run.sh is about to
 [ "$(cat "$SANDBOX/mock/prints" 2>/dev/null || echo 0)" -ge 3 ] && ok "it waited for the job to finish" || nope "it waited for the job to finish" "prints: $(cat "$SANDBOX/mock/prints" 2>/dev/null)"
 
 echo "# --watch: a degraded capture run.sh could not move aside is not ready either"
+# run.sh logs the WARNING and, because the capture is not a delivered report, no "report bytes" line
+# (test_report_bytes_is_logged_only_for_a_delivered_report in run-all.sh pins that side).
 D=2020-02-08
 watch_launch "$D" 1 "echo 'WARNING: an incomplete report is at $(repf $D) and could not be moved aside; later triggers will treat this date as done' >> '$(logf $D)'; printf '$COMPLETE' > '$(repf $D)'"
 [ "$RC" -ne 0 ] && ok "it fails" || nope "it fails" "rc=$RC out=$OUT"

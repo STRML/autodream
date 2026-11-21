@@ -5272,9 +5272,12 @@ PY
   fi
 
   if [ -f "$REPORT_PATH" ]; then
-    # autodream-now.sh --watch reads this line as "a delivered report stands": it is only reached
-    # after a degraded capture was moved aside. Change the text there too.
-    log "report bytes: $(wc -c < "$REPORT_PATH" | tr -d ' ')"
+    # autodream-now.sh --watch reads this line as "a delivered report stands", so it is logged for a
+    # sentinel-validated report only. A degraded capture that could not be moved aside also leaves a
+    # file here, and must not produce it. Change the text there too.
+    if [ "$L2_DELIVERED" = "1" ] && report_complete; then
+      log "report bytes: $(wc -c < "$REPORT_PATH" | tr -d ' ')"
+    fi
 
     # ---- Escalate questions this report has now asked N nights running ----
     # Before the pins and notify.sh, deliberately: it only reads the report and writes one

@@ -747,6 +747,24 @@ test_partial_report_does_not_consume(){
   rm -rf "$root"
 }
 
+test_report_bytes_is_logged_only_for_a_delivered_report(){
+  echo "# autodream-now --watch reads the report-bytes log line as 'a delivered report stands', so run.sh logs it for nothing else"
+  local root; root=$(setup_env); mk_session "$root" s1
+  local sh="$root/shim"; mkdir -p "$sh"
+  # a degraded capture (complete-looking, no sentinel) whose move-aside fails: the file stays at the report path
+  printf '#!/bin/bash\ncase "$*" in *.partial-*) exit 1 ;; esac\nexec /bin/mv "$@"\n' > "$sh/mv"; chmod +x "$sh/mv"
+  export MOCK_MODE=l2_partial_marker AUTODREAM_L2_ATTEMPTS=1
+  PATH="$sh:$PATH" vault_run "$root"
+  unset MOCK_MODE AUTODREAM_L2_ATTEMPTS
+  assert_grep "$root/run.out" "an incomplete report is at" "the run says the capture could not be moved aside"
+  assert_nogrep "$root/run.out" "report bytes:" "and does not log the line that means a report was delivered"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" s1
+  vault_run "$root"
+  assert_grep "$root/run.out" "report bytes: [0-9]" "a delivered report logs it"
+  rm -rf "$root"
+}
+
 test_partial_report_does_not_block_retry(){
   echo "# regression: a truncated report must not satisfy the idempotency guard forever"
   local root; root=$(setup_env); mk_session "$root" s1
@@ -3823,6 +3841,7 @@ _run test_force_rebuild_failed_l2_does_not_consume
 _run test_unmovable_stale_report_disarms_consuming
 _run test_partial_report_does_not_consume
 _run test_partial_report_keeps_previous
+_run test_report_bytes_is_logged_only_for_a_delivered_report
 _run test_partial_report_does_not_block_retry
 _run test_complete_report_retires_partials
 _run test_dead_stdout_does_not_kill_the_run

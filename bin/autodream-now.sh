@@ -280,7 +280,7 @@ job_finished() { # 0 once launchd has run the job and no process is left
 written_by_this_run() { [ "$(pstat_mtime "$REPORT" || echo 0)" -ge "$LAUNCH_TS" ]; }
 # A complete-looking file is not a delivered report while the job runs: between L2 attempts run.sh keeps
 # a capture that has the marker and the questions block but no AUTODREAM_REPORT_END sentinel, and moves it
-# aside when it gives up. run.sh logs "report bytes: N" only for a report that stands after that move-aside,
+# aside when it gives up. run.sh logs "report bytes: N" only for a sentinel-validated report that stands,
 # so this run's log slice is the one place the watcher can tell the two apart.
 report_delivered_this_run() { tail -c +"$((LOG_START + 1))" "$LOG" 2>/dev/null | grep -q 'report bytes: [0-9]'; }
 
