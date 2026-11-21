@@ -377,8 +377,10 @@ collect() {
         # The harness that tagged the turn knows where its session file is (the Claude button does
         # not), and OMP and Codex keep theirs outside the Claude roots. Trusted only as an existing
         # .jsonl: the tags file is a plain file anyone can edit, and L2 will Read what this names.
+        # Absolute only: a relative path would be read from this run's working directory, and could
+        # name a different file than the one the tag was made against.
         transcript=""
-        case "$recorded" in *.jsonl) [ -f "$recorded" ] && [ -r "$recorded" ] && transcript="$recorded" ;; esac
+        case "$recorded" in /*.jsonl) [ -f "$recorded" ] && [ -r "$recorded" ] && transcript="$recorded" ;; esac
         [ -n "$transcript" ] || transcript="$(tag_transcript "$session")"
         case "$harness" in claude) where="Claude Code" ;; omp) where="OMP" ;; codex) where="Codex" ;; *) where="an unknown harness" ;; esac
         short="$(printf '%s-%s' "${session:0:8}" "${id##*:}" | tr -c 'A-Za-z0-9.\n-' '-' | cut -c1-24)"

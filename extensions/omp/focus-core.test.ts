@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { actionFor, cliPath, lastTurn, pickList, tagArgv, taggedIds, tagsPath, textOf, turnsOf, type EntryLike } from "./focus-core";
+import { WRITER_CAP, actionFor, cliPath, lastTurn, pickList, tagArgv, taggedIds, tagsPath, textOf, turnsOf, type EntryLike } from "./focus-core";
 
 const msg = (id: string, role: string, content: unknown): EntryLike => ({ type: "message", id, message: { role, content } });
 
@@ -142,9 +142,40 @@ describe("tagArgv", () => {
 	test("leaves out a transcript the session has not written yet", () => {
 		expect(tagArgv(turn, { id: "s1", cwd: "/x", file: undefined })).not.toContain("--transcript");
 	});
-	test("caps the text it passes", () => {
+	test("bounds the text it passes", () => {
 		const argv = tagArgv({ ...turn, text: "y".repeat(5000) }, { id: "s1", cwd: "/x", file: undefined }, 100);
 		expect(argv[argv.length - 1]).toHaveLength(100);
+	});
+	test("cuts one character past the writer's cap, so the writer sees a long turn and marks the cut", () => {
+		const last = (text: string) => {
+			const argv = tagArgv({ ...turn, text }, { id: "s1", cwd: "/x", file: undefined });
+			return argv[argv.length - 1]!;
+		};
+		expect(last("z".repeat(WRITER_CAP))).toHaveLength(WRITER_CAP);
+		expect(last("z".repeat(WRITER_CAP + 1))).toHaveLength(WRITER_CAP + 1);
+		expect(last("z".repeat(5000))).toHaveLength(WRITER_CAP + 1);
+	});
+});
+
+describe("a prompt the agent wrote is not the person's", () => {
+	const attributed = (id: string, role: string, content: unknown, attribution: string): EntryLike => ({ type: "message", id, message: { role, content, attribution } });
+	const branch: EntryLike[] = [
+		msg("u1", "user", "the human prompt"),
+		msg("a1", "assistant", [{ type: "text", text: "a reply" }]),
+		attributed("u2", "user", "steering note from the parent", "agent"),
+	];
+
+	test("lastTurn skips an agent-attributed user message", () => {
+		expect(lastTurn(branch, "user")).toEqual({ id: "u1", role: "user", text: "the human prompt" });
+	});
+	test("the picker never offers it, and does not label it as the person", () => {
+		const turns = turnsOf(branch);
+		expect(turns.map(turn => turn.id)).toEqual(["u1", "a1"]);
+		expect(pickList(turns, new Set()).labels.some(label => label.includes("steering note"))).toBe(false);
+	});
+	test("a message with no attribution, or attributed to the user, still counts", () => {
+		expect(lastTurn([attributed("u3", "user", "typed", "user")], "user")?.id).toBe("u3");
+		expect(lastTurn([msg("u4", "user", "typed")], "user")?.id).toBe("u4");
 	});
 });
 

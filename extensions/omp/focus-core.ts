@@ -9,7 +9,7 @@ export type Role = "user" | "assistant";
 export type EntryLike = {
 	type: string;
 	id: string;
-	message?: { role?: string; content?: unknown };
+	message?: { role?: string; content?: unknown; attribution?: string };
 };
 
 export type Turn = { id: string; role: Role; text: string };
@@ -33,6 +33,9 @@ function turnOf(entry: EntryLike | undefined): Turn | undefined {
 	if (!entry || entry.type !== "message") return undefined;
 	const role = entry.message?.role;
 	if (role !== "user" && role !== "assistant") return undefined;
+	// A user-role message attributed to the agent (a steering note, hook output, an advisor's prompt) is not
+	// something the person typed. The shell reader (`last --harness omp`) skips it the same way.
+	if (role === "user" && entry.message?.attribution === "agent") return undefined;
 	const text = textOf(entry.message?.content);
 	return text.trim() === "" ? undefined : { id: entry.id, role, text };
 }
@@ -101,8 +104,15 @@ export function taggedIds(tagsText: string, session: string): Set<string> {
 	return ids;
 }
 
-/** The argv for `autodream-focus.sh tag`. The text goes as an argument because OMP's exec has no stdin. */
-export function tagArgv(turn: Turn, session: { id: string; cwd: string; file: string | undefined }, cap = 2000): string[] {
+/** The length at which autodream-focus.sh cuts a turn and appends an ellipsis. */
+export const WRITER_CAP = 2000;
+
+/**
+ * The argv for `autodream-focus.sh tag`. The text goes as an argument because OMP's exec has no stdin, so a very long
+ * turn is bounded here, at one character past the writer's cap: the writer then sees a turn longer than its cap, cuts
+ * it and says so with an ellipsis. Cutting at exactly its cap would hand it a text that looks whole.
+ */
+export function tagArgv(turn: Turn, session: { id: string; cwd: string; file: string | undefined }, cap = WRITER_CAP + 1): string[] {
 	return [
 		"tag",
 		"--harness",

@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { FocusTag } from '../types'
-import { clip, parseFile, serializeFile, tagId, tagsFile, toggleTag } from '../hooks/focus-lib'
+import { focusScript, forWriter, readTags, tagId, tagsFile, TEXT_CAP } from '../hooks/focus-lib'
 
 const TAG: FocusTag = {
   id: 's1:r1',
@@ -13,70 +13,43 @@ const TAG: FocusTag = {
   taggedAt: '2026-10-04T18:00:00.000Z',
 }
 
-const EMPTY = { tags: [], others: [] }
-
-test('a tag with a multi-line text survives a round trip on one line', () => {
-  const text = serializeFile({ tags: [TAG], others: [] })
-
-  expect(text.split('\n').filter(Boolean)).toHaveLength(1)
-  expect(parseFile(text)).toEqual({ tags: [TAG], others: [] })
+test('a tag with a multi-line text is read back from one line', () => {
+  expect(readTags(`${JSON.stringify(TAG)}\n`)).toEqual([TAG])
 })
 
-test('an empty file serializes to an empty file', () => {
-  expect(serializeFile(EMPTY)).toBe('')
+test('an empty file holds no tags', () => {
+  expect(readTags('')).toEqual([])
 })
 
-test('torn, foreign and incomplete lines are not tags, and they are kept as they stood', () => {
+test('torn, foreign and incomplete lines are not tags', () => {
   const torn = '{"id":"s1:r1","session":"s1"'
   const foreign = '{"note":"written by hand"}'
   const badRole = JSON.stringify({ ...TAG, id: 's1:bad-role', role: 'system' })
   const text = [torn, 'not json at all', '[1,2,3]', 'null', foreign, badRole, JSON.stringify(TAG), ''].join('\n')
 
-  expect(parseFile(text)).toEqual({ tags: [TAG], others: [torn, 'not json at all', '[1,2,3]', 'null', foreign, badRole] })
+  expect(readTags(text)).toEqual([TAG])
 })
 
-test('a rewrite hands back every line it did not understand', () => {
-  const foreign = '{"note":"written by hand","future":true}'
-  const { file } = toggleTag(parseFile(`${foreign}\n`), TAG)
-  const again = parseFile(serializeFile(file))
+test('a tag written by OMP or Codex is read like any other, with the fields this version does not know', () => {
+  const line = JSON.stringify({ ...TAG, harness: 'omp', transcript: '/Users/x/.omp/agent/sessions/b/s1.jsonl' })
 
-  expect(again.others).toEqual([foreign])
-  expect(again.tags).toEqual([TAG])
-})
-
-test('a field this version does not know survives a rewrite of its tag', () => {
-  const line = JSON.stringify({ ...TAG, label: 'from a later version' })
-  const { file } = toggleTag(parseFile(line), { ...TAG, id: 's1:r2', uuid: 'r2' })
-
-  expect(parseFile(serializeFile(file)).tags[0]).toEqual({ ...TAG, label: 'from a later version' })
+  expect(readTags(line)[0]).toEqual({ ...TAG, harness: 'omp', transcript: '/Users/x/.omp/agent/sessions/b/s1.jsonl' })
 })
 
 test('a tag without a cwd is read with an empty one', () => {
   const { cwd: _cwd, ...rest } = TAG
 
-  expect(parseFile(JSON.stringify(rest)).tags[0]?.cwd).toBe('')
-})
-
-test('toggling adds an untagged turn and removes a tagged one', () => {
-  const added = toggleTag(EMPTY, TAG)
-
-  expect(added).toEqual({ file: { tags: [TAG], others: [] }, isTagged: true })
-  expect(toggleTag(added.file, TAG)).toEqual({ file: EMPTY, isTagged: false })
-})
-
-test('toggling one turn leaves the others alone', () => {
-  const other = { ...TAG, id: 's1:r2', uuid: 'r2' }
-
-  expect(toggleTag({ tags: [TAG, other], others: [] }, TAG).file.tags).toEqual([other])
+  expect(readTags(JSON.stringify(rest))[0]?.cwd).toBe('')
 })
 
 test('the same row id in two sessions is two tags', () => {
   expect(tagId('s1', 'r1')).not.toBe(tagId('s2', 'r1'))
 })
 
-test('clip leaves short text alone and marks a cut', () => {
-  expect(clip('short', 10)).toBe('short')
-  expect(clip('abcdefghij', 4)).toBe('abcd…')
+test('a turn is handed to the writer one character past its cap, so the writer marks the cut', () => {
+  expect(forWriter('short')).toBe('short')
+  expect(forWriter('x'.repeat(TEXT_CAP))).toHaveLength(TEXT_CAP)
+  expect(forWriter('x'.repeat(5_000))).toHaveLength(TEXT_CAP + 1)
 })
 
 test('the tags file is next to the rest of autodream, and AUTODREAM_DIR moves it', () => {
@@ -88,4 +61,11 @@ test('the tags file is next to the rest of autodream, and AUTODREAM_DIR moves it
 test('AUTODREAM_TAGS_FILE moves the tags file, as it moves the one bin/vault-notes.sh reads', () => {
   expect(tagsFile({ HOME: '/Users/x', AUTODREAM_DIR: '/opt/ad', AUTODREAM_TAGS_FILE: '/elsewhere/t.jsonl' })).toBe('/elsewhere/t.jsonl')
   expect(tagsFile({ HOME: '/Users/x', AUTODREAM_TAGS_FILE: '' })).toBe('/Users/x/.claude/autodream/tags.jsonl')
+})
+
+test('the writer is the install directory script, AUTODREAM_DIR moves it, and AUTODREAM_FOCUS_BIN overrides it', () => {
+  expect(focusScript({ HOME: '/Users/x' })).toBe('/Users/x/.claude/autodream/autodream-focus.sh')
+  expect(focusScript({ HOME: '/Users/x', AUTODREAM_DIR: '/opt/ad' })).toBe('/opt/ad/autodream-focus.sh')
+  expect(focusScript({ HOME: '/Users/x', AUTODREAM_DIR: '' })).toBe('/Users/x/.claude/autodream/autodream-focus.sh')
+  expect(focusScript({ HOME: '/Users/x', AUTODREAM_FOCUS_BIN: '/opt/bin/focus' })).toBe('/opt/bin/focus')
 })

@@ -83,17 +83,20 @@ is consumed.
 | `AUTODREAM_DIR` | `~/.claude/autodream` (where `tags.jsonl` is) |
 | `AUTODREAM_TAGS_FILE` | `$AUTODREAM_DIR/tags.jsonl` (moves the file itself, as it does for `bin/vault-notes.sh`) |
 
-A value set only in `$AUTODREAM_DIR/config` is invisible to the mod, because the mod cannot source a shell file. Export it
-in the environment Claude Code starts from if you moved the install.
+A value set only in `$AUTODREAM_DIR/config` is invisible to the mod, because the mod cannot source a shell file: the
+script that writes the tag reads the config, but the mod reads the file to light the buttons from the environment alone,
+so a tags file moved only in the config shows no lit buttons. Export it in the environment Claude Code starts from if you
+moved the install. `AUTODREAM_FOCUS_BIN` names the writer if it is not at `$AUTODREAM_DIR/autodream-focus.sh`.
 
 ## Limits
 
 - Claude Code transcripts only. OMP sessions have no focus button.
 - `tags.jsonl` only grows, at most about 2 KB a tag, and Claude Code will not read a file over 4 MiB for a mod. Past
-  that the button says it cannot read the file and changes nothing, rather than rewriting it from empty. Prune it by hand
-  (and `tags-consumed.txt` with it) long before then.
-- Every press rewrites the file from what is on disk, so two open sessions mostly keep each other's tags, but the write
-  is not an atomic rename and the gap between its read and its write is not closed.
+  that the mod cannot read the file, says so, and lights no button; `bin/autodream-focus.sh` does not have that limit
+  but refuses to write over a file it cannot read. Prune it by hand (and `tags-consumed.txt` with it) long before then.
+- A press runs `bin/autodream-focus.sh tag`, so the button needs `install.sh` to have linked that script into
+  `$AUTODREAM_DIR` (or `AUTODREAM_FOCUS_BIN` to name it). Without it the button says the script was not found and writes
+  nothing: the mod does not write `tags.jsonl` itself, so a press and a tag from OMP or Codex cannot overwrite each other.
 - Whether a row's id is the transcript's own `uuid` is not guaranteed by the mod API, so a note points at the session
   and quotes the turn instead of relying on the id to find it.
 

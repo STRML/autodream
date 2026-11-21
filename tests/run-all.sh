@@ -849,20 +849,116 @@ test_focus_cli_a_stale_lock_is_taken_by_one_waiter_only(){
   rm -rf "$root"
 }
 
+test_focus_cli_the_tags_file_named_in_the_config_is_the_one_written(){
+  echo "# autodream-focus.sh: it resolves the tags file the way the collector does, config included"
+  local root; root=$(setup_env); local ad="$root/autodream"
+  printf 'AUTODREAM_TAGS_FILE=%s\n' "$root/moved.jsonl" > "$ad/config"
+  AUTODREAM_DIR="$ad" /bin/bash "$REPO/bin/autodream-focus.sh" tag --harness omp --session s1 --uuid r1 --role assistant --text x >/dev/null
+  assert_eq "$(jq -r .id "$root/moved.jsonl" 2>/dev/null)" "s1:r1" "a tags file named only in the install's config is the one written"
+  assert_no_file "$ad/tags.jsonl" "and the default file is not touched"
+  AUTODREAM_TAGS_FILE="$root/exported.jsonl" AUTODREAM_DIR="$ad" /bin/bash "$REPO/bin/autodream-focus.sh" tag --harness omp --session s1 --uuid r2 --role assistant --text y >/dev/null
+  assert_eq "$(jq -r .id "$root/exported.jsonl" 2>/dev/null)" "s1:r2" "an exported one still wins over the config"
+  rm -rf "$root"
+}
+
+test_focus_cli_last_finds_a_session_behind_newer_ones_in_other_directories(){
+  echo "# autodream-focus.sh last: the directory's session is found however many newer sessions other directories have"
+  local root; root=$(setup_env); local home="$root/codex" i
+  mk_codex_session "$home" cx-mine "$root" >/dev/null
+  sleep 1
+  for i in $(seq 1 90); do mk_codex_session "$home" "cx-other-$i" "$root/elsewhere" >/dev/null; done
+  CODEX_HOME="$home" focus_cli "$root" last --harness codex --cwd "$root" >/dev/null
+  assert_eq "$(jq -r .session "$root/autodream/tags.jsonl" 2>/dev/null)" "cx-mine" "90 newer sessions of another directory do not hide it"
+  rm -rf "$root"
+}
+
+test_focus_cli_a_relative_transcript_is_recorded_as_an_absolute_path(){
+  echo "# autodream-focus.sh: the transcript a tag records is absolute, because the nightly run reads it from elsewhere"
+  local root; root=$(setup_env); local want
+  mkdir -p "$root/rel"; : > "$root/rel/s.jsonl"; want="$(cd "$root/rel" && pwd -P)/s.jsonl"
+  ( cd "$root" && focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --transcript rel/s.jsonl --text x ) >/dev/null
+  assert_eq "$(jq -r .transcript "$root/autodream/tags.jsonl")" "$want" "tag --transcript with a relative path"
+  local f; f=$(mk_codex_session "$root/codex" cx-rel "$root")
+  ( cd "$(dirname "$f")" && CODEX_HOME="$root/codex" focus_cli "$root" last --harness codex --file "$(basename "$f")" ) >/dev/null
+  assert_eq "$(jq -r 'select(.session == "cx-rel") | .transcript' "$root/autodream/tags.jsonl")" "$(cd "$(dirname "$f")" && pwd -P)/$(basename "$f")" "last --file with a relative path"
+  local out rc=0; out=$( cd "$root" && focus_cli "$root" tag --harness omp --session s2 --uuid r1 --role assistant --transcript nodir/s.jsonl --text x 2>&1 ) || rc=$?
+  assert_eq "$rc" "1" "a path whose directory is not there is refused"
+  assert_grep_str "$out" "nothing was changed" "and says nothing was changed"
+  rm -rf "$root"
+}
+
+test_focus_cli_a_lock_is_held_by_its_owner_not_by_its_age(){
+  echo "# autodream-focus.sh: a lock whose owner is alive is never taken, however old; one whose owner is gone is taken at once"
+  local root; root=$(setup_env); local d="$root/autodream" live dead out rc=0
+  mkdir -p "$d"
+  sleep 60 & live=$!
+  mkdir -p "$d/tags.jsonl.lock"; echo "$live" > "$d/tags.jsonl.lock/pid"; touch -t 202001010000 "$d/tags.jsonl.lock" "$d/tags.jsonl.lock/pid"
+  out=$(focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1) || rc=$?
+  assert_eq "$rc" "1" "a writer suspended for longer than a minute still owns its lock, so a waiter gives up"
+  assert_grep_str "$out" "nothing was changed" "and says nothing was changed"
+  assert_eq "$(cat "$d/tags.jsonl.lock/pid" 2>/dev/null)" "$live" "the owner's lock is untouched"
+  assert_no_file "$d/tags.jsonl" "and nothing was written"
+  kill "$live" 2>/dev/null; wait "$live" 2>/dev/null || true
+  rm -rf "$d/tags.jsonl.lock"
+  sh -c 'exit 0' & dead=$!; wait "$dead" 2>/dev/null || true
+  mkdir -p "$d/tags.jsonl.lock"; echo "$dead" > "$d/tags.jsonl.lock/pid"
+  out=$(focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1)
+  assert_eq "$out" "tagged s1:r1" "a lock whose writer is gone is taken even though it is fresh"
+  assert_no_file "$d/tags.jsonl.lock" "and released afterwards"
+  rm -rf "$root"
+}
+
+test_focus_cli_a_write_by_a_writer_that_takes_no_lock_is_not_overwritten(){
+  echo "# autodream-focus.sh: a tag that lands in the file during the copy (an older mod build) is never replaced by the copy"
+  local root; root=$(setup_env); local f="$root/autodream/tags.jsonl" sh="$root/shim" out rc real_tail real_awk
+  real_tail=$(command -v tail); real_awk=$(command -v awk); mkdir -p "$sh"
+  printf '{"id":"keep:1","text":"one"}\n' > "$f"
+  # tail runs between the copy and the rename of an append: the shim writes a line the way an unlocked writer would
+  cat > "$sh/tail" <<SH
+#!/bin/bash
+case "\$*" in *tags.jsonl*) echo '{"id":"late:1","text":"unlocked"}' >> "$f" ;; esac
+exec "$real_tail" "\$@"
+SH
+  chmod +x "$sh/tail"
+  rc=0; out=$(PATH="$sh:$PATH" focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1) || rc=$?
+  assert_eq "$rc" "1" "an append refuses when the file changed under it"
+  assert_grep_str "$out" "changed while it was being rewritten" "and says why"
+  assert_eq "$(grep -c late:1 "$f")" "1" "the other writer's tag is still there"
+  assert_eq "$(grep -c s1:r1 "$f" || true)" "0" "and this one was not published over it"
+  # the untag path: awk is the rewrite, and the shim writes after it
+  printf '{"id":"s1:r1","session":"s1","uuid":"r1","text":"mine"}\n' > "$f"
+  rm -f "$sh/tail"
+  cat > "$sh/awk" <<SH
+#!/bin/bash
+"$real_awk" "\$@" || exit \$?
+echo '{"id":"late:2","text":"unlocked"}' >> "$f"
+SH
+  chmod +x "$sh/awk"
+  rc=0; out=$(PATH="$sh:$PATH" focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1) || rc=$?
+  assert_eq "$rc" "1" "an untag refuses when the file changed under it"
+  assert_eq "$(grep -c late:2 "$f")" "1" "the other writer's tag is still there"
+  assert_eq "$(grep -c '"id":"s1:r1"' "$f")" "1" "and the tag being removed is as it was"
+  rm -rf "$root"
+}
+
 mk_codex_session(){ # $1=codex home $2=session id $3=cwd — a rollout in the shape Codex writes
   local d="$1/sessions/2020/01/02"; mkdir -p "$d"
   local f="$d/rollout-2020-01-02T12-00-00-$2.jsonl"
   jq -cn --arg id "$2" --arg cwd "$3" '{timestamp:"2020-01-02T12:00:00.000Z",type:"session_meta",payload:{id:$id,cwd:$cwd}}' > "$f"
   local role id text
+  # What a person typed is an item_completed UserMessage event; the response_item messages with role user
+  # are what Codex injects (instructions, environment context), and the last one is injected after the
+  # last real prompt, so choosing by position or by the text's first character would pick the wrong turn.
+  jq -cn '{timestamp:"2020-01-02T12:00:01.000Z",type:"event_msg",payload:{type:"item_completed",item:{type:"UserMessage",id:"um_1",content:[{type:"text",text:"why is it slow?",text_elements:[]}]}}}' >> "$f"
+  jq -cn '{timestamp:"2020-01-02T12:00:02.000Z",type:"event_msg",payload:{type:"item_completed",item:{type:"UserMessage",id:"um_2",content:[{type:"text",text:"<div>Why does this fail?</div>",text_elements:[]}]}}}' >> "$f"
   while IFS='|' read -r role id text; do
     jq -cn --arg role "$role" --arg id "$id" --arg text "$text" \
-      '{timestamp:"2020-01-02T12:00:01.000Z",type:"response_item",payload:({type:"message",role:$role,content:[{type:(if $role=="assistant" then "output_text" else "input_text" end),text:$text}]} + (if $id=="" then {} else {id:$id} end))}' >> "$f"
+      '{timestamp:"2020-01-02T12:00:03.000Z",type:"response_item",payload:({type:"message",role:$role,content:[{type:(if $role=="assistant" then "output_text" else "input_text" end),text:$text}]} + (if $id=="" then {} else {id:$id} end))}' >> "$f"
   done <<'EOF'
 developer||standing instructions
-user||<environment_context>cwd</environment_context>
-user||why is it slow?
 assistant|msg_first|first answer
 assistant|msg_last|final answer
+user||<environment_context>cwd</environment_context>
 EOF
   printf '%s' "$f"
 }
@@ -876,7 +972,7 @@ test_focus_cli_last_codex(){
   assert_eq "$(jq -r '[.id, .role, .harness, .text, .transcript] | join("|")' "$tags")" "cx-1:msg_last|assistant|codex|final answer|$f" "the last assistant message, with the rollout as its transcript"
   rm -f "$tags"
   CODEX_HOME="$home" focus_cli "$root" last --harness codex --cwd "$root" --role user >/dev/null
-  assert_eq "$(jq -r '.text' "$tags")" "why is it slow?" "--role user skips the context Codex injects as user messages"
+  assert_eq "$(jq -r '[.id, .text] | join("|")' "$tags")" "cx-1:um_2|<div>Why does this fail?</div>" "--role user is the last thing the person typed, even one that starts with an angle bracket, and never the context Codex injected after it"
   rm -rf "$root"
 }
 
@@ -938,12 +1034,14 @@ test_focus_tag_uses_the_recorded_harness_and_transcript(){
   jq -cn --arg a "$at" --arg t "$root/elsewhere/real.jsonl" '{id:"cx:1",session:"cx",uuid:"1",role:"assistant",text:"codex reply",cwd:"/p",taggedAt:$a,harness:"codex",transcript:$t}' >> "$root/autodream/tags.jsonl"
   jq -cn --arg a "$at" --arg t "$root/elsewhere/gone.jsonl" '{id:"om:1",session:"om",uuid:"1",role:"assistant",text:"omp reply",cwd:"/p",taggedAt:$a,harness:"omp",transcript:$t}' >> "$root/autodream/tags.jsonl"
   jq -cn --arg a "$at" '{id:"ev:1",session:"ev",uuid:"1",role:"assistant",text:"evil path",cwd:"/p",taggedAt:$a,harness:"omp",transcript:"/etc/passwd"}' >> "$root/autodream/tags.jsonl"
-  focus_collect "$root" "$DATE"
+  jq -cn --arg a "$at" '{id:"rl:1",session:"rl",uuid:"1",role:"assistant",text:"relative path",cwd:"/p",taggedAt:$a,harness:"omp",transcript:"elsewhere/real.jsonl"}' >> "$root/autodream/tags.jsonl"
+  # Run from the directory where that relative path happens to exist: it still must not be trusted.
+  ( cd "$root" && focus_collect "$root" "$DATE" )
   local f; f="$(fdir "$root")/operator-notes.md"
   assert_grep "$f" "autodream focus in Codex" "the harness is named"
   assert_grep "$f" "autodream focus in OMP" "for OMP too"
   assert_grep "$f" "Transcript: $root/elsewhere/real.jsonl" "a recorded transcript that exists is used as given"
-  assert_eq "$(grep -c "Transcript: not found" "$f")" "2" "one that is gone, and one that is not a .jsonl, are reported as not found, not trusted"
+  assert_eq "$(grep -c "Transcript: not found" "$f")" "3" "one that is gone, one that is not a .jsonl, and a relative one are reported as not found, not trusted"
   assert_nogrep "$f" "Transcript: /etc/passwd" "a path to a file that is not a session is never handed to L2"
   rm -rf "$root"
 }
@@ -4058,6 +4156,11 @@ _run test_focus_cli_reclaims_a_stale_lock
 _run test_focus_cli_a_failed_read_never_becomes_a_write
 _run test_focus_cli_last_omp_leaves_no_copy_when_it_cannot_read_a_turn
 _run test_focus_cli_a_stale_lock_is_taken_by_one_waiter_only
+_run test_focus_cli_the_tags_file_named_in_the_config_is_the_one_written
+_run test_focus_cli_last_finds_a_session_behind_newer_ones_in_other_directories
+_run test_focus_cli_a_relative_transcript_is_recorded_as_an_absolute_path
+_run test_focus_cli_a_lock_is_held_by_its_owner_not_by_its_age
+_run test_focus_cli_a_write_by_a_writer_that_takes_no_lock_is_not_overwritten
 _run test_focus_cli_last_codex
 _run test_focus_cli_last_omp
 _run test_focus_cli_last_omp_reads_the_live_branch

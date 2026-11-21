@@ -2,8 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderElement } from 'claude-code'
 
 import type { FocusTag } from '../types'
-import type { TagFile } from './focus-lib'
-import { clip, parseFile, serializeFile, tagId, tagsFile, TEXT_CAP, toggleTag } from './focus-lib'
+import { focusScript, forWriter, readTags, tagId, tagsFile } from './focus-lib'
 
 /**
  * Plain text, not an icon: a glyph's width is a guess the engine and the terminal make separately (the emoji eye with
@@ -34,27 +33,27 @@ const where = async ($: EngineInterface): Promise<string> => {
 const reason = (cause: unknown): string => (cause instanceof Error ? cause.message : String(cause))
 
 /**
- * What is on disk now. Another session may have tagged since this one last looked, so every write starts here.
+ * The tags on disk now, to light the buttons. This mod only reads the file: every write goes through bin/autodream-focus.sh,
+ * which holds the lock the other two harnesses use, so a tag from the button and one from OMP or Codex cannot overwrite each other.
  *
- * Only a file that is not there is empty. One that is there and will not read (over the 4 MiB a read allows, no
- * permission, an I/O error) throws, because the caller rewrites the whole file: treating it as empty would replace
- * every tag with the one being added.
+ * Only a file that is not there is empty. One that is there and will not read (over the 4 MiB a read allows, no permission,
+ * an I/O error) throws, so the buttons say so rather than show every turn as untagged.
  */
-const load = async ($: EngineInterface): Promise<TagFile> => {
+const load = async ($: EngineInterface): Promise<FocusTag[]> => {
   const file = await where($)
 
-  if (!(await $.fs.exists(file))) return { tags: [], others: [] }
+  if (!(await $.fs.exists(file))) return []
 
   const text = await $.fs.read(file)
 
   if (typeof text !== 'string') throw new Error(`${file} did not read as text`)
 
-  return parseFile(text)
+  return readTags(text)
 }
 
 const refresh = async ($: EngineInterface) => {
   try {
-    const { tags } = await load($)
+    const tags = await load($)
 
     await update($, tagged, () => tags.map(tag => tag.id))
   } catch (cause) {
@@ -62,33 +61,45 @@ const refresh = async ($: EngineInterface) => {
   }
 }
 
-const press = async ($: EngineInterface, turn: Turn) => {
-  let current: TagFile
+/** The script and the two settings that move the file it writes, as the writer reads them from its environment. */
+const writer = async ($: EngineInterface): Promise<{ script: string; env: Record<string, string> }> => {
+  const [HOME, AUTODREAM_DIR, AUTODREAM_TAGS_FILE, AUTODREAM_FOCUS_BIN] = await Promise.all([
+    $.env.get('HOME'),
+    $.env.get('AUTODREAM_DIR'),
+    $.env.get('AUTODREAM_TAGS_FILE'),
+    $.env.get('AUTODREAM_FOCUS_BIN'),
+  ])
 
-  try {
-    current = await load($)
-  } catch (cause) {
-    $.ui.toast(`Could not read the tags file, so nothing was changed: ${reason(cause)}`)
-
-    return
+  return {
+    script: focusScript({ HOME, AUTODREAM_DIR, AUTODREAM_FOCUS_BIN }),
+    env: { ...(AUTODREAM_DIR ? { AUTODREAM_DIR } : {}), ...(AUTODREAM_TAGS_FILE ? { AUTODREAM_TAGS_FILE } : {}) },
   }
+}
 
+const press = async ($: EngineInterface, turn: Turn) => {
   try {
-    const [session, cwd, now] = await Promise.all([$.session.id(), $.session.cwd(), $.clock.now()])
-    const tag: FocusTag = {
-      id: tagId(session, turn.uuid),
-      session,
-      uuid: turn.uuid,
-      role: turn.role,
-      text: clip(turn.text, TEXT_CAP),
-      cwd,
-      taggedAt: new Date(now).toISOString(),
-    }
-    const { file, isTagged } = toggleTag(current, tag)
+    const [session, cwd, { script, env }] = await Promise.all([$.session.id(), $.session.cwd(), writer($)])
 
-    await $.fs.write(await where($), serializeFile(file))
-    await update($, tagged, () => file.tags.map(each => each.id))
-    $.ui.toast(isTagged ? "Tagged: tonight's autodream takes a close look at this." : 'Tag removed.')
+    if (!(await $.fs.exists(script))) {
+      $.ui.toast(`autodream-focus.sh was not found at ${script}, so nothing was changed. Run cc-autodream's install.sh.`)
+
+      return
+    }
+
+    // The writer toggles: a second press on a tagged turn takes the tag back, and says which it did.
+    const { exitCode, stdout, stderr } = await $.process.run(
+      [script, 'tag', '--harness', 'claude', '--session', session, '--uuid', turn.uuid, '--role', turn.role, '--cwd', cwd, '--text', forWriter(turn.text)],
+      { env, timeoutMs: 15_000 },
+    )
+
+    if (exitCode !== 0) {
+      $.ui.toast(`Could not save the tag: ${(stderr || stdout).trim().slice(0, 300)}`)
+
+      return
+    }
+
+    await refresh($)
+    $.ui.toast(stdout.trim().startsWith('untagged') ? 'Tag removed.' : "Tagged: tonight's autodream takes a close look at this.")
   } catch (cause) {
     $.ui.toast(`Could not save the tag: ${reason(cause)}`)
   }

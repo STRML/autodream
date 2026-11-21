@@ -50,6 +50,21 @@ if [ -z "$AUTODREAM_DIR" ]; then
     AUTODREAM_DIR="$HOME/.claude/autodream"
   fi
 fi
+# The collector (bin/vault-notes.sh) reads $AUTODREAM_DIR/config, so a tags file named only there is
+# the one it reads. This writer resolves it the same way, with the same guards: the caller's exports
+# win over the file (the snapshot is replayed after), and a bad config line cannot kill the script.
+AUTODREAM_CONFIG="${AUTODREAM_CONFIG:-$AUTODREAM_DIR/config}"
+if [ -f "$AUTODREAM_CONFIG" ]; then
+  _env_snapshot=$(export -p)
+  set +eu
+  set -a
+  # shellcheck disable=SC1090
+  . "$AUTODREAM_CONFIG" 2>/dev/null || true
+  set +a
+  eval "$_env_snapshot" 2>/dev/null
+  set -eu
+  unset _env_snapshot
+fi
 TAGS_FILE="${AUTODREAM_TAGS_FILE:-$AUTODREAM_DIR/tags.jsonl}"
 
 # Installed copies are symlinks into the repo's bin/, so the helpers are found next to the
@@ -70,25 +85,49 @@ usage() { sed -n '/^# Usage:/,/^# Exit:/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1
 
 command -v jq >/dev/null 2>&1 || die 3 "jq is required"
 
-lock_is_stale() { # $1=lock dir -> 0 when it is older than a minute
-  [ -d "$1" ] && [ $(( $(date +%s) - $(pstat_mtime "$1" || date +%s) )) -gt 60 ]
+# A lock is a directory holding its owner's pid. Whether it is stale is a question about that process,
+# never about the lock's age: a writer suspended for longer than any age limit still owns its lock, and
+# a waiter that removed it would publish a tag the suspended writer then overwrites with its old copy.
+# A lock with no pid yet belongs to a writer between mkdir and writing it; only one that stays that
+# way for a minute counts as dead.
+lock_is_stale() { # $1=lock dir -> 0 when its owner is gone
+  local p
+  [ -d "$1" ] || return 1
+  if [ -f "$1/pid" ]; then
+    p="$(cat "$1/pid" 2>/dev/null || true)"
+    case "$p" in ''|*[!0-9]*) return 0 ;; esac
+    ! kill -0 "$p" 2>/dev/null
+    return
+  fi
+  [ $(( $(date +%s) - $(pstat_mtime "$1" || date +%s) )) -gt 60 ]
 }
 
-# Two waiters can both see a lock as stale. Removing it takes a claim of its own, and the age is read
-# again under the claim, so a waiter that lost the race cannot remove the lock the winner just took.
-# A claim left by a killed waiter goes the same way once it is old.
+take_lock() { # $1=lock dir -> 0 when this process created it and holds it
+  mkdir "$1" 2>/dev/null || return 1
+  printf '%s\n' "$$" > "$1/pid" 2>/dev/null || true
+}
+
+drop_lock() { # $1=lock dir: removed only by the process that holds it
+  [ "$(cat "$1/pid" 2>/dev/null || true)" = "$$" ] || return 0
+  rm -f "$1/pid"
+  rmdir "$1" 2>/dev/null || true
+}
+
+# Two waiters can both see a lock as stale. Removing it takes a claim of its own (also a pid lock), and
+# staleness is read again under the claim, so a waiter that lost the race cannot remove the lock the
+# winner just took.
 reclaim_stale_lock() {
-  if ! mkdir "$LOCK.reclaim" 2>/dev/null; then
-    if lock_is_stale "$LOCK.reclaim"; then rmdir "$LOCK.reclaim" 2>/dev/null || true; fi
+  if ! take_lock "$LOCK.reclaim"; then
+    if lock_is_stale "$LOCK.reclaim"; then rm -f "$LOCK.reclaim/pid"; rmdir "$LOCK.reclaim" 2>/dev/null || true; fi
     return 1
   fi
-  if lock_is_stale "$LOCK"; then rmdir "$LOCK" 2>/dev/null || true; fi
-  rmdir "$LOCK.reclaim" 2>/dev/null || true
+  if lock_is_stale "$LOCK"; then rm -f "$LOCK/pid"; rmdir "$LOCK" 2>/dev/null || true; fi
+  drop_lock "$LOCK.reclaim"
 }
 
 acquire_lock() {
   local i=0
-  while ! mkdir "$LOCK" 2>/dev/null; do
+  while ! take_lock "$LOCK"; do
     i=$(( i + 1 ))
     [ "$i" -gt 20 ] && return 1
     if lock_is_stale "$LOCK" && reclaim_stale_lock; then continue; fi
@@ -96,7 +135,9 @@ acquire_lock() {
   done
   return 0
 }
-release_lock() { rmdir "$LOCK" 2>/dev/null || true; }
+release_lock() { drop_lock "$LOCK"; }
+
+fingerprint() { if [ -f "$TAGS_FILE" ]; then cksum < "$TAGS_FILE" 2>/dev/null || echo unreadable; else echo absent; fi; }
 
 # One cleanup for the lock and the scratch files, registered once. It must not name a function's
 # local: an EXIT trap runs after the function has returned, where `set -u` makes the reference
@@ -133,6 +174,13 @@ cmd_tag() {
   [ "$have_text" = 1 ] || text="$(cat)" || die 1 "could not read the turn text from stdin; nothing was changed"
   [ -n "$(printf '%s' "$text" | tr -d '[:space:]')" ] || die 1 "that turn has no text, so there is nothing to tag"
 
+  # The nightly run reads this from another working directory, so a relative path is resolved now.
+  case "$transcript" in
+    ''|/*) ;;
+    *) transcript="$(cd "$(dirname "$transcript")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$transcript")")" \
+         || die 1 "cannot resolve the transcript path $transcript; nothing was changed" ;;
+  esac
+
   local id="$session:$uuid"
 
   mkdir -p "$(dirname "$TAGS_FILE")" 2>/dev/null || die 1 "cannot create $(dirname "$TAGS_FILE"); nothing was changed"
@@ -145,7 +193,11 @@ cmd_tag() {
   fi
 
   TMP="$(mktemp "$TAGS_FILE.XXXXXX")" || die 1 "cannot write next to $TAGS_FILE; nothing was changed"
-  local tmp="$TMP"
+  local tmp="$TMP" before
+  # Taken under the lock and checked again just before the rename. A writer that does not take the lock
+  # (an older mod build) is the only way the file can change in between, and then this refuses rather
+  # than publish a copy that drops its tag.
+  before="$(fingerprint)"
 
   # 1-based numbers of the lines that already tag this turn (any number, in case of a hand edit).
   local drop=""
@@ -159,6 +211,7 @@ cmd_tag() {
     awk -v drop="$(printf '%s' "$drop" | tr '\n' ' ')" \
       'BEGIN { n = split(drop, a, " "); for (i = 1; i <= n; i++) d[a[i]] = 1 } !(NR in d)' \
       "$TAGS_FILE" > "$tmp" || die 1 "could not rewrite $TAGS_FILE; nothing was changed"
+    [ "$(fingerprint)" = "$before" ] || die 1 "$TAGS_FILE changed while it was being rewritten; nothing was changed"
     mv -f "$tmp" "$TAGS_FILE" || die 1 "could not replace $TAGS_FILE; nothing was changed"
     say "untagged $id"
     return 0
@@ -188,6 +241,7 @@ cmd_tag() {
     if [ -n "$last" ]; then printf '\n' >> "$tmp" || die 1 "could not write the tag; nothing was changed"; fi
   fi
   printf '%s\n' "$line" >> "$tmp" || die 1 "could not write the tag; nothing was changed"
+  [ "$(fingerprint)" = "$before" ] || die 1 "$TAGS_FILE changed while it was being rewritten; nothing was changed"
   mv -f "$tmp" "$TAGS_FILE" || die 1 "could not replace $TAGS_FILE; nothing was changed"
   say "tagged $id"
 }
@@ -202,7 +256,9 @@ newest_session() { # $1=harness $2=cwd $3=physical cwd
     omp)   root="${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}/sessions"; depth=2; find_name='*.jsonl' ;;
   esac
   [ -d "$root" ] || return 0
-  # Sorted by mtime, newest first, bounded: a bucket holds hundreds of sessions.
+  # Sorted by mtime, newest first, and read until one records the wanted directory. No count limit
+  # before that match: a limit across the whole root would stop before a recent session of this
+  # directory whenever other directories' sessions are newer. The 14-day window is the bound.
   local cand m
   while IFS= read -r f; do
     [ -n "$f" ] || continue
@@ -216,7 +272,7 @@ newest_session() { # $1=harness $2=cwd $3=physical cwd
     fi
   done < <(find "$root" -mindepth "$depth" -maxdepth "$depth" -type f -name "$find_name" -mtime -14 2>/dev/null \
              | while IFS= read -r cand; do m="$(pstat_mtime "$cand")" && printf '%s %s\n' "$m" "$cand"; done \
-             | sort -rn | head -80 | cut -d' ' -f2-)
+             | sort -rn | cut -d' ' -f2-)
   return 0
 }
 
@@ -246,12 +302,22 @@ cmd_last() {
   case "$harness" in
     codex)
       session="$(head -1 "$file" | jq -rR 'fromjson? | .payload.id // .payload.session_id // empty')" || session=""
-      # A user message has no id in a Codex rollout, so its timestamp stands in; the turns Codex
-      # injects as user messages (environment context, instructions) start with `<`.
+      # A person's turn is its own record: an `item_completed` UserMessage (older builds: an
+      # `event_msg` user_message). The `response_item` messages with role user are what Codex injects
+      # (instructions, environment context), whatever their text starts with, so they are never read.
       picked="$(jq -c -s --arg role "$role" '
-        map(select(.type == "response_item" and .payload.type == "message" and .payload.role == $role)
-            | {id: (.payload.id // .timestamp), text: ([.payload.content[]? | .text // empty] | join("\n"))}
-            | select(.text != "" and ($role == "assistant" or (.text | startswith("<") | not)))) | last // empty' "$file")" \
+        def text: [.[]? | .text // empty] | join("\n");
+        map(if $role == "assistant" then
+              select(.type == "response_item" and .payload.type == "message" and .payload.role == "assistant")
+              | {id: (.payload.id // .timestamp), text: (.payload.content | text)}
+            else
+              select(.type == "event_msg" and ((.payload.type == "item_completed" and .payload.item.type == "UserMessage")
+                                               or .payload.type == "user_message"))
+              | if .payload.type == "user_message"
+                then {id: (.payload.id // .timestamp), text: (.payload.message // "")}
+                else {id: (.payload.item.id // .timestamp), text: (.payload.item.content | text)} end
+            end
+            | select(.text != "")) | last // empty' "$file")" \
         || die 1 "$file is not readable JSON lines; nothing was changed" ;;
     omp)
       session="$(head -5 "$file" | jq -rR 'fromjson? | select(.type == "session") | .id // empty' | head -1)" || session=""
