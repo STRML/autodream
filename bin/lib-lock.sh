@@ -18,6 +18,7 @@
 # threads.sh does not use this: it holds an flock on an open file, which the kernel releases with
 # the process, so there is no lock to go stale.
 
+# shellcheck disable=SC2034 # set here, read by the script that sourced this
 LOCK_HOLDER=""
 
 lock_warn() { if declare -F log >/dev/null 2>&1; then log "$1"; else printf '%s\n' "$1" >&2; fi; }
