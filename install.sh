@@ -524,6 +524,26 @@ adapter_bin_dirs_one() { # $1=adapter name  $2=PATH to search
   case "$b" in /*) dirname "$b" ;; esac
 }
 
+# With AUTODREAM_X_FETCH=browser in the config, the directories of agent-browser and of node, one
+# per line. agent-browser is a node script (`#!/usr/bin/env node`), so launchd needs both: an
+# absolute X_BROWSER_BIN alone does not put node on the job's PATH. X_BROWSER_BIN from the config,
+# when it names an executable, wins over the PATH lookup, as x-bookmarks.sh resolves it at run time.
+x_browser_bin_dirs() { # $1=PATH to search
+  [ "$(cfg_get AUTODREAM_X_FETCH)" = browser ] || return 0
+  local override b
+  override=$(cfg_get X_BROWSER_BIN)
+  if [ -n "$override" ] && [ -f "$override" ] && [ -x "$override" ] && [ "${override#/}" != "$override" ] \
+     && ! ephemeral_dir "$(dirname "$override")"; then
+    dirname "$override"
+  elif b=$(PATH="$1" command -v agent-browser 2>/dev/null); then
+    case "$b" in /*) dirname "$b" ;; esac
+  fi
+  if b=$(PATH="$1" command -v node 2>/dev/null); then
+    case "$b" in /*) dirname "$b" ;; esac
+  fi
+  return 0
+}
+
 install_schedule() {
   local la_dir="$HOME/Library/LaunchAgents" real_la_dir
   real_la_dir="$la_dir"
@@ -579,7 +599,7 @@ install_schedule() {
     [ -n "$d" ] || continue
     d="$(cd "$d" 2>/dev/null && pwd)" || continue
     case ":$path_dirs:" in *":$d:"*) ;; *) path_dirs="${path_dirs:+$path_dirs:}$d" ;; esac
-  done < <(adapter_bin_dirs "$clean_path")
+  done < <(adapter_bin_dirs "$clean_path"; x_browser_bin_dirs "$clean_path")
   local path_val="${path_dirs:+$path_dirs:}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
   local reports_dir dreams_xml

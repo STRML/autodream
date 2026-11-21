@@ -1081,6 +1081,18 @@ test_x_fetch_path_reaches_run_stats(){
   assert_grep  "$stats" 'x_fetch_path: fallback_graphql'                          "the collector's path is copied into run-stats"
   assert_grep  "$stats" 'x_fetch_browser_cause: agent-browser open failed: boom'  "and so is the browser's cause"
   rm -rf "$root"
+  # A rebuild finds the earlier run's record files. A collector that dies before rewriting them
+  # must not have its predecessor's `browser` or `fresh` reported as this run's.
+  root=$(setup_env); mk_session "$root" real1
+  mkdir -p "$(fdir "$root")"
+  printf 'browser\n' > "$(fdir "$root")/x-bookmarks-fetch.txt"
+  printf 'fresh\n' > "$(fdir "$root")/x-bookmarks-queryid.txt"
+  printf '#!/bin/bash\nexit 1\n' > "$root/dead-xbm.sh"; chmod +x "$root/dead-xbm.sh"
+  AUTODREAM_XBOOKMARKS_BIN="$root/dead-xbm.sh" run_dream "$root"
+  stats="$(fdir "$root")/run-stats.txt"
+  assert_grep  "$stats" 'x_fetch_path: not_attempted'    "a stale fetch record is not read as this run's path"
+  assert_grep  "$stats" 'x_queryid_source: not_attempted' "nor a stale queryId source"
+  rm -rf "$root"
 }
 
 test_self_audit_stats_failure_denominator(){

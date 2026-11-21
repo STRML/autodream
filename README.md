@@ -353,8 +353,9 @@ and, after a browser failure, its cause.
 
 ```bash
 ~/.claude/autodream/x-bookmarks.sh browser-login   # log in once, by hand, in a visible window
-agent-browser --session autodream-x close          # then close it: the nightly run cannot share the profile
+agent-browser --session autodream-x-login close    # then close it: the nightly run cannot share the profile
 echo 'AUTODREAM_X_FETCH=browser' >> ~/.claude/autodream/config
+./install.sh                                       # from the checkout, so the job's PATH gets agent-browser and node
 ~/.claude/autodream/x-bookmarks.sh status          # shows the mode, the binary and the profile
 ```
 
@@ -364,9 +365,12 @@ echo 'AUTODREAM_X_FETCH=browser' >> ~/.claude/autodream/config
 | `X_BROWSER_BIN` | `agent-browser` | the binary, if it is not on `PATH` |
 | `X_BROWSER_SESSION` | `autodream-x` | the agent-browser session name |
 | `X_BROWSER_TIMEOUT` | `60` | seconds each browser command may run |
+| `X_BROWSER_LOCK_WAIT` | `120` | seconds a run waits for another run that is using the profile |
 
-`agent-browser` is a node script and the launchd job has its own `PATH`, so `node` has to be
-reachable from it too. The browser path cannot log in unattended. When X ends the session, the
+`agent-browser` is a node script and the launchd job has its own `PATH`. With browser mode in
+the config, `install.sh` adds the directories of `agent-browser` (or of an absolute
+`X_BROWSER_BIN` in the config) and of `node` to it, which is why the re-install above is a step.
+The browser path cannot log in unattended. When X ends the session, the
 run falls back to the cookies and the report says so until you run `browser-login` again. It
 reads one page of bookmarks and scrolls `X_MAX_PAGES - 1` times for more.
 

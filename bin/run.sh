@@ -4880,6 +4880,10 @@ PY
   # Unread bookmarks become idea fuel: L2 cross-references what the user saved against
   # what they actually worked on. The script always exits 0 and always writes the file,
   # including a "not configured" stub, so this seam has exactly one shape for L2.
+  # The two record files are removed first: a rebuild of a date finds the earlier run's copies, and
+  # a collector that is missing or dies before rewriting them would otherwise have its predecessor's
+  # `browser` or `fresh` read below as tonight's.
+  rm -f "$FINDINGS_DIR/x-bookmarks-fetch.txt" "$FINDINGS_DIR/x-bookmarks-queryid.txt"
   if [ -x "$XBOOKMARKS" ]; then
     "$XBOOKMARKS" collect "$FINDINGS_DIR" || log "x-bookmark collection failed (continuing)"
   else
