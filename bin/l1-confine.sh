@@ -16,10 +16,10 @@
 #       profile and then confines nothing reads as "no". Always exits 0.
 #   l1-confine.sh prefix <stage> [writable-path ...]
 #       NUL-delimited argv to put in front of the engine command. A writable path is a directory
-#       (subpath), or a prefix when it ends in "*" (macOS only: ~/.claude.json and the temp files
-#       claude renames over it). L1_CONFINE_PROTECT (colon-separated) names paths the engine
+#       (subpath), or a prefix when it ends in "*" (~/.claude.json and, under sandbox-exec, the temp
+#       files claude renames over it). L1_CONFINE_PROTECT (colon-separated) names paths the engine
 #       cannot write even when a writable path covers them: $AUTODREAM_DIR sits under ~/.claude on
-#       a default install.
+#       a default install. Under bwrap a prefix binds only the files that already match it.
 #
 # L1_CONFINE_TOOL=sandbox-exec|bwrap picks a tool (default: sandbox-exec, then bwrap).
 #
@@ -91,13 +91,21 @@ emit_prefix() { # $1=tool $2=stage, rest: writable paths -> NUL-delimited argv
       printf '%s\0' "$(command -v sandbox-exec)" -p "$profile"
       ;;
     bwrap)
-      printf '%s\0' "$(command -v bwrap)" --ro-bind / / --dev /dev --proc /proc --die-with-parent --bind "$stage" "$stage"
+      # A bind mount names an existing path, so a prefix rule binds the files that already match it
+      # (.claude.json itself, written in place) and cannot cover a temp file created later: the
+      # sandbox-exec profile can, bwrap cannot. A protected path is bound read-only after the state
+      # paths, and the stage last, so it wins inside a protected directory.
+      printf '%s\0' "$(command -v bwrap)" --ro-bind / / --dev /dev --proc /proc --die-with-parent
+      local f
       for p in "$@"; do
-        case "$p" in ""|*"*") continue ;; esac
-        [ -e "$p" ] || continue
-        printf '%s\0' --bind "$p" "$p"
+        case "$p" in
+          "") continue ;;
+          *"*") for f in "${p%\*}"*; do [ -e "$f" ] && printf '%s\0' --bind "$f" "$f"; done ;;
+          *) [ -e "$p" ] && printf '%s\0' --bind "$p" "$p" ;;
+        esac
       done
-      printf '%s\0' --
+      ( IFS=:; for p in ${L1_CONFINE_PROTECT:-}; do [ -n "$p" ] && [ -e "$p" ] && printf '%s\0' --ro-bind "$p" "$p"; done )
+      printf '%s\0' --bind "$stage" "$stage" --
       ;;
     *) return 1 ;;
   esac

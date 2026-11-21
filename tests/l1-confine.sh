@@ -99,6 +99,16 @@ has "$txt" "$D/state/dir" "an existing state directory is another"
 lacks "$txt" "nonexistent" "a state path that does not exist is skipped"
 lacks "$txt" "file.json" "a prefix rule has no bwrap equivalent and is skipped"
 assert_eq "$(printf '%s\n' "$txt" | tail -1)" "--" "the engine command follows a --"
+mkdir -p "$D/state/dir/inner"; : > "$D/state/pre.json"
+txt=$(prefix_text env L1_CONFINE_TOOL=bwrap L1_CONFINE_PROTECT="$D/state/dir/inner" bash "$H" prefix "$S" "$D/state/dir" "$D/state/pre.json*")
+has "$txt" "--ro-bind
+$D/state/dir/inner" "a protected path is re-bound read-only"
+has "$txt" "$D/state/pre.json" "a prefix rule binds a file that already matches it"
+bind_line=$(printf '%s\n' "$txt" | grep -n "^$D/state/dir\$" | head -1 | cut -d: -f1)
+ro_line=$(printf '%s\n' "$txt" | grep -n "^$D/state/dir/inner\$" | head -1 | cut -d: -f1)
+stage_line=$(printf '%s\n' "$txt" | grep -n "^$PS\$" | tail -1 | cut -d: -f1)
+[ -n "$bind_line" ] && [ -n "$ro_line" ] && [ -n "$stage_line" ] && [ "$bind_line" -lt "$ro_line" ] && [ "$ro_line" -lt "$stage_line" ] \
+  && ok "the read-only bind comes after the state path and before the stage" || no "bwrap order bind=$bind_line ro=$ro_line stage=$stage_line"
 printf '%s\n' "$(env PATH="$D/bare" L1_CONFINE_TOOL=none bash "$H" prefix "$S" 2>&1; echo "rc=$?")" | tail -1 | grep -q 'rc=1' && ok "an unknown L1_CONFINE_TOOL is refused" || no "an unknown L1_CONFINE_TOOL is refused"
 
 echo "# real confinement (only where a sandbox works here)"
@@ -124,9 +134,14 @@ else
   assert_eq "$(cat "$W/state/allowed/session-env" 2>/dev/null)" "state" "a listed state directory is writable"
   run_confined 'printf x > "$3/allowed/protected/config"'
   [ ! -e "$W/state/allowed/protected/config" ] && ok "a protected path inside it is not" || no "a protected path inside a state directory was written"
+  printf old > "$W/state/ptr-1.tmp"
   run_confined 'printf x > "$3/ptr-1.tmp"'
-  assert_eq "$(cat "$W/state/ptr-1.tmp" 2>/dev/null)" "x" "a prefix rule covers the temp files named after it"
-  run_confined 'printf x > "$3/ptrfoo/inner" 2>/dev/null; printf y > "$3/elsewhere"'
+  assert_eq "$(cat "$W/state/ptr-1.tmp" 2>/dev/null)" "x" "a prefix rule covers a file that already matches it"
+  if [ "$(verdict "$real")" = yes ] && [ "$(reason "$real")" = sandbox-exec ]; then
+    run_confined 'printf x > "$3/ptr-2.tmp"'
+    assert_eq "$(cat "$W/state/ptr-2.tmp" 2>/dev/null)" "x" "and, under sandbox-exec, a temp file made beside it later"
+  fi
+  run_confined 'printf y > "$3/elsewhere"'
   [ ! -e "$W/state/elsewhere" ] && ok "and nothing else beside it" || no "a file outside the prefix was written"
   run_confined 'mkdir "$2/newdir"'
   [ ! -d "$W/outside/newdir" ] && ok "a directory cannot be made outside the stage" || no "a directory was made outside the stage"
