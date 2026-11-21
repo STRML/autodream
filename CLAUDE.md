@@ -118,7 +118,8 @@ A pull is read-only on the remote and needs only sshd there.
   plus a line when the scan itself could not read a night, or a mirror could not be measured.
   - **The record is a line inside the report**, `<!-- autodream:remote-short=a,b -->` (the labels the
     report did not fully read, empty when none), written by `remote_short_line` inside the same
-    atomic write as the report body (the L2 writer's `tmp` plus `mv`, and the stub's heredoc). One
+    atomic write as the report body (the L2 writer's `tmp` plus `mv`, and the stub, which is written
+    to `<report>.tmp` and published with one `mv` after its status is checked). One
     file, so the record and the report cannot disagree: a run killed before it publishes, a rebuild
     that defers and a write that fails all leave the old report with its old record. This replaced a
     `remote-short.txt` beside the report, which took four review rounds because two files have an
@@ -130,7 +131,9 @@ A pull is read-only on the remote and needs only sshd there.
     enumeration was incomplete (`ROOTS_FAILED`, `ROOTS_UNAVAILABLE` or `PARTIAL_ROOTS` above zero),
     because a failed root cannot be told apart from a mirror; and every label in the record of the
     report this run replaces that this run does not configure (`REMOTE_PREV_SHORT`, read before
-    anything moves the old report), so a rebuild with fewer hosts cannot erase it. With remote sync
+    anything moves the old report, from the report at the path or, after a rebuild that died in L2
+    moved it aside, from the newest `.stale-<epoch>` copy with a record), so a rebuild with fewer
+    hosts cannot erase it, including across the retry of a failed rebuild. With remote sync
     off the line is still written when the replaced report had one to keep.
   - **No migration.** A report with no record line was written with remote sync off or before the
     record existed, and the scan skips it. Nights since #227 shipped were already named by that

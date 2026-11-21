@@ -10440,6 +10440,22 @@ test_remote_sync_rebuild_with_fewer_hosts_keeps_the_record_of_the_one_it_dropped
   rm -rf "$root"
 }
 
+test_remote_sync_failed_rebuild_with_fewer_hosts_keeps_the_dropped_host_for_the_retry(){
+  echo "# remote sync: when a rebuild with fewer hosts dies in L2, the trigger that retries it still keeps the dropped host"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  printf '255\n' > "$root/rsync.a.invalid.rc"; printf '255\n' > "$root/rsync.b.invalid.rc"
+  printf 'ssh: connect to host a.invalid port 22: No route to host\n' > "$root/rsync.a.invalid.err"
+  printf 'ssh: connect to host b.invalid port 22: No route to host\n' > "$root/rsync.b.invalid.err"
+  AUTODREAM_REMOTE_ROOTS="a=a.invalid:$root/studio b=b.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short=a,b -->' "both hosts were short"
+  rm -f "$root/rsync.b.invalid.rc" "$root/rsync.b.invalid.err"
+  MOCK_MODE=l2_fail AUTODREAM_L2_ATTEMPTS=1 AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="b=b.invalid:$root/studio" rs_run "$root"
+  assert_no_file "$root/dreams/$DATE.md" "the rebuild died in L2 and left no report at the path"
+  AUTODREAM_REMOTE_ROOTS="b=b.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short=a -->' "the retry reads the moved-aside report's record, so a is kept and b is cleared"
+  rm -rf "$root"
+}
+
 test_remote_sync_rebuild_with_remote_sync_off_keeps_the_record(){
   echo "# remote sync: a rebuild with remote sync off keeps the record of the report it replaces"
   local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
@@ -10648,6 +10664,7 @@ _run test_remote_sync_short_dates_only_for_labels_in_the_config
 _run test_remote_sync_short_date_is_named_until_it_is_rebuilt
 _run test_remote_sync_failed_rebuild_is_retried_by_the_next_trigger_and_its_record_follows_the_report
 _run test_remote_sync_rebuild_with_fewer_hosts_keeps_the_record_of_the_one_it_dropped
+_run test_remote_sync_failed_rebuild_with_fewer_hosts_keeps_the_dropped_host_for_the_retry
 _run test_remote_sync_rebuild_with_remote_sync_off_keeps_the_record
 _run test_remote_sync_incomplete_enumeration_marks_every_host_short
 _run test_remote_sync_prompt_names_short_dates_and_the_rebuild_command

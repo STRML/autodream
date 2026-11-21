@@ -2233,11 +2233,16 @@ remote_short_scan() {
 }
 
 sync_remote_roots() {
-  local prev
+  local prev f rec
   REMOTE_PREV_SHORT=""
-  if [ -f "$REPORT_PATH" ] && prev=$(cat "$REPORT_PATH" 2>/dev/null); then
-    REMOTE_PREV_SHORT=$(remote_report_record "$prev") || REMOTE_PREV_SHORT=""
-  fi
+  # The report this run replaces: the one at the path, or, after a rebuild that died in L2 moved it
+  # aside (a successful rebuild deletes that copy), the newest .stale-<epoch> copy that has a record.
+  # Without the second source, the trigger that retries the failed rebuild would start empty and drop
+  # the label of a host the rebuild does not configure.
+  for f in "$REPORT_PATH".stale-* "$REPORT_PATH"; do
+    [ -f "$f" ] && prev=$(cat "$f" 2>/dev/null) || continue
+    if rec=$(remote_report_record "$prev"); then REMOTE_PREV_SHORT=$rec; fi
+  done
   if [ -z "${AUTODREAM_REMOTE_ROOTS:-}" ]; then remote_sync_stat "remote_sync: off"; return 0; fi
   remote_sync_stat "remote_sync: on"
   local entries=() entry label seen=" " sdir="" n i
@@ -4215,7 +4220,7 @@ run() {
       printf 'unassembled_dates: %s\n' "${UNASSEMBLED:-}"
     } > "$FINDINGS_DIR/run-stats.txt" 2>/dev/null || true
     printf '%s\n' "$THREADS_SUMMARY" >> "$FINDINGS_DIR/run-stats.txt" 2>/dev/null || true
-    cat > "$REPORT_PATH" <<EOF
+    cat > "$REPORT_PATH.tmp" <<EOF
 # Autodream — $TARGET_DATE
 
 No sessions were triaged on this date.
@@ -4281,6 +4286,7 @@ $( if [ "$REMOTE_SHORT_QCOUNT" -gt 0 ]; then
 AUTODREAM_QUESTIONS_END
 $(remote_short_line)
 EOF
+    STUB_WRITTEN=$?
     if [ -s "$FINDINGS_DIR/dropped-threads.md" ]; then
       awk -v section="$FINDINGS_DIR/dropped-threads.md" '
         $0 == "AUTODREAM_QUESTIONS_BEGIN" {
@@ -4289,7 +4295,16 @@ EOF
           print ""
         }
         { print }
-      ' "$REPORT_PATH" > "$REPORT_PATH.threads" && mv "$REPORT_PATH.threads" "$REPORT_PATH"
+      ' "$REPORT_PATH.tmp" > "$REPORT_PATH.threads" && mv "$REPORT_PATH.threads" "$REPORT_PATH.tmp"
+    fi
+    # Published in one rename, like the L2 report: a write stopped after the questions block but
+    # before the record line (or anywhere else) leaves the old report, never a half stub that
+    # report_complete would accept without its record.
+    if [ "$STUB_WRITTEN" = 0 ] && mv -f "$REPORT_PATH.tmp" "$REPORT_PATH"; then
+      :
+    else
+      rm -f "$REPORT_PATH.tmp" "$REPORT_PATH.threads"
+      log "WARNING: could not publish the stub report for $TARGET_DATE; a later trigger will retry"
     fi
     # A question-free report still counts as a report. Without this the streak
     # store would keep yesterday's questions alive across an empty night, and a
