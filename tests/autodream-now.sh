@@ -115,10 +115,34 @@ case "$OUT" in *"✓"*) nope "it never says ✓ for a stub" "out: $OUT" ;; *) ok
 case "$OUT" in *"without a complete report"*) ok "it says the run ended without a complete report" ;; *) nope "it says the run ended without a complete report" "out: $OUT" ;; esac
 [ "$(cat "$SANDBOX/mock/prints" 2>/dev/null || echo 0)" -ge 3 ] && ok "it waited for the job to finish" || nope "it waited for the job to finish" "prints: $(cat "$SANDBOX/mock/prints" 2>/dev/null)"
 
-echo "# --watch: a complete report from this run is ready while the job is still going"
+echo "# --watch: a delivered report from this run is ready while the job is still going"
+# run.sh logs "report bytes: N" only for a report that stands after the move-aside of a degraded capture.
 D=2020-02-02
-watch_launch "$D" 1000 "echo run-line >> '$(logf $D)'; printf '$COMPLETE' > '$(repf $D)'"
-assert_eq "0" "$RC" "a complete new report exits 0"
+watch_launch "$D" 1000 "echo run-line >> '$(logf $D)'; printf '$COMPLETE' > '$(repf $D)'; echo 'report bytes: 40' >> '$(logf $D)'"
+assert_eq "0" "$RC" "a delivered new report exits 0"
+case "$OUT" in *"✓ report ready"*) ok "it says the report is ready" ;; *) nope "it says the report is ready" "out: $OUT" ;; esac
+
+echo "# --watch: a degraded capture that already carries the marker is not a ready report"
+# L2 left a capture with the open-questions marker but no AUTODREAM_REPORT_END sentinel; run.sh keeps it
+# at the report path between attempts and moves it aside when it gives up. The job is still running.
+D=2020-02-06
+watch_launch "$D" 8 "echo 'L2 attempt 1 wrote a complete-looking report but no AUTODREAM_REPORT_END sentinel; not a validated delivery, retrying' >> '$(logf $D)'; printf '$COMPLETE' > '$(repf $D)'; (sleep 0.3; mv '$(repf $D)' '$(repf $D).partial-1') >/dev/null 2>&1 &"
+case "$OUT" in *"✓"*) nope "it never says ✓ for a capture run.sh is about to retry" "out: $OUT" ;; *) ok "it never says ✓ for a capture run.sh is about to retry" ;; esac
+[ "$RC" -ne 0 ] && ok "the run that gave up fails" || nope "the run that gave up fails" "rc=$RC out=$OUT"
+[ "$(cat "$SANDBOX/mock/prints" 2>/dev/null || echo 0)" -ge 3 ] && ok "it waited for the job to finish" || nope "it waited for the job to finish" "prints: $(cat "$SANDBOX/mock/prints" 2>/dev/null)"
+
+echo "# --watch: a degraded capture run.sh could not move aside is not ready either"
+D=2020-02-08
+watch_launch "$D" 1 "echo 'WARNING: an incomplete report is at $(repf $D) and could not be moved aside; later triggers will treat this date as done' >> '$(logf $D)'; printf '$COMPLETE' > '$(repf $D)'"
+[ "$RC" -ne 0 ] && ok "it fails" || nope "it fails" "rc=$RC out=$OUT"
+case "$OUT" in *"✓"*) nope "and never says ✓" "out: $OUT" ;; *) ok "and never says ✓" ;; esac
+case "$OUT" in *"could not move it aside"*) ok "and says why" ;; *) nope "and says why" "out: $OUT" ;; esac
+
+echo "# --watch --force: a complete report this run wrote counts even with no report-bytes line (the no-sessions stub)"
+D=2020-02-07
+printf '%b' "$COMPLETE" > "$(repf $D)"; touch -t 202001010000 "$(repf $D)"
+watch_launch "$D" 1 "echo run-line >> '$(logf $D)'; printf '$COMPLETE' > '$(repf $D)'" --force
+assert_eq "0" "$RC" "a report written by this run is a success, not the previous one unchanged"
 case "$OUT" in *"✓ report ready"*) ok "it says the report is ready" ;; *) nope "it says the report is ready" "out: $OUT" ;; esac
 
 echo "# --watch: an existing complete report and a no-op run"
@@ -138,7 +162,7 @@ case "$OUT" in *"previous one is unchanged"*) ok "it says the old report is unch
 echo "# --watch: only this run's log lines are shown"
 D=2020-02-05
 echo "OLD-RUN-LINE" > "$(logf $D)"
-watch_launch "$D" 1000 "echo NEW-RUN-LINE >> '$(logf $D)'; printf '$COMPLETE' > '$(repf $D)'"
+watch_launch "$D" 1000 "echo NEW-RUN-LINE >> '$(logf $D)'; printf '$COMPLETE' > '$(repf $D)'; echo 'report bytes: 40' >> '$(logf $D)'"
 case "$OUT" in *NEW-RUN-LINE*) ok "this run's lines are shown" ;; *) nope "this run's lines are shown" "out: $OUT" ;; esac
 case "$OUT" in *OLD-RUN-LINE*) nope "an earlier attempt's lines are not replayed" "out: $OUT" ;; *) ok "an earlier attempt's lines are not replayed" ;; esac
 

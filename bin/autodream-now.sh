@@ -278,12 +278,17 @@ job_finished() { # 0 once launchd has run the job and no process is left
   grep -qE '^[[:space:]]*runs = [1-9]' <<<"$out"                      # runs = 0: not started yet
 }
 written_by_this_run() { [ "$(pstat_mtime "$REPORT" || echo 0)" -ge "$LAUNCH_TS" ]; }
+# A complete-looking file is not a delivered report while the job runs: between L2 attempts run.sh keeps
+# a capture that has the marker and the questions block but no AUTODREAM_REPORT_END sentinel, and moves it
+# aside when it gives up. run.sh logs "report bytes: N" only for a report that stands after that move-aside,
+# so this run's log slice is the one place the watcher can tell the two apart.
+report_delivered_this_run() { tail -c +"$((LOG_START + 1))" "$LOG" 2>/dev/null | grep -q 'report bytes: [0-9]'; }
 
 POLL="${AUTODREAM_WATCH_POLL:-5}"
 # Generous ceiling (90 min) since real runs can be long.
 deadline=$(( $(date +%s) + 90*60 ))
 while :; do
-  if report_finishes "$REPORT" "$TARGET" && written_by_this_run; then
+  if report_finishes "$REPORT" "$TARGET" && written_by_this_run && report_delivered_this_run; then
     sleep 1
     echo
     echo "✓ report ready: $REPORT"
@@ -292,6 +297,18 @@ while :; do
   if job_finished; then
     sleep 1
     echo
+    # run.sh could not move a degraded capture aside: the file looks complete and is not.
+    if tail -c +"$((LOG_START + 1))" "$LOG" 2>/dev/null | grep -q 'an incomplete report is at'; then
+      echo "✗ the run ended with an incomplete capture still at $REPORT (run.sh could not move it aside)." >&2
+      echo "  Why is in $LOG (and $ONDEMAND_ERR)." >&2
+      exit 1
+    fi
+    # The job is over, so nothing will move this file aside any more. A report this run wrote counts
+    # even with no "report bytes" line (the no-sessions stub returns before that point).
+    if report_finishes "$REPORT" "$TARGET" && written_by_this_run; then
+      echo "✓ report ready: $REPORT"
+      exit 0
+    fi
     if report_finishes "$REPORT" "$TARGET"; then
       if [ "$FORCE" = 1 ]; then
         echo "✗ the run ended without writing a new report; the previous one is unchanged: $REPORT" >&2

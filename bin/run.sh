@@ -5272,6 +5272,8 @@ PY
   fi
 
   if [ -f "$REPORT_PATH" ]; then
+    # autodream-now.sh --watch reads this line as "a delivered report stands": it is only reached
+    # after a degraded capture was moved aside. Change the text there too.
     log "report bytes: $(wc -c < "$REPORT_PATH" | tr -d ' ')"
 
     # ---- Escalate questions this report has now asked N nights running ----
