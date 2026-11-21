@@ -56,10 +56,10 @@
 #   AUTODREAM_REPORT_MAX_BYTES    cap on one report's body                  default 100000
 #                                 (a command is also limited to 4x this per file it writes, stdout
 #                                 and stderr included, so a command that never stops printing cannot
-#                                 fill the disk before its timeout)
+#                                 fill the disk before its timeout. The limit is per file, and macOS
+#                                 does not enforce it on `>>` appends, so what a script appends to
+#                                 its own files is bounded by the timeout alone)
 #   AUTODREAM_REPORT_KILL_GRACE   seconds between the TERM at the timeout and a KILL   default 5
-#   AUTODREAM_REPORT_TIMEOUT_BIN  the timeout binary; set and empty uses the built-in watchdog
-#                                 (default: timeout, then gtimeout, then the watchdog)
 
 set -u
 set -f   # args are literal words: a `*` in the conf must never glob
@@ -84,8 +84,6 @@ TIMEOUT_S=$((10#$TIMEOUT_S)); MAX_BYTES=$((10#$MAX_BYTES)); KILL_GRACE=$((10#$KI
 [ "$MAX_BYTES" -gt 0 ] || MAX_BYTES=100000
 [ "$KILL_GRACE" -gt 0 ] || KILL_GRACE=5
 FILE_LIMIT_KB=$((MAX_BYTES * 4 / 1024 + 1))
-if [ -n "${AUTODREAM_REPORT_TIMEOUT_BIN+x}" ]; then TIMEOUT_BIN="$AUTODREAM_REPORT_TIMEOUT_BIN"
-else TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"; fi
 
 utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
@@ -123,13 +121,15 @@ settle_tree() {
   for p in $(cat "$1" 2>/dev/null); do kill -s KILL "$p" 2>/dev/null || true; done
 }
 
-# $1=seconds, rest=command -> runs it bounded: TERM at the timeout, KILL KILL_GRACE seconds later.
-# A command that traps or ignores TERM must not be able to hold the nightly run, and the processes
-# it started must not outlive it (the timeout binary signals the whole group; the watchdog walks the tree).
+# $1=seconds, $2=flag file, rest=command -> runs it bounded: TERM at the timeout, KILL KILL_GRACE
+# seconds later. A command that traps or ignores TERM must not be able to hold the nightly run, and the
+# processes it started must not outlive it. There is one path, this watchdog, and no timeout(1): the
+# binary reports the command's own exit status when the command traps TERM and exits 0, and leaves a
+# TERM-ignoring child of an exited wrapper running, so neither could be told apart from a normal run.
+# The flag file is the caller's. It is empty unless the timeout fired, and then holds the tree that
+# was signalled, so "it timed out" is read from it and never inferred from the exit status or the clock.
 run_bounded() {
-  local secs="$1" pid wd rc flag; shift
-  if [ -n "$TIMEOUT_BIN" ]; then "$TIMEOUT_BIN" -k "$KILL_GRACE" "$secs" "$@"; return $?; fi
-  flag=$(mktemp "${TMPDIR:-/tmp}/report-scripts-wd.XXXXXX") || flag=""
+  local secs="$1" flag="$2" pid wd rc; shift 2
   "$@" & pid=$!
   # At the timeout the watchdog records the tree, then sends TERM. It traps TERM and takes its own
   # sleep with it, so a command that finishes in time leaves nothing behind, and a watchdog woken at
@@ -137,7 +137,7 @@ run_bounded() {
   ( trap 'kill "${sp:-}" 2>/dev/null; exit 0' TERM
     sleep "$secs" & sp=$!; wait "$sp" || exit 0
     tree=$(tree_pids "$pid")
-    [ -z "$flag" ] || printf '%s\n' "$tree" > "$flag"
+    printf '%s\n' "$tree" > "$flag"
     for p in $tree; do kill -s TERM "$p" 2>/dev/null || true; done
     sleep "$KILL_GRACE" & sp=$!; wait "$sp" || exit 0
     for p in $tree; do kill -s KILL "$p" 2>/dev/null || true; done ) >/dev/null 2>&1 & wd=$!
@@ -145,8 +145,7 @@ run_bounded() {
   kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
   # TERM was sent. The command may be gone while a TERM-ignoring child it started is not, and it is no
   # longer reachable through the command's process tree, so it is settled from the recorded list.
-  if [ -n "$flag" ] && [ -s "$flag" ]; then settle_tree "$flag"; fi
-  [ -z "$flag" ] || rm -f "$flag"
+  if [ -s "$flag" ]; then settle_tree "$flag"; fi
   return "$rc"
 }
 
@@ -196,7 +195,7 @@ collect() {
   find "$fdir" -maxdepth 1 \( -name 'report-*.md' -o -name report-index.txt \) -exec rm -f {} + \
     || { echo "report-scripts: could not remove the earlier report files in $fdir" >&2; rm -rf "$work"; return 1; }
 
-  local rows="$work/rows" n=0 line want lineno=0 name path cmd_text rc t0 reason status out err lname wfail=0 now
+  local rows="$work/rows" n=0 line want lineno=0 name path cmd_text rc reason status out err lname wfail=0 now tflag
   local -a words args
   : > "$rows"
   local seen=" "
@@ -263,17 +262,17 @@ collect() {
         continue
       fi
 
-      t0=$SECONDS
-      ( ulimit -f "$FILE_LIMIT_KB" 2>/dev/null; cd "$HOME" 2>/dev/null || cd /; run_bounded "$TIMEOUT_S" "$path" ${args[@]+"${args[@]}"} ) < /dev/null > "$out" 2> "$err"
+      tflag="$work/timeout.$n"; : > "$tflag"
+      ( ulimit -f "$FILE_LIMIT_KB" 2>/dev/null; cd "$HOME" 2>/dev/null || cd /; run_bounded "$TIMEOUT_S" "$tflag" "$path" ${args[@]+"${args[@]}"} ) < /dev/null > "$out" 2> "$err"
       rc=$?
-      if [ "$rc" -ne 0 ]; then
-        if [ $((SECONDS - t0)) -ge "$TIMEOUT_S" ] && { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] || [ "$rc" -eq 143 ]; }; then
-          status=timeout; reason="FAILED: timed out after ${TIMEOUT_S}s and was killed"
-        elif [ "$rc" -eq 153 ]; then
-          status=failed; reason="FAILED: output exceeded the ${FILE_LIMIT_KB} KB per-file limit and was stopped (exit 153, SIGXFSZ)"
-        else
-          status=failed; reason="FAILED: exited $rc"
-        fi
+      if [ -s "$tflag" ]; then
+        # The watchdog fired. The exit status says nothing here: a command that traps TERM and exits 0
+        # is still one that ran past its limit.
+        status=timeout; reason="FAILED: timed out after ${TIMEOUT_S}s and was stopped (exit $rc)"
+      elif [ "$rc" -eq 153 ]; then
+        status=failed; reason="FAILED: output exceeded the ${FILE_LIMIT_KB} KB per-file limit and was stopped (exit 153, SIGXFSZ)"
+      elif [ "$rc" -ne 0 ]; then
+        status=failed; reason="FAILED: exited $rc"
       fi
       if write_report "$fdir" "$name" "$cmd_text" "exit $rc" "$reason" "$out" "$err"; then
         printf '%s\t%s\t%s/report-%s.md\t%s\n' "$name" "$status" "$fdir" "$name" "$cmd_text" >> "$rows"

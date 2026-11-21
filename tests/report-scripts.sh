@@ -117,7 +117,7 @@ assert_grep "$F/report-slow.md" 'timed out after 1s' "file says it timed out and
 assert_grep "$F/report-slow.md" 'started' "timeout keeps what was printed before the kill"
 assert_eq "$(row slow)" "timeout" "index row says timeout"
 
-echo "# a command that ignores TERM is KILLed after the grace period (the timeout binary, and the built-in watchdog)"
+echo "# a command that ignores TERM is KILLed after the grace period"
 new_case deaf
 mk_script "$SCRIPTS/deaf.sh" <<'SH'
 #!/bin/bash
@@ -127,38 +127,53 @@ SH
 printf 'deaf %s\n' "$SCRIPTS/deaf.sh" > "$CONF"
 t0=$SECONDS
 TMO=1 KG=1 collect
-[ $((SECONDS - t0)) -lt 20 ] && ok "timeout -k: collector returned in $((SECONDS - t0))s" || no "a TERM-ignoring command held the collector"
+[ $((SECONDS - t0)) -lt 20 ] && ok "collector returned in $((SECONDS - t0))s" || no "a TERM-ignoring command held the collector"
 assert_eq "$(row deaf)" "timeout" "and its row says timeout"
-new_case deaf2
-mk_script "$SCRIPTS/deaf.sh" <<'SH'
-#!/bin/bash
-trap '' TERM
-while :; do sleep 1; done
-SH
-printf 'deaf %s\n' "$SCRIPTS/deaf.sh" > "$CONF"
-t0=$SECONDS
-AUTODREAM_REPORT_TIMEOUT_BIN="" TMO=1 KG=1 collect
-[ $((SECONDS - t0)) -lt 20 ] && ok "watchdog: collector returned in $((SECONDS - t0))s" || no "the built-in watchdog did not KILL a TERM-ignoring command"
-assert_eq "$(row deaf)" "timeout" "watchdog: row says timeout"
 
-echo "# a timed-out command's own children do not outlive it (timeout binary and watchdog)"
-for mode in bin watchdog; do
-  new_case "kids_$mode"
-  mk_script "$SCRIPTS/kids.sh" <<SH
+echo "# a command that traps TERM and exits 0 still timed out: the status comes from the watchdog, not the exit code"
+new_case trapzero
+mk_script "$SCRIPTS/polite.sh" <<'SH'
+#!/bin/bash
+trap 'echo "stopping cleanly"; exit 0' TERM
+echo "working"
+while :; do /bin/sleep 0.2; done
+SH
+printf 'polite %s\n' "$SCRIPTS/polite.sh" > "$CONF"
+TMO=1 KG=1 collect
+assert_eq "$(row polite)" "timeout" "exit 0 after the TERM is a timeout, not ok"
+assert_grep "$F/report-polite.md" 'timed out after 1s' "and the report says it timed out"
+assert_grep "$F/report-polite.md" 'FAILED' "with FAILED on it so L2 cannot read the partial output as a success"
+assert_grep "$F/report-polite.md" 'stopping cleanly' "and keeps what the command printed while stopping"
+
+echo "# a timeout binary on PATH is never used: it reports the command's own status and leaves a wrapper's children"
+new_case tbin
+mk_script "$SCRIPTS/polite.sh" <<'SH'
+#!/bin/bash
+trap 'exit 0' TERM
+while :; do /bin/sleep 0.2; done
+SH
+printf 'polite %s\n' "$SCRIPTS/polite.sh" > "$CONF"
+TB="$C/tbin"; mkdir -p "$TB"
+for t in timeout gtimeout; do printf '#!/bin/bash\necho used >> "%s/called"\nexec /usr/bin/false\n' "$C" > "$TB/$t"; chmod +x "$TB/$t"; done
+PATH="$TB:$PATH" TMO=1 KG=1 collect
+assert_no_file "$C/called" "neither timeout nor gtimeout was run"
+assert_eq "$(row polite)" "timeout" "the row still says timeout"
+
+echo "# a timed-out command's own children do not outlive it"
+new_case kids
+mk_script "$SCRIPTS/kids.sh" <<SH
 #!/bin/bash
 sleep 300 &
 echo \$! > "$C/kid.pid"
 wait
 SH
-  printf 'kids %s\n' "$SCRIPTS/kids.sh" > "$CONF"
-  if [ "$mode" = watchdog ]; then
-    pgrep -P $$ > /dev/null 2>&1; [ $? -le 1 ] || { ok "watchdog: skipped, pgrep cannot read the process table here (the sandbox); CI and launchd can"; continue; }
-    AUTODREAM_REPORT_TIMEOUT_BIN="" TMO=1 KG=1 collect
-  else TMO=1 KG=1 collect; fi
+printf 'kids %s\n' "$SCRIPTS/kids.sh" > "$CONF"
+if pgrep -P $$ > /dev/null 2>&1 || [ $? -le 1 ]; then
+  TMO=1 KG=1 collect
   kid=$(cat "$C/kid.pid" 2>/dev/null); gone=no
   for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$kid" 2>/dev/null || { gone=yes; break; }; sleep 0.3; done
-  [ "$gone" = yes ] && ok "$mode: the command's child is gone after the timeout" || { no "$mode: the command's child (pid $kid) outlived the timeout"; kill "$kid" 2>/dev/null; }
-done
+  [ "$gone" = yes ] && ok "the command's child is gone after the timeout" || { no "the command's child (pid $kid) outlived the timeout"; kill "$kid" 2>/dev/null; }
+else ok "skipped, pgrep cannot read the process table here (the sandbox); CI and launchd can"; fi
 
 echo "# a byte cap with a leading zero is a number, not a bad octal"
 new_case octal
@@ -330,6 +345,24 @@ pgrep -P $$ > /dev/null 2>&1; if [ $? -le 1 ]; then
   elif kill -0 "$gpid" 2>/dev/null; then no "a TERM-ignoring grandchild outlived the timeout and the wrapper"; kill -KILL "$gpid" 2>/dev/null
   else ok "the grandchild was KILLed after the grace period"; fi
 else ok "grandchild check skipped, pgrep cannot read the process table here (the sandbox); CI and launchd can"; fi
+
+echo "# verifier-b's wrapper: it exits 0 on TERM while a TERM-ignoring child keeps running; the row is timeout and the child dies"
+new_case gchild0
+mk_script "$SCRIPTS/wrap0.sh" <<SH
+#!/bin/bash
+trap 'exit 0' TERM
+( trap '' TERM; exec sh -c 'echo \$\$ > "\$1"; exec /bin/sleep 300' _ "$C/gchild0.pid" ) &
+while :; do wait; done
+SH
+printf 'wrap0 %s\n' "$SCRIPTS/wrap0.sh" > "$CONF"
+TMO=2 KG=1 collect
+assert_eq "$(row wrap0)" "timeout" "a wrapper that exits 0 on TERM is a timeout, not ok"
+if pgrep -P $$ > /dev/null 2>&1 || [ $? -le 1 ]; then
+  g0=$(cat "$C/gchild0.pid" 2>/dev/null)
+  if [ -z "$g0" ]; then no "the TERM-ignoring child started"
+  elif kill -0 "$g0" 2>/dev/null; then no "the TERM-ignoring child outlived the wrapper's exit 0 and the grace period"; kill -KILL "$g0" 2>/dev/null
+  else ok "the TERM-ignoring child was KILLed although its wrapper exited 0"; fi
+else ok "child check skipped, pgrep cannot read the process table here (the sandbox); CI and launchd can"; fi
 
 echo "# an unwritable findings dir is a loud failure, not a silent one"
 new_case nofind
