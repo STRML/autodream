@@ -18,7 +18,12 @@ resolve_install_dir "$THREADS_SRC" threads.sh
 . "$THREADS_LIB_DIR/adapters.sh" || exit 1
 . "$THREADS_LIB_DIR/lib-project.sh" || exit 1
 . "$THREADS_LIB_DIR/report-format.sh" || exit 1
-. "$THREADS_LIB_DIR/lib-flock.sh" || exit 1
+# An install made before lib-flock.sh existed has a link for every other helper but not this one, and
+# updating the checkout must not stop the nightly: fall back to the directory the script link points at.
+THREADS_FLOCK_LIB="$THREADS_LIB_DIR/lib-flock.sh"
+[ -r "$THREADS_FLOCK_LIB" ] || THREADS_FLOCK_LIB="$(dirname "$(readlink "$THREADS_SRC" 2>/dev/null || echo "$THREADS_SRC")")/lib-flock.sh"
+# shellcheck source=/dev/null
+. "$THREADS_FLOCK_LIB" || exit 1
 
 CONFIG_FILE=${AUTODREAM_CONFIG:-$AUTODREAM_DIR/config}
 if [ -f "$CONFIG_FILE" ]; then

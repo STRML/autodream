@@ -28,18 +28,27 @@
 # stalled past 300 s, is not covered: the upgrade window bounds both.
 #
 # Every child started while the lock is held inherits fd 9 and so keeps the lock alive if it outlives
-# the holder. Run any child that can run long (a notification, a browser) with `9>&-`.
+# the holder. The short-lived ones (awk, jq, mktemp, cp) are accepted: a hung one under a killed writer
+# keeps the lock, and the next run skips loudly instead of racing it. Run any child that can run long (a
+# notification, a browser) with `9>&-`.
 
 FLOCK_HELD=""
 
 flock_acquire() { # $1=lock file $2=seconds $3=legacy lock directory
-  local file="$1" wait="${2:-0}" legacy="${3:-}" rc
+  local file="$1" wait="${2:-0}" legacy="${3:-}" res
   [ -z "$FLOCK_HELD" ] || return 4
   command -v python3 >/dev/null 2>&1 || return 3
+  # Opening a FIFO for writing blocks until a reader appears, before any deadline exists. Only a
+  # regular file (or none yet) is a lock file.
+  if [ -e "$file" ] && [ ! -f "$file" ]; then
+    return 2
+  fi
   if ! { exec 9>>"$file"; } 2>/dev/null; then
     return 2
   fi
-  python3 -c '
+  # The answer is a word on stdout, not an exit code: a python3 that is broken, or a stand-in that
+  # exits with a number this file uses, must read as cannot-lock, never as a live holder.
+  res=$(python3 -c '
 import fcntl, os, stat, sys, time
 legacy = sys.argv[2]
 
@@ -57,33 +66,33 @@ def legacy_live():
     return time.time() - st.st_mtime < 300
 
 try:
-    deadline = time.time() + float(sys.argv[1])
+    end = time.monotonic() + float(sys.argv[1])
     while True:
         try:
             fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
             if not legacy_live():
+                print("flock-ok")
                 sys.exit(0)
             fcntl.flock(9, fcntl.LOCK_UN)
-            code = 15
+            word = "flock-legacy"
         except BlockingIOError:
-            code = 11
-        if time.time() >= deadline:
-            sys.exit(code)
-        time.sleep(0.2)
+            word = "flock-held"
+        left = end - time.monotonic()
+        if left <= 0:
+            print(word)
+            sys.exit(0)
+        time.sleep(min(0.2, left))
 except SystemExit:
     raise
 except BaseException:
     sys.exit(2)
-' "$wait" "$legacy"
-  rc=$?
-  case "$rc" in
-    0) ;;
-    11) exec 9>&-; return 1 ;;
-    15) exec 9>&-; return 5 ;;
+' "$wait" "$legacy" 2>/dev/null) || res=""
+  case "$res" in
+    flock-ok) FLOCK_HELD="$file"; return 0 ;;
+    flock-held) exec 9>&-; return 1 ;;
+    flock-legacy) exec 9>&-; return 5 ;;
     *) exec 9>&-; return 2 ;;
   esac
-  FLOCK_HELD="$file"
-  return 0
 }
 
 flock_release() {

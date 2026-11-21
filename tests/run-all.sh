@@ -8107,10 +8107,21 @@ test_question_streaks_lock_is_a_kernel_flock(){
   out=$(PATH="$root/bare" AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" /bin/bash "$QS" clear all 2>&1); rc=$?
   assert_eq "$rc" "1" "clear without python3 fails"
   cmp -s "$st" "$root/own.before" && ok "and the state is untouched" || no "and the state is untouched"
-  # A python3 that fails for a reason other than contention is not a held lock.
-  mkdir -p "$root/badpy"; printf '#!/bin/sh\nexit 7\n' > "$root/badpy/python3"; chmod +x "$root/badpy/python3"
-  out=$(PATH="$root/badpy:$PATH" AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" AUTODREAM_NOTIFY_DRYRUN=1 /bin/bash "$QS" update "$root/2026-04-04.md" 2>&1)
-  case "$out" in *"cannot lock"*) ok "a python3 that fails is reported as cannot lock, not as a held lock" ;; *) no "a python3 that fails is reported as cannot lock (got: $out)" ;; esac
+  # A python3 that fails, or exits with a number the lock code once used for a holder, is not a held lock.
+  mkdir -p "$root/badpy"
+  local code
+  for code in 1 7 11 15; do
+    printf '#!/bin/sh\nexit %s\n' "$code" > "$root/badpy/python3"; chmod +x "$root/badpy/python3"
+    out=$(PATH="$root/badpy:$PATH" AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" AUTODREAM_NOTIFY_DRYRUN=1 /bin/bash "$QS" update "$root/2026-04-04.md" 2>&1)
+    case "$out" in *"cannot lock"*) ok "a python3 that exits $code is reported as cannot lock, not as a held lock" ;; *) no "a python3 that exits $code is reported as cannot lock (got: $out)" ;; esac
+  done
+  # A FIFO at the lock path would block the open before any deadline exists.
+  rm -f "$lk"; mkfifo "$lk" 2>/dev/null
+  t0=$SECONDS
+  out=$(QS_WAIT=0 qs update "$root/2026-04-04.md")
+  [ $((SECONDS - t0)) -le 2 ] && ok "a FIFO at the lock path is refused at once, not blocked on" || no "a FIFO at the lock path blocked for $((SECONDS - t0))s"
+  case "$out" in *"cannot lock"*) ok "and reported as cannot lock" ;; *) no "and reported as cannot lock (got: $out)" ;; esac
+  rm -f "$lk"
 
   # 8. A second acquire in one process is refused and does not drop the first lock.
   out=$( ( . "$REPO/bin/lib-flock.sh"; flock_acquire "$root/dbl.flock" 0; first=$?; flock_acquire "$root/dbl.flock" 0; second=$?

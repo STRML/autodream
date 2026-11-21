@@ -57,12 +57,18 @@ echo "# install-dir: an installed script finds the helper even before install.sh
 linkdir="$SUITE_TMP/oldinstall"; mkdir -p "$linkdir"; : > "$linkdir/config"
 for s in autodream-note vault-notes review; do ln -s "$REPO/bin/$s.sh" "$linkdir/$s.sh"; done
 ln -s "$REPO/bin/question-streaks.sh" "$linkdir/question-streaks.sh"
+ln -s "$REPO/bin/threads.sh" "$linkdir/threads.sh"
 ln -s "$REPO/bin/autodream-now.sh" "$linkdir/autodream-now.sh"
 quiet() { ( unset AUTODREAM_DIR; HOME="$HOME_S" "$@" 2>&1 </dev/null ); }
 out=$(quiet bash "$linkdir/autodream-note.sh")
 case "$out" in *"No such file"*|*"lib-install-dir"*) no "autodream-note.sh starts without a linked helper ($out)" ;; *usage*) ok "autodream-note.sh starts without a linked helper" ;; *) no "autodream-note.sh starts without a linked helper ($out)" ;; esac
 out=$(quiet bash "$linkdir/question-streaks.sh" bogus)
 case "$out" in *"No such file"*) no "question-streaks.sh starts without a linked helper ($out)" ;; *usage*) ok "question-streaks.sh starts without a linked helper" ;; *) no "question-streaks.sh starts without a linked helper ($out)" ;; esac
+# An install that has every other helper linked but not lib-flock.sh: the dir the script link points at has it.
+thrdir="$SUITE_TMP/oldthreads"; mkdir -p "$thrdir"; : > "$thrdir/config"
+for s in threads lib-install-dir portable adapters lib-project report-format; do ln -s "$REPO/bin/$s.sh" "$thrdir/$s.sh"; done
+out=$(quiet bash "$thrdir/threads.sh" bogus)
+case "$out" in *"No such file"*|*"lib-flock"*) no "threads.sh starts without a linked lib-flock.sh ($out)" ;; *) ok "threads.sh starts without a linked lib-flock.sh" ;; esac
 out=$(quiet bash "$linkdir/vault-notes.sh" status)
 case "$out" in *"$linkdir/notes.md"*) ok "vault-notes.sh status names the install it was linked into" ;; *) no "vault-notes.sh status names the install it was linked into ($out)" ;; esac
 out=$(quiet bash "$linkdir/autodream-now.sh" --dry-run)
