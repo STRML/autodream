@@ -8032,6 +8032,14 @@ test_question_streaks_lock_is_owned(){
   case "$out" in *"another run holds"*) no "an old pid-less lock is reclaimed by age (got: $out)" ;; *) ok "an old pid-less lock is reclaimed by age" ;; esac
   [ ! -e "$lk" ] && ok "and released when the update finishes" || no "and released when the update finishes"
 
+  # A regular file at the lock path is not a lock: the old code only ever tried rmdir on it, so it stays.
+  printf 'not a lock\n' > "$lk"; touch -t 200001010000 "$lk"
+  out=$(qs update "$root/2026-04-03.md"); rc=$?
+  assert_eq "$rc" "0" "update beside a regular file at the lock path exits 0"
+  case "$out" in *"another run holds"*) ok "and skips loudly" ;; *) no "and skips loudly (got: $out)" ;; esac
+  assert_eq "$(cat "$lk" 2>/dev/null)" "not a lock" "and the file is left as it was"
+  rm -f "$lk"
+
   # The lock is replaced between the check and the rename (an older version's age reclaim does exactly
   # that). A shim mktemp stands in for the other writer: it takes over the lock the instant the state
   # temp file is requested, which is the last thing before the rename.

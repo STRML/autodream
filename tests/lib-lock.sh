@@ -93,12 +93,16 @@ acquire_lock "$D/dead.lock"; rc=$?
 assert_eq "$rc" "0" "a lock whose holder is gone is reclaimed"
 assert_eq "$(cat "$D/dead.lock/pid")" "$$" "and now records the new owner"
 release_lock "$D/dead.lock"
-holder=$(start_holder "$D/reuse.lock")
-printf 'Mon Jan  1 00:00:00 1990\n' > "$D/reuse.lock/start"
-acquire_lock "$D/reuse.lock"; rc=$?
-assert_eq "$rc" "0" "a live pid with a different start time is a stale lock"
-release_lock "$D/reuse.lock"
-stop_holder "$holder"
+if [ -n "$(ps -o lstart= -p $$ 2>/dev/null)" ]; then
+  holder=$(start_holder "$D/reuse.lock")
+  printf 'Mon Jan  1 00:00:00 1990\n' > "$D/reuse.lock/start"
+  acquire_lock "$D/reuse.lock"; rc=$?
+  assert_eq "$rc" "0" "a live pid with a different start time is a stale lock"
+  release_lock "$D/reuse.lock"
+  stop_holder "$holder"
+else
+  echo "  skip - ps is unavailable here, so a reused pid cannot be told from the holder"
+fi
 
 echo "# lib-lock: the owner check refuses a lock that is no longer ours"
 holder=$(start_holder "$D/stolen.lock")   # B owns it
@@ -147,6 +151,67 @@ LOCK_NOPID_AGE=120 acquire_lock_wait "$D/slow.lock" 1; rc=$?
 assert_eq "$rc" "1" "a young pid-less directory is still refused at the deadline"
 [ $((SECONDS - t0)) -le 10 ] && ok "and the wait did not stretch into a minute" || no "and the wait did not stretch into a minute ($((SECONDS - t0))s)"
 rm -rf "$D/slow.lock"
+
+echo "# lib-lock: an unavailable check is never proof of death or of age (#192 review)"
+holder=$(start_holder "$D/psfail.lock")
+printf 'Mon Jan  1 00:00:00 1990\n' > "$D/psfail.lock/start"
+real_proc_start=$(declare -f proc_start)
+proc_start() { return 1; }
+acquire_lock "$D/psfail.lock"; rc=$?
+assert_eq "$rc" "1" "a holder whose start time cannot be looked up now stays the holder"
+assert_eq "$(cat "$D/psfail.lock/pid")" "$holder" "and its lock is left alone"
+eval "$real_proc_start"
+stop_holder "$holder"
+rm -rf "$D/psfail.lock"
+mkdir "$D/statfail.lock"
+real_pstat=$(declare -f pstat_mtime)
+pstat_mtime() { return 1; }
+lock_aged "$D/statfail.lock" 0; rc=$?
+assert_eq "$rc" "1" "a directory whose age cannot be read is not old"
+LOCK_NOPID_AGE=0 acquire_lock "$D/statfail.lock" 0; rc=$?
+assert_eq "$rc" "1" "so a young pid-less lock is not reclaimed when stat fails"
+[ -d "$D/statfail.lock" ] && ok "and is left in place" || no "and is left in place"
+eval "$real_pstat"
+rm -rf "$D/statfail.lock"
+
+echo "# lib-lock: only a lock directory is ever taken over or removed"
+printf 'not a lock\n' > "$D/file.lock"; age_dir "$D/file.lock"
+LOCK_NOPID_AGE=1 acquire_lock "$D/file.lock"; rc=$?
+assert_eq "$rc" "3" "a regular file at the lock path is not a lock to take"
+assert_eq "$(cat "$D/file.lock")" "not a lock" "and it is left as it was"
+reclaim_lock "$D/file.lock" ""
+[ -f "$D/file.lock" ] && ok "reclaim_lock leaves a regular file alone" || no "reclaim_lock removed a regular file"
+mkdir -p "$D/real-target/keep"; ln -s "$D/real-target" "$D/link.lock"
+acquire_lock "$D/link.lock"; rc=$?
+assert_eq "$rc" "3" "a symlink at the lock path is not a lock either"
+[ -d "$D/real-target/keep" ] && ok "and what it points at is untouched" || no "a symlink target was removed"
+rm -rf "$D/real-target" "$D/link.lock" "$D/file.lock"
+
+echo "# lib-lock: putting a displaced lock back never nests it, and never writes over another holder"
+mkdir -p "$D/displaced.stale"; printf '4242\n' > "$D/displaced.stale/pid"
+restore_lock "$D/displaced.stale" "$D/restored.lock"; rc=$?
+assert_eq "$rc" "0" "a displaced lock is restored when its path is free"
+assert_eq "$(cat "$D/restored.lock/pid" 2>/dev/null)" "4242" "with its holder recorded"
+[ ! -e "$D/displaced.stale" ] && ok "and the displaced directory is gone" || no "and the displaced directory is gone"
+mkdir -p "$D/displaced2.stale"; printf '5151\n' > "$D/displaced2.stale/pid"
+mkdir -p "$D/taken.lock"; printf '6262\n' > "$D/taken.lock/pid"
+restore_lock "$D/displaced2.stale" "$D/taken.lock" 2>/dev/null; rc=$?
+assert_eq "$rc" "1" "when the path was taken meanwhile, the restore says it could not"
+assert_eq "$(cat "$D/taken.lock/pid")" "6262" "the new holder's record is untouched"
+[ ! -e "$D/taken.lock/displaced2.stale" ] && ok "and the displaced directory was not nested inside it" || no "the displaced directory was nested inside the new lock"
+[ -d "$D/displaced2.stale" ] && ok "it stays where it was, named in the warning" || no "the displaced directory vanished"
+mkdir -p "$D/wo.lock"; printf '7373\n' > "$D/wo.lock/pid"
+write_owner "$D/wo.lock"; rc=$?
+assert_eq "$rc" "1" "write_owner refuses a directory that already names a holder"
+assert_eq "$(cat "$D/wo.lock/pid")" "7373" "and does not write over it"
+
+echo "# lib-lock: a zero-second wait does not sleep on a young pid-less lock"
+mkdir "$D/zero.lock"
+t0=$SECONDS
+LOCK_NOPID_AGE=120 acquire_lock_wait "$D/zero.lock" 0; rc=$?
+assert_eq "$rc" "1" "it gives up at once"
+[ $((SECONDS - t0)) -le 1 ] && ok "in under a second, not after three" || no "took $((SECONDS - t0))s"
+rm -rf "$D/zero.lock"
 
 echo "# lib-lock: reclaiming never removes a lock another reclaimer already replaced"
 holder=$(start_holder "$D/race.lock")

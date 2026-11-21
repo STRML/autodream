@@ -10,6 +10,9 @@
 # writer's lock (#192). Liveness, not age, decides, and release and every write under the lock
 # re-check ownership.
 #
+# Nothing an unavailable check says counts as proof of death: a failed ps or stat leaves the holder
+# alive and the directory young, and only a regular file or symlink at the path is refused outright.
+#
 # A directory with no pid is a writer that has not recorded one yet, or debris from a version that
 # never wrote one. It is left alone until it is older than LOCK_NOPID_AGE seconds (default 3,
 # which covers the gap between the mkdir and the pid write; question-streaks.sh passes 120 to keep
@@ -25,23 +28,35 @@ lock_warn() { if declare -F log >/dev/null 2>&1; then log "$1"; else printf '%s\
 
 proc_start() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '; }
 
-# 0 = the lock's holder is alive, 1 = gone (stale), 2 = the holder has not written its pid yet.
-lock_holder_state() { # $1=lock dir
-  local pid start
-  pid=$(cat "$1/pid" 2>/dev/null) || pid=""
-  [ -n "$pid" ] || return 2
-  kill -0 "$pid" 2>/dev/null || return 1
-  start=$(cat "$1/start" 2>/dev/null) || start=""
-  # No recorded start (ps unavailable): the live pid is all there is to go on.
-  [ -z "$start" ] || [ "$(proc_start "$pid")" = "$start" ]
+# 0 = alive or cannot tell, 1 = gone. kill -0 also fails with EPERM for another user's process, so
+# a failure is checked against ps before the pid is called gone.
+lock_pid_alive() { # $1=pid
+  kill -0 "$1" 2>/dev/null && return 0
+  [ -n "$(ps -o pid= -p "$1" 2>/dev/null)" ]
 }
 
-# 0 when the lock directory is at least $2 seconds old. A directory whose age cannot be read is old.
+# 0 = the lock's holder is alive, 1 = gone (stale), 2 = the holder has not written its pid yet.
+# Only evidence of death says 1. A start time that cannot be read now (ps failed) proves nothing,
+# so it reads as alive: reclaiming on a failed lookup would evict a live holder (#192 review).
+lock_holder_state() { # $1=lock dir
+  local pid start now
+  pid=$(cat "$1/pid" 2>/dev/null) || pid=""
+  [ -n "$pid" ] || return 2
+  lock_pid_alive "$pid" || return 1
+  start=$(cat "$1/start" 2>/dev/null) || start=""
+  [ -n "$start" ] || return 0
+  now=$(proc_start "$pid")
+  [ -z "$now" ] || [ "$now" = "$start" ]
+}
+
+# 0 when the lock directory is at least $2 seconds old, and only then. A directory whose age cannot be
+# read is not old: a failed stat on a lock a holder made a moment ago must not hand it to a contender.
 # At least, not more than: the mtime is whole seconds, so a directory made just before three
 # one-second waits reads exactly 3 and must count as old, as it did when this was a tries count.
 lock_aged() { # $1=lock dir $2=seconds
   local mtime now
-  mtime=$(pstat_mtime "$1" 2>/dev/null) || return 0
+  mtime=$(pstat_mtime "$1" 2>/dev/null) || return 1
+  case "$mtime" in ""|*[!0-9]*) return 1 ;; esac
   now=$(date +%s)
   [ $((now - mtime)) -ge "$2" ]
 }
@@ -52,26 +67,65 @@ lock_owned() { # $1=lock dir
   [ "$(cat "$1/pid" 2>/dev/null)" = "$$" ]
 }
 
+# Record this process as the holder without ever writing over another process's record: the
+# noclobber write fails when a pid file is already there (our directory was reclaimed and made
+# again by someone else between our mkdir and this write).
+write_owner() { # $1=lock dir
+  ( set -C; printf '%s\n' "$$" > "$1/pid" ) 2>/dev/null || return 1
+  lock_owned "$1" || return 1
+  proc_start "$$" > "$1/start" 2>/dev/null
+  return 0
+}
+
+# Put a displaced lock back. The path is made first and the files moved into it: a plain rename of
+# the directory onto a path that has meanwhile been taken would nest it inside the new holder's lock
+# and call that restored. When the path is taken the displaced directory stays where it is, named in
+# the warning, and its holder finds lock_owned false at its next check instead of sharing the lock.
+restore_lock() { # $1=displaced dir $2=lock dir
+  local f
+  if mkdir "$2" 2>/dev/null; then
+    for f in "$1"/* "$1"/.[!.]*; do
+      [ -e "$f" ] && mv "$f" "$2/" 2>/dev/null
+    done
+    rmdir "$1" 2>/dev/null
+    return 0
+  fi
+  lock_warn "WARNING: $2 was taken again while another run's lock was being put back; it is left at $1"
+  return 1
+}
+
 # Move the stale lock aside (rename is atomic, so one reclaimer wins) rather than rmdir it:
 # a second reclaimer that judged the same stale holder must not delete the winner's NEW lock.
+# Only a lock directory is moved: a regular file or a symlink at the path is not a lock.
 reclaim_lock() { # $1=lock dir $2=the pid judged stale ("" when none was ever written)
-  local dead="$1.stale.$$"
+  [ -d "$1" ] && [ ! -L "$1" ] || return 0
+  local dead="$1.stale.$$.$SECONDS$RANDOM"
   mv "$1" "$dead" 2>/dev/null || return 0
   if [ "$(cat "$dead/pid" 2>/dev/null)" = "$2" ]; then
     rm -rf "$dead"
     return 0
   fi
   # We moved a lock that a faster reclaimer had already replaced. Put it back.
-  mv "$dead" "$1" 2>/dev/null || { lock_warn "WARNING: could not restore another run's lock from $dead"; return 0; }
+  restore_lock "$dead" "$1"
+  return 0
 }
 
-# 0 = taken, 1 = another live holder has it (its pid in LOCK_HOLDER), 3 = the lock's directory
-# cannot be made at all (a read-only state dir).
-acquire_lock() { # $1=lock dir
+# 0 = taken, 1 = another live holder has it (its pid in LOCK_HOLDER), 3 = the lock cannot be made
+# at all: a read-only state dir, or something other than a directory at the lock path.
+# $2 is how many seconds to give a directory whose pid has not appeared yet (default 3).
+acquire_lock() { # $1=lock dir [$2=seconds]
   mkdir -p "$(dirname "$1")" 2>/dev/null || return 3
-  local tries=0 st pid nopid_age="${LOCK_NOPID_AGE:-3}"
+  local tries=0 st pid nopid_age="${LOCK_NOPID_AGE:-3}" pwait="${2:-3}"
   case "$nopid_age" in ''|*[!0-9]*) nopid_age=3 ;; esac
-  until mkdir "$1" 2>/dev/null; do
+  case "$pwait" in ''|*[!0-9]*) pwait=3 ;; esac
+  while :; do
+    if mkdir "$1" 2>/dev/null; then
+      write_owner "$1" && return 0
+      tries=$((tries + 1))
+      [ "$tries" -lt 8 ] || return 3
+      continue
+    fi
+    [ -d "$1" ] && [ ! -L "$1" ] || return 3
     pid=$(cat "$1/pid" 2>/dev/null) || pid=""
     lock_holder_state "$1"; st=$?
     [ "$st" -ne 0 ] || { LOCK_HOLDER="$pid"; return 1; }
@@ -79,24 +133,24 @@ acquire_lock() { # $1=lock dir
     if [ "$st" -eq 2 ] && ! lock_aged "$1" "$nopid_age"; then
       # A holder between its mkdir and its pid write, or an older writer's lock. Give the pid a
       # moment to appear; past that the directory is held by something we cannot name.
-      [ "$tries" -le 3 ] || { LOCK_HOLDER="unknown"; return 1; }
+      [ "$tries" -le "$pwait" ] || { LOCK_HOLDER="unknown"; return 1; }
       sleep 1; continue
     fi
     reclaim_lock "$1" "$pid"
     [ "$tries" -lt 8 ] || { LOCK_HOLDER="${pid:-unknown}"; return 1; }
   done
-  printf '%s\n' "$$" > "$1/pid"
-  proc_start "$$" > "$1/start"
-  return 0
 }
 
 # acquire_lock, retried once a second while another holder has it, until $2 seconds have passed.
-# The deadline is the wall clock: one acquire_lock can itself spend a few seconds on a lock whose
-# pid has not appeared yet.
+# The deadline is the wall clock and each try is told how much of it is left, so a lock whose pid
+# has not appeared yet cannot stretch the wait past it.
 acquire_lock_wait() { # $1=lock dir $2=seconds
-  local deadline=$((SECONDS + $2)) rc
+  local deadline=$((SECONDS + $2)) rc left
   while :; do
-    rc=0; acquire_lock "$1" || rc=$?
+    left=$((deadline - SECONDS))
+    [ "$left" -ge 0 ] || left=0
+    [ "$left" -le 3 ] || left=3
+    rc=0; acquire_lock "$1" "$left" || rc=$?
     [ "$rc" -eq 1 ] || return "$rc"
     [ "$SECONDS" -lt "$deadline" ] || return 1
     sleep 1
