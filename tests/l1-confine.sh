@@ -88,6 +88,16 @@ assert_eq "$rc" "1" "so is one with a newline"
 env PATH="$D/bare" bash "$H" prefix "$S" >/dev/null 2>&1; rc=$?
 assert_eq "$rc" "1" "prefix with no sandbox tool fails"
 
+echo "# prefix: paths are resolved as the kernel sees them, and checked again after"
+mkdir -p "$D/realdir"; : > "$D/realdir/onefile"; ln -s "$D/realdir" "$D/linkdir"
+txt=$(prefix_text bash "$H" prefix "$S" "$D/linkdir/onefile")
+has "$txt" "(subpath \"$(cd "$D/realdir" && pwd -P)/onefile\")" "an existing regular file under a symlinked parent resolves through the parent"
+mkdir -p "$D/q\"uote"; ln -s "$D/q\"uote" "$D/quotelink"
+env PATH="$D/shim:$D/bare" bash "$H" prefix "$S" "$D/quotelink" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "1" "a symlink whose target holds a quote is refused, not written into the profile"
+env PATH="$D/shim:$D/bare" L1_CONFINE_PROTECT="$D/quotelink" bash "$H" prefix "$S" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "1" "and so is a protected path that resolves to one"
+
 echo "# prefix: bwrap"
 printf '#!/bin/sh\nexit 0\n' > "$D/shim/bwrap"; chmod +x "$D/shim/bwrap" "$D/shim/sandbox-exec"
 txt=$(prefix_text env L1_CONFINE_TOOL=bwrap bash "$H" prefix "$S" "$D/state/dir" "$D/state/nonexistent" "$D/state/file.json*")

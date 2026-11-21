@@ -53,10 +53,20 @@ safe_path() {
 # compares as the kernel sees it. A path that does not exist yet keeps its tail.
 resolve_path() {
   local p="$1" tail=""
+  # A regular file cannot be cd'd into: resolve its parent and keep its name.
+  if [ -e "$p" ] && [ ! -d "$p" ]; then tail="/$(basename "$p")"; p=$(dirname "$p"); fi
   while [ ! -e "$p" ] && [ "$p" != "/" ] && [ "$p" != "." ]; do
     tail="/$(basename "$p")$tail"; p=$(dirname "$p")
   done
   printf '%s%s' "$(phys "$p" || printf '%s' "$p")" "$tail"
+}
+
+# A path as the kernel sees it, checked again after resolving: a symlink can lead to a name that
+# the profile text cannot hold (a quote or a newline), which the check on the supplied path never saw.
+profile_path() { # $1=path -> the resolved path, or exit 1
+  local r; r=$(resolve_path "$1")
+  safe_path "$r" || { printf 'l1-confine: %s resolves to a path the profile cannot hold: %s\n' "$1" "$r" >&2; return 1; }
+  printf '%s' "$r"
 }
 
 sb_profile() { # $1=stage, rest: writable paths. Protected paths come from L1_CONFINE_PROTECT.
@@ -68,16 +78,18 @@ sb_profile() { # $1=stage, rest: writable paths. Protected paths come from L1_CO
     [ -n "$p" ] || continue
     safe_path "${p%\*}" || { printf 'l1-confine: refusing writable path with a character the profile cannot hold: %s\n' "$p" >&2; return 1; }
     case "$p" in
-      *"*") base=$(resolve_path "${p%\*}")
+      *"*") base=$(profile_path "${p%\*}") || return 1
             printf '(allow file-write* (regex #"^%s"))\n' "$(printf '%s' "$base" | sed 's/[][\.^$*+?(){}|]/\\&/g')" ;;
-      *) printf '(allow file-write* (subpath "%s"))\n' "$(resolve_path "$p")" ;;
+      *) base=$(profile_path "$p") || return 1
+         printf '(allow file-write* (subpath "%s"))\n' "$base" ;;
     esac
   done
   local IFS=:
   for p in ${L1_CONFINE_PROTECT:-}; do
     [ -n "$p" ] || continue
     safe_path "$p" || { printf 'l1-confine: a protected path cannot be written into a profile: %s\n' "$p" >&2; return 1; }
-    printf '(deny file-write* (subpath "%s"))\n' "$(resolve_path "$p")"
+    base=$(profile_path "$p") || return 1
+    printf '(deny file-write* (subpath "%s"))\n' "$base"
   done
   printf '(allow file-write* (subpath "%s"))\n' "$stage"
 }

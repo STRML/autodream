@@ -28,12 +28,35 @@ fail(){ printf 'FAIL  %s\n' "$1"; fails=$((fails + 1)); }
 
 measure=0
 [ "${1:-}" = "--measure" ] && { measure=1; shift; }
-probe=$(bash "$H" probe)
-if [ "$(printf '%s' "$probe" | cut -f1)" != yes ]; then
-  fail "probe: $(printf '%s' "$probe" | cut -f2-)"
-  exit 1
+
+# The nightly's own configuration: the same AUTODREAM_DIR and config file, so an AUTODREAM_L1_WRITES_EXTRA the
+# operator put there is the one this check runs under, and the same protected paths and work bucket run.sh uses.
+AUTODREAM_DIR="${AUTODREAM_DIR:-$HOME/.claude/autodream}"
+CONFIG="${AUTODREAM_CONFIG:-$AUTODREAM_DIR/config}"
+if [ -r "$CONFIG" ]; then
+  set -a
+  # shellcheck source=/dev/null
+  . "$CONFIG"
+  set +a
+  echo "# configuration: $CONFIG"
+else
+  echo "# configuration: none at $CONFIG (defaults)"
 fi
-pass "probe: $(printf '%s' "$probe" | cut -f2)"
+FINDINGS_DIR="${FINDINGS_DIR:-$AUTODREAM_DIR/findings}"
+DREAMS_DIR="${DREAMS_DIR:-$HOME/.claude/dreams}"
+WORK_DIR="$AUTODREAM_DIR/work"
+export AUTODREAM_WORK_BUCKET="${PROJECTS_DIR:-$HOME/.claude/projects}/$(printf '%s' "$WORK_DIR" | sed 's#[/.]#-#g')"
+mkdir -p "$AUTODREAM_WORK_BUCKET" 2>/dev/null
+protect="$AUTODREAM_DIR:$FINDINGS_DIR:$DREAMS_DIR"
+
+if [ "$measure" != 1 ]; then
+  probe=$(bash "$H" probe)
+  if [ "$(printf '%s' "$probe" | cut -f1)" != yes ]; then
+    fail "probe: $(printf '%s' "$probe" | cut -f2-)"
+    exit 1
+  fi
+  pass "probe: $(printf '%s' "$probe" | cut -f2)"
+fi
 
 model="${1:-$(jq -r .l1_model "$REPO/adapters/claude/manifest.json" 2>/dev/null)}"
 [ -n "$model" ] && [ "$model" != null ] || { fail "no model: pass one as the first argument"; exit 1; }
@@ -49,8 +72,10 @@ sleep 1
 wpaths=()
 while IFS= read -r l; do [ -n "$l" ] && wpaths+=("$l"); done < <(bash "$ADAPTER" l1-writes)
 pre=()
-while IFS= read -r -d '' a; do pre+=("$a"); done < <(L1_CONFINE_PROTECT="$W/protected" bash "$H" prefix "$stage" "${wpaths[@]}")
-[ "${#pre[@]}" -gt 0 ] || { fail "the prefix could not be built"; exit 1; }
+if [ "$measure" != 1 ]; then
+  while IFS= read -r -d '' a; do pre+=("$a"); done < <(L1_CONFINE_PROTECT="$protect" bash "$H" prefix "$stage" "${wpaths[@]}")
+  [ "${#pre[@]}" -gt 0 ] || { fail "the prefix could not be built"; exit 1; }
+fi
 argv=()
 while IFS= read -r -d '' a; do argv+=("$a"); done < <(bash "$ADAPTER" l1-argv "$model")
 envs=()
@@ -69,8 +94,13 @@ home_writes() {
 if [ "$measure" = 1 ]; then
   echo "# one UNCONFINED call (model $model): the paths it writes under \$HOME are what l1-writes must cover"
   ( cd "$work" && printf '%s' "$prompt" | env ${envs[@]+"${envs[@]}"} "TMPDIR=$stage/tmp" "${argv[@]}" ) > "$W/stdout" 2> "$W/stderr"
-  echo "# exit $?, stdout: $(head -c 200 "$W/stdout")"
+  mrc=$?
+  echo "# exit $mrc, stdout: $(head -c 200 "$W/stdout")"
   home_writes
+  if [ "$mrc" -ne 0 ]; then
+    fail "the unconfined call exited $mrc, so the list above is not a measurement: $(head -c 300 "$W/stderr")"
+    exit 1
+  fi
   exit 0
 fi
 echo "# running one real call (model $model) under the sandbox prefix ${pre[0]}"
@@ -79,14 +109,19 @@ rc=$?
 if [ "$rc" -eq 0 ]; then pass "the call exited 0 (authenticated, reached the network)"; else fail "the call exited $rc: $(head -c 300 "$W/stderr")"; fi
 if [ -s "$answer" ] && jq -e '.findings | type == "array"' "$answer" >/dev/null 2>&1; then pass "the answer is in the staging directory"; else fail "no answer in the staging directory"; fi
 if [ ! -e "$outside/forged.txt" ]; then pass "the model's second write was not created (it may simply not have tried)"; else fail "forged.txt was created outside the staging directory"; fi
-# The refusal itself is checked with a command that certainly tries: the same prefix, a plain shell write.
-rm -f "$outside/forged.txt"
-if "${pre[@]}" /bin/sh -c 'printf x > "$1/forged.txt"' _ "$outside" >/dev/null 2>&1; then
-  fail "a shell under the sandbox prefix wrote outside the staging directory"
+# The refusal itself is checked with a command that certainly tries: the same prefix, a plain shell that writes
+# its stage first (so the shell is known to have started and run) and then a file beside it.
+rm -f "$outside/forged.txt" "$stage/control"
+"${pre[@]}" /bin/sh -c 'printf ok > "$1/control" && printf x > "$2/forged.txt"' _ "$stage" "$outside" >/dev/null 2>&1
+shrc=$?
+if [ "$(cat "$stage/control" 2>/dev/null)" != ok ]; then
+  fail "the control shell under the sandbox prefix could not write its own staging directory, so the refusal below proves nothing (exit $shrc)"
 elif [ -e "$outside/forged.txt" ]; then
-  fail "a shell under the sandbox prefix left a file outside the staging directory"
+  fail "a shell under the sandbox prefix wrote outside the staging directory"
+elif [ "$shrc" -eq 0 ]; then
+  fail "the shell exited 0 although its write outside the staging directory should have failed"
 else
-  pass "a write outside the staging directory, attempted under the same prefix, was refused"
+  pass "a write outside the staging directory, attempted by a shell that did write its stage, was refused"
 fi
 echo "# stdout: $(head -c 300 "$W/stdout")"
 
