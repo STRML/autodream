@@ -2014,6 +2014,8 @@ REMOTE_SYNC_BAD=0      # entries that did not sync this run: failed or invalid
 REMOTE_SYNC_SHORT=0    # entries whose mirror may be short tonight: BAD plus partial and skipped_locked
 REMOTE_SYNC_FIRST_ERR=""
 REMOTE_SYNC_HELPER=""
+REMOTE_SYNCED_LABELS=" "   # labels whose sync was ok or partial this run, space-delimited
+REMOTE_SHORT_NOTE=""       # stub-report lines naming earlier dates a host missed (#230)
 remote_sync_stat() { REMOTE_SYNC_LINES="${REMOTE_SYNC_LINES}$1"$'\n'; }
 
 # $1=entry $2=key $3=why: an entry refused before any ssh.
