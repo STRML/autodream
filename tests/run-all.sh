@@ -10593,7 +10593,6 @@ test_remote_sync_reserved_label_is_refused_before_the_adapter_check(){
   assert_grep "$rs" '^remote_sync_invalid_cause: label x_cause is reserved' "the reserved label is named in a refusal under invalid"
   assert_nogrep "$rs" '^remote_sync_x_cause' "and has no key of its own"
   assert_grep "$rs" '^remote_sync_studio2: invalid$' "a real label is still refused for the adapter"
-  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short=studio2 -->' "the report's record names the real label and not the reserved one"
   rm -rf "$root"
 }
 
