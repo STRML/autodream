@@ -2056,22 +2056,45 @@ remote_sync_locked() {
   esac
 }
 
-# $1=label $2=target: sync one host under its lock, record its keys, add its mirror to the roots.
-remote_sync_one() {
-  local label="$1" spec="$2" dir="$AUTODREAM_DIR/remote/$1" lock="$AUTODREAM_DIR/locks/remote-$1.lock"
-  local mirror="$AUTODREAM_DIR/remote/$1/projects" status="" word cause="" last t0=$SECONDS
-  # remote_sync_locked runs inside $(...). $$ is still this run's pid there, so the lock it takes
-  # and releases is this run's.
+# $1=mirror -> "<files> <bytes>" of the *.jsonl transcripts in it. The mirror is an archive that is
+# never pruned (#228), so its size is measured every night and the growth shows in run-stats. wc -c
+# prints a "total" line per batch, which a transcript cannot match because its name ends in .jsonl.
+remote_mirror_size() {
+  [ -d "$1" ] || { echo "0 0"; return 0; }
+  find "$1" -type f -name '*.jsonl' -exec wc -c {} + 2>/dev/null \
+    | awk '$2 == "total" && NF == 2 { next } { f++; b += $1 } END { print f + 0, b + 0 }'
+}
+
+# $1=label $2=target $3=file prefix: one host's sync, run as a background job (#229). It leaves its
+# answers in files because a job cannot set the parent's variables: <prefix>.status (the helper's
+# line), .secs and .mirror (the mirror's size). Each label has its own lock and mirror, so the jobs
+# share nothing. $$ is still this run's pid inside the job, so the lock it takes is this run's.
+remote_sync_job() {
+  local label="$1" mirror="$AUTODREAM_DIR/remote/$1/projects" t0=$SECONDS status=""
   if [ -z "$REMOTE_SYNC_HELPER" ]; then
     status="failed (remote-sync.sh not found)"
   else
-    status=$(remote_sync_locked "$label" "$spec" "$mirror" "$lock")
+    status=$(remote_sync_locked "$label" "$2" "$mirror" "$AUTODREAM_DIR/locks/remote-$label.lock")
   fi
+  printf '%s\n' "$status" > "$3.status"
+  printf '%s\n' "$((SECONDS - t0))" > "$3.secs"
+  remote_mirror_size "$mirror" > "$3.mirror"
+}
+
+# $1=label $2=file prefix: read a finished job, record its keys, add its mirror to the roots.
+remote_sync_finish() {
+  local label="$1" p="$2" dir="$AUTODREAM_DIR/remote/$1" status word cause="" last secs size
+  local mirror="$AUTODREAM_DIR/remote/$1/projects"
+  status=$(head -n 1 "$p.status" 2>/dev/null) || status=""
+  secs=$(head -n 1 "$p.secs" 2>/dev/null) || secs=""
+  size=$(cat "$p.mirror" 2>/dev/null) || size=""
+  [ -n "$size" ] || size=$(remote_mirror_size "$mirror")
   [ -n "$status" ] || status="failed (remote-sync.sh printed nothing)"
   word=${status%% *}
   case "$status" in *" ("*")") cause=${status#* (}; cause=${cause%)} ;; esac
   case "$word" in
     ok|partial)
+      REMOTE_SYNCED_LABELS="$REMOTE_SYNCED_LABELS$label "
       if ! { mkdir -p "$dir" && printf '%s\n' "$(date +%Y-%m-%d)" > "$dir/last-ok.tmp.$$" \
              && mv -f "$dir/last-ok.tmp.$$" "$dir/last-ok"; } 2>/dev/null; then
         log "WARNING: remote sync $label: could not stamp $dir/last-ok"
@@ -2086,14 +2109,61 @@ remote_sync_one() {
   remote_sync_stat "remote_sync_$label: $word"
   remote_sync_stat "remote_sync_${label}_cause: $cause"
   remote_sync_stat "remote_sync_${label}_last_ok: ${last:-never}"
-  log "remote sync $label: $status in $((SECONDS - t0))s"
+  remote_sync_stat "remote_mirror_files_$label: ${size% *}"
+  remote_sync_stat "remote_mirror_bytes_$label: ${size#* }"
+  log "remote sync $label: $status in ${secs:-?}s"
   [ ! -d "$mirror" ] || SESSION_ROOTS="${SESSION_ROOTS:+$SESSION_ROOTS:}$mirror"
+}
+
+# A finished report stops every later trigger at the guard, and the next night's mtime lower bound
+# skips a transcript last written on the failed day, so a date whose host was down is never
+# retried (#230). Rebuilding it replaces a report the user may have triaged, so nothing rebuilds on
+# its own. Instead, a run whose sync worked looks back over the trailing week of run-stats.txt and
+# names every date where the same label failed, was refused or was held by a lock, with the rebuild
+# command. A date drops off when its own run-stats shows the label ok, which only a rebuild writes.
+# Only labels configured tonight are read, so a renamed or removed host lists nothing. A night whose
+# findings dir exists but whose run-stats.txt is missing or unreadable cannot be judged: it is
+# counted, never read as clean. A night with no findings dir did not run.
+REMOTE_SHORT_SCAN_DAYS=7
+remote_short_scan() {
+  local i d f label dates unreadable=0 w
+  REMOTE_SHORT_NOTE=""
+  i=$REMOTE_SHORT_SCAN_DAYS
+  while [ "$i" -ge 1 ]; do
+    d=$(pdate_shift "$TARGET_DATE" "-$i" d) || { i=$((i - 1)); continue; }
+    f="$AUTODREAM_DIR/findings/$d/run-stats.txt"
+    if [ -d "$AUTODREAM_DIR/findings/$d" ] && { [ ! -f "$f" ] || [ ! -r "$f" ]; }; then
+      unreadable=$((unreadable + 1))
+    fi
+    i=$((i - 1))
+  done
+  for label in $REMOTE_SYNCED_LABELS; do
+    dates=""
+    i=$REMOTE_SHORT_SCAN_DAYS
+    while [ "$i" -ge 1 ]; do
+      d=$(pdate_shift "$TARGET_DATE" "-$i" d) || { i=$((i - 1)); continue; }
+      f="$AUTODREAM_DIR/findings/$d/run-stats.txt"
+      i=$((i - 1))
+      [ -f "$f" ] && [ -r "$f" ] || continue
+      for w in failed invalid skipped_locked; do
+        grep -Fxq "remote_sync_$label: $w" "$f" 2>/dev/null || continue
+        dates="${dates:+$dates }$d"; break
+      done
+    done
+    remote_sync_stat "remote_short_dates_$label: ${dates:-none}"
+    for d in $dates; do
+      REMOTE_SHORT_NOTE="${REMOTE_SHORT_NOTE}- \`autodream-now.sh $d --force\` ($label was not fully read that night)"$'\n'
+    done
+    [ -z "$dates" ] || log "remote sync $label: earlier dates missing its sessions: $dates"
+  done
+  remote_sync_stat "remote_short_scan_unreadable: $unreadable"
 }
 
 sync_remote_roots() {
   if [ -z "${AUTODREAM_REMOTE_ROOTS:-}" ]; then remote_sync_stat "remote_sync: off"; return 0; fi
   remote_sync_stat "remote_sync: on"
-  local entries=() entry label seen=" "
+  local entries=() entry label seen=" " sdir="" n i
+  local kinds=() keys=() whys=() entrys=() pids=()
   REMOTE_SYNC_FIRST_ERR=""
   REMOTE_SYNC_HELPER=$(find_lib remote-sync.sh) || REMOTE_SYNC_HELPER=""
   # The mirrors are claude roots. With the claude adapter not enabled nothing would scan them, and
@@ -2101,21 +2171,44 @@ sync_remote_roots() {
   local claude_on=1
   resolve_enabled_adapters
   case " $ENABLED_ADAPTERS " in *" claude "*) ;; *) claude_on=0 ;; esac
+  sdir=$(mktemp -d "${TMPDIR:-/tmp}/remote-sync.XXXXXX" 2>/dev/null) \
+    || { sdir=""; log "WARNING: remote sync: cannot make a temp dir, so no host is synced"; }
   read -r -a entries <<< "$AUTODREAM_REMOTE_ROOTS"
+  # Pass 1 validates and starts every sync at once. A host that is asleep costs ConnectTimeout and a
+  # stalled copy costs rsync's --timeout, so with several hosts down the waits overlap (#229).
   for entry in ${entries[@]+"${entries[@]}"}; do
     REMOTE_SYNC_TOTAL=$((REMOTE_SYNC_TOTAL + 1))
-    case "$entry" in *=*) label=${entry%%=*} ;; *) remote_sync_refuse "$entry" invalid "no label=target"; continue ;; esac
+    n=${#kinds[@]}; entrys[n]=$entry
+    case "$entry" in *=*) label=${entry%%=*} ;; *) kinds[n]=refuse; keys[n]=invalid; whys[n]="no label=target"; continue ;; esac
     case "$label" in
-      ''|.|..|*[!A-Za-z0-9._-]*) remote_sync_refuse "$entry" invalid "label must match [A-Za-z0-9._-]+"; continue ;;
+      ''|.|..|*[!A-Za-z0-9._-]*) kinds[n]=refuse; keys[n]=invalid; whys[n]="label must match [A-Za-z0-9._-]+"; continue ;;
     esac
-    case "$seen" in *" $label "*) remote_sync_refuse "$entry" invalid "label $label is used twice"; continue ;; esac
+    case "$seen" in *" $label "*) kinds[n]=refuse; keys[n]=invalid; whys[n]="label $label is used twice"; continue ;; esac
     seen="$seen$label "
     if [ "$claude_on" = 0 ]; then
-      remote_sync_refuse "$entry" "$label" "the claude adapter is not enabled (AUTODREAM_ADAPTERS), so no mirror would be scanned"
+      kinds[n]=refuse; keys[n]=$label; whys[n]="the claude adapter is not enabled (AUTODREAM_ADAPTERS), so no mirror would be scanned"
       continue
     fi
-    remote_sync_one "$label" "${entry#*=}"
+    kinds[n]=sync; keys[n]=$label; pids[n]=""
+    if [ -n "$sdir" ]; then
+      remote_sync_job "$label" "${entry#*=}" "$sdir/$n" &
+      pids[n]=$!
+    fi
   done
+  # Pass 2 reads the results in config order, so run-stats and SESSION_ROOTS do not depend on which
+  # host answered first.
+  i=0
+  while [ "$i" -lt "${#kinds[@]}" ]; do
+    if [ "${kinds[i]}" = refuse ]; then
+      remote_sync_refuse "${entrys[i]}" "${keys[i]}" "${whys[i]}"
+    else
+      [ -z "${pids[i]}" ] || wait "${pids[i]}" 2>/dev/null
+      remote_sync_finish "${keys[i]}" "$sdir/$i"
+    fi
+    i=$((i + 1))
+  done
+  [ -z "$sdir" ] || rm -rf "$sdir"
+  remote_short_scan
   log "session roots with remote mirrors: ${SESSION_ROOTS//:/, }"
   # Every host failing is a broken path (lost key, renamed host, no route), and the per-host lines
   # sit in run-stats.txt until the report, so it gets a banner of its own group. One failing does
@@ -4064,6 +4157,12 @@ $( if [ "${ROOTS_FAILED:-0}" -gt 0 ] || [ "${ROOTS_UNAVAILABLE:-0}" -gt 0 ]; the
      # The two are counted separately because they are separate facts.
      printf 'Nothing was triaged. %s session file(s) were enumerated (%s autodream-own, %s with no substantive turns); a further %s path(s) were refused before enumeration, and %s hash-collision event(s) each dropped two or more paths. See run-stats.txt — this is not an empty night.' \
        "$RAW" "$EXCLUDED" "$SKIPPED_EMPTY" "$REJECTED_PATHS" "$HASH_COLLISIONS"
+   fi )
+
+$( if [ -n "$REMOTE_SHORT_NOTE" ]; then
+     # A night with nothing to triage skips L2, so this stub is the only place the dates a remote
+     # host missed (#230) can be named.
+     printf 'A remote host that synced tonight was not fully read on earlier dates, so those reports are missing its sessions. Rebuild each date once:\n\n%s' "$REMOTE_SHORT_NOTE"
    fi )
 
 (Generated $(date -u +%Y-%m-%dT%H:%M:%SZ))

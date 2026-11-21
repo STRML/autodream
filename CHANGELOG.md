@@ -2,6 +2,13 @@
 
 All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
+## 2026-11-21
+
+### Added
+- **A host that was down is named again when it syncs.** A date whose remote sync failed is never retried (its report is done, and the next night's mtime bound skips what it missed), and nothing said so after that night. When a run's sync of a host is `ok` or `partial`, it now reads the previous seven days of `run-stats.txt` and writes `remote_short_dates_<label>` for every date where that label was `failed`, `invalid` or `skipped_locked`. PROMPT.md turns the list into a self-audit line and one open question per label, with `autodream-now.sh <date> --force` for each date, and a night with nothing to triage puts it in the stub report. Nothing rebuilds on its own, since a rebuild would replace a report the user may have triaged. A night whose `run-stats.txt` is missing or unreadable is counted in `remote_short_scan_unreadable`, and a label no longer in the config lists nothing. Fixes #230.
+- **Remote hosts sync in parallel.** Each label's sync runs as a background job and the run waits for all of them, so several hosts that are down cost one `ConnectTimeout`, not the sum. Run-stats lines and the session roots still follow the order of `AUTODREAM_REMOTE_ROOTS`. Fixes #229.
+- **The remote mirror's size is recorded every night** (`remote_mirror_files_<label>`, `remote_mirror_bytes_<label>`), and the mirror is documented as an archive that is never pruned. A pruned file that is still on the host would be copied back, and keeping transcripts the host deleted is intended. Fixes #228.
+
 ## 2026-11-18
 
 ### Changed

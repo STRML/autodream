@@ -9959,6 +9959,9 @@ printf '%s\n' "$*" >> "$R/rsync.log"
 n=$#; src=${@:$((n - 1)):1}; dst=${!n}
 host=${src%%:*}; src=${src#*:}
 rc=$(cat "$R/rsync.$host.rc" 2>/dev/null || cat "$R/rsync.rc" 2>/dev/null || echo 0)
+printf '%s start %s\n' "$host" "$(date +%s)" >> "$R/rsync.times"
+[ ! -f "$R/rsync.$host.kill" ] || kill -9 "$PPID"
+[ ! -f "$R/rsync.$host.delay" ] || sleep "$(cat "$R/rsync.$host.delay")"
 if [ "$rc" = 0 ] || [ "$rc" = 24 ]; then
   ( cd "$src" 2>/dev/null && find . -type f -name '*.jsonl' ) | while IFS= read -r f; do
     mkdir -p "$dst/$(dirname "$f")" && cp -p "$src/$f" "$dst/$f"
@@ -9970,6 +9973,7 @@ if [ -f "$R/rsync.strand" ]; then
   touch -t 202001021200 "$dst/proj-r/.r2.jsonl.Xy12Zw"
 fi
 if [ -f "$R/rsync.$host.err" ]; then cat "$R/rsync.$host.err" >&2; elif [ -f "$R/rsync.err" ]; then cat "$R/rsync.err" >&2; fi
+printf '%s end %s\n' "$host" "$(date +%s)" >> "$R/rsync.times"
 exit "$rc"
 RSYNC_SHIM
   printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s/ssh.log"\necho "ssh shim: no real host" >&2\nexit 255\n' "$r" > "$r/rsshim/ssh"
@@ -10294,6 +10298,205 @@ test_remote_sync_session_in_both_trees_is_enumerated_twice(){
   rm -rf "$root"
 }
 
+rs_seed_stats(){ # $1=root $2=date $3...=run-stats lines: an earlier night's run-stats.txt
+  local d="$1/autodream/findings/$2"; mkdir -p "$d"; shift 2; printf '%s\n' "$@" > "$d/run-stats.txt"
+}
+rs_lineno(){ grep -n "$2" "$1" 2>/dev/null | head -n 1 | cut -d: -f1; }   # $1=file $2=pattern -> first line number
+rs_epoch(){ awk -v h="$2" -v k="$3" '$1==h && $2==k {print $3; exit}' "$1"; }   # $1=times $2=host $3=start|end
+
+# ---- #230: a date whose host failed is named by the next run that syncs it ----
+test_remote_sync_short_dates_lists_earlier_dates_the_host_missed(){
+  echo "# remote sync: a host that syncs again lists the trailing week's dates it failed on, oldest first"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  rs_seed_stats "$root" 2020-01-01 'remote_sync_studio2: failed'
+  rs_seed_stats "$root" 2019-12-31 'remote_sync_studio2: skipped_locked'
+  rs_seed_stats "$root" 2019-12-30 'remote_sync_studio2: invalid'
+  rs_seed_stats "$root" 2019-12-29 'remote_sync_studio2: ok'
+  rs_seed_stats "$root" 2019-12-28 'remote_sync_studio2: partial'
+  rs_seed_stats "$root" 2019-12-26 'remote_sync_studio2: failed'
+  rs_seed_stats "$root" 2019-12-25 'remote_sync_studio2: failed'
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_sync_studio2: ok$' "the host synced tonight"
+  assert_grep "$rs" '^remote_short_dates_studio2: 2019-12-26 2019-12-30 2019-12-31 2020-01-01$' "failed, invalid and skipped_locked dates inside seven days are listed, oldest first"
+  assert_grep "$rs" '^remote_short_scan_unreadable: 0$' "every night in the window that ran was readable"
+  rm -rf "$root"
+}
+
+test_remote_sync_short_dates_none_when_every_earlier_date_was_read(){
+  echo "# remote sync: no short date reads none, and a night with no earlier run-stats does not count as unreadable"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  rs_seed_stats "$root" 2020-01-01 'remote_sync_studio2: ok' 'remote_sync_studio2_cause: '
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_short_dates_studio2: none$' "nothing is short"
+  assert_grep "$rs" '^remote_short_scan_unreadable: 0$' "nights with no findings dir at all are nights that did not run"
+  rm -rf "$root"
+}
+
+test_remote_sync_short_dates_not_scanned_while_the_host_is_still_down(){
+  echo "# remote sync: a host that fails tonight lists nothing (the failure line and banner already cover it)"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  rs_seed_stats "$root" 2020-01-01 'remote_sync_studio2: failed'
+  printf '255\n' > "$root/rsync.rc"; printf 'ssh: connect to host studio2.invalid port 22: No route to host\n' > "$root/rsync.err"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_sync_studio2: failed$' "the host is down"
+  assert_nogrep "$rs" '^remote_short_dates_' "no short dates are listed"
+  rm -rf "$root"
+}
+
+test_remote_sync_short_dates_skips_unreadable_run_stats_and_counts_them(){
+  echo "# remote sync: a night whose run-stats is missing or unreadable is skipped and counted, never read as clean"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  mkdir -p "$root/autodream/findings/2020-01-01"                       # a run that died before run-stats
+  rs_seed_stats "$root" 2019-12-31 'remote_sync_studio2: failed'
+  chmod 000 "$root/autodream/findings/2019-12-31/run-stats.txt"        # unreadable
+  rs_seed_stats "$root" 2019-12-30 'remote_sync_studio2: failed'
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  local rs want=2; rs=$(rs_stats "$root")
+  [ "$(id -u)" != 0 ] || want=1                                        # root reads a mode-000 file
+  assert_grep "$rs" "^remote_short_scan_unreadable: $want\$" "the missing and the unreadable night are counted"
+  if [ "$want" = 2 ]; then
+    assert_grep "$rs" '^remote_short_dates_studio2: 2019-12-30$' "only the readable night is listed"
+  else
+    assert_grep "$rs" '^remote_short_dates_studio2: 2019-12-30 2019-12-31$' "as root the mode-000 night reads"
+  fi
+  assert_eq "$(cat "$root/run.exit")" "0" "and the run still succeeds"
+  chmod 600 "$root/autodream/findings/2019-12-31/run-stats.txt" 2>/dev/null
+  rm -rf "$root"
+}
+
+test_remote_sync_short_dates_only_for_labels_in_the_config(){
+  echo "# remote sync: dates short for a label that was renamed or removed are not listed under another"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  rs_seed_stats "$root" 2020-01-01 'remote_sync_oldhost: failed' 'remote_sync_studio2: ok'
+  AUTODREAM_REMOTE_ROOTS="studio3=studio3.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_short_dates_studio3: none$' "a new label starts with no short dates"
+  assert_nogrep "$rs" 'remote_short_dates_oldhost' "a label no longer configured is not reported"
+  assert_nogrep "$rs" 'remote_short_dates_studio2' "nor is the label it replaced"
+  rm -rf "$root"
+}
+
+test_remote_sync_short_date_is_named_until_it_is_rebuilt(){
+  echo "# remote sync: Mon failed, Tue syncs and names Mon (stub report too), a --force rebuild of Mon clears it"
+  local root DATE=2020-01-02; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  printf '255\n' > "$root/rsync.rc"; printf 'ssh: connect to host studio2.invalid port 22: Operation timed out\n' > "$root/rsync.err"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_grep "$(rs_stats "$root")" '^remote_sync_studio2: failed$' "the first night's host was down"
+  assert_no_file "$root/autodream/remote/studio2/projects/proj-r/r1.jsonl" "so the Studio session was not read"
+  rm -f "$root/rsync.rc" "$root/rsync.err"
+  DATE=2020-01-03
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_grep "$(rs_stats "$root")" '^remote_sync_studio2: ok$' "the next night the host is back"
+  assert_grep "$(rs_stats "$root")" '^remote_short_dates_studio2: 2020-01-02$' "and the first night is named"
+  assert_grep "$root/dreams/2020-01-03.md" 'autodream-now.sh 2020-01-02 --force' "a night with nothing to triage still gives the rebuild command"
+  DATE=2020-01-02
+  AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_grep "$(rs_stats "$root")" '^remote_sync_studio2: ok$' "the rebuild reads the host"
+  assert_file "$(fdir "$root")/$(hash_of "$(rs_mirror "$root" studio2)/proj-r/r1.jsonl").json" "and now triages the session the first night missed"
+  DATE=2020-01-04
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_grep "$(rs_stats "$root")" '^remote_short_dates_studio2: none$' "the rebuilt date is no longer listed"
+  assert_nogrep "$root/dreams/2020-01-04.md" 'autodream-now.sh' "and the report stops asking for it"
+  rm -rf "$root"
+}
+
+test_remote_sync_prompt_names_short_dates_and_the_rebuild_command(){
+  echo "# remote sync: the self-audit and the Open questions rules in PROMPT.md name the dates and the command"
+  local p="$REPO/prompts/PROMPT.md"
+  assert_grep "$p" 'remote_short_dates_<label>' "the self-audit reads the per-label key"
+  assert_grep "$p" 'remote_short_scan_unreadable' "and says when the scan could not read a night"
+  assert_grep "$p" 'autodream-now.sh <date> --force' "the rebuild command is spelled out"
+  assert_grep "$p" 'Rebuild the report dates missing <label> sessions' "the open question has one stable title per label"
+}
+
+# ---- #229: hosts sync in parallel ----
+test_remote_sync_hosts_run_in_parallel_and_keep_config_order(){
+  echo "# remote sync: two slow hosts overlap instead of queueing, and run-stats keep config order with a refused entry between"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  printf '3\n' > "$root/rsync.a.invalid.delay"; printf '3\n' > "$root/rsync.b.invalid.delay"
+  AUTODREAM_REMOTE_ROOTS="a=a.invalid:$root/studio bad/label=x.invalid:/p b=b.invalid:$root/studio" rs_run "$root"
+  local t="$root/rsync.times" rs; rs=$(rs_stats "$root")
+  local as ae bs be; as=$(rs_epoch "$t" a.invalid start); ae=$(rs_epoch "$t" a.invalid end)
+  bs=$(rs_epoch "$t" b.invalid start); be=$(rs_epoch "$t" b.invalid end)
+  [ -n "$as" ] && [ -n "$bs" ] && [ "$bs" -lt "$ae" ] && [ "$as" -lt "$be" ] && ok "the two syncs overlap (a $as-$ae, b $bs-$be)" || no "the two syncs overlap (a ${as:-?}-${ae:-?}, b ${bs:-?}-${be:-?})"
+  assert_grep "$rs" '^remote_sync_a: ok$' "a synced"
+  assert_grep "$rs" '^remote_sync_b: ok$' "b synced"
+  local la lb li
+  la=$(rs_lineno "$rs" '^remote_sync_a:'); li=$(rs_lineno "$rs" '^remote_sync_invalid:'); lb=$(rs_lineno "$rs" '^remote_sync_b:')
+  [ -n "$la" ] && [ -n "$li" ] && [ -n "$lb" ] && [ "$la" -lt "$li" ] && [ "$li" -lt "$lb" ] && ok "run-stats lists a, the refused entry, then b" || no "run-stats order (a=$la invalid=$li b=$lb)"
+  assert_grep "$rs" "^session_roots_list: $root/projects:$(rs_mirror "$root" a):$(rs_mirror "$root" b)\$" "the mirrors join the roots in config order"
+  rm -rf "$root"
+}
+
+test_remote_sync_parallel_a_slow_failure_does_not_reorder_or_hide_the_fast_host(){
+  echo "# remote sync: a failing first host that finishes last still reads failed, and the second host's result is its own"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"; stub_notify "$root"
+  printf '2\n' > "$root/rsync.a.invalid.delay"; printf '255\n' > "$root/rsync.a.invalid.rc"
+  printf 'ssh: connect to host a.invalid port 22: Operation timed out\n' > "$root/rsync.a.invalid.err"
+  AUTODREAM_REMOTE_ROOTS="a=a.invalid:$root/studio b=b.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_sync_a: failed$' "a is failed"
+  assert_grep "$rs" '^remote_sync_a_cause: ssh: connect to host a.invalid port 22: Operation timed out$' "with its own cause"
+  assert_grep "$rs" '^remote_sync_b: ok$' "b is ok"
+  assert_nogrep "$rs" '^remote_sync_b_cause: ssh' "and does not inherit a's cause"
+  assert_nogrep "$root/notify-args.txt" '^--warning' "one of two failing posts no banner"
+  rm -rf "$root"
+}
+
+test_remote_sync_parallel_a_killed_helper_reads_failed(){
+  echo "# remote sync: a helper killed mid-sync prints nothing and reads failed, and the other host is unaffected"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  : > "$root/rsync.a.invalid.kill"
+  AUTODREAM_REMOTE_ROOTS="a=a.invalid:$root/studio b=b.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_sync_a: failed$' "the killed helper reads failed"
+  assert_grep "$rs" '^remote_sync_a_cause: remote-sync.sh printed nothing$' "and says it printed nothing"
+  assert_grep "$rs" '^remote_sync_b: ok$' "the other host syncs"
+  assert_no_file "$root/autodream/locks/remote-a.lock" "the killed host's lock is released"
+  rm -rf "$root"
+}
+
+# ---- #228: the mirror is an archive; its size is measured every night ----
+test_remote_sync_mirror_size_is_recorded_every_night(){
+  echo "# remote sync: run-stats carry the mirror's transcript count and bytes, archive files included"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"; rs_seed_mirror "$root" studio2
+  local m; m=$(rs_mirror "$root" studio2)
+  printf '{"half\n' > "$m/proj-r/.r2.jsonl.Xy12Zw"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  local rs bytes; rs=$(rs_stats "$root")
+  bytes=$(( $(wc -c < "$m/proj-r/r0.jsonl") + $(wc -c < "$m/proj-r/r1.jsonl") ))
+  assert_grep "$rs" '^remote_mirror_files_studio2: 2$' "the kept transcript and the new one are counted, a stranded temp is not"
+  assert_grep "$rs" "^remote_mirror_bytes_studio2: $bytes\$" "the bytes are the sum of the transcripts"
+  rm -rf "$root"
+}
+
+test_remote_sync_mirror_size_is_zero_before_the_first_good_sync(){
+  echo "# remote sync: a host that never synced has no mirror and records 0 and 0, and a refused entry records none"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  printf '255\n' > "$root/rsync.rc"; printf 'ssh: connect to host studio2.invalid port 22: No route to host\n' > "$root/rsync.err"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio bad/label=x.invalid:/p" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_mirror_files_studio2: 0$' "no files"
+  assert_grep "$rs" '^remote_mirror_bytes_studio2: 0$' "no bytes"
+  assert_nogrep "$rs" '^remote_mirror_.*_invalid' "a refused entry has no mirror to measure"
+  rm -rf "$root"
+}
+
+_run test_remote_sync_short_dates_lists_earlier_dates_the_host_missed
+_run test_remote_sync_short_dates_none_when_every_earlier_date_was_read
+_run test_remote_sync_short_dates_not_scanned_while_the_host_is_still_down
+_run test_remote_sync_short_dates_skips_unreadable_run_stats_and_counts_them
+_run test_remote_sync_short_dates_only_for_labels_in_the_config
+_run test_remote_sync_short_date_is_named_until_it_is_rebuilt
+_run test_remote_sync_prompt_names_short_dates_and_the_rebuild_command
+_run test_remote_sync_hosts_run_in_parallel_and_keep_config_order
+_run test_remote_sync_parallel_a_slow_failure_does_not_reorder_or_hide_the_fast_host
+_run test_remote_sync_parallel_a_killed_helper_reads_failed
+_run test_remote_sync_mirror_size_is_recorded_every_night
+_run test_remote_sync_mirror_size_is_zero_before_the_first_good_sync
 _run test_remote_sync_off_changes_nothing
 _run test_remote_sync_invalid_entries_are_refused
 _run test_remote_sync_unreachable_host_keeps_and_scans_the_mirror

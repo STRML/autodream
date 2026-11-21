@@ -7,7 +7,8 @@
 # remote but sshd and a live session there never writes to a network filesystem. It asks for
 # *.jsonl (transcripts and subagent sidecars) and nothing else, keeps mtimes (-t), because
 # enumeration's lower bound is the file mtime, and never deletes: a transcript removed on the
-# remote stays in the mirror. rsync writes each file to a dot-named temp and renames it, so a copy
+# remote stays in the mirror, which is an archive nothing prunes (a pruned file still on the host would
+# be copied back; #228). rsync writes each file to a dot-named temp and renames it, so a copy
 # killed mid-file leaves the old file whole plus a `.name.jsonl.XXXXXX` temp, which is not
 # `*.jsonl` and is never enumerated.
 #

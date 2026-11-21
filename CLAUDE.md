@@ -97,11 +97,44 @@ A pull is read-only on the remote and needs only sshd there.
   (a down Studio is not a down model provider) and never aborts the run. On a night with no
   sessions, any host that is not `ok` (failed, invalid, partial or skipped_locked) makes the stub
   report say the host was not fully synced instead of calling the night empty.
-- **What a failed host loses.** A finished report stops every later trigger at the guard, so
-  nothing syncs that date again, and the next night's mtime lower bound skips a transcript last
-  written on the failed day. Those sessions reach no report unless the date is rebuilt
-  (`autodream-now.sh <date> --force`), which the self-audit line tells the reader to do. Automatic
-  retry would need a sync above the guard, which the design rules out (#230).
+- **What a failed host loses, and how it is named later (#230).** A finished report stops every
+  later trigger at the guard, so nothing syncs that date again, and the next night's mtime lower
+  bound skips a transcript last written on the failed day. Those sessions reach no report unless the
+  date is rebuilt (`autodream-now.sh <date> --force`). Nothing rebuilds on its own: a rebuild
+  replaces the report, including any `## Triage decisions` the user wrote into it, and a sync above
+  the guard would rerun L2 on every trigger while a host stays down. What happens instead is
+  `remote_short_scan`, run at the end of `sync_remote_roots`. For each label whose sync was `ok` or
+  `partial` tonight it reads `findings/<date>/run-stats.txt` for the seven days before the target
+  date and writes `remote_short_dates_<label>: <dates>` (oldest first, `none` when empty) for every
+  date whose own run-stats has that label at `failed`, `invalid` or `skipped_locked`. PROMPT.md turns
+  each into a self-audit line and one open question titled `Rebuild the report dates missing <label>
+  sessions?` (a stable title per label, so the streak escalation applies), and a night with nothing
+  to triage names them in the stub report, because that path skips L2. The rules that keep it honest:
+  a label still failing tonight lists nothing (the host is down, and the banner covers it); a date
+  leaves the list when its own run-stats shows the label `ok`, which only a rebuild writes; only
+  labels configured tonight are read, so a renamed or removed host lists nothing; a night whose
+  findings dir exists but whose `run-stats.txt` is missing or unreadable is skipped and counted in
+  `remote_short_scan_unreadable` (a night with no findings dir did not run, and is not counted);
+  `partial` is not listed, because it names files re-read the next night.
+- **Hosts sync in parallel (#229).** `sync_remote_roots` validates every entry first, starts one
+  `remote_sync_job` per valid label in the background, then reads the results in config order. Each
+  label has its own lock and mirror, so the jobs share nothing, and with several hosts down the
+  `ConnectTimeout` and `--timeout` waits overlap instead of adding up. A job cannot set the parent's
+  variables, so it leaves `<label>.status`, `.secs` and `.mirror` in a per-run temp dir
+  (`mktemp -d`, removed with `rm -rf`). A job that dies before writing reads `failed
+  (remote-sync.sh printed nothing)`. Run-stats lines, `SESSION_ROOTS` and the refusal warnings are
+  written in the second pass, in the order of `AUTODREAM_REMOTE_ROOTS`, so a refused entry keeps its
+  place and the artifact does not depend on which host answered first. `bin/remote-sync.sh` is
+  unchanged.
+- **The mirror is an archive, and its size is measured (#228).** Nothing prunes a mirror.
+  `remote-sync.sh` never passes `--delete`, so a file pruned out of the mirror and still on the host
+  would be copied back the next night, and the mirror keeps transcripts the remote deleted on purpose.
+  Disk is the only cost: the nightly `find` drops old files by the mtime bound cheaply. Every run
+  writes `remote_mirror_files_<label>` and `remote_mirror_bytes_<label>` (the `*.jsonl` count and
+  byte sum, `0` and `0` before a first good sync, nothing for a refused entry), measured in the
+  background job, so the month of growth the retention question wanted accrues in the run-stats
+  files without anyone remembering to look. Revisit pruning only when those numbers say the disk
+  matters, and then a prune needs an rsync exclude for what it removed, not just a delete.
 - **A killed copy.** rsync writes each file to a dot-named temp (`.name.jsonl.XXXXXX`) and renames
   it, so a file is old or new, never torn by rsync, and a stranded temp is not `*.jsonl`. A file
   copied while the remote session was appending can end in a torn line; session-window and the
@@ -111,7 +144,9 @@ A pull is read-only on the remote and needs only sshd there.
   The day cut keeps only each copy's records inside the day, so on the day the session moved, the
   part written before the move is triaged twice. Deduping across trees is out of scope (#226).
 - **Tests.** The `test_remote_sync_*` cases in `tests/run-all.sh` put a fake `rsync` (logs argv,
-  copies `*.jsonl` with `cp -p`, exits with a per-host code and stderr) and a logging `ssh` that
+  copies `*.jsonl` with `cp -p`, exits with a per-host code and stderr, logs start and end epochs to
+  `rsync.times`, and sleeps (`rsync.<host>.delay`) or SIGKILLs its helper (`rsync.<host>.kill`) on request;
+  the parallel test asserts the two hosts' intervals overlap rather than timing the run) and a logging `ssh` that
   always fails first on PATH, and every target is a `*.invalid` host. The missing-tool case runs
   the helper with a PATH that holds no rsync, because run.sh appends `/usr/bin` to PATH.
   `install.sh` resolves `rsync` into the plist PATH beside claude, git and bash.
