@@ -4,6 +4,7 @@ from http.server import SimpleHTTPRequestHandler
 import json
 import os
 import pwd
+import re
 import selectors
 import socket
 import urllib.parse
@@ -48,8 +49,9 @@ def has_result(dom):
 # page when virtual time runs out, and a busy machine can reach that before the fetches the
 # checks wait for have returned; the headless process can also miss its deadline outright. Either
 # way the page never wrote data-result, which means unfinished, not failed (#202): try again with
-# more room and a fresh profile. A FAIL result is a real failure and is returned at once.
-CHROME_ATTEMPTS = ((1500, 25), (6000, 60), (20000, 120))
+# more room and a fresh profile. The sum of the deadlines must fit inside the suite's own in
+# tests/autodream-web.sh, and a test pins that. A FAIL result is a real failure and is returned at once.
+CHROME_ATTEMPTS = ((1500, 25), (6000, 45), (20000, 60))
 
 
 def dump_dom(chrome, root, url, *, attempts=CHROME_ATTEMPTS, finished=has_result, before_retry=None):
@@ -877,6 +879,39 @@ pending[2](snapshot('open'));
 await last;
 check(tab('Open') === 'Open 1', 'a refresh issued after both must still draw');
 ''')
+
+    def test_web_stale_thread_snapshot_still_applies_the_requested_selection(self):
+        self.run_browser('''await new Promise(resolve => window.addEventListener('load', resolve, {once:true}));
+const content = document.getElementById('content');
+const row = (id, status) => ({id,kind:'work',repo:'/repo',title:id,goal:id,status,display_status:status,
+  last_seen:'2026-11-01',sessions:[]});
+const snapshot = {threads:[row('t-00000001','dropped'), row('t-00000002','done')]};
+const pending = [];
+let reads = 0;
+window.fetch = async function(path) {
+  if (path !== '/api/threads') throw new Error('unexpected fetch ' + path);
+  if (++reads === 1) return {ok:true,status:200,json:async () => snapshot};
+  return new Promise(resolve => pending.push(() => resolve({ok:true,status:200,json:async () => snapshot})));
+};
+history.replaceState(null, '', '#threads');
+await loadView('threads');
+const navigation = loadView('threads', 't-00000002');
+const refresh = refreshThreads();
+check(pending.length === 2, 'navigation and refresh must both be in flight');
+pending[1](); await refresh;
+pending[0](); await navigation;
+const done = content.querySelector('nav button[data-view="Done"]');
+check(done.getAttribute('aria-pressed') === 'true', 'the requested thread must stay selected');
+check(content.querySelector('article')?.id === 't-00000002', 'the requested thread must be shown');
+''')
+
+    def test_web_browser_suite_deadline_covers_every_chrome_retry(self):
+        worst = sum(deadline for _, deadline in CHROME_ATTEMPTS)
+        runner = (REPO / 'tests/autodream-web.sh').read_text()
+        match = re.search(r'^_run autodream-web-browser\.py (\d+)$', runner, re.M)
+        self.assertIsNotNone(match, 'tests/autodream-web.sh must give the browser suite its own deadline')
+        self.assertGreaterEqual(int(match[1]), worst + 60,
+            'the suite deadline must outlast one test that uses every Chrome retry')
 
     def test_web_lately_renders_when_optional_threads_fetch_rejects(self):
         self.run_browser('''await new Promise(resolve => window.addEventListener('load', resolve, {once:true}));

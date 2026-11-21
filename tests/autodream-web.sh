@@ -10,7 +10,7 @@ suite_tmp adweb
 pass=0; fail=0
 _run() {
   local output rc=0 counts p f
-  output=$(tmo 90 env PYTHONDONTWRITEBYTECODE=1 python3 "$HERE/$1") || rc=$?
+  output=$(tmo "${2:-90}" env PYTHONDONTWRITEBYTECODE=1 python3 "$HERE/$1") || rc=$?
   printf '%s\n' "$output"
   counts=$(printf '%s\n' "$output" | sed -n 's/^passed: \([0-9]*\)   failed: \([0-9]*\)$/\1 \2/p' | tail -1)
   if [ -z "$counts" ]; then fail=$((fail + 1)); return; fi
@@ -20,6 +20,6 @@ _run() {
 }
 _run autodream-web-data.py
 _run autodream-web.py
-_run autodream-web-browser.py
+_run autodream-web-browser.py 300
 printf '\npassed: %s   failed: %s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

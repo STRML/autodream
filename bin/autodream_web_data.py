@@ -73,6 +73,16 @@ def read_categories(path):
         return None
 
 
+def run_enumerated(directory):
+    # fatal_exit writes run-stats with a `fatal:` line before any enumeration, so that night has
+    # no worklist and nothing is missing.
+    try:
+        lines = (directory / 'run-stats.txt').read_text(encoding='utf-8').splitlines()
+    except (OSError, UnicodeError):
+        return False
+    return not any(line.startswith('fatal:') for line in lines)
+
+
 def night_sessions(directory, unreadable):
     worklist = directory / 'sessions.txt'
     if worklist.exists():
@@ -84,8 +94,8 @@ def night_sessions(directory, unreadable):
             return sorted({hashlib.sha1(line).hexdigest()[:12] for line in lines if line})
     found = {path.name[:-len('.json')] for path in directory.glob('*.json')
              if FINDING.fullmatch(path.name)}
-    if not worklist.exists() and (directory / 'run-stats.txt').exists():
-        # A run wrote run-stats, so it also wrote a worklist: its absence is damage, not age.
+    if not worklist.exists() and run_enumerated(directory):
+        # A run that got as far as enumeration wrote run-stats and a worklist: its absence is damage.
         # Without a worklist no rebuild has left stale sidecars, so a sidecar with no findings
         # is a session still pending, and leaving it out would read the night as complete.
         unreadable.add('sessions.txt')

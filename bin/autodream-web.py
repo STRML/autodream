@@ -145,9 +145,17 @@ def open_browser(executable, url, install):
     page = Path(install) / f"web-login-{handoff_id}.html"
     target = url + "&h=" + handoff_id
     fd = os.open(page, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        stream.write('<!doctype html><meta name="referrer" content="no-referrer">'
-                     '<meta http-equiv="refresh" content="0;url=' + html.escape(target, quote=True) + '">')
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            fd = -1
+            stream.write('<!doctype html><meta name="referrer" content="no-referrer">'
+                         '<meta http-equiv="refresh" content="0;url=' + html.escape(target, quote=True) + '">')
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        page.unlink(missing_ok=True)
+        raise
     try:
         result = run_bounded([executable, page.absolute().as_uri()])
     except BaseException:

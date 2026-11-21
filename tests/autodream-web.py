@@ -857,6 +857,30 @@ l1_chunks_elided threads_linked threads_unassigned threads_unmeasured""".split()
         self.assertEqual(result.returncode, 1)
         self.assertEqual(list(self.install.glob("web-login*.html")), [])
 
+    def test_web_handoff_is_readable_under_a_restrictive_umask(self):
+        self.start_server()
+        shim = self.root / "umask-opener"
+        shim.mkdir()
+        opener = shim / ("open" if sys.platform == "darwin" else "xdg-open")
+        opener.write_text("#!/bin/sh\nexit 0\n")
+        opener.chmod(0o755)
+        result = subprocess.run(["/bin/bash", str(COMMAND), "open"], capture_output=True, text=True,
+                                timeout=15, preexec_fn=lambda: os.umask(0o377),
+                                env=dict(self.env, AUTODREAM_WEB_PORT=str(self.port),
+                                         PATH=str(shim) + os.pathsep + os.environ["PATH"]))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        handoffs = list(self.install.glob("web-login-*.html"))
+        self.assertEqual(len(handoffs), 1)
+        self.assertEqual(stat.S_IMODE(handoffs[0].stat().st_mode), 0o600,
+                         "the caller's umask must not decide whether the browser can read the handoff")
+
+    def test_web_failed_handoff_write_leaves_no_file(self):
+        module = self.load_module()
+        with mock.patch.object(module.os, "fdopen", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                module.open_browser("/usr/bin/true", "http://127.0.0.1:1/login?t=x", self.install)
+        self.assertEqual(list(self.install.glob("web-login*.html")), [])
+
     def test_web_login_handoff_id_cannot_delete_other_files(self):
         self.start_server()
         victim = self.root / "victim.html"

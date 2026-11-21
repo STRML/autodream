@@ -66,7 +66,7 @@ permissions:
 
 jobs:
   launchd:
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && !(github.event_name == 'workflow_dispatch' && inputs.suite == 'web')
     runs-on: macos-latest
     timeout-minutes: 20
     steps:

@@ -158,6 +158,14 @@ class DataTests(unittest.TestCase):
         night = self.stats_night()
         self.assertEqual(night['activity']['tool_calls'], 3, 'a pending nested worker leaves totals measured')
 
+    def test_web_stats_fatal_run_before_enumeration_is_not_a_missing_worklist(self):
+        self.finding('0123456789ab')
+        (self.day / 'run-stats.txt').write_text(
+            '# Autodream run self-audit\nrunner_commit: abc\nfatal: jq not found\nsessions_triaged: 0\n')
+        night = self.stats_night()
+        self.assertNotIn('Could not read sessions.txt.', night['degraded'],
+                         'a run that died before enumeration never wrote a worklist')
+
     def test_web_stats_missing_worklist_on_a_legacy_night_is_not_degraded(self):
         self.finding('0123456789ab')
         night = self.stats_night()
