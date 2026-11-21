@@ -20,6 +20,6 @@ _run() {
 }
 _run autodream-web-data.py
 _run autodream-web.py
-_run autodream-web-browser.py 300
+_run autodream-web-browser.py 330
 printf '\npassed: %s   failed: %s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -60,18 +60,25 @@ SUITE_BUDGET = int(os.environ.get('ADWEB_BROWSER_BUDGET', '270'))
 SUITE_END = time.monotonic() + SUITE_BUDGET
 
 
+# A before_retry that restarts the live backend waits up to 30s for its origin line and 5s to stop
+# the old one, so a retry needs this much budget left before it may start.
+RESTART_RESERVE = 40
+
+
 def dump_dom(chrome, root, url, *, attempts=CHROME_ATTEMPTS, finished=has_result, before_retry=None,
-             until=None):
+             until=None, restart_reserve=RESTART_RESERVE):
     # A retry must start from the state the first attempt started from: before_retry puts back
     # anything the page's own run changed (a killed backend, a deleted single-use file).
     until = SUITE_END if until is None else until
     last = None
     for number, (budget, deadline) in enumerate(attempts):
+        if number and before_retry:
+            if until - time.monotonic() < restart_reserve:
+                break
+            before_retry()
         remaining = until - time.monotonic()
         if remaining < 1:
             break
-        if number and before_retry:
-            before_retry()
         try:
             result = subprocess.run([chrome, *(['--single-process'] if sys.platform == 'darwin' else []),
                 '--headless', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
@@ -915,6 +922,29 @@ const done = content.querySelector('nav button[data-view="Done"]');
 check(done.getAttribute('aria-pressed') === 'true', 'the requested thread must stay selected');
 check(content.querySelector('article')?.id === 't-00000002', 'the requested thread must be shown');
 ''')
+
+    def test_web_chrome_retry_restart_counts_against_the_budget(self):
+        with tempfile.TemporaryDirectory(prefix='fake-chrome.') as root:
+            root = Path(root)
+            log = root / 'calls'
+            fake = root / 'chrome'
+            fake.write_text('#!/bin/sh\necho x >> "' + str(log) + '"\necho "<body>"\n')
+            fake.chmod(0o755)
+            attempts = ((1500, 20), (6000, 20), (20000, 20))
+            restarts = []
+            log.write_text('')
+            result = dump_dom(str(fake), root, 'http://127.0.0.1:1/', attempts=attempts,
+                              until=time.monotonic() + 6, before_retry=lambda: restarts.append(1))
+            self.assertEqual(restarts, [], 'a restart that cannot finish inside the budget is not started')
+            self.assertEqual(len(log.read_text().split()), 1)
+            self.assertNotIn('data-result', result.stdout)
+            log.write_text('')
+            started = time.monotonic()
+            dump_dom(str(fake), root, 'http://127.0.0.1:1/', attempts=attempts, restart_reserve=0,
+                     until=started + 4, before_retry=lambda: time.sleep(5))
+            self.assertEqual(len(log.read_text().split()), 1,
+                             'time spent restarting counts: no attempt starts after the budget ran out')
+            self.assertLess(time.monotonic() - started, 7)
 
     def test_web_chrome_retries_stop_at_the_suite_budget(self):
         runner = (REPO / 'tests/autodream-web.sh').read_text()

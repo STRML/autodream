@@ -579,7 +579,10 @@ in the login URL; a successful login deletes only its own file, and the next `op
 handoff files older than ten minutes (#199). The browser suite runs Chrome through `dump_dom`,
 which retries with a larger virtual-time budget and a fresh profile while the page has not
 written `data-result`, because a missing result means unfinished and `FAIL:` means failed
-(#202). Stats treats a night whose `run-stats.txt` exists but whose `sessions.txt` does not as
+(#202). All Chrome time in one process shares a 270 second budget (`ADWEB_BROWSER_BUDGET`):
+each attempt is clamped to what is left, a retry that restarts the live backend needs 40
+seconds left, and `tests/autodream-web.sh` gives the suite 330 seconds, so an exhausted budget
+fails one test with `TimeoutExpired` and the suite still prints its counts. Stats treats a night whose `run-stats.txt` exists but whose `sessions.txt` does not as
 damaged: it is degraded and its sidecar-only top-level hashes count as pending (#204).
 `launchd.yml`'s manual dispatch takes `suite=web` to run only this suite on macOS.
 
