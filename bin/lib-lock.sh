@@ -28,11 +28,14 @@ lock_warn() { if declare -F log >/dev/null 2>&1; then log "$1"; else printf '%s\
 
 proc_start() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '; }
 
-# 0 = alive or cannot tell, 1 = gone. kill -0 also fails with EPERM for another user's process, so
-# a failure is checked against ps before the pid is called gone.
+# 0 = alive or cannot tell, 1 = gone. Only the kernel's own answer for a pid that does not exist
+# counts as gone: kill -0 fails the same way with EPERM for another user's live process, and a ps
+# that also fails says nothing, so any other failure reads as alive.
 lock_pid_alive() { # $1=pid
-  kill -0 "$1" 2>/dev/null && return 0
-  [ -n "$(ps -o pid= -p "$1" 2>/dev/null)" ]
+  local err
+  err=$(LC_ALL=C kill -0 "$1" 2>&1) && return 0
+  case "$err" in *"No such process"*) return 1 ;; esac
+  return 0
 }
 
 # 0 = the lock's holder is alive, 1 = gone (stale), 2 = the holder has not written its pid yet.
@@ -77,17 +80,26 @@ write_owner() { # $1=lock dir
   return 0
 }
 
-# Put a displaced lock back. The path is made first and the files moved into it: a plain rename of
-# the directory onto a path that has meanwhile been taken would nest it inside the new holder's lock
-# and call that restored. When the path is taken the displaced directory stays where it is, named in
-# the warning, and its holder finds lock_owned false at its next check instead of sharing the lock.
+# Copy a displaced lock's record into the lock directory that now holds the path. The pid goes in
+# with noclobber and the start time only after it: if the path was taken and its holder already wrote a
+# pid, nothing of ours lands on it, because a pid or start time written over another holder's record
+# would let the displaced holder and the new one both pass their ownership checks.
+put_back_record() { # $1=displaced dir $2=lock dir
+  if [ -s "$1/pid" ]; then
+    ( set -C; cat "$1/pid" > "$2/pid" ) 2>/dev/null || return 1
+    [ ! -s "$1/start" ] || cat "$1/start" > "$2/start" 2>/dev/null
+  fi
+  return 0
+}
+
+# Put a displaced lock back. The path is made first and the record put in with put_back_record: a
+# plain rename of the directory onto a path that has meanwhile been taken would nest it inside the new
+# holder's lock and call that restored. When the path is taken, or its holder wrote first, the displaced
+# directory stays where it is, named in the warning, and its holder finds lock_owned false at its next
+# check instead of sharing the lock.
 restore_lock() { # $1=displaced dir $2=lock dir
-  local f
-  if mkdir "$2" 2>/dev/null; then
-    for f in "$1"/* "$1"/.[!.]*; do
-      [ -e "$f" ] && mv "$f" "$2/" 2>/dev/null
-    done
-    rmdir "$1" 2>/dev/null
+  if mkdir "$2" 2>/dev/null && put_back_record "$1" "$2"; then
+    rm -rf "$1"
     return 0
   fi
   lock_warn "WARNING: $2 was taken again while another run's lock was being put back; it is left at $1"

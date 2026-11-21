@@ -174,6 +174,21 @@ assert_eq "$rc" "1" "so a young pid-less lock is not reclaimed when stat fails"
 eval "$real_pstat"
 rm -rf "$D/statfail.lock"
 
+echo "# lib-lock: only the kernel's answer for a missing pid counts as death"
+# pid 1 belongs to root: kill -0 fails with EPERM for this user, and a failed ps cannot say otherwise.
+mkdir "$D/eperm.lock"; printf '1\n' > "$D/eperm.lock/pid"
+lock_pid_alive 1; rc=$?
+assert_eq "$rc" "0" "a pid kill -0 cannot signal (EPERM) reads as alive"
+acquire_lock "$D/eperm.lock"; rc=$?
+assert_eq "$rc" "1" "so its lock is not reclaimed"
+assert_eq "$(cat "$D/eperm.lock/pid")" "1" "and is left alone"
+rm -rf "$D/eperm.lock"
+true & gone=$!; wait "$gone" 2>/dev/null
+lock_pid_alive "$gone"; rc=$?
+assert_eq "$rc" "1" "a pid that no longer exists is gone"
+lock_pid_alive "not-a-pid"; rc=$?
+assert_eq "$rc" "0" "and an answer that is not the no-such-process one reads as alive"
+
 echo "# lib-lock: only a lock directory is ever taken over or removed"
 printf 'not a lock\n' > "$D/file.lock"; age_dir "$D/file.lock"
 LOCK_NOPID_AGE=1 acquire_lock "$D/file.lock"; rc=$?
@@ -200,6 +215,16 @@ assert_eq "$rc" "1" "when the path was taken meanwhile, the restore says it coul
 assert_eq "$(cat "$D/taken.lock/pid")" "6262" "the new holder's record is untouched"
 [ ! -e "$D/taken.lock/displaced2.stale" ] && ok "and the displaced directory was not nested inside it" || no "the displaced directory was nested inside the new lock"
 [ -d "$D/displaced2.stale" ] && ok "it stays where it was, named in the warning" || no "the displaced directory vanished"
+mkdir -p "$D/pb-from"; printf '8181\n' > "$D/pb-from/pid"; printf 'Mon Jan  1 00:00:00 1990\n' > "$D/pb-from/start"
+mkdir -p "$D/pb-to"; printf '9292\n' > "$D/pb-to/pid"; printf 'Tue Feb  2 00:00:00 1991\n' > "$D/pb-to/start"
+put_back_record "$D/pb-from" "$D/pb-to"; rc=$?
+assert_eq "$rc" "1" "a record is not put back into a lock that already names a holder"
+assert_eq "$(cat "$D/pb-to/pid")" "9292" "its pid is untouched"
+assert_eq "$(cat "$D/pb-to/start")" "Tue Feb  2 00:00:00 1991" "and so is its start time"
+mkdir -p "$D/pb-empty"
+put_back_record "$D/pb-from" "$D/pb-empty"; rc=$?
+assert_eq "$rc" "0" "into a directory with no holder it is put back"
+assert_eq "$(cat "$D/pb-empty/pid")-$(cat "$D/pb-empty/start")" "8181-Mon Jan  1 00:00:00 1990" "pid and start together"
 mkdir -p "$D/wo.lock"; printf '7373\n' > "$D/wo.lock/pid"
 write_owner "$D/wo.lock"; rc=$?
 assert_eq "$rc" "1" "write_owner refuses a directory that already names a holder"
