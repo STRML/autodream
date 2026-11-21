@@ -268,6 +268,21 @@ case "$cmd" in
     printf '%s\n' CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1
     ;;
 
+  l1-writes) # -> the paths an L1 worker may write besides its staging directory, one per line
+    # run.sh runs the worker under an OS sandbox that can write nothing else (#169, bin/l1-confine.sh),
+    # so this list is the whole of what the claude CLI is allowed to touch of its own: a directory
+    # is a subtree, a trailing * a prefix (.claude.json is rewritten through temp files and a lock
+    # directory beside it). It is NOT the config dir: $AUTODREAM_DIR lives under ~/.claude on a
+    # default install, and settings, hooks, skills and plugins there are code the next run would
+    # execute. An engine whose adapter has no such verb is not confined, and run-stats says so.
+    # Authentication is the keychain (a mach service), not a file this process writes.
+    cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    printf '%s\n' "$cfg/session-env" "$cfg/todos" "$cfg/statsig" "$cfg/debug" "$cfg/backups"
+    if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then printf '%s\n' "$CLAUDE_CONFIG_DIR/.claude.json*"; else printf '%s\n' "$HOME/.claude.json*"; fi
+    # The isolated cwd's bucket: an AI-title stub lands there, and the runner wipes it.
+    [ -z "${AUTODREAM_WORK_BUCKET:-}" ] || printf '%s\n' "$AUTODREAM_WORK_BUCKET"
+    ;;
+
   l2-argv) # [$1=model] -> NUL-delimited argv for the L2 aggregator; the prompt arrives on stdin
     # Glob and Read only: the report and the pins come back on stdout and the runner is the only
     # writer. The model is optional, and absent means the CLI's own default, so an upgrade of the

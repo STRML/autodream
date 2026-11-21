@@ -583,6 +583,8 @@ the full history. Keep that operation separate from facet-only backfill.
 - `bin/adapters.sh` — adapter discovery, identity validation and containment
 - `bin/lib-project.sh` — the canonical project encoding and artifact hash every
   adapter must agree on
+- `bin/l1-confine.sh` — the OS sandbox each L1 worker runs under, so it can write
+  only its own staging directory → `CLAUDE.md`, "A worker writes only its staging directory"
 - `bin/preflight.sh` — the shared-dependency gate, run before anything is enumerated
 
 For the internals — data flow, file map, state layout, environment overrides, the

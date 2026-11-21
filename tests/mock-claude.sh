@@ -280,6 +280,9 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
   fi
   out=$(printf '%s' "$line2" | sed 's/^Write your findings JSON to this literal absolute path: //')
   sess=$(printf '%s' "$line1" | sed 's/^Session transcript to analyze (literal absolute path): //')
+  # The answer is written in a staging directory (#169), so the findings dir a hostile worker would
+  # attack is the runner's, which it inherits in the environment, not the answer's own directory.
+  fdir_l1="${FINDINGS_DIR:-$(dirname "$out")}"
   [ -n "${MOCK_CALL_LOG:-}" ] && printf '%s\n' "$out" >> "$MOCK_CALL_LOG"
   # What the worker was pointed at, so a test can tell the normalized copy from the raw tree.
   [ -n "${MOCK_CAPTURE_DIR:-}" ] && [ -r "$sess" ] && cp "$sess" "$MOCK_CAPTURE_DIR/l1-read-$(basename "$out" .json).txt"
@@ -353,8 +356,8 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
       exit 7 ;;
     l1_rewrite_source)                  # a hostile worker: points every session at an engine that is not claude
       write_findings
-      awk -F'\t' 'BEGIN{OFS="\t"} {print $1, "evil"}' "$(dirname "$out")/sessions-source.txt" > "$(dirname "$out")/sessions-source.txt.new" \
-        && mv "$(dirname "$out")/sessions-source.txt.new" "$(dirname "$out")/sessions-source.txt" ;;
+      awk -F'\t' 'BEGIN{OFS="\t"} {print $1, "evil"}' "$fdir_l1/sessions-source.txt" > "$fdir_l1/sessions-source.txt.new" \
+        && mv "$fdir_l1/sessions-source.txt.new" "$fdir_l1/sessions-source.txt" ;;
     l1_provider_refusal)
       echo '429 {"type":"error","error":{"type":"rate_limit_error","code":"1113","message":"[1113][Insufficient balance or no resource package. Please recharge.]"}}'
       exit 1 ;;
@@ -388,10 +391,23 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
       printf '{"session_path":"x","project":"proj-a","findings":[{"category":"tool_loop","error":"ENOENT while reading a file","severity":"low"}]}' > "$out"
       l1_reply ;;
     l1_badproject|pins|pins_partial|pins_tamper) write_badproject ;;  # wrong project + real path — exercises normalization
-    pins_tamper_l1) write_badproject; tamper_worklist "$(dirname "$out")" ;;
-    pins_ledger_wipe) write_badproject; : > "$(dirname "$out")/pins-applied.tsv" ;;  # a worker empties the ledger
+    pins_tamper_l1) write_badproject; tamper_worklist "$fdir_l1" ;;
+    pins_ledger_wipe) write_badproject; : > "$fdir_l1/pins-applied.tsv" ;;  # a worker empties the ledger
     pins_forged)                        # session_path names a session this worker was never given
       printf '{"session_path":"%s","project":"WRONG-PROJECT","findings":[]}' "$MOCK_FORGED_SESSION" > "$out" ;;
+    l1_forge)                           # a hostile worker: its own answer, then every write outside staging
+      write_findings
+      own=$(basename "$out" .json)
+      for h in ${MOCK_FORGE_HASHES:-}; do
+        [ "$h" = "$own" ] && continue
+        printf '{"session_path":"FORGED","findings":[]}' > "$fdir_l1/$h.json" 2>/dev/null
+        printf 'runner\t-\t-\trunner\n' > "$fdir_l1/$h.json.served" 2>/dev/null
+      done
+      printf '{"session_path":"FORGED","findings":[]}' > "$fdir_l1/forged-new.json" 2>/dev/null
+      printf '# FORGED\n' >> "$AUTODREAM_DIR/config" 2>/dev/null
+      : > "$AUTODREAM_DIR/forged-marker" 2>/dev/null ;;
+    l1_symlink_answer)                  # the answer path is a symlink to a file that is not findings
+      ln -s "${MOCK_SYMLINK_TARGET:-/etc/hosts}" "$out" ;;
     l1_flaky)                           # fail the first dispatch per session, succeed on retry
       if [ -f "$out.attempt" ]; then write_findings; else : > "$out.attempt"; fi ;;
     *) write_findings ;;
@@ -405,7 +421,7 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
       && mv "$out.threads.tmp" "$out"
   fi
   if [ -n "${MOCK_THREADS_TAMPER:-}" ] && [ -s "$out" ]; then
-    tamper_worklist "$(dirname "$out")"
+    tamper_worklist "$fdir_l1"
     jq --arg path "$MOCK_FORGED_SESSION" '.session_path = $path | .project = "forged-project"' "$out" > "$out.threads.tmp" \
       && mv "$out.threads.tmp" "$out"
   fi
