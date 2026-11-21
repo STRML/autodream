@@ -94,6 +94,24 @@ assert_nogrep "$OUT" '^2026-09-21' "the week before the window is not shown"
 echo "# counts only: never a message or note"
 assert_nogrep "$OUT" 'SECRET' "no message or note text in the output"
 
+echo "# a kind outside [a-z]+ cannot forge rows: it is counted as other"
+LOG2="$SUITE_TMP/forge.jsonl"
+cat > "$LOG2" <<EOF
+{"kind":"ok\tFAKE\t999\nkind\tevil\t5","at":"2026-11-19T11:00:00Z",$M}
+{"kind":"OK","at":"2026-11-19T10:00:00Z",$M}
+{"kind":"ok","at":"2026-11-19T09:00:00Z",$M}
+{"kind":"ok","at":"2026-11-19T12:00:01Z",$M}
+{"kind":"bad","at":"2026-11-30T00:00:00Z",$M}
+EOF
+STOP_CHECK_VERDICTS="$LOG2" STOP_CHECK_NOW="$NOW" bash "$BIN" > "$SUITE_TMP/out" 2> "$SUITE_TMP/err"; RC=$?; OUT="$SUITE_TMP/out"
+assert_eq "$RC" "0" "a log with odd kinds exits 0"
+assert_nogrep "$OUT" 'FAKE' "a kind holding a tab and newline forges no row"
+assert_nogrep "$OUT" 'evil' "nor a second row of its own"
+assert_eq "$(cell '^kind' other 2)" "2" "both odd kinds are counted as other"
+assert_eq "$(cell '^kind' ok 2)" "1" "a clean kind is still itself"
+assert_eq "$(cell '^kind' total 2)" "3" "the window total still adds up"
+assert_grep "$OUT" 'dated after now.*2' "lines dated after now are counted, not dropped without a word"
+
 echo "# failure modes are loud"
 STOP_CHECK_VERDICTS="$SUITE_TMP/nope.jsonl" STOP_CHECK_NOW="$NOW" bash "$BIN" > "$SUITE_TMP/out" 2> "$SUITE_TMP/err"; RC=$?
 assert_eq "$RC" "1" "a missing log exits 1"

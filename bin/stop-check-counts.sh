@@ -11,7 +11,9 @@
 #
 # Counts only: `message` and `note` hold quoted session text and are never printed. A line that does
 # not parse, or has no usable `kind` and `at`, is counted and reported as unparseable, never dropped
-# silently.
+# silently. A line dated after the clock is reported too ("dated after now"), and a `kind` outside
+# [a-z]+ is counted as `other`: the log is written by another tool and a kind holding a tab or newline
+# would otherwise forge rows in this report.
 #
 # Env: STOP_CHECK_VERDICTS  path to the log   default $HOME/.claude/stop-check/verdicts.jsonl
 #      STOP_CHECK_NOW       epoch seconds to treat as now (tests)   default: the clock
@@ -49,14 +51,14 @@ jq -nrR --argjson now "$now" --argjson hours "$hours" '
       | . as $o
       | (try ($o.at | ts) catch null) as $t
       | select($t != null)
-      | {kind: $o.kind, t: $t} ] as $good
+      | {kind: (if ($o.kind | test("^[a-z]+$")) then $o.kind else "other" end), t: $t} ] as $good
   | ($now - $hours * 3600) as $cutoff
   | ($good | map(select(.t >= $cutoff and .t <= $now))) as $recent
   | ($now | weekstart) as $thisweek
   | ([range(0; 8)] | map($thisweek - . * 7 * 86400) | reverse) as $weeks
   | ($good | map(select((.t | weekstart) >= $weeks[0] and (.t | weekstart) <= $thisweek and .t <= $now))) as $inweeks
   | ($inweeks | map(.kind) | unique) as $kinds
-  | "meta\t\($hours)\t\($cutoff | iso)\t\($now | iso)\t\(($lines | length) - ($good | length))",
+  | "meta\t\($hours)\t\($cutoff | iso)\t\($now | iso)\t\(($lines | length) - ($good | length))\t\($good | map(select(.t > $now)) | length)",
     ($recent | group_by(.kind) | map({k: .[0].kind, n: length}) | sort_by(-.n, .k)[] | "kind\t\(.k)\t\(.n)"),
     "total\t\($recent | length)",
     "wkh\t\($kinds | join("\t"))",
@@ -66,14 +68,15 @@ jq -nrR --argjson now "$now" --argjson hours "$hours" '
 ' "$log" | awk -F'\t' '
   $1 == "meta" {
     printf "stop-check verdicts, last %sh (%s to %s)\n", $2, $3, $4
-    bad = $5
+    bad = $5; future = $6
     printf "%-12s %s\n", "kind", "count"
     next
   }
   $1 == "kind"  { printf "%-12s %d\n", $2, $3; next }
   $1 == "total" {
     printf "%-12s %d\n", "total", $2
-    printf "unparseable lines skipped: %d\n\n", bad
+    printf "unparseable lines skipped: %d\n", bad
+    printf "dated after now (not counted): %d\n\n", future
     next
   }
   $1 == "wkh" {

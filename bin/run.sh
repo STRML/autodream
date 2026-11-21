@@ -3759,6 +3759,23 @@ report_scripts_unavailable() { # $1=why
   printf '# report-scripts: unavailable (%s); nothing was collected\n' "$1" > "$FINDINGS_DIR/report-index.txt" || return 1
 }
 
+# Appends report_scripts (off, unavailable, or the entry count) and report_scripts_not_ok (the names
+# of the entries whose status is not ok, or none) to run-stats.txt, read from the index the collector
+# or report_scripts_unavailable just wrote. PROMPT.md reads the index only when an operator note asks
+# for a command, so an entry that fails every night would never reach the self-audit without these.
+report_scripts_stats() {
+  local idx="$FINDINGS_DIR/report-index.txt" first n names
+  first=$(sed -n 1p "$idx" 2>/dev/null)
+  case "$first" in
+    '# report-scripts: unavailable'*) n=unavailable ;;
+    '# report-scripts: none configured'*) n=off ;;
+    '# report-scripts: '[0-9]*' entries'*) n=${first#'# report-scripts: '}; n=${n%% *} ;;
+    *) n=unavailable ;;
+  esac
+  names=$(awk -F'\t' 'NR > 1 && $1 !~ /^#/ && $2 != "ok" { printf "%s%s", sep, $1; sep = "," }' "$idx" 2>/dev/null)
+  printf 'report_scripts: %s\nreport_scripts_not_ok: %s\n' "$n" "${names:-none}" >> "$FINDINGS_DIR/run-stats.txt"
+}
+
 run() {
   log "===== autodream start: $(date) ====="
   log "runner: $RUNNER_COMMIT$([ "$RUNNER_DIRTY" = "yes" ] && echo " (dirty)")"
@@ -4939,7 +4956,8 @@ PY
   # cannot run anything. Each allowlisted entry in $AUTODREAM_DIR/report-scripts.conf runs here
   # with a timeout, and a failing one still writes its file with the failure as the content. A new
   # report is a conf line, never a change to this file or the prompt. It runs from the snapshot taken
-  # before L1, never from the live conf. Best-effort, like the seams above.
+  # before L1, never from the live conf. A collector that cannot run costs a log line and an
+  # `unavailable` index; the run stops only when the earlier run's files cannot be cleared (below).
   REPORT_SEAM_OK=1
   if [ ! -x "$REPORT_SCRIPTS" ]; then
     report_scripts_unavailable "report-scripts.sh not found at $REPORT_SCRIPTS" || REPORT_SEAM_OK=0
@@ -4956,6 +4974,7 @@ PY
     log_fatal "cannot clear the earlier run's report files in $FINDINGS_DIR; refusing to let L2 read them as tonight's"
     fatal_exit; return 1
   fi
+  report_scripts_stats
 
   # ---- Was the queryId scraping walk actually exercised tonight? (#38) ----
   # The walk against X's JS bundle is the one part of the fetcher with no test, and the

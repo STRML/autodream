@@ -293,6 +293,27 @@ HOME="$C/home" AUTODREAM_DIR="$C/ad" AUTODREAM_REPORT_MAX_BYTES=1000 bash "$BIN"
 sz=$(wc -c < "$F/report-flood.md")
 [ "$sz" -lt 6000 ] && ok "a command that prints 20 MB is stopped long before it fills the disk (report is $sz bytes)" || no "a flooding command was not bounded ($sz bytes)"
 assert_eq "$(row flood)" "failed" "and its row says failed"
+assert_grep "$F/report-flood.md" 'output exceeded' "and says the output was too large, not just that it exited 153"
+assert_nogrep "$F/report-flood.md" 'exited 153' "no bare signal exit code"
+
+echo "# the watchdog does not leave its own sleep behind when the command finishes in time"
+new_case orphan
+mk_script "$SCRIPTS/quick.sh" <<'SH'
+#!/bin/bash
+/bin/sleep 0.3
+echo quick
+SH
+printf 'quick %s\n' "$SCRIPTS/quick.sh" > "$CONF"
+# A sleep shim that records its pid and then becomes the real sleep: kill -0 asks about it without
+# a process table (pgrep and ps are denied in some sandboxes).
+SPD="$C/spshim"; mkdir -p "$SPD"
+printf '#!/bin/bash\necho $$ > "%s/pid"\nexec /bin/sleep "$@"\n' "$SPD" > "$SPD/sleep"; chmod +x "$SPD/sleep"
+PATH="$SPD:$PATH" AUTODREAM_REPORT_TIMEOUT_BIN="" TMO=137 KG=5 collect
+sleep 0.5
+sp_pid=$(cat "$SPD/pid" 2>/dev/null)
+if [ -z "$sp_pid" ]; then no "the watchdog's sleep was observed"
+elif kill -0 "$sp_pid" 2>/dev/null; then no "the watchdog's sleep outlived the command"; kill "$sp_pid" 2>/dev/null
+else ok "no orphaned watchdog sleep after a command that finished in time"; fi
 
 echo "# an unwritable findings dir is a loud failure, not a silent one"
 new_case nofind

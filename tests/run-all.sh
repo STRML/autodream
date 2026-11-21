@@ -3758,6 +3758,40 @@ test_report_scripts_prompt_names_the_index_by_exact_path(){
   assert_grep "$REPO/prompts/PROMPT.md" 'report-scripts.conf' "PROMPT.md names the allowlist file L2 points the operator at"
   assert_nogrep "$REPO/prompts/PROMPT.md" 'Glob `report-' "PROMPT.md does not glob report files (a Glob stops at 200 entries)"
 }
+test_report_scripts_prompt_status_contract_matches_the_collector(){
+  echo "# report scripts: PROMPT.md names every non-ok status the collector emits, and what a - file column means"
+  local st
+  for st in failed timeout missing invalid changed write-failed; do
+    assert_grep "$REPO/prompts/PROMPT.md" "\`$st\`" "PROMPT.md names the $st status"
+  done
+  assert_grep "$REPO/prompts/PROMPT.md" 'nothing to Read' "PROMPT.md says a - file column has nothing to Read"
+  assert_grep "$REPO/prompts/PROMPT.md" 'report_scripts_not_ok' "the self-audit names the run-stats key listing entries that are not ok"
+}
+test_report_scripts_run_stats_name_every_entry_that_is_not_ok(){
+  echo "# report scripts: an entry that fails every night reaches run-stats, so the self-audit can name it"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  mkdir -p "$root/rs"
+  printf '#!/bin/bash\necho row\n' > "$root/rs/good.sh"
+  printf '#!/bin/bash\nexit 4\n' > "$root/rs/bad.sh"
+  chmod +x "$root/rs/good.sh" "$root/rs/bad.sh"
+  printf 'good %s\nbad %s\nghost %s\n' "$root/rs/good.sh" "$root/rs/bad.sh" "$root/rs/ghost.sh" > "$root/autodream/report-scripts.conf"
+  run_dream "$root"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
+  assert_grep "$stats" '^report_scripts: 3$' "the entry count is in run-stats"
+  assert_grep "$stats" '^report_scripts_not_ok: bad,ghost$' "every entry that is not ok is named, ok ones are not"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" sess1
+  run_dream "$root"
+  stats="$(fdir "$root")/run-stats.txt"
+  assert_grep "$stats" '^report_scripts: off$' "no conf reads as off"
+  assert_grep "$stats" '^report_scripts_not_ok: none$' "and names nothing"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" sess1
+  AUTODREAM_REPORTS_BIN="$root/no-such-collector.sh" run_dream "$root"
+  stats="$(fdir "$root")/run-stats.txt"
+  assert_grep "$stats" '^report_scripts: unavailable$' "a collector that could not run reads as unavailable, not off"
+  rm -rf "$root"
+}
 
 _run test_happy
 _run test_session_stats
@@ -10443,6 +10477,8 @@ _run test_report_scripts_a_conf_rewritten_after_the_snapshot_runs_nothing_new
 _run test_report_scripts_a_collector_changed_after_the_run_started_is_not_executed
 _run test_report_scripts_earlier_files_that_cannot_be_cleared_stop_the_run
 _run test_report_scripts_prompt_names_the_index_by_exact_path
+_run test_report_scripts_prompt_status_contract_matches_the_collector
+_run test_report_scripts_run_stats_name_every_entry_that_is_not_ok
 
 [ -z "$_list" ] || exit 0
 echo

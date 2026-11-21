@@ -27,6 +27,13 @@
 # hash differs now, or that did not exist when the snapshot was taken. A `collect` with no snapshot
 # (by hand) reads the conf and checks nothing, because nothing has run since you wrote it.
 #
+# What the hash covers, and what it does not: only the file named as the entry's path is pinned. An
+# entry such as `name /usr/bin/python3 ~/x.py` pins python3 and leaves x.py, and anything a script
+# sources or reads, writable by a worker, so interpreter-style entries are unprotected: give the
+# conf the script itself, not an interpreter plus a file. And only the same-run window is defended:
+# a worker that plants a conf entry on night N gets it snapshotted as trusted on night N+1, because
+# nothing tells a planted line from one the operator wrote.
+#
 # THE FAILURE IS THE CONTENT
 #
 # A non-zero exit, a timeout, a missing or non-executable script, a relative path: each still writes
@@ -109,7 +116,13 @@ run_bounded() {
   local secs="$1" pid wd rc; shift
   if [ -n "$TIMEOUT_BIN" ]; then "$TIMEOUT_BIN" -k "$KILL_GRACE" "$secs" "$@"; return $?; fi
   "$@" & pid=$!
-  ( sleep "$secs"; kill_tree TERM "$pid"; sleep "$KILL_GRACE"; kill_tree KILL "$pid" ) >/dev/null 2>&1 & wd=$!
+  # The watchdog traps TERM and takes its own sleep with it, so a command that finishes in time
+  # leaves nothing behind, and a watchdog woken at that moment cannot fire at a recycled pid.
+  ( trap 'kill "$sp" 2>/dev/null; exit 0' TERM
+    sleep "$secs" & sp=$!; wait "$sp" || exit 0
+    kill_tree TERM "$pid"
+    sleep "$KILL_GRACE" & sp=$!; wait "$sp" || exit 0
+    kill_tree KILL "$pid" ) >/dev/null 2>&1 & wd=$!
   wait "$pid"; rc=$?
   kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
   return "$rc"
@@ -205,6 +218,8 @@ collect() {
       if [ "$rc" -ne 0 ]; then
         if [ $((SECONDS - t0)) -ge "$TIMEOUT_S" ] && { [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] || [ "$rc" -eq 143 ]; }; then
           status=timeout; reason="FAILED: timed out after ${TIMEOUT_S}s and was killed"
+        elif [ "$rc" -eq 153 ]; then
+          status=failed; reason="FAILED: output exceeded the ${FILE_LIMIT_KB} KB per-file limit and was stopped (exit 153, SIGXFSZ)"
         else
           status=failed; reason="FAILED: exited $rc"
         fi
