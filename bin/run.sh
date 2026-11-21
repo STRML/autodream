@@ -4090,6 +4090,10 @@ None; no sessions were triaged on this date.
 <!-- autodream:open-questions=0 -->
 AUTODREAM_QUESTIONS_END
 EOF
+    # The status of the write above, kept for the outcome below: a stub that could not be opened for
+    # writing leaves the previous report in place, and that old file is complete, so report_complete
+    # alone would call it this run's delivery.
+    STUB_RC=$?
     if [ -s "$FINDINGS_DIR/dropped-threads.md" ]; then
       awk -v section="$FINDINGS_DIR/dropped-threads.md" '
         $0 == "AUTODREAM_QUESTIONS_BEGIN" {
@@ -4109,7 +4113,11 @@ EOF
       env AUTODREAM_DIR="$AUTODREAM_DIR" "$AUTODREAM_DIR/question-streaks.sh" update "$REPORT_PATH" "$FINDINGS_DIR" \
         || log "question-streaks returned non-zero (continuing)"
     fi
-    if report_complete; then write_run_outcome delivered; fi
+    if [ "$STUB_RC" -eq 0 ] && report_complete; then
+      write_run_outcome delivered
+    else
+      log "WARNING: the stub report for $TARGET_DATE could not be written (exit $STUB_RC); not reporting it as delivered"
+    fi
     return 0
   fi
 

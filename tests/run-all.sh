@@ -775,6 +775,12 @@ test_run_outcome_is_written_only_for_a_delivered_or_untouched_report(){
   root=$(setup_env); o="$root/autodream/logs/run-$DATE.outcome"
   AUTODREAM_RUN_TOKEN=tok.5 vault_run "$root"
   assert_eq "$(cat "$o" 2>/dev/null)" "tok.5 delivered" "the no-sessions stub counts as delivered"
+  # a forced rebuild whose stub cannot be written leaves the old report, which is complete: it is not this run's delivery
+  chmod 444 "$root/dreams/$DATE.md"
+  AUTODREAM_FORCE=1 AUTODREAM_RUN_TOKEN=tok.6 vault_run "$root"
+  chmod 644 "$root/dreams/$DATE.md"
+  assert_eq "$(grep -c 'tok.6' "$o" || true)" "0" "a stub that could not be written over the old report is not reported as delivered"
+  assert_grep "$root/run.out" "could not be written" "and the run says so"
   rm -rf "$root"
 }
 
