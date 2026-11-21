@@ -111,7 +111,9 @@ transcripts over ssh before it scans:
 AUTODREAM_REMOTE_ROOTS="studio2=studio2:.claude/projects"
 ```
 
-Each entry is `label=ssh-target:path`, and several hosts are separated by spaces. The path
+Each entry is `label=ssh-target:path`, and several hosts are separated by spaces. A label is
+letters, digits, `.`, `_` and `-`; `invalid` and any name ending in `_cause` or `_last_ok` are
+reserved, because `run-stats.txt` builds its lines from the label. The path
 is relative to the remote home. The ssh login must work without a prompt (a key in the agent,
 or one with no passphrase), because launchd runs the job. A host that is asleep or unreachable
 costs only its own sessions. The report names it, and when every host fails a warning banner

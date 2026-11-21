@@ -67,8 +67,13 @@ A pull is read-only on the remote and needs only sshd there.
 - **Exit 23 is split.** rsync 24 (a file vanished) is partial. 23 is partial too, except that both
   GNU rsync (`change_dir "…" failed`) and openrsync (`(l)stat: No such file`) also return 23 when
   the remote root does not exist, and that is a host with nothing to read, so it is `failed`.
-- **Validation before ssh.** run.sh refuses a label outside `[A-Za-z0-9._-]+`, `.`, `..` and a
-  repeated label. The helper refuses a host or path that starts with `-` (ssh would read it as an
+- **Validation before ssh.** run.sh refuses a label outside `[A-Za-z0-9._-]+`, `.`, `..`, a
+  repeated label, and a reserved one: `invalid`, or any name ending in `_cause` or `_last_ok`.
+  Run-stats builds `remote_sync_<label>`, `remote_sync_<label>_cause`, `remote_sync_<label>_last_ok`
+  and the refusal key `remote_sync_invalid` by concatenation, so without that rule a host called
+  `studio_cause` prints like `studio`'s cause line and no reader can tell them apart (four review
+  rounds on the short-dates scan, 2026-11-21). A refused entry takes the key `invalid`, with the
+  label in its cause. The helper refuses a host or path that starts with `-` (ssh would read it as an
   option) or holds a character outside the set a projects path needs, because openrsync does not
   quote the path for the remote shell. The mirrors are claude roots, so with the claude adapter not
   enabled every entry is refused as `invalid` (and the all-failed banner fires) rather than synced
@@ -124,9 +129,14 @@ A pull is read-only on the remote and needs only sshd there.
     `sync_remote_roots`, before a rebuild of that date rewrites run-stats.txt.
   - **`partial` is listed**: rsync 23 can leave a file uncopied, and the next sync copies it with its
     old mtime, which the next day's lower bound skips.
-  - **Refusals**: a malformed or repeated entry has no label and its run-stats key `invalid` can equal
-    a real host's label, so only real labels join the marker (an entry refused because the claude
-    adapter is off does).
+  - **Refusals**: a malformed, repeated or reserved entry has no label of its own and takes the
+    run-stats key `invalid`, so only real labels join the marker (an entry refused because the claude
+    adapter is off does, under its own label). `migrate_remote_short_marker` reads a status line as a
+    label when its key is not `invalid` and does not end in `_cause` or `_last_ok`, which the
+    reserved names make exact. It writes an empty marker when the old run-stats says
+    `remote_sync: on` and names no short label, so a rebuild whose sync fails and then defers cannot
+    make a date that did read the host look short. Delete it and the run-stats branch of
+    `remote_short_has` after 2026-11-28 (every night in the 7-day window will then carry a marker).
   - A label still failing tonight lists nothing (the host is down, and the banner covers it); only
     labels configured tonight are read, so a renamed or removed host lists nothing; a night whose
     findings dir exists but holds no readable marker or `run-stats.txt` is skipped and counted in

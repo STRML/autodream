@@ -10554,12 +10554,33 @@ test_remote_sync_failed_rebuild_keeps_the_date_listed(){
   rm -rf "$root"
 }
 
-test_remote_sync_a_host_named_invalid_is_not_blamed_for_a_malformed_entry(){
-  echo "# remote sync: a malformed entry shares the key invalid with a real host of that name, and only the real one counts"
+test_remote_sync_reserved_labels_are_refused(){
+  echo "# remote sync: invalid and names ending in _cause or _last_ok are refused before ssh and never join the record"
   local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
-  AUTODREAM_REMOTE_ROOTS="invalid=studio.invalid:$root/studio bad/label=x.invalid:/p" rs_run "$root"
+  AUTODREAM_REMOTE_ROOTS="invalid=studio.invalid:$root/studio x_cause=studio.invalid:$root/studio y_last_ok=studio.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_eq "$(grep -c '^remote_sync_invalid: invalid$' "$rs")" "3" "each reserved entry reads invalid under the key invalid"
+  assert_grep "$rs" '^remote_sync_invalid_cause: label invalid is reserved' "the cause names the label and why"
+  assert_grep "$rs" '^remote_sync_invalid_cause: label x_cause is reserved' "a name ending in _cause is reserved"
+  assert_grep "$rs" '^remote_sync_invalid_cause: label y_last_ok is reserved' "a name ending in _last_ok is reserved"
+  assert_nogrep "$rs" '^remote_sync_x_cause' "no reserved label gets a key of its own"
+  assert_no_file "$root/rsync.log" "nothing is synced"
   assert_file "$(fdir "$root")/remote-short.txt" "the delivered report wrote its record"
-  assert_eq "$(wc -c < "$(fdir "$root")/remote-short.txt" | tr -d ' ')" "0" "the host named invalid synced, so the record is empty"
+  assert_eq "$(wc -c < "$(fdir "$root")/remote-short.txt" | tr -d ' ')" "0" "and no reserved name is in it"
+  rm -rf "$root"
+}
+
+test_remote_sync_reserved_label_is_refused_before_the_adapter_check(){
+  echo "# remote sync: with the claude adapter off a reserved label is still refused under the key invalid, not its own"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  AUTODREAM_ADAPTERS=omp AUTODREAM_REMOTE_ROOTS="x_cause=studio.invalid:$root/studio studio2=studio.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_sync_invalid_cause: label x_cause is reserved' "the reserved label is named in a refusal under invalid"
+  assert_nogrep "$rs" '^remote_sync_x_cause' "and has no key of its own"
+  assert_grep "$rs" '^remote_sync_studio2: invalid$' "a real label is still refused for the adapter"
+  assert_file "$(fdir "$root")/remote-short.txt" "the report wrote its record"
+  assert_grep "$(fdir "$root")/remote-short.txt" '^studio2$' "which names the real label"
+  assert_nogrep "$(fdir "$root")/remote-short.txt" 'x_cause' "and not the reserved one"
   rm -rf "$root"
 }
 
@@ -10614,27 +10635,47 @@ test_remote_sync_failed_rebuild_of_a_pre_marker_night_keeps_the_date_listed(){
   rm -rf "$root"
 }
 
-test_remote_sync_pre_marker_migration_reads_a_label_that_ends_in_cause(){
-  echo "# remote sync: migrating an old run-stats keeps a host called studio_cause, and skips a label's own _cause line"
+test_remote_sync_pre_marker_migration_skips_a_labels_extra_lines(){
+  echo "# remote sync: migrating an old run-stats keeps a short label and skips its _cause and _last_ok lines and the key invalid"
   local root DATE=2020-01-02; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
-  rs_seed_stats "$root" 2020-01-02 'remote_sync_studio_cause: failed' \
-    'remote_sync_other: failed' 'remote_sync_other_cause: failed' 'remote_sync_other_last_ok: never'
-  MOCK_MODE=l2_fail AUTODREAM_L2_ATTEMPTS=1 AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="studio_cause=studio2.invalid:$root/studio" rs_run "$root"
+  rs_seed_stats "$root" 2020-01-02 'remote_sync: on' \
+    'remote_sync_other: failed' 'remote_sync_other_cause: failed' 'remote_sync_other_last_ok: never' \
+    'remote_sync_invalid: invalid' 'remote_sync_invalid_cause: label x is reserved' 'remote_sync_fine: ok'
+  MOCK_MODE=l2_fail AUTODREAM_L2_ATTEMPTS=1 AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="other=studio2.invalid:$root/studio" rs_run "$root"
   local m; m="$(fdir "$root")/remote-short.txt"
-  assert_grep "$m" '^studio_cause$' "the host whose label ends in _cause is kept"
-  assert_grep "$m" '^other$' "a plain label is kept"
-  assert_nogrep "$m" '^other_cause$' "and the plain label's own cause line is not read as a host"
-  assert_nogrep "$m" '^other_last_ok$' "nor its last_ok line"
+  assert_grep "$m" '^other$' "the short label is kept"
+  assert_nogrep "$m" '_cause' "and the _cause line is not read as a host"
+  assert_nogrep "$m" '_last_ok' "nor the _last_ok line"
+  assert_nogrep "$m" '^invalid$' "nor the refusal key"
+  assert_nogrep "$m" '^fine$' "nor a label that was ok"
   rm -rf "$root"
 }
 
-_run test_remote_sync_pre_marker_migration_reads_a_label_that_ends_in_cause
+test_remote_sync_pre_marker_ok_night_is_not_made_short_by_a_failed_rebuild(){
+  echo "# remote sync: a pre-marker night that read its host stays unlisted when a forced rebuild's sync fails and no report follows"
+  local root DATE=2020-01-02; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  rs_seed_stats "$root" 2020-01-02 'remote_sync: on' 'remote_sync_studio2: ok'
+  printf '255\n' > "$root/rsync.rc"; printf 'ssh: connect to host studio2.invalid port 22: No route to host\n' > "$root/rsync.err"
+  MOCK_MODE=l2_fail AUTODREAM_L2_ATTEMPTS=1 AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_grep "$(rs_stats "$root")" '^remote_sync_studio2: failed$' "the rebuild's own sync failed and rewrote run-stats"
+  assert_file "$(fdir "$root")/remote-short.txt" "the old night's answer was kept as a marker"
+  assert_eq "$(wc -c < "$(fdir "$root")/remote-short.txt" | tr -d ' ')" "0" "and it names no host, because the standing report read them all"
+  rm -f "$root/rsync.rc" "$root/rsync.err"
+  DATE=2020-01-03
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_grep "$(rs_stats "$root")" '^remote_short_dates_studio2: none$' "so the next night does not list the date"
+  rm -rf "$root"
+}
+
+_run test_remote_sync_pre_marker_migration_skips_a_labels_extra_lines
+_run test_remote_sync_pre_marker_ok_night_is_not_made_short_by_a_failed_rebuild
 _run test_remote_sync_failed_rebuild_of_a_pre_marker_night_keeps_the_date_listed
 _run test_remote_sync_no_job_dir_fails_each_host_and_says_why
 _run test_remote_sync_dead_runs_job_dirs_are_removed_and_live_ones_kept
 _run test_remote_sync_short_marker_wins_over_run_stats
 _run test_remote_sync_failed_rebuild_keeps_the_date_listed
-_run test_remote_sync_a_host_named_invalid_is_not_blamed_for_a_malformed_entry
+_run test_remote_sync_reserved_labels_are_refused
+_run test_remote_sync_reserved_label_is_refused_before_the_adapter_check
 _run test_remote_sync_empty_night_stub_asks_the_question_and_counts_it
 _run test_remote_sync_empty_night_stub_says_the_scan_could_not_read_a_night
 _run test_remote_sync_mirror_size_failure_is_unknown_not_zero

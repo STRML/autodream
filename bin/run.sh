@@ -2023,8 +2023,9 @@ REMOTE_SYNC_NOTMP=0        # 1 when the per-run job dir could not be made, so no
 remote_sync_stat() { REMOTE_SYNC_LINES="${REMOTE_SYNC_LINES}$1"$'\n'; }
 
 # $1=entry $2=key $3=why $4=real: an entry refused before any ssh. $4=real when the key is a real
-# label (an adapter that is off); a malformed or repeated entry has no label, and its synthetic
-# key `invalid` can equal a real host's label, so it never joins the short list.
+# label (an adapter that is off); a malformed, repeated or reserved entry has no label of its own
+# and takes the synthetic key `invalid`, so it never joins the short list. No label may be called
+# `invalid` or end in `_cause` or `_last_ok`, so those keys cannot be mistaken for a host.
 remote_sync_refuse() {
   log "WARNING: AUTODREAM_REMOTE_ROOTS entry '$1' refused ($3); it is not synced"
   remote_sync_stat "remote_sync_$2: invalid"
@@ -2154,6 +2155,7 @@ remote_sync_finish() {
 # findings dir did not run. Each file is read once into memory, so a file that goes unreadable
 # between a check and a read cannot read as "no match".
 REMOTE_SHORT_SCAN_DAYS=7
+REMOTE_SHORT_STATUSES="failed invalid skipped_locked partial"   # statuses that mean a host was not fully read
 
 # $1=marker|stats $2=file text $3=label: 0 when that night's text lists the label as short.
 remote_short_has() {
@@ -2162,7 +2164,7 @@ remote_short_has() {
     printf '%s\n' "$2" | grep -Fxq -- "$3"
     return
   fi
-  for w in failed invalid skipped_locked partial; do
+  for w in $REMOTE_SHORT_STATUSES; do
     if printf '%s\n' "$2" | grep -Fxq -- "remote_sync_$3: $w"; then return 0; fi
   done
   return 1
@@ -2219,29 +2221,28 @@ write_remote_short_marker() {
 
 # A night from before remote-short.txt existed keeps its record only in run-stats.txt, which a
 # forced rebuild rewrites before L2 runs. Copy it into the marker before this run can overwrite it,
-# so a rebuild that dies before a report still leaves the date listed. A night whose old run-stats
-# names no short label gets no marker, and a night that already has one is left alone.
+# so a rebuild that dies before a report leaves the date's earlier state in place, short hosts or
+# none. A night whose old run-stats has no `remote_sync: on` line was not syncing remote hosts and
+# gets no marker, and a night that already has one is left alone.
+#
+# A status line names a label exactly when its key is not `invalid` and does not end in `_cause`
+# or `_last_ok`: sync_remote_roots refuses those as label names, so no label can print like another
+# line. Remove this function and the run-stats branch of remote_short_has after 2026-11-28, once
+# every night inside the scan window was written by a run that writes the marker.
 migrate_remote_short_marker() {
   local f="$FINDINGS_DIR/run-stats.txt" m="$FINDINGS_DIR/remote-short.txt" labels
-  { [ ! -e "$m" ] && [ -r "$f" ]; } || return 0
-  # A key ending _cause or _last_ok is a label's own extra line when the label it names has a status
-  # line, and a label in its own right when it does not (a host called studio_cause), so the file is
-  # read twice: first for every key, then for the status lines.
-  labels=$(awk -F': ' '
-    /^remote_sync_/ { seen[$1] = 1; row[++n] = $0 }
-    END {
-      for (i = 1; i <= n; i++) {
-        split(row[i], p, ": ")
-        if (!(p[2] == "failed" || p[2] == "invalid" || p[2] == "skipped_locked" || p[2] == "partial")) continue
-        k = p[1]; sub(/^remote_sync_/, "", k)
-        if (k == "invalid") continue
-        if (k ~ /_cause$/ && (("remote_sync_" substr(k, 1, length(k) - 6)) in seen)) continue
-        if (k ~ /_last_ok$/ && (("remote_sync_" substr(k, 1, length(k) - 8)) in seen)) continue
-        print k
-      }
-    }' "$f" 2>/dev/null) || return 0
-  [ -n "$labels" ] || return 0
-  if printf '%s\n' "$labels" > "$m.tmp.$$" 2>/dev/null && mv -f "$m.tmp.$$" "$m" 2>/dev/null; then
+  [ ! -e "$m" ] || return 0
+  [ -e "$f" ] || return 0
+  if ! grep -Fxq 'remote_sync: on' "$f" 2>/dev/null; then
+    [ -r "$f" ] || log "WARNING: $f is unreadable, so a rebuild of $TARGET_DATE cannot keep that night's short hosts"
+    return 0
+  fi
+  labels=$(awk -F': ' -v st="$REMOTE_SHORT_STATUSES" '
+    /^remote_sync_/ && index(" " st " ", " " $2 " ") {
+      k = $1; sub(/^remote_sync_/, "", k)
+      if (k != "invalid" && k !~ /_(cause|last_ok)$/) print k
+    }' "$f" 2>/dev/null) || { log "WARNING: could not read $f, so a rebuild of $TARGET_DATE cannot keep that night's short hosts"; return 0; }
+  if { [ -z "$labels" ] || printf '%s\n' "$labels"; } > "$m.tmp.$$" 2>/dev/null && mv -f "$m.tmp.$$" "$m" 2>/dev/null; then
     log "remote sync: kept the earlier run's short hosts for $TARGET_DATE in remote-short.txt before this run rewrites run-stats.txt"
   else
     rm -f "$m.tmp.$$" 2>/dev/null
@@ -2273,7 +2274,7 @@ sync_remote_roots() {
       case "$jp" in ''|*[!0-9]*) continue ;; esac
       kill -0 "$jp" 2>/dev/null || rm -rf "$jd"
     done
-    rm -rf "$jobs/$$"
+    rm -rf "${jobs:?}/$$"
     mkdir "$jobs/$$" 2>/dev/null && sdir="$jobs/$$"
   fi
   [ -n "$sdir" ] || { REMOTE_SYNC_NOTMP=1; log "WARNING: remote sync: cannot make a job dir under $jobs, so no host is synced"; }
@@ -2286,6 +2287,10 @@ sync_remote_roots() {
     case "$entry" in *=*) label=${entry%%=*} ;; *) kinds[n]=refuse; keys[n]=invalid; whys[n]="no label=target"; continue ;; esac
     case "$label" in
       ''|.|..|*[!A-Za-z0-9._-]*) kinds[n]=refuse; keys[n]=invalid; whys[n]="label must match [A-Za-z0-9._-]+"; continue ;;
+      # These names would print like another run-stats line (the refusal key, or the cause or
+      # last_ok line of a label), so no reader could tell the two apart. Refused here, ahead of the
+      # adapter check, so a reserved label never gets a key of its own.
+      invalid|*_cause|*_last_ok) kinds[n]=refuse; keys[n]=invalid; whys[n]="label $label is reserved (invalid, or ending in _cause or _last_ok)"; continue ;;
     esac
     case "$seen" in *" $label "*) kinds[n]=refuse; keys[n]=invalid; whys[n]="label $label is used twice"; continue ;; esac
     seen="$seen$label "
@@ -4286,6 +4291,7 @@ $( if [ "$REMOTE_SHORT_QCOUNT" -gt 0 ]; then
 <!-- autodream:open-questions=$REMOTE_SHORT_QCOUNT -->
 AUTODREAM_QUESTIONS_END
 EOF
+    STUB_WRITTEN=$?
     if [ -s "$FINDINGS_DIR/dropped-threads.md" ]; then
       awk -v section="$FINDINGS_DIR/dropped-threads.md" '
         $0 == "AUTODREAM_QUESTIONS_BEGIN" {
@@ -4296,7 +4302,9 @@ EOF
         { print }
       ' "$REPORT_PATH" > "$REPORT_PATH.threads" && mv "$REPORT_PATH.threads" "$REPORT_PATH"
     fi
-    if report_complete; then write_remote_short_marker; fi
+    # Only a stub this run wrote counts: a write that failed to open leaves whatever report was at
+    # the path, which report_complete would accept.
+    if [ "$STUB_WRITTEN" = 0 ] && report_complete; then write_remote_short_marker; fi
     # A question-free report still counts as a report. Without this the streak
     # store would keep yesterday's questions alive across an empty night, and a
     # question that reappeared two reports later would be called consecutive when
