@@ -404,6 +404,304 @@ test_walk_reaches_every_suffix_variant(){
   rm -rf "$root"
 }
 
+# ---- The browser path (#166) ---------------------------------------------------------
+#
+# `agent-browser` is shimmed the way curl is. The shim logs every call (AB_LOG), strips the
+# global --session/--profile/--headed flags, serves MOCK_HAR on `network har stop <path>`,
+# and answers `get url` with AB_URL. AB_FAIL=<open|har-start|har-stop|get-url|wait|scroll>
+# makes that one command exit 1, and AB_HANG=<same> makes it block (exec, so the watchdog's
+# kill reaches the sleep). Nothing here touches x.com: the real browser path cannot be
+# exercised without a logged-in profile, which is what the PR's verify command is for.
+
+make_ab_shim(){ # $1=bindir
+  mkdir -p "$1"
+  cat > "$1/agent-browser" <<'SH'
+#!/bin/bash
+printf 'session=%s profile=%s :: %s\n' "${AGENT_BROWSER_SESSION:-}" "${AGENT_BROWSER_PROFILE:-}" "$*" >> "${AB_LOG:-/dev/null}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session|--profile) shift 2 ;;
+    --headed|--json) shift ;;
+    *) break ;;
+  esac
+done
+name="$1"
+case "$1 ${2:-}" in
+  "network har") name="har-$3" ;;
+  "get url") name="get-url" ;;
+esac
+[ "${AB_HANG:-}" = "$name" ] && exec /bin/sleep 30
+if [ "${AB_FAIL:-}" = "$name" ]; then echo "agent-browser: simulated $name failure" >&2; exit 1; fi
+case "$name" in
+  har-stop) cp "${MOCK_HAR:-/dev/null}" "$4" ;;
+  get-url) printf '%s\n' "${AB_URL:-https://x.com/i/bookmarks}" ;;
+esac
+exit 0
+SH
+  chmod +x "$1/agent-browser"
+}
+
+# curl that records the call and fails: proves the browser path never reached for it.
+make_curl_trap(){ # $1=bindir
+  cat > "$1/curl" <<'SH'
+#!/bin/bash
+printf 'called\n' >> "${CURL_LOG:-/dev/null}"
+exit 7
+SH
+  chmod +x "$1/curl"
+}
+
+# make_har <out> <status:bodyfile>...  — a HAR with one Bookmarks entry per pair, in order,
+# between a BookmarkFolders call and an unrelated asset that must both be ignored.
+make_har(){
+  local out="$1"; shift
+  local entries='[{"request":{"method":"GET","url":"https://x.com/i/api/graphql/ZZZ/BookmarkFolders?variables=%7B%7D"},"response":{"status":200,"content":{"text":"{\"folders\":true}"}}},{"request":{"method":"GET","url":"https://abs.twimg.com/main.js"},"response":{"status":200,"content":{"text":"x"}}}]'
+  local pair status file
+  for pair in "$@"; do
+    status="${pair%%:*}"; file="${pair#*:}"
+    entries=$(jq -c --argjson s "$status" --rawfile b "$file" \
+      '. + [{request:{method:"GET",url:"https://x.com/i/api/graphql/RANDOMQID/Bookmarks?variables=%7B%22count%22%3A20%7D"},response:{status:$s,content:{mimeType:"application/json",text:$b}}}]' <<<"$entries")
+  done
+  jq -n --argjson e "$entries" '{log:{version:"1.2",entries:$e}}' > "$out"
+}
+
+# A sandbox for the browser path: shims, a profile dir, a trapped curl, no queryId cache and
+# a HAR holding the fixture page. Credentials exist unless the test removes them.
+bsetup(){
+  local root; root=$(setup)
+  make_ab_shim "$root/bin"
+  make_curl_trap "$root/bin"
+  mkdir -p "$root/profile"
+  make_har "$root/har.json" "200:$root/page.json"
+  printf '%s' "$root"
+}
+run_br(){ # $1=root, rest = args
+  local root="$1"; shift
+  AUTODREAM_X_FETCH=browser X_BROWSER_PROFILE="${X_BROWSER_PROFILE:-$root/profile}" \
+  X_BROWSER_TIMEOUT="${X_BROWSER_TIMEOUT:-20}" AB_LOG="$root/ab.log" CURL_LOG="$root/curl.log" \
+  MOCK_HAR="${MOCK_HAR:-$root/har.json}" MOCK_BODY="${MOCK_BODY:-$root/page.json}" \
+    run_bm "$root" "$@"
+}
+fetch_path(){ head -1 "$1/x-bookmarks-fetch.txt" 2>/dev/null; }
+
+test_default_mode_never_touches_the_browser(){
+  echo "# AUTODREAM_X_FETCH unset -> the GraphQL path, and agent-browser is never called"
+  local root; root=$(bsetup)
+  make_curl_shim "$root/bin"
+  AB_LOG="$root/ab.log" run_bm "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "graphql" "x-bookmarks-fetch.txt names the graphql path"
+  [ ! -s "$root/ab.log" ] && ok "agent-browser was not invoked" || no "agent-browser was invoked in the default mode"
+  assert_grep "$root/findings/x-bookmarks.md" "the newer post" "the bookmarks came from the GraphQL fetch"
+  assert_eq "$(sed -n 2p "$root/findings/x-bookmarks-fetch.txt")" "" "no browser cause is recorded"
+  rm -rf "$root"
+}
+
+test_unknown_mode_is_graphql_with_a_warning(){
+  echo "# an unknown AUTODREAM_X_FETCH value is read as graphql, loudly"
+  local root; root=$(bsetup)
+  make_curl_shim "$root/bin"
+  AUTODREAM_X_FETCH=headless AB_LOG="$root/ab.log" run_bm "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "graphql" "an unknown mode runs the default path"
+  assert_grep "$root/out.txt" "AUTODREAM_X_FETCH" "the output names the variable it did not understand"
+  [ ! -s "$root/ab.log" ] && ok "and the browser stays untouched" || no "the browser ran for an unknown mode"
+  rm -rf "$root"
+}
+
+test_browser_mode_reads_the_response_from_the_har(){
+  echo "# browser mode: the Bookmarks response in the HAR becomes the bookmarks, with no curl and no credentials"
+  local root; root=$(bsetup)
+  X_CREDS_FILE="$root/does-not-exist" run_br "$root" collect "$root/findings"
+  assert_eq "$?" "0" "exits 0"
+  assert_eq "$(fetch_path "$root/findings")" "browser" "the path is recorded as browser"
+  assert_grep "$root/findings/x-bookmarks.md" "@newerauthor" "the author is parsed from the browser's response"
+  assert_grep "$root/findings/x-bookmarks.md" "the older post" "every bookmark in the response is present"
+  assert_eq "$(wc -l < "$root/findings/x-bookmarks-manifest.txt" | tr -d ' ')" "2" "both are in the manifest"
+  assert_eq "$(wc -l < "$root/state/seen.jsonl" | tr -d ' ')" "2" "and recorded in state"
+  [ ! -s "$root/curl.log" ] && ok "curl was never called" || no "the browser path called curl"
+  assert_eq "$(cat "$root/findings/x-bookmarks-queryid.txt")" "not_attempted" "the queryId walk is recorded as not run"
+  assert_grep "$root/ab.log" "har start" "the HAR recording starts before the page opens"
+  assert_grep "$root/ab.log" "x.com/i/bookmarks" "the bookmarks page is opened"
+  assert_eq "$(grep -vc "^session=autodream-x profile=$root/profile :: " "$root/ab.log")" "0" "every call runs in the dedicated session and profile"
+  rm -rf "$root"
+}
+
+test_browser_mode_orders_the_har_before_the_page(){
+  echo "# the HAR must start recording before open, or the first Bookmarks call is missed"
+  local root; root=$(bsetup)
+  run_br "$root" collect "$root/findings"
+  local start open
+  start=$(grep -n "har start" "$root/ab.log" | head -1 | cut -d: -f1)
+  open=$(grep -n " open " "$root/ab.log" | head -1 | cut -d: -f1)
+  { [ -n "$start" ] && [ -n "$open" ] && [ "$start" -lt "$open" ]; } && ok "har start precedes open" || no "har start ($start) does not precede open ($open)"
+  rm -rf "$root"
+}
+
+test_browser_mode_scrolls_for_more_pages(){
+  echo "# X_MAX_PAGES > 1: the browser scrolls, and every Bookmarks response in the HAR is read"
+  local root; root=$(bsetup)
+  # Page two holds one more bookmark, id 50.
+  jq -c '.data.bookmark_timeline_v2.timeline.instructions[0].entries =
+          [{"entryId":"tweet-50","content":{"itemContent":{"tweet_results":{"result":{"rest_id":"50","core":{"user_results":{"result":{"core":{"screen_name":"pagetwo"}}}},"legacy":{"full_text":"page two post","entities":{"urls":[]}}}}}}}]' \
+    "$root/page.json" > "$root/page2.json"
+  make_har "$root/har.json" "200:$root/page.json" "200:$root/page2.json"
+  X_MAX_PAGES=2 run_br "$root" collect "$root/findings"
+  assert_grep "$root/findings/x-bookmarks.md" "page two post" "the second response is read"
+  assert_eq "$(grep -c ' scroll ' "$root/ab.log")" "1" "one scroll for the second page"
+  rm -rf "$root"
+  root=$(bsetup)
+  X_MAX_PAGES=1 run_br "$root" collect "$root/findings"
+  assert_eq "$(grep -c ' scroll ' "$root/ab.log")" "0" "a one-page run never scrolls"
+  rm -rf "$root"
+}
+
+test_browser_mode_stops_at_a_known_bookmark(){
+  echo "# a response page is not read past the first already-seen bookmark, as on the GraphQL path"
+  local root; root=$(bsetup)
+  jq -c '.data.bookmark_timeline_v2.timeline.instructions[0].entries =
+          [{"entryId":"tweet-50","content":{"itemContent":{"tweet_results":{"result":{"rest_id":"50","core":{"user_results":{"result":{"core":{"screen_name":"pagetwo"}}}},"legacy":{"full_text":"page two post","entities":{"urls":[]}}}}}}}]' \
+    "$root/page.json" > "$root/page2.json"
+  make_har "$root/har.json" "200:$root/page.json" "200:$root/page2.json"
+  printf '{"id":"200","author":"newerauthor","url":"https://x.com/newerauthor/status/200","text":"the newer post","links":[],"read_on":"2026-08-01"}\n' > "$root/state/seen.jsonl"
+  X_MAX_PAGES=2 run_br "$root" collect "$root/findings"
+  assert_nogrep "$root/findings/x-bookmarks.md" "page two post" "nothing past the known bookmark is read"
+  rm -rf "$root"
+}
+
+test_browser_mode_decodes_a_base64_body(){
+  echo "# a HAR body stored as base64 is decoded before parsing"
+  local root; root=$(bsetup)
+  jq -n --rawfile b "$root/page.json" \
+    '{log:{entries:[{request:{method:"GET",url:"https://x.com/i/api/graphql/Q/Bookmarks?v=1"},response:{status:200,content:{encoding:"base64",text:($b|@base64)}}}]}}' > "$root/har.json"
+  run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "browser" "a base64 response still counts as the browser path"
+  assert_grep "$root/findings/x-bookmarks.md" "the newer post" "and parses"
+  rm -rf "$root"
+}
+
+# One fallback case: break the browser path in the named way, collect, and check the GraphQL
+# fallback served the bookmarks with the browser cause recorded.
+fallback_case(){ # $1=case name
+  local name="$1" root cause_re timeout=20
+  root=$(bsetup)
+  make_curl_shim "$root/bin"
+  local bin_override="" url="" ab_fail="" hang=""
+  case "$name" in
+    missing_bin)          bin_override="$root/no-such-agent-browser"; cause_re="not found" ;;
+    open)                 ab_fail=open; cause_re="open" ;;
+    har_stop)             ab_fail=har-stop; cause_re="HAR" ;;
+    no_bookmarks_request) printf '{"log":{"entries":[]}}' > "$root/har.json"; cause_re="no Bookmarks request" ;;
+    har_unparseable)      printf 'not json' > "$root/har.json"; cause_re="HAR" ;;
+    login_redirect)       url="https://x.com/i/flow/login"; cause_re="logged out" ;;
+    http_401)             make_har "$root/har.json" "401:$root/page.json"; cause_re="401" ;;
+    hung)                 hang=open; timeout=2; cause_re="timed out" ;;
+    no_profile)           rm -rf "$root/profile"; cause_re="no browser profile" ;;
+  esac
+  local t0=$SECONDS
+  X_BROWSER_BIN="$bin_override" AB_URL="$url" AB_FAIL="$ab_fail" AB_HANG="$hang" X_BROWSER_TIMEOUT="$timeout" \
+    run_br "$root" collect "$root/findings"
+  local elapsed=$((SECONDS - t0))
+  assert_eq "$(fetch_path "$root/findings")" "fallback_graphql" "$name: the GraphQL fallback served the bookmarks"
+  assert_grep "$root/findings/x-bookmarks-fetch.txt" "$cause_re" "$name: the browser cause is recorded"
+  assert_grep "$root/findings/x-bookmarks.md" "the newer post" "$name: the report still has the bookmarks"
+  if [ "$name" = hung ]; then
+    [ "$elapsed" -lt 15 ] && ok "hung: the watchdog cut a blocked browser call short" || no "hung: took ${elapsed}s"
+  fi
+  rm -rf "$root"
+}
+
+test_browser_failure_falls_back_to_graphql(){
+  echo "# every browser failure falls back to the GraphQL path when credentials exist, and the cause is kept"
+  local c
+  for c in missing_bin open har_stop no_bookmarks_request har_unparseable login_redirect http_401 hung no_profile; do
+    fallback_case "$c"
+  done
+}
+
+test_browser_failure_without_credentials_reports_the_browser_cause(){
+  echo "# browser fails and there is no GraphQL fallback -> a fetch-failed header naming the browser, exit 0"
+  local root; root=$(bsetup)
+  AB_FAIL=open X_CREDS_FILE="$root/does-not-exist" run_br "$root" collect "$root/findings"
+  assert_eq "$?" "0" "exits 0"
+  assert_grep "$root/findings/x-bookmarks.md" "^# x-bookmarks: fetch failed" "the failure header is written"
+  assert_grep "$root/findings/x-bookmarks.md" "browser" "and it names the browser path"
+  assert_eq "$(fetch_path "$root/findings")" "failed" "the path is failed"
+  assert_file "$root/findings/x-bookmarks-manifest.txt" "the manifest exists"
+  rm -rf "$root"
+}
+
+test_both_paths_failing_names_both(){
+  echo "# browser failure then GraphQL failure -> one header carrying both reasons, earlier unread bookmarks still served"
+  local root; root=$(bsetup)
+  make_curl_shim "$root/bin"
+  printf '{"id":"50","author":"earlier","url":"https://x.com/earlier/status/50","text":"earlier post","links":[],"read_on":null}\n' > "$root/state/seen.jsonl"
+  AB_FAIL=open MOCK_CODE=401 run_br "$root" collect "$root/findings"
+  assert_eq "$?" "0" "exits 0"
+  assert_eq "$(fetch_path "$root/findings")" "failed" "the path is failed"
+  assert_grep "$root/findings/x-bookmarks.md" "earlier post" "unread bookmarks captured earlier are still offered"
+  assert_grep "$root/findings/x-bookmarks.md" "browser" "the banner names the browser failure"
+  assert_grep "$root/findings/x-bookmarks.md" "credentials" "and the GraphQL one"
+  rm -rf "$root"
+}
+
+test_browser_mode_is_not_configured_without_profile_or_credentials(){
+  echo "# browser mode with neither a profile nor credentials is 'not configured', not a failure"
+  local root; root=$(bsetup)
+  rm -rf "$root/profile"
+  X_CREDS_FILE="$root/does-not-exist" run_br "$root" collect "$root/findings"
+  assert_eq "$?" "0" "exits 0"
+  assert_grep "$root/findings/x-bookmarks.md" "not configured" "the stub says not configured"
+  assert_nogrep "$root/findings/x-bookmarks.md" "fetch failed" "and not failed"
+  assert_eq "$(fetch_path "$root/findings")" "not_attempted" "the path is not_attempted"
+  [ ! -s "$root/ab.log" ] && ok "no browser was launched against a profile that does not exist" || no "the browser launched without a profile"
+  rm -rf "$root"
+}
+
+test_browser_is_closed_on_every_outcome(){
+  echo "# the dedicated browser session is closed after success and after failure"
+  local root; root=$(bsetup)
+  run_br "$root" collect "$root/findings"
+  assert_grep "$root/ab.log" " close" "closed after a good run"
+  rm -rf "$root"
+  root=$(bsetup)
+  AB_FAIL=har-stop X_CREDS_FILE="$root/does-not-exist" run_br "$root" collect "$root/findings"
+  assert_grep "$root/ab.log" " close" "closed after a failed run"
+  rm -rf "$root"
+}
+
+test_no_credential_reaches_the_browser_argv(){
+  echo "# credentials never go in argv: the browser path does not carry the cookie values anywhere"
+  local root; root=$(bsetup)
+  printf 'X_AUTH_TOKEN=SECRETAUTHTOKEN\nX_CT0=SECRETCT0VALUE\n' > "$root/creds"; chmod 600 "$root/creds"
+  make_curl_shim "$root/bin"
+  AB_FAIL=open run_br "$root" collect "$root/findings"
+  assert_nogrep "$root/ab.log" "SECRET" "no cookie value in any agent-browser call, fallback included"
+  assert_nogrep "$root/findings/x-bookmarks-fetch.txt" "SECRET" "none in the recorded cause"
+  rm -rf "$root"
+}
+
+test_browser_login_opens_a_headed_profile(){
+  echo "# browser-login opens the dedicated profile headed, on the login page, and touches no credentials"
+  local root; root=$(bsetup)
+  rm -rf "$root/profile"
+  AB_LOG="$root/ab.log" X_BROWSER_PROFILE="$root/profile" run_bm "$root" browser-login
+  assert_eq "$?" "0" "exits 0"
+  assert_grep "$root/ab.log" "[-][-]headed" "the window is shown"
+  assert_grep "$root/ab.log" "[-][-]profile $root/profile" "the dedicated profile is used"
+  assert_grep "$root/ab.log" "x.com" "it opens x.com"
+  assert_grep "$root/out.txt" "close" "the output says how to finish"
+  rm -rf "$root"
+}
+
+test_status_names_the_fetch_mode(){
+  echo "# status says which fetch mode and browser profile are configured"
+  local root; root=$(bsetup)
+  run_br "$root" status
+  assert_grep "$root/out.txt" "fetch mode" "the mode is printed"
+  assert_grep "$root/out.txt" "browser" "browser mode is named"
+  assert_grep "$root/out.txt" "$root/profile" "the profile path is shown"
+  rm -rf "$root"
+}
+
 echo "x-bookmarks.sh tests"
 test_pages_are_paced_and_the_last_one_is_not_waited_on
 test_not_configured
@@ -425,6 +723,21 @@ test_state_write_failure_is_not_no_unread
 test_state_write_failure_after_failed_fetch
 test_state_write_failure_keeps_earlier_unread
 test_walk_reaches_every_suffix_variant
+test_default_mode_never_touches_the_browser
+test_unknown_mode_is_graphql_with_a_warning
+test_browser_mode_reads_the_response_from_the_har
+test_browser_mode_orders_the_har_before_the_page
+test_browser_mode_scrolls_for_more_pages
+test_browser_mode_stops_at_a_known_bookmark
+test_browser_mode_decodes_a_base64_body
+test_browser_failure_falls_back_to_graphql
+test_browser_failure_without_credentials_reports_the_browser_cause
+test_both_paths_failing_names_both
+test_browser_mode_is_not_configured_without_profile_or_credentials
+test_browser_is_closed_on_every_outcome
+test_no_credential_reaches_the_browser_argv
+test_browser_login_opens_a_headed_profile
+test_status_names_the_fetch_mode
 
 echo
 echo "----------------------------------------"

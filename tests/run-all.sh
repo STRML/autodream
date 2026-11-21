@@ -1066,6 +1066,20 @@ test_self_audit_stats(){
   # #38: the key is always emitted, even with no bookmark credentials anywhere near the
   # sandbox, so a consumer never has to tell "absent" from "the walk did not run".
   assert_grep  "$stats" 'x_queryid_source: not_attempted'      "the queryId source is recorded even when the walk never ran"
+  # #166: which fetch path served the bookmarks is recorded the same way, unconfigured included.
+  assert_grep  "$stats" 'x_fetch_path: not_attempted'          "the fetch path is recorded even when no fetch was configured"
+  rm -rf "$root"
+}
+
+test_x_fetch_path_reaches_run_stats(){
+  echo "# #166: the path the collector names, and the browser's cause, land in run-stats.txt"
+  local root; root=$(setup_env); mk_session "$root" real1
+  printf '#!/bin/bash\n[ "$1" = collect ] || exit 0\nprintf "fallback_graphql\\nagent-browser open failed: boom\\n" > "$2/x-bookmarks-fetch.txt"\nprintf "# x-bookmarks: no unread bookmarks\\n" > "$2/x-bookmarks.md"\n: > "$2/x-bookmarks-manifest.txt"\n' > "$root/fake-xbm.sh"
+  chmod +x "$root/fake-xbm.sh"
+  AUTODREAM_XBOOKMARKS_BIN="$root/fake-xbm.sh" run_dream "$root"
+  local stats="$(fdir "$root")/run-stats.txt"
+  assert_grep  "$stats" 'x_fetch_path: fallback_graphql'                          "the collector's path is copied into run-stats"
+  assert_grep  "$stats" 'x_fetch_browser_cause: agent-browser open failed: boom'  "and so is the browser's cause"
   rm -rf "$root"
 }
 
@@ -3717,6 +3731,7 @@ _run test_run_lock_is_per_date_and_live_holders_win
 _run test_run_lock_is_reclaimed_from_a_dead_holder
 _run test_killed_run_temps_are_swept_at_the_start_of_the_next_run
 _run test_self_audit_stats
+_run test_x_fetch_path_reaches_run_stats
 _run test_self_audit_stats_failure_denominator
 _run test_self_audit_stats_precached_disambiguation
 _run test_normalize_project

@@ -2,6 +2,11 @@
 
 All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
+## 2026-11-21
+
+### Added
+- **Opt-in browser fetch for X bookmarks (`AUTODREAM_X_FETCH=browser`, #166).** The queryId grep of X's JS bundle is the only part of the bookmarks fetch that has broken, so `x-bookmarks.sh` can now read the Bookmarks responses off a logged-in `agent-browser` profile instead: it records a HAR while the profile opens `x.com/i/bookmarks`, scrolls `X_MAX_PAGES - 1` times, and feeds every Bookmarks response through the existing parse, dedupe and read-state code. The GraphQL path stays the default and the fallback: any browser failure (no binary, no profile, a logged-out profile, a timeout, no Bookmarks call in the HAR) falls back to it when credentials exist. `x-bookmarks.sh browser-login` opens the profile headed for the one manual login. New knobs: `X_BROWSER_PROFILE`, `X_BROWSER_BIN`, `X_BROWSER_SESSION`, `X_BROWSER_TIMEOUT`. run-stats gains `x_fetch_path` (`graphql`, `browser`, `fallback_graphql`, `failed` or `not_attempted`) and, after a browser failure, `x_fetch_browser_cause`; PROMPT.md's self-audit names `fallback_graphql`. Not verified on a logged-in browser: the tests shim `agent-browser`.
+
 ## 2026-11-18
 
 ### Changed

@@ -38,10 +38,29 @@
 # forever. `mark-read` is what closes the loop, and run.sh calls it only after a
 # non-empty report exists.
 #
+# THE BROWSER PATH (#166, opt-in)
+#
+# The queryId walk above is the only part of the GraphQL path that has ever broken (ten nights
+# in 2026-09). With AUTODREAM_X_FETCH=browser the bookmarks are read off the network instead:
+# a dedicated, already-logged-in `agent-browser` profile opens x.com/i/bookmarks, a HAR records
+# the page's own Bookmarks calls, and every Bookmarks response in it goes through the same
+# parse, dedupe and read-state code as the GraphQL path. X's web app picks the queryId, so
+# there is nothing to scrape. The GraphQL path stays the default and is the fallback: any
+# browser failure (no binary, no profile, a logged-out profile, a timeout, a page that made no
+# Bookmarks call) falls back to it when credentials exist, and the cause is recorded so the
+# run-stats line `x_fetch_path` can say which path actually served the night.
+#
+# The browser path needs no credentials in this script's hands: the session lives in the
+# profile, and the profile is handed over through AGENT_BROWSER_* environment variables, so
+# nothing secret is ever in argv. It cannot log in unattended; `browser-login` opens the
+# profile headed once for a person to do that. It reads one page by default and scrolls
+# X_MAX_PAGES-1 times for more.
+#
 # Usage:
 #   x-bookmarks.sh collect <findings-dir>    # write x-bookmarks.md + manifest
 #   x-bookmarks.sh mark-read <findings-dir>  # stamp the manifest's ids as read
 #   x-bookmarks.sh status                    # check the setup by hand
+#   x-bookmarks.sh browser-login             # log in to the browser profile, once, by hand
 #
 # Config (env; run.sh sources ~/.claude/autodream/config with `set -a` first):
 #   AUTODREAM_DIR   default $HOME/.claude/autodream
@@ -53,6 +72,11 @@
 #   X_MAX_UNREAD    most unread bookmarks to show one report     default 40
 #   X_MAX_TEXT      per-post character cap in the report input   default 800
 #   X_QUERYID_TTL   seconds to reuse a scraped queryId           default 86400
+#   AUTODREAM_X_FETCH   graphql (default) or browser            default graphql
+#   X_BROWSER_PROFILE   agent-browser profile directory          default $AUTODREAM_DIR/x-browser-profile
+#   X_BROWSER_BIN       agent-browser binary                     default agent-browser (on PATH)
+#   X_BROWSER_SESSION   agent-browser session name               default autodream-x
+#   X_BROWSER_TIMEOUT   seconds each browser command may run     default 60
 set -uo pipefail
 
 _pp="$(dirname "${BASH_SOURCE[0]}")/portable.sh"
@@ -90,6 +114,18 @@ MAX_UNREAD="${X_MAX_UNREAD:-40}"
 MAX_TEXT="${X_MAX_TEXT:-800}"
 QUERYID_TTL="${X_QUERYID_TTL:-86400}"
 
+X_FETCH_MODE="${AUTODREAM_X_FETCH:-graphql}"
+case "$X_FETCH_MODE" in
+  graphql|browser) : ;;
+  *) echo "x-bookmarks: AUTODREAM_X_FETCH=$X_FETCH_MODE is not graphql or browser; using graphql" >&2
+     X_FETCH_MODE=graphql ;;
+esac
+BROWSER_PROFILE="${X_BROWSER_PROFILE:-$AUTODREAM_DIR/x-browser-profile}"
+BROWSER_BIN="${X_BROWSER_BIN:-agent-browser}"
+BROWSER_SESSION="${X_BROWSER_SESSION:-autodream-x}"
+BROWSER_TIMEOUT="${X_BROWSER_TIMEOUT:-60}"
+case "$BROWSER_TIMEOUT" in ''|*[!0-9]*|0) BROWSER_TIMEOUT=60 ;; esac
+
 SEEN="$STATE_DIR/seen.jsonl"
 QID_CACHE="$STATE_DIR/query-id"
 TODAY="$(date +%F)"
@@ -105,7 +141,8 @@ FEATURES='{"graphql_timeline_v2_bookmark_timeline":true,"rweb_tipjar_consumption
 FIELD_TOGGLES='{"withArticlePlainText":false,"withArticleRichContentState":false,"withGrokAnalyze":false,"withDisallowedReplyControls":false}'
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/xbm.XXXXXX")"
-cleanup() { rm -rf "$TMP"; }
+BROWSER_OPEN=0   # 1 while a browser session this run started has not been closed
+cleanup() { [ "$BROWSER_OPEN" = 1 ] && browser_close; rm -rf "$TMP"; }
 trap cleanup EXIT
 
 # The failure reason goes to a FILE, not a variable, and that is load-bearing. The
@@ -360,26 +397,36 @@ next_cursor() {
 
 known_ids() { [ -s "$SEEN" ] && jq -r '.id' "$SEEN" 2>/dev/null || true; }
 
-# Walk pages newest-first, stopping at the first already-seen bookmark (the timeline is
-# reverse-chronological, so everything past it is old) or at the page cap.
+# Both fetch paths feed the same two files: the ids already in state, and this run's new rows.
+ingest_init() {
+  known_ids | sort > "$TMP/known"
+  : > "$TMP/new.jsonl"
+}
+
+# Take the bookmarks of the page now in $TMP/page.json into $TMP/new.jsonl. Returns 1 when the
+# caller should stop paging: the page was empty, or it reached a bookmark already in state (the
+# timeline is reverse-chronological, so everything past it is old).
+ingest_page() {
+  parse_page > "$TMP/page.jsonl"
+  [ -s "$TMP/page.jsonl" ] || return 1
+  local line id
+  while IFS= read -r line; do
+    id=$(printf '%s' "$line" | jq -r '.id' 2>/dev/null)
+    if grep -qxF "$id" "$TMP/known" 2>/dev/null; then return 1; fi
+    printf '%s\n' "$line" >> "$TMP/new.jsonl"
+  done < "$TMP/page.jsonl"
+  return 0
+}
+
+# Walk pages newest-first, stopping at the first already-seen bookmark or at the page cap.
 fetch_new() {
   local qid; qid=$(get_query_id) || return 1
-  local known="$TMP/known"; known_ids | sort > "$known"
-  local out="$TMP/new.jsonl"; : > "$out"
+  ingest_init
   local cursor="" page=1
 
   while [ "$page" -le "$MAX_PAGES" ]; do
     fetch_page "$qid" "$cursor" || return 1
-    parse_page > "$TMP/page.jsonl"
-    [ -s "$TMP/page.jsonl" ] || break
-
-    local line id hit=0
-    while IFS= read -r line; do
-      id=$(printf '%s' "$line" | jq -r '.id' 2>/dev/null)
-      if grep -qxF "$id" "$known" 2>/dev/null; then hit=1; break; fi
-      printf '%s\n' "$line" >> "$out"
-    done < "$TMP/page.jsonl"
-    [ "$hit" -eq 1 ] && break
+    ingest_page || break
 
     cursor=$(next_cursor)
     [ -n "$cursor" ] || break
@@ -388,6 +435,166 @@ fetch_new() {
     # after the last one the loop ends, and the two seconds bought nothing.
     if [ "$page" -le "$MAX_PAGES" ]; then sleep 2; fi
   done
+  return 0
+}
+
+# ---- the browser path (#166) ----
+
+BROWSER_LOGIN_HINT="Log the profile in once with: x-bookmarks.sh browser-login"
+
+# Run a command for at most $1 seconds, stdout to $TMP/ab.out and stderr to $TMP/ab.err.
+# macOS ships no timeout(1), and a browser daemon that stops answering would otherwise hold the
+# whole nightly run. TERM first, KILL two seconds later; returns 124 when the limit fired. The
+# watchdog sleeps through `command -p` so a test that shims `sleep` cannot make it fire at once.
+run_bounded() {
+  local secs="$1"; shift
+  local flag="$TMP/timed-out"; rm -f "$flag"
+  "$@" > "$TMP/ab.out" 2> "$TMP/ab.err" &
+  local pid=$!
+  ( command -p sleep "$secs"; : > "$flag"; kill -TERM "$pid"; command -p sleep 2; kill -KILL "$pid" ) >/dev/null 2>&1 &
+  local watchdog=$!
+  wait "$pid" 2>/dev/null
+  local rc=$?
+  pkill -P "$watchdog" 2>/dev/null
+  kill "$watchdog" 2>/dev/null
+  wait "$watchdog" 2>/dev/null
+  [ -e "$flag" ] && return 124
+  return "$rc"
+}
+
+# One agent-browser command against the dedicated session and profile. Both travel as
+# environment, so every call has the same argv shape and the profile path is not repeated on
+# each command line.
+ab() {
+  BROWSER_OPEN=1
+  AGENT_BROWSER_SESSION="$BROWSER_SESSION" AGENT_BROWSER_PROFILE="$BROWSER_PROFILE" \
+    run_bounded "$BROWSER_TIMEOUT" "$BROWSER_BIN" "$@"
+}
+
+browser_close() {
+  BROWSER_OPEN=0
+  ab close >/dev/null 2>&1 || true
+}
+
+# First line of the last command's stderr, single-lined and cut, for a failure reason.
+ab_err_line() { grep -v '^[[:space:]]*$' "$TMP/ab.err" 2>/dev/null | head -1 | tr '\t\r' '  ' | cut -c1-200; }
+
+# Run one browser command that must succeed, else fail() with $2 and the command's own words.
+ab_must() { # $1=what failed, rest = agent-browser args
+  local what="$1"; shift
+  ab "$@"
+  local rc=$?
+  [ "$rc" -ne 124 ] || { fail "$what: agent-browser timed out after ${BROWSER_TIMEOUT}s"; return 1; }
+  [ "$rc" -eq 0 ] || { fail "$what: $(ab_err_line)"; return 1; }
+  return 0
+}
+
+browser_ready() {
+  command -v "$BROWSER_BIN" >/dev/null 2>&1 \
+    || { fail "$BROWSER_BIN not found (put agent-browser on PATH or set X_BROWSER_BIN; it is a node script, so node has to be on the job's PATH too)"; return 1; }
+  [ -d "$BROWSER_PROFILE" ] \
+    || { fail "no browser profile at $BROWSER_PROFILE. $BROWSER_LOGIN_HINT"; return 1; }
+  return 0
+}
+
+browser_logged_out_url() {
+  case "$1" in
+    *"/i/flow/login"*|*"x.com/login"*|*"twitter.com/login"*) return 0 ;;
+  esac
+  return 1
+}
+
+# Drive the page and leave the HAR of what it did at $1. Sets BROWSER_URL to where it ended.
+browser_capture() {
+  local har="$1" i
+  BROWSER_URL=""
+  ab_must "could not start the HAR capture" network har start || return 1
+  ab_must "agent-browser open failed" open "https://x.com/i/bookmarks" || return 1
+  # Best effort from here until the export: X's page may never go fully idle, and a missed wait
+  # costs at worst a response the HAR export then does not hold, which is reported as such.
+  ab wait --load networkidle >/dev/null 2>&1 || true
+  ab wait 2000 >/dev/null 2>&1 || true
+  if ab get url; then BROWSER_URL=$(head -1 "$TMP/ab.out" 2>/dev/null); fi
+  i=2
+  while [ "$i" -le "$MAX_PAGES" ]; do
+    ab scroll down 5000 >/dev/null 2>&1 || true
+    ab wait 2500 >/dev/null 2>&1 || true
+    i=$(( i + 1 ))
+  done
+  ab_must "could not export the HAR" network har stop "$har" || return 1
+  return 0
+}
+
+# Write each good Bookmarks response in the HAR to $2/NN.json, in the order the page made them.
+# Fails with the most specific reason it can name when there are none.
+browser_extract() {
+  local har="$1" dir="$2"
+  jq -e '.log.entries | type == "array"' "$har" >/dev/null 2>&1 \
+    || { fail "the HAR export could not be read (not a HAR file)"; return 1; }
+  local rows="$TMP/har-rows.jsonl" n=0 bad_status="" line status body="$TMP/har-body"
+  jq -c '.log.entries[]
+         | select((.request.method // "GET") == "GET")
+         | select((.request.url // "") | test("/graphql/[^/]+/Bookmarks(\\?|$)"))
+         | {status: (.response.status // 0),
+            text: (if (.response.content.encoding // "") == "base64"
+                   then ((.response.content.text // "") | (try @base64d catch ""))
+                   else (.response.content.text // "") end)}' "$har" > "$rows" 2>/dev/null
+  mkdir -p "$dir"
+  while IFS= read -r line; do
+    status=$(printf '%s' "$line" | jq -r '.status' 2>/dev/null)
+    if [ "$status" != 200 ]; then [ -n "$bad_status" ] || bad_status="$status"; continue; fi
+    printf '%s' "$line" | jq -r '.text' > "$body" 2>/dev/null
+    jq -e . "$body" >/dev/null 2>&1 || continue
+    n=$(( n + 1 ))
+    cp "$body" "$dir/$(printf '%02d' "$n").json"
+  done < "$rows"
+  [ "$n" -gt 0 ] && return 0
+  case "$bad_status" in
+    401|403) fail "X rejected the browser session (HTTP $bad_status): the profile is logged out. $BROWSER_LOGIN_HINT" ;;
+    429)     fail "X rate-limited the browser page (HTTP 429); it will be retried tomorrow" ;;
+    '')      fail "the bookmarks page made no Bookmarks request that the HAR caught (X changed its page, or it did not finish loading within ${BROWSER_TIMEOUT}s)" ;;
+    *)       fail "X answered the browser page's Bookmarks request with HTTP $bad_status" ;;
+  esac
+  return 1
+}
+
+# Read the bookmarks off a logged-in browser profile into $TMP/new.jsonl, the way fetch_new does.
+fetch_new_browser() {
+  browser_ready || return 1
+  local har="$TMP/x.har" pages="$TMP/br-pages" rc=0
+  rm -rf "$pages"
+  browser_capture "$har" || rc=1
+  browser_close
+  [ "$rc" -eq 0 ] || return 1
+  if browser_logged_out_url "$BROWSER_URL"; then
+    fail "X sent the browser to its login page ($BROWSER_URL): the profile is logged out. $BROWSER_LOGIN_HINT"
+    return 1
+  fi
+  browser_extract "$har" "$pages" || return 1
+
+  ingest_init
+  local f page=0
+  for f in "$pages"/*.json; do
+    page=$(( page + 1 ))
+    [ "$page" -le "$MAX_PAGES" ] || break
+    cp "$f" "$TMP/page.json"
+    ingest_page || break
+  done
+  return 0
+}
+
+# Sign in to the dedicated profile by hand. Headed, because X's login needs a password, a
+# second factor and a human; the nightly run cannot do it and does not try.
+browser_login() {
+  command -v "$BROWSER_BIN" >/dev/null 2>&1 || { echo "x-bookmarks: $BROWSER_BIN not found; put agent-browser on PATH or set X_BROWSER_BIN" >&2; return 1; }
+  ( umask 077; mkdir -p "$BROWSER_PROFILE" ) || { echo "x-bookmarks: could not create $BROWSER_PROFILE" >&2; return 1; }
+  echo "x-bookmarks: opening x.com in a window on the dedicated profile ($BROWSER_PROFILE)."
+  echo "Log in there. The nightly run cannot use the profile while this window is open, so when you are done run:"
+  echo "  $BROWSER_BIN --session $BROWSER_SESSION close"
+  BROWSER_OPEN=0
+  run_bounded "$BROWSER_TIMEOUT" "$BROWSER_BIN" --session "$BROWSER_SESSION" --profile "$BROWSER_PROFILE" --headed open "https://x.com/i/bookmarks"
+  local rc=$?
+  [ "$rc" -eq 0 ] || { echo "x-bookmarks: could not open the browser: $(ab_err_line)" >&2; return 1; }
   return 0
 }
 
@@ -440,7 +647,48 @@ collect() {
   # not run tonight" is exactly the state this exists to make visible (#38). run.sh reads
   # it back into run-stats.txt.
   printf '%s\n' "$(qid_source)" > "$findings/x-bookmarks-queryid.txt"
+  write_fetch_record "$findings/x-bookmarks-fetch.txt"
   return $rc
+}
+
+# Which path served the night, for run-stats `x_fetch_path`, and why the browser path did not
+# when it was asked to. Line one is the path: graphql (the default path ran), browser,
+# fallback_graphql (the browser path failed and GraphQL served), failed (nothing served) or
+# not_attempted (nothing configured). Line two is the browser's cause, single-lined, when it
+# failed. Stamped on every path, like the queryId source, for the same reason: the nightly
+# fetch working says nothing about WHICH way it worked.
+FETCH_PATH=not_attempted
+BROWSER_CAUSE=""
+write_fetch_record() {
+  {
+    printf '%s\n' "$FETCH_PATH"
+    [ -z "$BROWSER_CAUSE" ] || printf '%s\n' "$BROWSER_CAUSE" | tr '\n\t\r' '   ' | cut -c1-300
+  } > "$1"
+}
+
+# Fetch with the configured path, falling back from the browser to GraphQL. $1 is load_creds'
+# status. Returns 0 with the new rows in $TMP/new.jsonl, or 1 with the reason in $FAIL_FILE.
+run_fetch() {
+  local creds_rc="$1" creds_reason="$2"
+  if [ "$X_FETCH_MODE" = browser ]; then
+    if fetch_new_browser; then FETCH_PATH=browser; return 0; fi
+    BROWSER_CAUSE=$(fail_reason)
+    if [ "$creds_rc" -ne 0 ]; then
+      FETCH_PATH=failed
+      case "$creds_rc" in
+        2) fail "the browser path failed ($BROWSER_CAUSE) and there are no GraphQL credentials at $CREDS_FILE to fall back on" ;;
+        *) fail "the browser path failed ($BROWSER_CAUSE) and the GraphQL fallback cannot run: $creds_reason" ;;
+      esac
+      return 1
+    fi
+  fi
+  if fetch_new; then
+    if [ -n "$BROWSER_CAUSE" ]; then FETCH_PATH=fallback_graphql; else FETCH_PATH=graphql; fi
+    return 0
+  fi
+  FETCH_PATH=failed
+  [ -z "$BROWSER_CAUSE" ] || fail "the browser path failed ($BROWSER_CAUSE) and so did the GraphQL fallback: $(fail_reason)"
+  return 1
 }
 
 # merge_state failed, so this run's bookmarks never reached the state and emit_unread
@@ -456,18 +704,32 @@ collect_bookmarks() {
   : > "$manifest"
 
   load_creds
-  case $? in
-    2) printf '# x-bookmarks: not configured (no credentials at %s)\n' "$CREDS_FILE" > "$out"
-       echo "x-bookmarks: not configured; skipping"
-       return 0 ;;
-    1) printf '# x-bookmarks: fetch failed — %s\n' "$(fail_reason)" > "$out"
-       echo "x-bookmarks: $(fail_reason)"
-       return 0 ;;
+  local creds_rc=$? creds_reason; creds_reason=$(fail_reason)
+  case $creds_rc in
+    2) # Browser mode carries its own session in the profile, so an absent credentials file is
+       # only "not configured" when there is no profile to read either.
+       if [ "$X_FETCH_MODE" != browser ] || [ ! -d "$BROWSER_PROFILE" ]; then
+         if [ "$X_FETCH_MODE" = browser ]; then
+           printf '# x-bookmarks: not configured (no credentials at %s and no browser profile at %s)\n' "$CREDS_FILE" "$BROWSER_PROFILE" > "$out"
+         else
+           printf '# x-bookmarks: not configured (no credentials at %s)\n' "$CREDS_FILE" > "$out"
+         fi
+         echo "x-bookmarks: not configured; skipping"
+         return 0
+       fi ;;
+    1) if [ "$X_FETCH_MODE" != browser ]; then
+         printf '# x-bookmarks: fetch failed — %s\n' "$creds_reason" > "$out"
+         echo "x-bookmarks: $creds_reason"
+         FETCH_PATH=failed
+         return 0
+       fi ;;
   esac
-  warn_perms
-  write_curl_configs
+  if [ "$creds_rc" -eq 0 ]; then
+    warn_perms
+    write_curl_configs
+  fi
 
-  if ! fetch_new; then
+  if ! run_fetch "$creds_rc" "$creds_reason"; then
     # A failed fetch still lets previously-recorded unread bookmarks through below —
     # they are already on disk and the model can still use them. Only say "failed" when
     # there is also nothing to show.
@@ -560,8 +822,19 @@ mark_read() {
 # ---- status ----
 
 status() {
+  printf 'fetch mode:  %s\n' "$X_FETCH_MODE"
+  if [ "$X_FETCH_MODE" = browser ]; then
+    local bin_state=found profile_state=present
+    command -v "$BROWSER_BIN" >/dev/null 2>&1 || bin_state="NOT FOUND"
+    [ -d "$BROWSER_PROFILE" ] || profile_state="ABSENT ($BROWSER_LOGIN_HINT)"
+    printf 'browser:     %s %s, session %s, profile %s %s\n' "$BROWSER_BIN" "$bin_state" "$BROWSER_SESSION" "$BROWSER_PROFILE" "$profile_state"
+  fi
   if [ ! -f "$CREDS_FILE" ]; then
-    printf 'credentials: absent (%s) — feature is off\n' "$CREDS_FILE"
+    if [ "$X_FETCH_MODE" = browser ] && [ -d "$BROWSER_PROFILE" ]; then
+      printf 'credentials: absent (%s) — the GraphQL fallback is unavailable\n' "$CREDS_FILE"
+    else
+      printf 'credentials: absent (%s) — feature is off\n' "$CREDS_FILE"
+    fi
     return 0
   fi
   printf 'credentials: %s (mode %s)\n' "$CREDS_FILE" "$(pstat_mode "$CREDS_FILE" || echo '?')"
@@ -608,10 +881,14 @@ case "${1:-}" in
       : > "$findings/x-bookmarks-manifest.txt"
       printf '# x-bookmarks: fetch failed — jq is not installed or not on PATH, so bookmarks cannot be parsed\n' \
         > "$findings/x-bookmarks.md"
+      FETCH_PATH=failed
+      write_fetch_record "$findings/x-bookmarks-fetch.txt"
       echo "x-bookmarks: jq not found; wrote a failure stub" >&2
       exit 0
     fi
     collect "${1:-}" ;;
+  browser-login)
+    browser_login ;;
   mark-read)
     shift
     [ "$HAVE_JQ" = "1" ] || { echo "x-bookmarks: jq not found; cannot update read state (they stay unread)" >&2; exit 0; }
@@ -619,5 +896,5 @@ case "${1:-}" in
   status)
     [ "$HAVE_JQ" = "1" ] || printf 'jq:          NOT FOUND — the feature cannot run without it\n'
     status ;;
-  *) echo "usage: x-bookmarks.sh {collect <findings-dir>|mark-read <findings-dir>|status}" >&2; exit 2 ;;
+  *) echo "usage: x-bookmarks.sh {collect <findings-dir>|mark-read <findings-dir>|status|browser-login}" >&2; exit 2 ;;
 esac

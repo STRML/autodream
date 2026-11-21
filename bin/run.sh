@@ -4901,6 +4901,20 @@ PY
   fi
   printf 'x_queryid_source: %s\n' "$XQID_SOURCE" >> "$FINDINGS_DIR/run-stats.txt"
 
+  # ---- Which path served the bookmarks tonight? (#166) ----
+  # `graphql` is the default path; `browser` means AUTODREAM_X_FETCH=browser read them off a
+  # logged-in profile; `fallback_graphql` means that browser path failed and GraphQL served
+  # (its cause is the second line of the file); `failed` and `not_attempted` say nothing
+  # served. Always emitted, like x_queryid_source, so absence only ever means an old runner.
+  XFETCH_PATH=not_attempted; XFETCH_CAUSE=""
+  if [ -s "$FINDINGS_DIR/x-bookmarks-fetch.txt" ]; then
+    XFETCH_PATH=$(sed -n 1p "$FINDINGS_DIR/x-bookmarks-fetch.txt" | tr -d '[:space:]')
+    XFETCH_CAUSE=$(sed -n 2p "$FINDINGS_DIR/x-bookmarks-fetch.txt" | tr '\t\r' '  ')
+    [ -n "$XFETCH_PATH" ] || XFETCH_PATH=not_attempted
+  fi
+  printf 'x_fetch_path: %s\n' "$XFETCH_PATH" >> "$FINDINGS_DIR/run-stats.txt"
+  [ -z "$XFETCH_CAUSE" ] || printf 'x_fetch_browser_cause: %s\n' "$XFETCH_CAUSE" >> "$FINDINGS_DIR/run-stats.txt"
+
   # ---- Finished worktrees and branches ----
   # Removes worktrees and local/remote branches whose PR merged (see prune-worktrees.sh for
   # the full proof rules). Opt-in via AUTODREAM_PRUNE_ROOTS. It needs nothing from L1 or L2
