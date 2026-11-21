@@ -116,6 +116,13 @@ os.execv(sys.argv[2], sys.argv[2:])
 hold_lock_and_rerun() { # args: the subcommand and its arguments, run again with the lock held
   command -v python3 >/dev/null 2>&1 || die 3 "python3 is required (it holds the lock on the tags file)"
   mkdir -p "$(dirname "$TAGS_FILE")" 2>/dev/null || die 1 "cannot create $(dirname "$TAGS_FILE"); nothing was changed"
+  # An earlier build of this script kept its lock as a directory (with a pid file). One left behind by a
+  # writer that was killed cannot be opened as a file, so it is removed here; a directory that is not
+  # empty of anything but that pid file is somebody else's and is refused rather than deleted.
+  if [ -d "$LOCK" ]; then
+    rm -f "$LOCK/pid"
+    rmdir "$LOCK" 2>/dev/null || die 1 "$LOCK is a directory this script did not make; remove it and try again; nothing was changed"
+  fi
   AUTODREAM_FOCUS_LOCKED=1 exec python3 -c "$LOCKER_PY" "$LOCK" "$BASH" "${BASH_SOURCE[0]}" "$@"
 }
 

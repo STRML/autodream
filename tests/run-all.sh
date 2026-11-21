@@ -820,6 +820,20 @@ test_focus_cli_a_failed_read_never_becomes_a_write(){
   rm -rf "$root"
 }
 
+test_focus_cli_a_lock_directory_from_the_earlier_build_does_not_block_tagging(){
+  echo "# autodream-focus.sh: the earlier build kept its lock as a directory; one left by a killed writer is cleared, a foreign one is refused"
+  local root; root=$(setup_env); local d="$root/autodream" out rc=0
+  mkdir -p "$d/tags.jsonl.lock"; echo 12345 > "$d/tags.jsonl.lock/pid"
+  out=$(focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1)
+  assert_eq "$out" "tagged s1:r1" "a directory lock with only its pid file does not stop the new lock"
+  rm -rf "$d/tags.jsonl.lock"; mkdir -p "$d/tags.jsonl.lock"; echo precious > "$d/tags.jsonl.lock/other"
+  out=$(focus_cli "$root" tag --harness omp --session s1 --uuid r2 --role assistant --text y 2>&1) || rc=$?
+  assert_eq "$rc" "1" "a directory holding anything else is refused, not deleted"
+  assert_grep_str "$out" "nothing was changed" "and says nothing was changed"
+  assert_eq "$(cat "$d/tags.jsonl.lock/other")" "precious" "its contents are untouched"
+  rm -rf "$root"
+}
+
 test_focus_cli_without_python3_it_refuses_and_writes_nothing(){
   echo "# autodream-focus.sh: the lock needs python3, and without it the script says so instead of writing unlocked"
   local root; root=$(setup_env); local bin="$root/nopy" t out rc=0
@@ -4169,6 +4183,7 @@ _run test_focus_cli_the_tags_file_named_in_the_config_is_the_one_written
 _run test_focus_cli_last_finds_a_session_behind_newer_ones_in_other_directories
 _run test_focus_cli_a_relative_transcript_is_recorded_as_an_absolute_path
 _run test_focus_cli_a_live_holder_is_never_pushed_aside
+_run test_focus_cli_a_lock_directory_from_the_earlier_build_does_not_block_tagging
 _run test_focus_cli_without_python3_it_refuses_and_writes_nothing
 _run test_focus_cli_a_write_by_a_writer_that_takes_no_lock_is_not_overwritten
 _run test_focus_cli_last_codex
