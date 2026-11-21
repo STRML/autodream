@@ -227,8 +227,10 @@ jq -R -s \
   # absolute, and an edit start record carries no args (its path is only in the `[path#HASH]`
   # header of the block, so both record shapes are read here), so every path goes through
   # abs_path against the cwd of the session header (or of autodream_meta in a linearized copy)
-  # first. A path that cannot be resolved (no cwd, `~` with no HOME, `~user`, a URL such as the
-  # raw.githubusercontent.com SKILL.md a session fetches before installing it) falls back to the
+  # first. A read path with a URL scheme other than `skill://` (the raw.githubusercontent.com
+  # SKILL.md a session fetches before installing it) fetches the file, it does not load the skill,
+  # so it is dropped before any of that (#185). A path that cannot be resolved (no cwd, `~` with no
+  # HOME, `~user`) falls back to the
   # old rule, a match by skill name (the directory above SKILL.md): an unresolvable edit masks
   # every read of that name, an unresolvable read is masked by any edit of that name. The
   # resolution is lexical, so the sidecar depends on the transcript alone: a read through a
@@ -289,6 +291,7 @@ jq -R -s \
     ] + [
       $read_paths[]
       | select(startswith("skill://") | not)
+      | select(test("^[A-Za-z][A-Za-z0-9+.-]*://") | not)
       | abs_path($cwd) as $file
       | (try capture("(?:^|/)(?<name>[^/*?]+)/SKILL\\.md$") catch empty)
       | .name

@@ -387,6 +387,20 @@ SPU="$tmp/skill-by-file-nocwd.jsonl"
 } > "$SPU"
 HOME= "$A" stats "$SPU" "$tmp/stspu.json" >/dev/null 2>&1
 assert_eq "$(jq -r '"\(.skills_invoked|join(",")) \(.skills_invoked_count)"' "$tmp/stspu.json")" "bar 1" "an unresolvable path falls back to the skill-name match; resolvable ones compare as files"
+# A SKILL.md fetched by URL is being installed or inspected, not invoked (#185). The session above hid it
+# only because it also wrote the file; one that fetches without writing used to be counted. Only a
+# skill:// URL names a skill, and a plain path still does.
+SPW="$tmp/skill-url-reads.jsonl"
+{ echo "$HDR_TITLE"; hdr_session 41 /tmp; umsg u1 null a
+  RD 1 u1 'https://raw.githubusercontent.com/o/skills/main/skills/fetched/SKILL.md'
+  RD 2 r1 'http://example.invalid/skills/plain/SKILL.md:raw'
+  RD 3 r2 'git+ssh://host/skills/vcs/SKILL.md'
+  RD 4 r3 'HTTPS://example.invalid/skills/upper/SKILL.md; /Users/x/.claude/skills/local/SKILL.md'
+  RD 5 r4 'skill://real'
+  RD 6 r5 '/Users/x/.claude/skills/fetched/SKILL.md'
+} > "$SPW"
+"$A" stats "$SPW" "$tmp/stspw.json" >/dev/null 2>&1
+assert_eq "$(jq -r '"\(.skills_invoked|join(",")) \(.skills_invoked_count)"' "$tmp/stspw.json")" "fetched,local,real 3" "a SKILL.md URL read is not an invocation; a local path read, a skill:// read and a later local read of the same name are"
 
 echo "# is-self: omp's own worker transcripts"
 SELF="$tmp/self.jsonl"
