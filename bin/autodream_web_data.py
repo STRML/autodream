@@ -82,8 +82,16 @@ def night_sessions(directory, unreadable):
             unreadable.add('sessions.txt')
         else:
             return sorted({hashlib.sha1(line).hexdigest()[:12] for line in lines if line})
-    return sorted(path.name[:-len('.json')] for path in directory.glob('*.json')
-                  if FINDING.fullmatch(path.name))
+    found = {path.name[:-len('.json')] for path in directory.glob('*.json')
+             if FINDING.fullmatch(path.name)}
+    if not worklist.exists() and (directory / 'run-stats.txt').exists():
+        # A run wrote run-stats, so it also wrote a worklist: its absence is damage, not age.
+        # Without a worklist no rebuild has left stale sidecars, so a sidecar with no findings
+        # is a session still pending, and leaving it out would read the night as complete.
+        unreadable.add('sessions.txt')
+        found.update(path.name[:-len('.stats.json')] for path in directory.glob('*.stats.json')
+                     if re.fullmatch(r'[0-9a-f]{12}\.stats\.json', path.name))
+    return sorted(found)
 
 
 def pending_is_nested(sidecar):

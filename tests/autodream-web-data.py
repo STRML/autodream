@@ -140,8 +140,33 @@ class DataTests(unittest.TestCase):
         key = ('2026-11-14', 'stats')
         self.assertIn(key, self.cache._nights, 'an unmeasured night must still be cached')
 
+    def test_web_stats_missing_worklist_on_a_run_night_is_degraded_and_unmeasured(self):
+        import hashlib
+        self.finding('0123456789ab')
+        (self.day / 'run-stats.txt').write_text('l1_timed_out: 0\n')
+        night = self.stats_night()
+        self.assertIn('Could not read sessions.txt.', night['degraded'],
+                      'a run wrote run-stats, so a missing worklist is not a legacy night')
+        pending = hashlib.sha1(b'/sessions/pending.jsonl').hexdigest()[:12]
+        (self.day / (pending + '.stats.json')).write_text(json.dumps(dict(nested=False)))
+        night = self.stats_night()
+        self.assertTrue(all(value is None for value in night['activity'].values()),
+                        'a top-level sidecar with no findings must not be left out of the totals')
+        self.assertTrue(all(value is None for value in night['outcomes'].values()))
+        self.assertEqual(night['sessions_without_sidecar'], 0)
+        (self.day / (pending + '.stats.json')).write_text(json.dumps(dict(nested=True)))
+        night = self.stats_night()
+        self.assertEqual(night['activity']['tool_calls'], 3, 'a pending nested worker leaves totals measured')
+
+    def test_web_stats_missing_worklist_on_a_legacy_night_is_not_degraded(self):
+        self.finding('0123456789ab')
+        night = self.stats_night()
+        self.assertEqual(night['degraded'], [], 'a night with no run-stats predates worklists')
+        self.assertEqual(night['activity']['tool_calls'], 3)
+
     def test_web_stats_unreadable_file_is_degraded_and_not_cached(self):
-        self.finding()
+        done, = self.worklist('/sessions/done.jsonl')
+        self.finding(done)
         run_stats = self.day / 'run-stats.txt'
         run_stats.write_text('l1_timed_out: 2\n')
         run_stats.chmod(0)

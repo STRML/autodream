@@ -142,29 +142,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: diag (temporary)
-        continue-on-error: true
-        run: |
-          python3 --version
-          d=$(mktemp -d)
-          echo "TMPDIR=$TMPDIR tmp=$d"
-          mkdir -p "$d/install with spaces/web"
-          echo hi > "$d/install with spaces/web/index.html"
-          export HOME="$d" AUTODREAM_DIR="$d/install with spaces" PYTHONDONTWRITEBYTECODE=1
-          unset AUTODREAM_CONFIG AUTODREAM_WEB_PORT
-          echo "== wrapper under bash -x, 8s"
-          /bin/bash -x bin/autodream-web serve --port 0 > "$d/out" 2> "$d/err" &
-          pid=$!
-          sleep 8
-          echo "-- stdout:"; cat "$d/out"
-          echo "-- stderr (tail):"; tail -40 "$d/err"
-          echo "-- ps:"; ps -o pid,ppid,state,command -p "$pid" || true
-          pkill -P "$pid" || true; kill "$pid" || true
-          wait "$pid" 2>/dev/null || true
-          echo "== python with faulthandler, traceback after 5s"
-          rm -rf "$d/install with spaces/web-token" "$d/install with spaces/web-port"
-          python3 -X faulthandler -c "import faulthandler, runpy, sys; faulthandler.dump_traceback_later(5, exit=True); sys.argv = ['autodream-web.py', 'serve', '--port', '0']; runpy.run_path('bin/autodream-web.py', run_name='__main__')" 2>&1 | tail -40
-
       - name: web suite
-        if: ${{ false }}
         run: /bin/bash tests/autodream-web.sh
