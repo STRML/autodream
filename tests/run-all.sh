@@ -749,7 +749,7 @@ test_focus_cli_unreadable_file_is_never_overwritten(){
   assert_eq "$rc" "1" "it refuses"
   assert_grep_str "$out" "nothing was changed" "and says nothing was changed"
   assert_eq "$(cat "$f")" '{"id":"keep:me","text":"someone else"}' "the file is exactly as it was"
-  assert_eq "$(ls -A "$root/autodream" | grep -c '^tags\.jsonl\.' || true)" "0" "no lock or scratch file is left behind"
+  assert_eq "$(ls -A "$root/autodream" | grep -v '\.lock$' | grep -c '^tags\.jsonl\.' || true)" "0" "no lock or scratch file is left behind"
   rm -rf "$root"
 }
 
@@ -775,37 +775,62 @@ test_focus_cli_usage_errors(){
   rm -rf "$root"
 }
 
-test_focus_cli_reclaims_a_stale_lock(){
-  echo "# autodream-focus.sh: a lock left by a killed run does not block tagging forever"
-  local root; root=$(setup_env)
-  mkdir -p "$root/autodream/tags.jsonl.lock"; touch -t 202001010000 "$root/autodream/tags.jsonl.lock"
-  local out; out=$(focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1)
-  assert_eq "$out" "tagged s1:r1" "a lock older than a minute is taken over"
-  assert_no_file "$root/autodream/tags.jsonl.lock" "and released afterwards"
+hold_flock(){ # $1=lock file -> a background process holds flock(2) on it until killed; its pid is HOLDER
+  python3 -c 'import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(sys.argv[2], "w").write("held")
+time.sleep(600)' "$1" "$1.held" &
+  HOLDER=$!
+  local i; for i in $(seq 1 100); do [ -f "$1.held" ] && break; sleep 0.1; done
+}
+
+test_focus_cli_a_killed_holder_leaves_no_stale_lock(){
+  echo "# autodream-focus.sh: the lock is the kernel's, so a writer that dies leaves nothing to reclaim"
+  local root; root=$(setup_env); local lock="$root/autodream/tags.jsonl.lock" out
+  mkdir -p "$root/autodream"; hold_flock "$lock"
+  kill -9 "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null || true
+  out=$(focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1)
+  assert_eq "$out" "tagged s1:r1" "a holder killed with SIGKILL frees the lock at once"
+  assert_eq "$(jq -r .id "$root/autodream/tags.jsonl")" "s1:r1" "and the tag is written"
   rm -rf "$root"
 }
 
 test_focus_cli_a_failed_read_never_becomes_a_write(){
-  echo "# autodream-focus.sh: a read that fails part-way cannot replace the tags with a partial copy"
-  local root; root=$(setup_env); local f="$root/autodream/tags.jsonl" sh="$root/shim" out rc real_tail
-  real_tail=$(command -v tail); mkdir -p "$sh"
+  echo "# autodream-focus.sh: a read that fails cannot become a write that drops the tags"
+  local root; root=$(setup_env); local f="$root/autodream/tags.jsonl" sh="$root/shim" out rc real_tail real_jq
+  real_tail=$(command -v tail); real_jq=$(command -v jq); mkdir -p "$sh"
   printf '{"id":"keep:1","text":"one"}\n{"id":"keep:2","text":"two"}\n' > "$f"
   cp "$f" "$root/before"
-  # cat that prints the first line of the tags file and then fails, as an I/O error part-way would
-  printf '#!/bin/bash\ncase "$*" in *tags.jsonl*) head -1 "$1"; exit 1 ;; esac\nexec /bin/cat "$@"\n' > "$sh/cat"
-  chmod +x "$sh/cat"
+  # jq that fails on the read of the tags file, as an I/O error would
+  printf '#!/bin/bash\ncase " $* " in *" -R -n "*tags.jsonl*) exit 5 ;; esac\nexec "%s" "$@"\n' "$real_jq" > "$sh/jq"
+  chmod +x "$sh/jq"
   rc=0; out=$(PATH="$sh:$PATH" focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1) || rc=$?
-  assert_eq "$rc" "1" "a copy that fails part-way is a refusal"
+  assert_eq "$rc" "1" "a read of the tags file that fails is a refusal"
   assert_grep_str "$out" "nothing was changed" "and says nothing was changed"
   assert_eq "$(cat "$f")" "$(cat "$root/before")" "the tags are exactly as they were"
-  assert_eq "$(ls -A "$root/autodream" | grep -c '^tags\.jsonl\.' || true)" "0" "no lock or scratch file is left behind"
-  rm -f "$sh/cat"
+  assert_eq "$(ls -A "$root/autodream" | grep -v '\.lock$' | grep -c '^tags\.jsonl\.' || true)" "0" "no scratch file is left behind"
+  rm -f "$sh/jq"
   # tail that fails: the torn-line check cannot be answered, so it cannot be guessed
   printf '#!/bin/bash\ncase "$*" in *tags.jsonl*) exit 1 ;; esac\nexec "%s" "$@"\n' "$real_tail" > "$sh/tail"
   chmod +x "$sh/tail"
   rc=0; out=$(PATH="$sh:$PATH" focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1) || rc=$?
   assert_eq "$rc" "1" "a failed torn-line check is a refusal too"
   assert_eq "$(cat "$f")" "$(cat "$root/before")" "and the tags are exactly as they were"
+  rm -rf "$root"
+}
+
+test_focus_cli_without_python3_it_refuses_and_writes_nothing(){
+  echo "# autodream-focus.sh: the lock needs python3, and without it the script says so instead of writing unlocked"
+  local root; root=$(setup_env); local bin="$root/nopy" t out rc=0
+  mkdir -p "$bin"
+  for t in jq dirname basename readlink sed tr cat date mkdir tail awk head mktemp rm cksum find sort cut seq env stat; do
+    [ -x "$(command -v "$t" 2>/dev/null)" ] && ln -sf "$(command -v "$t")" "$bin/$t"
+  done
+  out=$(PATH="$bin" AUTODREAM_DIR="$root/autodream" AUTODREAM_CONFIG=/nonexistent /bin/bash "$REPO/bin/autodream-focus.sh" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1) || rc=$?
+  assert_eq "$rc" "3" "exit 3"
+  assert_grep_str "$out" "python3 is required" "and says what is missing"
+  assert_no_file "$root/autodream/tags.jsonl" "and nothing is written"
   rm -rf "$root"
 }
 
@@ -827,25 +852,15 @@ test_focus_cli_last_omp_leaves_no_copy_when_it_cannot_read_a_turn(){
   rm -rf "$root"
 }
 
-test_focus_cli_a_stale_lock_is_taken_by_one_waiter_only(){
-  echo "# autodream-focus.sh: two waiters that both see a stale lock cannot both take it over"
-  local root; root=$(setup_env); local d="$root/autodream" f="$root/autodream/tags.jsonl" out rc
-  mkdir -p "$d/tags.jsonl.lock" "$d/tags.jsonl.lock.reclaim"
-  touch -t 202001010000 "$d/tags.jsonl.lock"
-  rc=0; out=$(focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1) || rc=$?
-  assert_eq "$rc" "1" "another waiter is mid-takeover, so this one does not remove the lock under it"
-  assert_grep_str "$out" "nothing was changed" "and says nothing was changed"
-  [ -d "$d/tags.jsonl.lock" ] && ok "the lock was left for the waiter that is taking it" || no "the lock was left for the waiter that is taking it"
-  assert_no_file "$f" "and nothing was written"
-  touch -t 202001010000 "$d/tags.jsonl.lock.reclaim"
-  out=$(focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1)
-  assert_eq "$out" "tagged s1:r1" "a takeover claim that is itself stale does not block tagging forever"
-  assert_eq "$(ls -A "$d" | grep -c 'lock' || true)" "0" "and no lock or claim is left behind"
-  local i
-  mkdir -p "$d/tags.jsonl.lock"; touch -t 202001010000 "$d/tags.jsonl.lock"
-  for i in 1 2 3 4 5 6; do focus_cli "$root" tag --harness omp --session p --uuid "r$i" --role assistant --text "n$i" >/dev/null 2>&1 & done
+test_focus_cli_tags_made_at_once_are_all_kept(){
+  echo "# autodream-focus.sh: tags and untags made at the same moment by several writers all land"
+  local root; root=$(setup_env); local f="$root/autodream/tags.jsonl" i
+  focus_cli "$root" tag --harness omp --session q --uuid old --role assistant --text old >/dev/null
+  for i in 1 2 3 4 5 6 7 8; do focus_cli "$root" tag --harness omp --session p --uuid "r$i" --role assistant --text "n$i" >/dev/null 2>&1 & done
+  focus_cli "$root" tag --harness omp --session q --uuid old --role assistant --text old >/dev/null 2>&1 &
   wait
-  assert_eq "$(jq -s '[.[] | select(.session == "p")] | length' "$f")" "6" "six tags made at once over a stale lock are all kept"
+  assert_eq "$(jq -s '[.[] | select(.session == "p")] | length' "$f")" "8" "eight tags made at once are all kept"
+  assert_eq "$(jq -s '[.[] | select(.session == "q")] | length' "$f")" "0" "and an untag made at the same moment took its tag back"
   rm -rf "$root"
 }
 
@@ -856,6 +871,7 @@ test_focus_cli_the_tags_file_named_in_the_config_is_the_one_written(){
   AUTODREAM_DIR="$ad" /bin/bash "$REPO/bin/autodream-focus.sh" tag --harness omp --session s1 --uuid r1 --role assistant --text x >/dev/null
   assert_eq "$(jq -r .id "$root/moved.jsonl" 2>/dev/null)" "s1:r1" "a tags file named only in the install's config is the one written"
   assert_no_file "$ad/tags.jsonl" "and the default file is not touched"
+  assert_eq "$(AUTODREAM_DIR="$ad" /bin/bash "$REPO/bin/autodream-focus.sh" path)" "$root/moved.jsonl" "path prints it, which is where the mod and the OMP picker look"
   AUTODREAM_TAGS_FILE="$root/exported.jsonl" AUTODREAM_DIR="$ad" /bin/bash "$REPO/bin/autodream-focus.sh" tag --harness omp --session s1 --uuid r2 --role assistant --text y >/dev/null
   assert_eq "$(jq -r .id "$root/exported.jsonl" 2>/dev/null)" "s1:r2" "an exported one still wins over the config"
   rm -rf "$root"
@@ -887,33 +903,26 @@ test_focus_cli_a_relative_transcript_is_recorded_as_an_absolute_path(){
   rm -rf "$root"
 }
 
-test_focus_cli_a_lock_is_held_by_its_owner_not_by_its_age(){
-  echo "# autodream-focus.sh: a lock whose owner is alive is never taken, however old; one whose owner is gone is taken at once"
-  local root; root=$(setup_env); local d="$root/autodream" live dead out rc=0
+test_focus_cli_a_live_holder_is_never_pushed_aside(){
+  echo "# autodream-focus.sh: a writer that holds the lock keeps it however long it holds it; a waiter gives up and changes nothing"
+  local root; root=$(setup_env); local d="$root/autodream" out rc=0
   mkdir -p "$d"
-  sleep 60 & live=$!
-  mkdir -p "$d/tags.jsonl.lock"; echo "$live" > "$d/tags.jsonl.lock/pid"; touch -t 202001010000 "$d/tags.jsonl.lock" "$d/tags.jsonl.lock/pid"
+  : > "$d/tags.jsonl.lock"; touch -t 202001010000 "$d/tags.jsonl.lock"
+  hold_flock "$d/tags.jsonl.lock"
   out=$(focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1) || rc=$?
-  assert_eq "$rc" "1" "a writer suspended for longer than a minute still owns its lock, so a waiter gives up"
+  assert_eq "$rc" "1" "a lock file with a years-old mtime and a live holder is still held, so the waiter gives up"
   assert_grep_str "$out" "nothing was changed" "and says nothing was changed"
-  assert_eq "$(cat "$d/tags.jsonl.lock/pid" 2>/dev/null)" "$live" "the owner's lock is untouched"
   assert_no_file "$d/tags.jsonl" "and nothing was written"
-  kill "$live" 2>/dev/null; wait "$live" 2>/dev/null || true
-  rm -rf "$d/tags.jsonl.lock"
-  sh -c 'exit 0' & dead=$!; wait "$dead" 2>/dev/null || true
-  mkdir -p "$d/tags.jsonl.lock"; echo "$dead" > "$d/tags.jsonl.lock/pid"
-  out=$(focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1)
-  assert_eq "$out" "tagged s1:r1" "a lock whose writer is gone is taken even though it is fresh"
-  assert_no_file "$d/tags.jsonl.lock" "and released afterwards"
+  kill -9 "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null || true
   rm -rf "$root"
 }
 
 test_focus_cli_a_write_by_a_writer_that_takes_no_lock_is_not_overwritten(){
-  echo "# autodream-focus.sh: a tag that lands in the file during the copy (an older mod build) is never replaced by the copy"
+  echo "# autodream-focus.sh: a writer that takes no lock (an older mod build) cannot lose a tag to, or take one from, an add"
   local root; root=$(setup_env); local f="$root/autodream/tags.jsonl" sh="$root/shim" out rc real_tail real_awk
   real_tail=$(command -v tail); real_awk=$(command -v awk); mkdir -p "$sh"
   printf '{"id":"keep:1","text":"one"}\n' > "$f"
-  # tail runs between the copy and the rename of an append: the shim writes a line the way an unlocked writer would
+  # tail runs just before the append: the shim writes a line the way an unlocked writer would
   cat > "$sh/tail" <<SH
 #!/bin/bash
 case "\$*" in *tags.jsonl*) echo '{"id":"late:1","text":"unlocked"}' >> "$f" ;; esac
@@ -921,11 +930,11 @@ exec "$real_tail" "\$@"
 SH
   chmod +x "$sh/tail"
   rc=0; out=$(PATH="$sh:$PATH" focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1) || rc=$?
-  assert_eq "$rc" "1" "an append refuses when the file changed under it"
-  assert_grep_str "$out" "changed while it was being rewritten" "and says why"
+  assert_eq "$rc" "0" "an add is an append, so it succeeds beside the other writer's line"
   assert_eq "$(grep -c late:1 "$f")" "1" "the other writer's tag is still there"
-  assert_eq "$(grep -c s1:r1 "$f" || true)" "0" "and this one was not published over it"
-  # the untag path: awk is the rewrite, and the shim writes after it
+  assert_eq "$(grep -c keep:1 "$f")" "1" "and so is the one that was there before"
+  assert_eq "$(grep -c s1:r1 "$f")" "1" "and this tag was added after them, not instead of them"
+  # the untag path replaces the file: awk is the rewrite, and the shim writes after it
   printf '{"id":"s1:r1","session":"s1","uuid":"r1","text":"mine"}\n' > "$f"
   rm -f "$sh/tail"
   cat > "$sh/awk" <<SH
@@ -4152,14 +4161,15 @@ _run test_focus_cli_keeps_lines_it_does_not_understand
 _run test_focus_cli_unreadable_file_is_never_overwritten
 _run test_focus_cli_refuses_empty_text
 _run test_focus_cli_usage_errors
-_run test_focus_cli_reclaims_a_stale_lock
+_run test_focus_cli_a_killed_holder_leaves_no_stale_lock
 _run test_focus_cli_a_failed_read_never_becomes_a_write
 _run test_focus_cli_last_omp_leaves_no_copy_when_it_cannot_read_a_turn
-_run test_focus_cli_a_stale_lock_is_taken_by_one_waiter_only
+_run test_focus_cli_tags_made_at_once_are_all_kept
 _run test_focus_cli_the_tags_file_named_in_the_config_is_the_one_written
 _run test_focus_cli_last_finds_a_session_behind_newer_ones_in_other_directories
 _run test_focus_cli_a_relative_transcript_is_recorded_as_an_absolute_path
-_run test_focus_cli_a_lock_is_held_by_its_owner_not_by_its_age
+_run test_focus_cli_a_live_holder_is_never_pushed_aside
+_run test_focus_cli_without_python3_it_refuses_and_writes_nothing
 _run test_focus_cli_a_write_by_a_writer_that_takes_no_lock_is_not_overwritten
 _run test_focus_cli_last_codex
 _run test_focus_cli_last_omp

@@ -20,14 +20,42 @@ const tagged = atom({ plugin: 'autodream-focus', key: 'tagged' } as const, [])
 type Ui = ReturnType<EngineInterface['ui']['resolve']>
 type Turn = { uuid: string; role: FocusTag['role']; text: string }
 
-const where = async ($: EngineInterface): Promise<string> => {
-  const [HOME, AUTODREAM_DIR, AUTODREAM_TAGS_FILE] = await Promise.all([
+/** The script, the two settings that move the file it writes (passed on, as the writer reads them from its environment), and where this mod would look without it. */
+const writer = async ($: EngineInterface): Promise<{ script: string; env: Record<string, string>; fallback: string }> => {
+  const [HOME, AUTODREAM_DIR, AUTODREAM_TAGS_FILE, AUTODREAM_FOCUS_BIN] = await Promise.all([
     $.env.get('HOME'),
     $.env.get('AUTODREAM_DIR'),
     $.env.get('AUTODREAM_TAGS_FILE'),
+    $.env.get('AUTODREAM_FOCUS_BIN'),
   ])
 
-  return tagsFile({ HOME, AUTODREAM_DIR, AUTODREAM_TAGS_FILE })
+  return {
+    script: focusScript({ HOME, AUTODREAM_DIR, AUTODREAM_FOCUS_BIN }),
+    env: { ...(AUTODREAM_DIR ? { AUTODREAM_DIR } : {}), ...(AUTODREAM_TAGS_FILE ? { AUTODREAM_TAGS_FILE } : {}) },
+    fallback: tagsFile({ HOME, AUTODREAM_DIR, AUTODREAM_TAGS_FILE }),
+  }
+}
+
+/**
+ * The tags file, asked of the writer. The writer also reads `$AUTODREAM_DIR/config`, which this mod cannot (it cannot source a
+ * shell file), so a tags file named only there would be written by the script and invisible here: no button would light, and
+ * pressing one again would take a tag back that was never shown. The environment's answer is the fallback when the script is
+ * not installed or cannot answer.
+ */
+const where = async ($: EngineInterface): Promise<string> => {
+  const { script, env, fallback } = await writer($)
+
+  try {
+    if (await $.fs.exists(script)) {
+      const { exitCode, stdout } = await $.process.run([script, 'path'], { env, timeoutMs: 5_000 })
+
+      if (exitCode === 0 && stdout.trim() !== '') return stdout.trim()
+    }
+  } catch {
+    // fall back to what the environment says
+  }
+
+  return fallback
 }
 
 const reason = (cause: unknown): string => (cause instanceof Error ? cause.message : String(cause))
@@ -58,21 +86,6 @@ const refresh = async ($: EngineInterface) => {
     await update($, tagged, () => tags.map(tag => tag.id))
   } catch (cause) {
     $.ui.toast(`Could not read the tags file, so no turn shows as tagged: ${reason(cause)}`)
-  }
-}
-
-/** The script and the two settings that move the file it writes, as the writer reads them from its environment. */
-const writer = async ($: EngineInterface): Promise<{ script: string; env: Record<string, string> }> => {
-  const [HOME, AUTODREAM_DIR, AUTODREAM_TAGS_FILE, AUTODREAM_FOCUS_BIN] = await Promise.all([
-    $.env.get('HOME'),
-    $.env.get('AUTODREAM_DIR'),
-    $.env.get('AUTODREAM_TAGS_FILE'),
-    $.env.get('AUTODREAM_FOCUS_BIN'),
-  ])
-
-  return {
-    script: focusScript({ HOME, AUTODREAM_DIR, AUTODREAM_FOCUS_BIN }),
-    env: { ...(AUTODREAM_DIR ? { AUTODREAM_DIR } : {}), ...(AUTODREAM_TAGS_FILE ? { AUTODREAM_TAGS_FILE } : {}) },
   }
 }
 

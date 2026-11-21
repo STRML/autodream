@@ -52,6 +52,16 @@ test('a turn is handed to the writer one character past its cap, so the writer m
   expect(forWriter('x'.repeat(5_000))).toHaveLength(TEXT_CAP + 1)
 })
 
+test('characters are counted as the writer counts them, in code points, so emoji are not cut early or in half', () => {
+  const fifteenHundred = '😀'.repeat(1_500)
+  const many = '😀'.repeat(3_000)
+
+  expect(forWriter(fifteenHundred)).toBe(fifteenHundred)
+  expect(Array.from(forWriter(many))).toHaveLength(TEXT_CAP + 1)
+  expect(forWriter(many)).not.toContain('�')
+  expect(forWriter(many).endsWith('😀')).toBe(true)
+})
+
 test('the tags file is next to the rest of autodream, and AUTODREAM_DIR moves it', () => {
   expect(tagsFile({ HOME: '/Users/x' })).toBe('/Users/x/.claude/autodream/tags.jsonl')
   expect(tagsFile({ HOME: '/Users/x', AUTODREAM_DIR: '/opt/ad' })).toBe('/opt/ad/tags.jsonl')

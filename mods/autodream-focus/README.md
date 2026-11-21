@@ -83,10 +83,10 @@ is consumed.
 | `AUTODREAM_DIR` | `~/.claude/autodream` (where `tags.jsonl` is) |
 | `AUTODREAM_TAGS_FILE` | `$AUTODREAM_DIR/tags.jsonl` (moves the file itself, as it does for `bin/vault-notes.sh`) |
 
-A value set only in `$AUTODREAM_DIR/config` is invisible to the mod, because the mod cannot source a shell file: the
-script that writes the tag reads the config, but the mod reads the file to light the buttons from the environment alone,
-so a tags file moved only in the config shows no lit buttons. Export it in the environment Claude Code starts from if you
-moved the install. `AUTODREAM_FOCUS_BIN` names the writer if it is not at `$AUTODREAM_DIR/autodream-focus.sh`.
+The mod cannot source a shell file, so a value set only in `$AUTODREAM_DIR/config` is invisible to it directly. It asks
+the script instead: `autodream-focus.sh path` prints the tags file the script writes (the environment, then the config),
+and the mod reads that file to light the buttons. Only when the script is missing or cannot answer does the mod fall back
+to its own environment. `AUTODREAM_FOCUS_BIN` names the writer if it is not at `$AUTODREAM_DIR/autodream-focus.sh`.
 
 ## Limits
 

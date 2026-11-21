@@ -9,6 +9,8 @@
 #         calls this with what it already holds)
 #   last  the newest session of a harness for a directory, and its last reply (what you run
 #         from a second terminal for Codex, which has nothing to hook into)
+#   path  the tags file this script writes, as it resolves it (the environment, then the install's
+#         config): the Claude mod and the OMP picker ask here, so they read the file that is written
 #
 # bin/vault-notes.sh turns pending tags into notes for L2 (see its header). The line this
 # writes is the mod's, plus `harness` and, when known, `transcript` (the session file, so
@@ -21,15 +23,18 @@
 #   refusal with nothing written, because the write replaces the whole file and reading
 #   "unreadable" as "empty" would replace every tag with the one being added.
 # - Lines it does not understand are written back as they stood (a torn last line gets its newline).
-# - The write is a temp file in the same directory and one rename, under a lock, because
-#   three harnesses can tag at once and the mod's own writes are not locked at all.
+# - Adding a tag is one append, so it cannot drop another writer's line. Taking a tag back replaces
+#   the file (a temp file in the same directory and one rename) and is the only write that does.
+# - `tag` runs under flock(2) on $TAGS_FILE.lock, taken by a python3 wrapper that re-runs this script,
+#   because three harnesses can tag at once. The kernel owns the lock: nothing can go stale.
 #
 # Usage:
 #   autodream-focus.sh tag --harness claude|omp|codex --session ID --uuid ROW --role user|assistant
 #                          [--cwd DIR] [--transcript FILE] [--text TEXT]   (text on stdin if omitted)
 #   autodream-focus.sh last --harness omp|codex [--cwd DIR] [--file SESSION] [--role assistant|user] [--dry-run]
+#   autodream-focus.sh path
 #
-# Exit: 0 done, 1 refused (nothing written), 2 usage, 3 jq missing.
+# Exit: 0 done, 1 refused (nothing written), 2 usage, 3 jq or python3 missing.
 #
 # Config (env):
 #   AUTODREAM_DIR         default: next to this script when it carries an install marker, else
@@ -85,70 +90,45 @@ usage() { sed -n '/^# Usage:/,/^# Exit:/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1
 
 command -v jq >/dev/null 2>&1 || die 3 "jq is required"
 
-# A lock is a directory holding its owner's pid. Whether it is stale is a question about that process,
-# never about the lock's age: a writer suspended for longer than any age limit still owns its lock, and
-# a waiter that removed it would publish a tag the suspended writer then overwrites with its old copy.
-# A lock with no pid yet belongs to a writer between mkdir and writing it; only one that stays that
-# way for a minute counts as dead.
-lock_is_stale() { # $1=lock dir -> 0 when its owner is gone
-  local p
-  [ -d "$1" ] || return 1
-  if [ -f "$1/pid" ]; then
-    p="$(cat "$1/pid" 2>/dev/null || true)"
-    case "$p" in ''|*[!0-9]*) return 0 ;; esac
-    ! kill -0 "$p" 2>/dev/null
-    return
-  fi
-  [ $(( $(date +%s) - $(pstat_mtime "$1" || date +%s) )) -gt 60 ]
-}
+# The tags file is written by one process at a time, and the lock is the kernel's, not a file this
+# script judges. `tag` re-runs itself under a small python wrapper that takes flock(2) on
+# $TAGS_FILE.lock and then execs the script with the lock still held; the kernel drops it when that
+# process exits or dies, however it ends. There is no stale lock to detect (so no age rule, no owner
+# pid, no reclaim claim for two waiters to race over), and a writer suspended for any length of time
+# still holds it. A waiter polls without blocking and gives up after five seconds, saying so.
+LOCKER_PY='
+import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)
+deadline = time.time() + 5
+while True:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except OSError:
+        if time.time() >= deadline:
+            sys.stderr.write("autodream-focus: another tag is being written and did not finish; nothing was changed\n")
+            sys.exit(1)
+        time.sleep(0.05)
+os.set_inheritable(fd, True)
+os.execv(sys.argv[2], sys.argv[2:])
+'
 
-take_lock() { # $1=lock dir -> 0 when this process created it and holds it
-  mkdir "$1" 2>/dev/null || return 1
-  printf '%s\n' "$$" > "$1/pid" 2>/dev/null || true
+hold_lock_and_rerun() { # args: the subcommand and its arguments, run again with the lock held
+  command -v python3 >/dev/null 2>&1 || die 3 "python3 is required (it holds the lock on the tags file)"
+  mkdir -p "$(dirname "$TAGS_FILE")" 2>/dev/null || die 1 "cannot create $(dirname "$TAGS_FILE"); nothing was changed"
+  AUTODREAM_FOCUS_LOCKED=1 exec python3 -c "$LOCKER_PY" "$LOCK" "$BASH" "${BASH_SOURCE[0]}" "$@"
 }
-
-drop_lock() { # $1=lock dir: removed only by the process that holds it
-  [ "$(cat "$1/pid" 2>/dev/null || true)" = "$$" ] || return 0
-  rm -f "$1/pid"
-  rmdir "$1" 2>/dev/null || true
-}
-
-# Two waiters can both see a lock as stale. Removing it takes a claim of its own (also a pid lock), and
-# staleness is read again under the claim, so a waiter that lost the race cannot remove the lock the
-# winner just took.
-reclaim_stale_lock() {
-  if ! take_lock "$LOCK.reclaim"; then
-    if lock_is_stale "$LOCK.reclaim"; then rm -f "$LOCK.reclaim/pid"; rmdir "$LOCK.reclaim" 2>/dev/null || true; fi
-    return 1
-  fi
-  if lock_is_stale "$LOCK"; then rm -f "$LOCK/pid"; rmdir "$LOCK" 2>/dev/null || true; fi
-  drop_lock "$LOCK.reclaim"
-}
-
-acquire_lock() {
-  local i=0
-  while ! take_lock "$LOCK"; do
-    i=$(( i + 1 ))
-    [ "$i" -gt 20 ] && return 1
-    if lock_is_stale "$LOCK" && reclaim_stale_lock; then continue; fi
-    sleep 0.25
-  done
-  return 0
-}
-release_lock() { drop_lock "$LOCK"; }
 
 fingerprint() { if [ -f "$TAGS_FILE" ]; then cksum < "$TAGS_FILE" 2>/dev/null || echo unreadable; else echo absent; fi; }
 
-# One cleanup for the lock and the scratch files, registered once. It must not name a function's
-# local: an EXIT trap runs after the function has returned, where `set -u` makes the reference
-# a fatal error that skips the rest of the trap, and a lock left behind blocks every later tag.
+# One cleanup for the scratch files, registered once. It must not name a function's local: an EXIT
+# trap runs after the function has returned, where `set -u` makes the reference a fatal error that
+# skips the rest of the trap.
 TMP=""
 LIVE=""
-HAVE_LOCK=0
 cleanup() {
   [ -z "$TMP" ] || rm -f "$TMP"
   [ -z "$LIVE" ] || rm -f "$LIVE"
-  [ "$HAVE_LOCK" = 0 ] || release_lock
 }
 trap cleanup EXIT
 
@@ -184,20 +164,11 @@ cmd_tag() {
   local id="$session:$uuid"
 
   mkdir -p "$(dirname "$TAGS_FILE")" 2>/dev/null || die 1 "cannot create $(dirname "$TAGS_FILE"); nothing was changed"
-  acquire_lock || die 1 "another tag is being written and did not finish; nothing was changed"
-  HAVE_LOCK=1
 
   # Only a file that is not there is empty.
   if [ -e "$TAGS_FILE" ] && { [ ! -f "$TAGS_FILE" ] || [ ! -r "$TAGS_FILE" ]; }; then
     die 1 "cannot read $TAGS_FILE; nothing was changed"
   fi
-
-  TMP="$(mktemp "$TAGS_FILE.XXXXXX")" || die 1 "cannot write next to $TAGS_FILE; nothing was changed"
-  local tmp="$TMP" before
-  # Taken under the lock and checked again just before the rename. A writer that does not take the lock
-  # (an older mod build) is the only way the file can change in between, and then this refuses rather
-  # than publish a copy that drops its tag.
-  before="$(fingerprint)"
 
   # 1-based numbers of the lines that already tag this turn (any number, in case of a hand edit).
   local drop=""
@@ -207,12 +178,18 @@ cmd_tag() {
       "$TAGS_FILE")" || die 1 "cannot parse $TAGS_FILE; nothing was changed"
   fi
 
+  # Taking a tag back is the one write that replaces the file. Every cooperating writer is held off by
+  # the lock; the fingerprint, checked again just before the rename, is for a writer that takes no lock
+  # (a copy of the old mod that rewrites the file itself): it refuses rather than publish a copy that
+  # drops that writer's tag. Adding a tag never needs it: that is an append (below).
   if [ -n "$drop" ]; then
+    local before; before="$(fingerprint)"
+    TMP="$(mktemp "$TAGS_FILE.XXXXXX")" || die 1 "cannot write next to $TAGS_FILE; nothing was changed"
     awk -v drop="$(printf '%s' "$drop" | tr '\n' ' ')" \
       'BEGIN { n = split(drop, a, " "); for (i = 1; i <= n; i++) d[a[i]] = 1 } !(NR in d)' \
-      "$TAGS_FILE" > "$tmp" || die 1 "could not rewrite $TAGS_FILE; nothing was changed"
+      "$TAGS_FILE" > "$TMP" || die 1 "could not rewrite $TAGS_FILE; nothing was changed"
     [ "$(fingerprint)" = "$before" ] || die 1 "$TAGS_FILE changed while it was being rewritten; nothing was changed"
-    mv -f "$tmp" "$TAGS_FILE" || die 1 "could not replace $TAGS_FILE; nothing was changed"
+    mv -f "$TMP" "$TAGS_FILE" || die 1 "could not replace $TAGS_FILE; nothing was changed"
     say "untagged $id"
     return 0
   fi
@@ -227,22 +204,16 @@ cmd_tag() {
       cwd: $cwd, taggedAt: $at, harness: $harness}
      + (if $transcript == "" then {} else {transcript: $transcript} end)')" || die 1 "could not build the tag"
 
-  # Each step is its own checked command. A `{ ...; } > "$tmp" || die` group is not: bash ignores
-  # errexit for everything inside a group on the left of `||`, and the group's status is its last
-  # command's, so a `cat` that failed part-way was hidden by the `printf` after it and the rename
-  # below replaced every tag with a partial copy.
+  # An append, not a copy and a rename: one O_APPEND write adds the line without reading or replacing
+  # anything, so it cannot drop another writer's tag even if that writer takes no lock, and there is no
+  # copy of the file to come out partial. A torn last line has no newline, so the write starts with one
+  # and the new tag is not glued onto it (the newline and the line are one write).
+  local last="" lead=""
   if [ -s "$TAGS_FILE" ]; then
-    local last
-    cat "$TAGS_FILE" > "$tmp" || die 1 "could not read $TAGS_FILE; nothing was changed"
-    # The mod's own writes are not locked, so the file can change under the copy.
-    cmp -s "$TAGS_FILE" "$tmp" || die 1 "$TAGS_FILE changed while it was being copied; nothing was changed"
-    # A torn last line has no newline; the new tag must not be glued onto it.
     last="$(tail -c1 "$TAGS_FILE")" || die 1 "could not read $TAGS_FILE; nothing was changed"
-    if [ -n "$last" ]; then printf '\n' >> "$tmp" || die 1 "could not write the tag; nothing was changed"; fi
+    if [ -n "$last" ]; then lead=$'\n'; fi
   fi
-  printf '%s\n' "$line" >> "$tmp" || die 1 "could not write the tag; nothing was changed"
-  [ "$(fingerprint)" = "$before" ] || die 1 "$TAGS_FILE changed while it was being rewritten; nothing was changed"
-  mv -f "$tmp" "$TAGS_FILE" || die 1 "could not replace $TAGS_FILE; nothing was changed"
+  printf '%s%s\n' "$lead" "$line" >> "$TAGS_FILE" || die 1 "could not write the tag to $TAGS_FILE; nothing may have been changed"
   say "tagged $id"
 }
 
@@ -349,12 +320,17 @@ cmd_last() {
     printf '%s\n' "$text" | head -3 | sed 's/^/  > /'
     return 0
   fi
-  cmd_tag --harness "$harness" --session "$session" --uuid "$uuid" --role "$role" --cwd "$cwd" --transcript "$file" --text "$text"
+  # The tag is its own run of this script, which takes the lock: this one only read session files.
+  "$BASH" "${BASH_SOURCE[0]}" tag --harness "$harness" --session "$session" --uuid "$uuid" --role "$role" --cwd "$cwd" --transcript "$file" --text "$text"
   say "  from $file"
 }
 
 case "${1:-}" in
-  tag)  shift; cmd_tag "$@" ;;
+  tag)
+    shift
+    if [ "${AUTODREAM_FOCUS_LOCKED:-}" != 1 ]; then hold_lock_and_rerun tag "$@"; fi
+    cmd_tag "$@" ;;
   last) shift; cmd_last "$@" ;;
+  path) printf '%s\n' "$TAGS_FILE" ;;
   *)    usage ;;
 esac

@@ -46,6 +46,22 @@ export default function autodreamFocus(pi: ExtensionAPI) {
 	const cli = cliPath(process.env, homedir());
 	const tags = tagsPath(process.env, homedir(), dirname(cli), dir => isFile(join(dir, "config")) || isFile(join(dir, "PROMPT.md")));
 
+	/**
+	 * The file the script writes, asked of the script: it also reads $AUTODREAM_DIR/config, which this extension cannot,
+	 * so a tags file named only there is invisible to `tags` above. That value stays as the fallback when the script
+	 * cannot answer.
+	 */
+	async function tagsFileNow(): Promise<string> {
+		try {
+			const result = await pi.exec(cli, ["path"], { timeout: 5_000 });
+			const said = result.stdout.trim();
+			if (result.code === 0 && said !== "") return said;
+		} catch {
+			// fall back to what the environment says
+		}
+		return tags;
+	}
+
 	async function toggle(turn: Turn, ctx: ExtensionContext): Promise<void> {
 		const result = await pi.exec(
 			cli,
@@ -74,7 +90,7 @@ export default function autodreamFocus(pi: ExtensionAPI) {
 			ctx.ui.notify("autodream focus: no prompt or reply with text on this branch yet.", "warning");
 			return;
 		}
-		const list = pickList(turns, readTagged(tags, ctx.sessionManager.getSessionId()));
+		const list = pickList(turns, readTagged(await tagsFileNow(), ctx.sessionManager.getSessionId()));
 		const choice = await ctx.ui.select("autodream focus: tag a turn", list.labels, {
 			selectionMarker: "checkbox",
 			checkedIndices: list.checked,

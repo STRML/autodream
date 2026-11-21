@@ -16,6 +16,10 @@ type Machine = {
   writerFails?: string
   /** extra environment the mod can see */
   env?: Record<string, string>
+  /** where the writer says the tags file is (it also reads the install's config, which the mod cannot); default: the usual place */
+  tagsPath?: string
+  /** the writer cannot answer `path` */
+  pathFails?: boolean
 }
 
 type Run = { argv: string[]; env: Record<string, string> | undefined }
@@ -24,11 +28,12 @@ type Run = { argv: string[]; env: Record<string, string> | undefined }
  * The writer is autodream-focus.sh. The stand-in below does what it does to the file the mod reads (toggle a line by id), so the
  * buttons can be checked against what a press leaves on disk. The mod itself never writes: any fs.write is refused.
  */
-const world = (on: On, { file, readError, noScript = false, writerFails, env = {} }: Machine = {}) => {
+const world = (on: On, { file, readError, noScript = false, writerFails, env = {}, tagsPath = FILE, pathFails = false }: Machine = {}) => {
   mock.clock(on, { now: NOW })
   mock.env(on, { HOME: '/Users/x', ...env })
 
   const runs: Run[] = []
+  const asks: Run[] = []
   const toasts: string[] = []
   const writes: string[] = []
   let disk = file
@@ -36,11 +41,11 @@ const world = (on: On, { file, readError, noScript = false, writerFails, env = {
   on('session.start', () => ({ cwd: '/x' }))
   on('session.id', () => ({ value: 's1' }))
   on('session.cwd', () => ({ value: '/Users/x/proj' }))
-  on('fs.exists', (_$, e) => ({ value: e.path.endsWith('autodream-focus.sh') ? !noScript : e.path === FILE && (disk !== undefined || readError !== undefined) }))
+  on('fs.exists', (_$, e) => ({ value: e.path.endsWith('autodream-focus.sh') ? !noScript : e.path === tagsPath && (disk !== undefined || readError !== undefined) }))
   on('fs.read', (_$, e) => {
     if (readError !== undefined) return { deny: readError }
 
-    return e.path === FILE && disk !== undefined ? { value: disk } : { deny: `ENOENT ${e.path}` }
+    return e.path === tagsPath && disk !== undefined ? { value: disk } : { deny: `ENOENT ${e.path}` }
   })
   on('fs.write', (_$, e) => {
     writes.push(e.path)
@@ -48,6 +53,14 @@ const world = (on: On, { file, readError, noScript = false, writerFails, env = {
     return { deny: 'the mod must not write tags.jsonl; the shared writer does' }
   })
   on('process.run', (_$, e) => {
+    if (e.argv[1] === 'path') {
+      asks.push({ argv: e.argv, env: e.init?.env })
+
+      return pathFails
+        ? { value: { exitCode: 1, stdout: '', stderr: 'no', isStdoutTruncated: false, isStderrTruncated: false } }
+        : { value: { exitCode: 0, stdout: `${tagsPath}\n`, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+
     runs.push({ argv: e.argv, env: e.init?.env })
 
     if (writerFails !== undefined) return { value: { exitCode: 1, stdout: '', stderr: writerFails, isStdoutTruncated: false, isStderrTruncated: false } }
@@ -74,7 +87,7 @@ const world = (on: On, { file, readError, noScript = false, writerFails, env = {
     return <Text>engine row</Text>
   })
 
-  return { runs, toasts, writes, disk: () => disk }
+  return { runs, asks, toasts, writes, disk: () => disk }
 }
 
 const start = ($: any) => $.session.start({ cwd: '/x', surface: 'terminal', isInteractive: true })
@@ -191,6 +204,25 @@ test('a tag that OMP or Codex wrote lights the button for its own turn', async (
   const other = JSON.stringify({ id: 's1:r1', session: 's1', uuid: 'r1', role: 'assistant', text: 'x', cwd: '/x', taggedAt: '2026-10-03T10:00:00.000Z', harness: 'omp', transcript: '/t/s1.jsonl' })
 
   world(on, { file: `${other}\n` })
+  await start($)
+
+  expect(await shown(await user($, 'r1'))).toBe('always')
+})
+
+test('a tags file that only the install\'s config names is read where the writer says, so its buttons light', async ($, on) => {
+  const mine = JSON.stringify({ id: 's1:r1', session: 's1', uuid: 'r1', role: 'user', text: 'x', cwd: '/x', taggedAt: '2026-10-03T10:00:00.000Z', harness: 'omp' })
+  const { asks } = world(on, { tagsPath: '/elsewhere/t.jsonl', file: `${mine}\n` })
+
+  await start($)
+
+  expect(asks.length).toBeGreaterThan(0)
+  expect(await shown(await user($, 'r1'))).toBe('always')
+})
+
+test('when the writer cannot say where the file is, the mod reads where its own environment points', async ($, on) => {
+  const mine = JSON.stringify({ id: 's1:r1', session: 's1', uuid: 'r1', role: 'user', text: 'x', cwd: '/x', taggedAt: '2026-10-03T10:00:00.000Z' })
+
+  world(on, { pathFails: true, file: `${mine}\n` })
   await start($)
 
   expect(await shown(await user($, 'r1'))).toBe('always')

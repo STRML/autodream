@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import autodreamFocus from "./autodream-focus";
@@ -174,12 +174,24 @@ describe("/focus pick", () => {
 		expect(notes.at(-1)?.[0]).toContain("removed");
 	});
 
-	test("closing the picker writes nothing", async () => {
+	test("closing the picker writes nothing; it only asks the script where the tags file is", async () => {
 		const { run, execs, pickers } = rig();
 		await run("pick");
 		expect(pickers).toHaveLength(1);
-		expect(execs).toEqual([]);
+		expect(execs).toEqual([["path"]]);
 		expect(existsSync(tags)).toBe(false);
+	});
+
+	test("marks what is tagged in a tags file that only the install's config names", async () => {
+		const moved = join(dir, "moved.jsonl");
+		writeFileSync(join(dir, "config"), `AUTODREAM_TAGS_FILE=${moved}\n`);
+		const first = rig();
+		await first.run();
+		expect(existsSync(tags)).toBe(false);
+		expect(readFileSync(moved, "utf8")).toContain('"id":"s1:a2"');
+		const { run, pickers } = rig(BRANCH, labels => labels[0]);
+		await run("pick");
+		expect(pickers[0]?.checked).toEqual([0]);
 	});
 
 	test("a branch with nothing to tag says so instead of opening an empty picker", async () => {

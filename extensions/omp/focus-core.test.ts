@@ -155,6 +155,17 @@ describe("tagArgv", () => {
 		expect(last("z".repeat(WRITER_CAP + 1))).toHaveLength(WRITER_CAP + 1);
 		expect(last("z".repeat(5000))).toHaveLength(WRITER_CAP + 1);
 	});
+	test("counts code points as the writer does, so emoji are not cut early or in half", () => {
+		const last = (text: string) => {
+			const argv = tagArgv({ ...turn, text }, { id: "s1", cwd: "/x", file: undefined });
+			return argv[argv.length - 1]!;
+		};
+		const fifteenHundred = "😀".repeat(1500);
+		expect(last(fifteenHundred)).toBe(fifteenHundred);
+		const cut = last("😀".repeat(3000));
+		expect(Array.from(cut)).toHaveLength(WRITER_CAP + 1);
+		expect(cut).not.toContain("�");
+	});
 });
 
 describe("a prompt the agent wrote is not the person's", () => {

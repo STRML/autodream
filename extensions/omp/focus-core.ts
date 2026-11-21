@@ -127,8 +127,14 @@ export function tagArgv(turn: Turn, session: { id: string; cwd: string; file: st
 		session.cwd,
 		...(session.file ? ["--transcript", session.file] : []),
 		"--text",
-		turn.text.length > cap ? turn.text.slice(0, cap) : turn.text,
+		cutAt(turn.text, cap),
 	];
+}
+
+/** The first `cap` characters, counted in code points as the writer counts them, so an emoji is neither cut early nor in half. */
+export function cutAt(text: string, cap: number): string {
+	const chars = Array.from(text);
+	return chars.length > cap ? chars.slice(0, cap).join("") : text;
 }
 
 /** Where the shared command is: an explicit override, else the install directory autodream links its scripts into. */

@@ -7,8 +7,8 @@ const ROLES: readonly string[] = ['user', 'assistant']
 
 /**
  * Where the tags are, resolved the way bin/vault-notes.sh resolves them: an exported AUTODREAM_TAGS_FILE wins, else AUTODREAM_DIR (an empty
- * one counts as unset) plus tags.jsonl. The writer (bin/autodream-focus.sh) also reads `$AUTODREAM_DIR/config`; this mod cannot see a value
- * that lives only there, so a tags file moved only in the config shows no lit buttons here. Export it to move the mod's reading too.
+ * one counts as unset) plus tags.jsonl. This is only the fallback: the mod asks the writer (`autodream-focus.sh path`), which also reads
+ * `$AUTODREAM_DIR/config`, a file this mod cannot source.
  */
 export const tagsFile = (env: {
   HOME?: string | undefined
@@ -29,8 +29,16 @@ export const focusScript = (env: {
 /** One turn, across sessions: the id Claude Code gives the row, under the session that holds it. */
 export const tagId = (session: string, uuid: string): string => `${session}:${uuid}`
 
-/** The text handed to the writer: one character past its cap, so the writer sees a long turn and marks the cut with an ellipsis. */
-export const forWriter = (text: string): string => text.slice(0, TEXT_CAP + 1)
+/**
+ * The text handed to the writer: one character past its cap, so the writer sees a long turn and marks the cut with an
+ * ellipsis. Counted in code points, as the writer counts, not in UTF-16 units: a turn of emoji cut at 2,001 units would be
+ * about 1,000 characters, under the writer's cap, so it would add no ellipsis and could keep half a surrogate pair.
+ */
+export const forWriter = (text: string): string => {
+  const chars = Array.from(text)
+
+  return chars.length > TEXT_CAP + 1 ? chars.slice(0, TEXT_CAP + 1).join('') : text
+}
 
 const isString = (value: unknown): value is string => typeof value === 'string'
 
