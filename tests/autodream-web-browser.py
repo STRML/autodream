@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import threading
 import unittest
 
@@ -49,16 +50,26 @@ def has_result(dom):
 # page when virtual time runs out, and a busy machine can reach that before the fetches the
 # checks wait for have returned; the headless process can also miss its deadline outright. Either
 # way the page never wrote data-result, which means unfinished, not failed (#202): try again with
-# more room and a fresh profile. The sum of the deadlines must fit inside the suite's own in
-# tests/autodream-web.sh, and a test pins that. A FAIL result is a real failure and is returned at once.
+# more room and a fresh profile. A FAIL result is a real failure and is returned at once.
 CHROME_ATTEMPTS = ((1500, 25), (6000, 45), (20000, 60))
+# One budget for all Chrome time in this process. Per-attempt deadlines cannot be summed across
+# tests (a suite of 23 tests could spend 23 x 130s), so each attempt is clamped to what is left,
+# and tests/autodream-web.sh gives the process a deadline above this one: the suite then fails a
+# test with TimeoutExpired and still prints its counts, rather than being killed mid-run.
+SUITE_BUDGET = int(os.environ.get('ADWEB_BROWSER_BUDGET', '270'))
+SUITE_END = time.monotonic() + SUITE_BUDGET
 
 
-def dump_dom(chrome, root, url, *, attempts=CHROME_ATTEMPTS, finished=has_result, before_retry=None):
+def dump_dom(chrome, root, url, *, attempts=CHROME_ATTEMPTS, finished=has_result, before_retry=None,
+             until=None):
     # A retry must start from the state the first attempt started from: before_retry puts back
     # anything the page's own run changed (a killed backend, a deleted single-use file).
+    until = SUITE_END if until is None else until
     last = None
     for number, (budget, deadline) in enumerate(attempts):
+        remaining = until - time.monotonic()
+        if remaining < 1:
+            break
         if number and before_retry:
             before_retry()
         try:
@@ -66,14 +77,14 @@ def dump_dom(chrome, root, url, *, attempts=CHROME_ATTEMPTS, finished=has_result
                 '--headless', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
                 '--user-data-dir=' + str(Path(root) / ('profile%d' % number)), '--dump-dom',
                 '--virtual-time-budget=%d' % budget, url],
-                capture_output=True, text=True, timeout=deadline)
+                capture_output=True, text=True, timeout=min(deadline, remaining))
         except subprocess.TimeoutExpired:
             continue
         last = result
         if result.returncode == 0 and finished(result.stdout):
             return result
     if last is None:
-        raise subprocess.TimeoutExpired('chrome', attempts[-1][1])
+        raise subprocess.TimeoutExpired('chrome', max(0, until - time.monotonic()))
     return last
 
 
@@ -905,13 +916,25 @@ check(done.getAttribute('aria-pressed') === 'true', 'the requested thread must s
 check(content.querySelector('article')?.id === 't-00000002', 'the requested thread must be shown');
 ''')
 
-    def test_web_browser_suite_deadline_covers_every_chrome_retry(self):
-        worst = sum(deadline for _, deadline in CHROME_ATTEMPTS)
+    def test_web_chrome_retries_stop_at_the_suite_budget(self):
         runner = (REPO / 'tests/autodream-web.sh').read_text()
         match = re.search(r'^_run autodream-web-browser\.py (\d+)$', runner, re.M)
         self.assertIsNotNone(match, 'tests/autodream-web.sh must give the browser suite its own deadline')
-        self.assertGreaterEqual(int(match[1]), worst + 60,
-            'the suite deadline must outlast one test that uses every Chrome retry')
+        self.assertGreaterEqual(int(match[1]), SUITE_BUDGET + 15,
+            'the runner deadline must outlast the budget the suite spends on Chrome')
+        with tempfile.TemporaryDirectory(prefix='fake-chrome.') as root:
+            root = Path(root)
+            log = root / 'calls'
+            fake = root / 'chrome'
+            fake.write_text('#!/bin/sh\necho x >> "' + str(log) + '"\nsleep 30\n')
+            fake.chmod(0o755)
+            log.write_text('')
+            started = time.monotonic()
+            with self.assertRaises(subprocess.TimeoutExpired):
+                dump_dom(str(fake), root, 'http://127.0.0.1:1/', attempts=((1500, 20), (6000, 20), (20000, 20)),
+                         until=time.monotonic() + 3)
+            self.assertLess(time.monotonic() - started, 10, 'no attempt may run past the suite budget')
+            self.assertEqual(len(log.read_text().split()), 1, 'no new attempt starts once the budget is spent')
 
     def test_web_lately_renders_when_optional_threads_fetch_rejects(self):
         self.run_browser('''await new Promise(resolve => window.addEventListener('load', resolve, {once:true}));

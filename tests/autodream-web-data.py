@@ -166,6 +166,16 @@ class DataTests(unittest.TestCase):
         self.assertNotIn('Could not read sessions.txt.', night['degraded'],
                          'a run that died before enumeration never wrote a worklist')
 
+    def test_web_stats_unreadable_run_stats_still_counts_pending_sidecars(self):
+        import hashlib
+        self.finding('0123456789ab')
+        (self.day / 'run-stats.txt').write_bytes(b'\xff\xfe not utf-8\n')
+        pending = hashlib.sha1(b'/sessions/pending.jsonl').hexdigest()[:12]
+        (self.day / (pending + '.stats.json')).write_text(json.dumps(dict(nested=False)))
+        night = self.stats_night()
+        self.assertTrue(all(value is None for value in night['activity'].values()),
+                        'a run-stats file that will not read is no proof the run died before enumeration')
+
     def test_web_stats_missing_worklist_on_a_legacy_night_is_not_degraded(self):
         self.finding('0123456789ab')
         night = self.stats_night()

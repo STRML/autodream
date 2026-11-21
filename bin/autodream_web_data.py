@@ -74,13 +74,13 @@ def read_categories(path):
 
 
 def run_enumerated(directory):
-    # fatal_exit writes run-stats with a `fatal:` line before any enumeration, so that night has
-    # no worklist and nothing is missing.
+    # fatal_exit writes run-stats with a `fatal:` line before any enumeration, so only a run-stats
+    # file that says so excuses a missing worklist. One that will not read proves nothing.
     try:
-        lines = (directory / 'run-stats.txt').read_text(encoding='utf-8').splitlines()
-    except (OSError, UnicodeError):
-        return False
-    return not any(line.startswith('fatal:') for line in lines)
+        lines = (directory / 'run-stats.txt').read_bytes().splitlines()
+    except OSError:
+        return (directory / 'run-stats.txt').exists()
+    return not any(line.startswith(b'fatal:') for line in lines)
 
 
 def night_sessions(directory, unreadable):
