@@ -10456,6 +10456,36 @@ test_remote_sync_failed_rebuild_with_fewer_hosts_keeps_the_dropped_host_for_the_
   rm -rf "$root"
 }
 
+test_remote_sync_an_older_moved_aside_copy_is_ignored_while_a_report_stands(){
+  echo "# remote sync: a moved-aside copy that a later retry did not remove never brings back a label that retry read"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  printf '255\n' > "$root/rsync.rc"; printf 'ssh: connect to host studio2.invalid port 22: No route to host\n' > "$root/rsync.err"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short=studio2 -->' "the first report records the host"
+  rm -f "$root/rsync.rc" "$root/rsync.err"
+  MOCK_MODE=l2_fail AUTODREAM_L2_ATTEMPTS=1 AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short= -->' "the retry read the host and records nothing missed"
+  AUTODREAM_FORCE=1 rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" "" "a rebuild with remote sync off writes no record, since there is nothing to keep"
+  AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short= -->' "and the next rebuild does not read the old moved-aside copy and bring the host back"
+  rm -rf "$root"
+}
+
+test_remote_sync_a_stub_that_cannot_be_published_fails_the_run(){
+  echo "# remote sync: an empty-night rebuild whose stub cannot be staged exits non-zero and leaves the old report"
+  local root; root=$(setup_env); rs_env "$root"; remove_path "$root/studio/proj-r/r1.jsonl"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_nonempty "$root/dreams/$DATE.md" "the first run wrote a stub report"
+  mkdir -p "$root/dreams/$DATE.md.tmp"                                    # a directory where the stub is staged
+  AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(cat "$root/run.exit")" "1" "the run fails, so nothing reads it as a delivered rebuild"
+  assert_grep "$root/run.out" 'could not publish the report for' "and says why"
+  assert_nonempty "$root/dreams/$DATE.md" "the old report is still there"
+  rm -rf "$root"
+}
+
 test_remote_sync_rebuild_with_remote_sync_off_keeps_the_record(){
   echo "# remote sync: a rebuild with remote sync off keeps the record of the report it replaces"
   local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
@@ -10665,6 +10695,8 @@ _run test_remote_sync_short_date_is_named_until_it_is_rebuilt
 _run test_remote_sync_failed_rebuild_is_retried_by_the_next_trigger_and_its_record_follows_the_report
 _run test_remote_sync_rebuild_with_fewer_hosts_keeps_the_record_of_the_one_it_dropped
 _run test_remote_sync_failed_rebuild_with_fewer_hosts_keeps_the_dropped_host_for_the_retry
+_run test_remote_sync_an_older_moved_aside_copy_is_ignored_while_a_report_stands
+_run test_remote_sync_a_stub_that_cannot_be_published_fails_the_run
 _run test_remote_sync_rebuild_with_remote_sync_off_keeps_the_record
 _run test_remote_sync_incomplete_enumeration_marks_every_host_short
 _run test_remote_sync_prompt_names_short_dates_and_the_rebuild_command

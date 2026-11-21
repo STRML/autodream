@@ -131,8 +131,9 @@ A pull is read-only on the remote and needs only sshd there.
     enumeration was incomplete (`ROOTS_FAILED`, `ROOTS_UNAVAILABLE` or `PARTIAL_ROOTS` above zero),
     because a failed root cannot be told apart from a mirror; and every label in the record of the
     report this run replaces that this run does not configure (`REMOTE_PREV_SHORT`, read before
-    anything moves the old report, from the report at the path or, after a rebuild that died in L2
-    moved it aside, from the newest `.stale-<epoch>` copy with a record), so a rebuild with fewer
+    anything moves the old report, from the report at the path, or only when there is none, because
+    a rebuild that died in L2 moved it aside, from the newest `.stale-<epoch>` copy with a record),
+    so a rebuild with fewer
     hosts cannot erase it, including across the retry of a failed rebuild. With remote sync
     off the line is still written when the replaced report had one to keep.
   - **No migration.** A report with no record line was written with remote sync off or before the

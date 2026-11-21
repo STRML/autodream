@@ -2235,14 +2235,18 @@ remote_short_scan() {
 sync_remote_roots() {
   local prev f rec
   REMOTE_PREV_SHORT=""
-  # The report this run replaces: the one at the path, or, after a rebuild that died in L2 moved it
-  # aside (a successful rebuild deletes that copy), the newest .stale-<epoch> copy that has a record.
-  # Without the second source, the trigger that retries the failed rebuild would start empty and drop
-  # the label of a host the rebuild does not configure.
-  for f in "$REPORT_PATH".stale-* "$REPORT_PATH"; do
-    [ -f "$f" ] && prev=$(cat "$f" 2>/dev/null) || continue
-    if rec=$(remote_report_record "$prev"); then REMOTE_PREV_SHORT=$rec; fi
-  done
+  # The report this run replaces: the one at the path. Only when there is none, because a rebuild
+  # that died in L2 moved it aside, the newest .stale-<epoch> copy that has a record. A copy is never
+  # consulted while a report stands at the path, even one with no record: an older copy that a later
+  # retry did not remove would otherwise bring back a label that retry had already read.
+  if [ -f "$REPORT_PATH" ]; then
+    if prev=$(cat "$REPORT_PATH" 2>/dev/null) && rec=$(remote_report_record "$prev"); then REMOTE_PREV_SHORT=$rec; fi
+  else
+    for f in "$REPORT_PATH".stale-*; do
+      [ -f "$f" ] && prev=$(cat "$f" 2>/dev/null) || continue
+      if rec=$(remote_report_record "$prev"); then REMOTE_PREV_SHORT=$rec; fi
+    done
+  fi
   if [ -z "${AUTODREAM_REMOTE_ROOTS:-}" ]; then remote_sync_stat "remote_sync: off"; return 0; fi
   remote_sync_stat "remote_sync: on"
   local entries=() entry label seen=" " sdir="" n i
@@ -4304,7 +4308,12 @@ EOF
       :
     else
       rm -f "$REPORT_PATH.tmp" "$REPORT_PATH.threads"
-      log "WARNING: could not publish the stub report for $TARGET_DATE; a later trigger will retry"
+      # A run that could not publish its report has not done what it was asked, so it fails: the
+      # exit code is what the launchd job and a forced rebuild's caller see, and a report that was
+      # already at the path stays the old one.
+      log_fatal "could not publish the report for $TARGET_DATE (no sessions were triaged, and the stub could not be staged or renamed into place)"
+      fatal_exit
+      return 1
     fi
     # A question-free report still counts as a report. Without this the streak
     # store would keep yesterday's questions alive across an empty night, and a
