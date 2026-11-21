@@ -491,6 +491,27 @@ ln -s "$C/nodir/x" "$F/.report-index.tmp"
 collect
 assert_eq "$RC" "1" "an index that cannot be written makes collect exit 1"
 
+echo "# a conf that exists and cannot be read is unavailable, not 'none configured'"
+new_case unreadable_conf
+printf 'w %s\n' "$SCRIPTS/w.sh" > "$CONF"
+chmod 000 "$CONF"
+collect
+chmod 644 "$CONF"
+assert_grep "$F/report-index.txt" 'unavailable' "a manual collect over an unreadable conf says the allowlist is unavailable"
+assert_nogrep "$F/report-index.txt" 'none configured' "and never reads as none configured"
+
+echo "# an index whose rows cannot be read back is a failed collect, not a short index with exit 0"
+new_case rows_unreadable
+mk_script "$SCRIPTS/w.sh" <<'SH'
+#!/bin/bash
+echo hi
+SH
+printf 'w %s\n' "$SCRIPTS/w.sh" > "$CONF"
+mkdir -p "$C/shim"
+printf '#!/bin/bash\ncase "$*" in */rows*) exit 1 ;; esac\nexec /bin/cat "$@"\n' > "$C/shim/cat"; chmod +x "$C/shim/cat"
+PATH="$C/shim:$PATH" collect
+assert_eq "$RC" "1" "a failed copy of the rows into the index makes collect exit 1"
+
 echo
 echo "passed: $pass   failed: $fail"
 [ "$fail" -eq 0 ]

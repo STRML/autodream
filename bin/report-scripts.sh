@@ -202,7 +202,12 @@ collect() {
   local seen=" "
 
   # No snapshot means a manual run: read the conf now and skip the hash check.
-  if [ -z "$snapfile" ]; then snapfile="$work/snapshot"; snapshot > "$snapfile"; checked=0; fi
+  # A conf that exists and cannot be read is unavailable, not "none configured".
+  if [ -z "$snapfile" ]; then
+    snapfile="$work/snapshot"; checked=0
+    snapshot > "$snapfile" || printf '#unavailable\n' > "$snapfile"
+  fi
+  # An unreadable snapshot has no first line, so its state is empty and reads as unavailable below.
   local state; state=$(sed -n 1p "$snapfile" 2>/dev/null)
 
   if [ "$state" = "#present" ]; then
@@ -275,7 +280,7 @@ collect() {
       else
         wfail=1; printf '%s\twrite-failed\t-\tcould not write report-%s.md\n' "$name" "$name" >> "$rows"
       fi
-    done < <(sed 1d "$snapfile")
+    done < "$snapfile"   # its first line is the #present marker, which the loop skips as a comment
   fi
 
   local idx="$work/index"
@@ -287,7 +292,10 @@ collect() {
     esac
   else
     printf '# report-scripts: %s entries from %s; columns: name, status, file, detail\n' "$n" "$CONF" > "$idx"
-    cat "$rows" >> "$idx"
+    cat "$rows" >> "$idx" || wfail=1
+    # Every entry line wrote exactly one row. A row write that failed would otherwise leave a short
+    # index that reads as complete.
+    [ "$(wc -l < "$rows" | tr -d ' ')" = "$n" ] || wfail=1
   fi
   cp "$idx" "$fdir/.report-index.tmp" && mv "$fdir/.report-index.tmp" "$fdir/report-index.txt" || wfail=1
   rm -rf "$work"
