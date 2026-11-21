@@ -124,8 +124,8 @@ skips what it missed. The first night the host syncs again, the report lists the
 (the last seven days) that were missing it, with the command for each,
 `autodream-now.sh <date> --force`. Nothing rebuilds by itself, because a rebuild replaces the
 report, including any triage decisions you wrote into it. A date drops off the list once a
-rebuild has delivered a report that read the host. A rebuild that dies before it writes a report
-leaves the date listed.
+rebuild has delivered a report that read the host. The list comes from a line each report carries
+(`<!-- autodream:remote-short=studio2 -->`), so it is only as old as the reports.
 
 The local copy of each host's transcripts, `~/.claude/autodream/remote/<label>/projects`, is an
 archive and is never pruned, so it keeps transcripts the host has since deleted. Its transcript

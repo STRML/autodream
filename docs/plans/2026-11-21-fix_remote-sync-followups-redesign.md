@@ -1,48 +1,48 @@
 # Redesign: remote sync follow-ups (#228, #229, #230)
 
-Branch `fix/remote-sync-followups`, https://github.com/STRML/autodream/pull/234. Review gate rounds 1 to 4 blocked, so this plan groups every blocking finding by the mistake behind it and rules each group out.
+Branch `fix/remote-sync-followups`, https://github.com/STRML/autodream/pull/234. The review gate blocked rounds 1 to 4, a first redesign (reserved labels, below) ran as round 5 and blocked on three new P1s, and this is the second redesign. It groups every blocking finding by the mistake behind it and rules each group out.
 
 ## Blocking findings, by group
 
 | Group | Mistake | Findings (round) |
 |---|---|---|
-| A | Treating a sync status or a run-stats file as proof that a report was delivered | `partial` omitted from the list (1); failed rebuild clears the warning (1); same, pre-marker nights (2, 3); marker cleared by a half-written report (2) |
-| B | An alternate output path (the empty-night stub) not carrying the obligations of the main one | stub tells the user to overwrite decisions with no warning (1); stub hides the question from the streak store (1); stub hides an unreadable scan (1) |
-| C | Keys of different kinds sharing one flat `remote_sync_<name>` namespace in run-stats | a malformed entry's key `invalid` equals a host named `invalid` (1); a host named `studio_cause` read as `studio`'s cause line (3); `studio` plus `studio_cause` (4) |
-| D | A failed measurement recorded as a value | mirror size from a failed walk (1); a read error read as no match (1) |
-| E | A path or resource built from a failed allocation | `/0.status` from a failed `mktemp` (1); job dir leaked by a killed run (1) |
+| A | Treating a sync status or a run-stats file as proof that a report was delivered | `partial` omitted (1); failed rebuild clears the warning (1); same for older nights (2, 3); marker cleared by a half-written report (2); successful sync clears the warning when the mirror could not be enumerated (5) |
+| B | An alternate output path (the empty-night stub) not carrying the obligations of the main one | stub: no warning about triage decisions, no counted question, no unreadable-scan line (1); no unknown-mirror line (5, P2) |
+| C | Keys of different kinds sharing one flat `remote_sync_<name>` namespace in run-stats | host `invalid` (1); host `studio_cause` (3, 4) |
+| D | A failed measurement recorded as a value | mirror size from a failed walk (1); read error as no match (1); newline in a path (5, P2); a failed date computation (5, P2) |
+| E | A path or resource built from a failed allocation | `/0.status` (1); leaked job dir (1) |
+| F | Related state published in two unprotected steps, or replaced by a narrower view | a delivered report keeps the previous report's marker if the run dies between them (5); a rebuild configured with fewer hosts erases a short host (5) |
 
-Groups A, B, D and E were fixed and not raised again in the delta rounds, except that round 2 to 4's repeat of A is really C's ambiguity at the migration site. Group C came back three times (rounds 3 and 4, and its first form in round 1) because each fix parsed run-stats better instead of removing what makes the parse ambiguous.
+Groups A and F are one mistake seen twice: the record of "which hosts this report did not read" lived outside the report, in `remote-short.txt` and in run-stats, so it could disagree with the report it described. Rounds 1 to 5 fixed the disagreements one order at a time. `CLAUDE.md` already names the rule that ends it (`question-streaks.sh`: "when a fix starts choosing which of two files to write first, merge the files instead").
 
-## The step that would have caught group C in round 1
+## Design
 
-Asking what a label may be called before writing a parser for the keys built from it. `remote_sync_<label>`, `remote_sync_<label>_cause`, `remote_sync_<label>_last_ok` and the refusal key `invalid` are all built by concatenation, so two different facts can print the same line. No parser can undo that; only the set of allowed labels can.
-
-## Design change
-
-1. **Reserved label names.** `sync_remote_roots` refuses a label equal to `invalid` or ending in `_cause` or `_last_ok`, in the same `case` as the character check and so ahead of the adapter check: the entry takes the key `invalid`, nothing syncs, the cause names the label and says it is reserved. A reserved label therefore never gets a key of its own, never reaches `REMOTE_SYNCED_LABELS` and never joins the marker. After this, `remote_sync_<name>` with a status value names a label exactly when `<name>` is not `invalid` and does not end in either suffix, for every file this code writes.
-2. **The migration reads that rule and nothing else.** `migrate_remote_short_marker` is one pass: a status line whose key is not `invalid` and does not end in `_cause` or `_last_ok`, with the status words in one shared list (`REMOTE_SHORT_STATUSES`) that `remote_short_has` also uses. The two-pass `seen` logic goes, because it only existed to give a meaning to the names step 1 forbids.
-3. **The migration also keeps the "read everything" answer.** When the old run-stats says `remote_sync: on` and names no short label, it writes an empty marker. Without it, a forced rebuild whose sync fails and then defers rewrote run-stats, the scan fell back to it, and a date whose standing report did read the host was listed as short (the inverse of group A, found in plan review). An old run-stats that is unreadable, or that awk cannot read, logs a WARNING instead of returning silently (group D).
-4. **The stub marker needs the stub write to have succeeded.** `cat > "$REPORT_PATH"` has no move-aside, so a write that cannot open leaves the previous run's report, which `report_complete` accepts. `STUB_WRITTEN=$?` gates the marker.
-5. **Residual, stated.** A run-stats file written before this change by a host whose label ended in a reserved suffix would migrate wrongly. The only host configured anywhere is `studio2` (https://github.com/STRML/autodream/issues/229 says "Today there is one host (studio2)"), so no such file exists. No shim is added.
-6. **Deletion date.** The migration and the run-stats branch of `remote_short_has` only matter for nights written before the marker, inside a 7-day window. Both are removed after 2026-11-28; the comment above the function says so.
+1. **The record is a line in the report.** `<!-- autodream:remote-short=a,b -->`, the labels the report did not fully read, empty when none. It is written inside the same atomic write as the report body: the L2 writer's `{ report_body; remote_short_line; } > tmp && mv tmp report`, and the stub's heredoc. `remote-short.txt`, `write_remote_short_marker`, `migrate_remote_short_marker` and the run-stats fallback are deleted. A run killed before it publishes, a rebuild that defers, and a write that fails all leave the old report with its old record, by construction.
+2. **What a report did not fully read** (`remote_short_labels`): every configured label whose sync was not `ok` (`partial` counts); every configured label when `ROOTS_FAILED`, `ROOTS_UNAVAILABLE` or `PARTIAL_ROOTS` is above zero, because a failed root cannot be told apart from a mirror; and every label in the record of the report being replaced that this run does not configure (`REMOTE_PREV_SHORT`, read at the top of `sync_remote_roots` before anything moves the old report), so a rebuild with fewer hosts cannot erase it. With remote sync off the line is still written when the replaced report carried one.
+3. **The scan reads reports.** For each of the seven days before the target date, `$DREAMS_DIR/<date>.md`, read once into memory. A record line names the labels; a report with no line (remote sync was off, or it predates the record) is skipped. A night with a findings dir and no report (a rebuild that died in L2 moved the old one aside, and the next trigger rebuilds it), a report that will not read, or a date that will not compute is counted in `remote_short_scan_unreadable`.
+4. **No migration.** Nights since remote sync shipped (2026-11-18) were already named by their own self-audit line, so the scan does not look at them. This removes the run-stats fallback whose hole (a rebuild rewrites run-stats before L2 runs) the gate found in rounds 2 to 4.
+5. **Reserved labels** (kept from the first redesign): `invalid` and any name ending in `_cause` or `_last_ok` are refused, ahead of the adapter check, so run-stats lines cannot be mistaken for a host.
+6. **Smaller fixes from round 5:** the mirror size is `unknown` when a path holds a newline; the empty-night stub says when a mirror could not be measured; a failed date computation counts as unreadable. Not changed: an inaccessible parent of a mirror reading as an empty one (P2; `-d` cannot tell absent from unreadable, and a mirror with an inaccessible parent also fails the sync that creates it).
 
 ## Failure matrix
 
 | State or input | What the operation does | How it can fail | What the caller is told | Test |
 |---|---|---|---|---|
-| Label `invalid` configured | Refused before ssh | Synced, then its `ok` line read as the refusal | `remote_sync_invalid: invalid`, cause names the label and the reserved rule, no rsync | `reserved_labels_are_refused` |
-| Label `x_cause` or `y_last_ok` configured | Refused before ssh | Its status line read as another label's extra line | Same | `reserved_labels_are_refused` |
-| Reserved label while the claude adapter is off | Refused as reserved, not as an adapter refusal | Written under its own key and joined to the marker | Key `invalid`; a real label in the same config is still refused for the adapter and listed | `reserved_label_is_refused_before_the_adapter_check` |
-| Legacy run-stats with `other`, `other_cause`, `other_last_ok` and the key `invalid`, rebuild dies before a report | Migration writes `other` only | Extra lines or the refusal key read as hosts | Marker lists `other`; the next night names the date | `pre_marker_migration_skips_a_labels_extra_lines` |
-| Legacy run-stats says `remote_sync: on` and every host `ok`, forced rebuild's sync fails and no report follows | Migration writes an empty marker | Run-stats rewritten with `failed`, scan falls back to it and lists a date that did read the host | Date not listed | `pre_marker_ok_night_is_not_made_short_by_a_failed_rebuild` |
-| Legacy run-stats has no `remote_sync: on`, or cannot be read | No marker; a WARNING for the unreadable case | Silent return | Log line | by inspection (a mode-000 run-stats is skipped as root in CI) |
-| Stub report write fails to open | Marker untouched | `report_complete` accepts the earlier report and clears the marker | Date still listed | gated on `STUB_WRITTEN`, by inspection (no test can make the write fail without breaking the run) |
-| Forced rebuild syncs, then no report | Marker from the earlier delivery stands | Cleared by the rebuild's run-stats | Date still listed | `failed_rebuild_keeps_the_date_listed` |
-| Report written but not validated (stub half-write, degraded capture) | Marker untouched | Cleared on `-s` | Date still listed | gated by `L2_DELIVERED` and `report_complete` |
-| Empty night, host synced, earlier date short | Question inside the sentinels, counted, with the triage-decisions warning | "None" and a zero count | Question and streak escalation | `empty_night_stub_asks_the_question_and_counts_it` |
-| Empty night, an earlier night unreadable | Stub says it could not be checked | Silent | A sentence in the stub | `empty_night_stub_says_the_scan_could_not_read_a_night` |
+| Earlier report's record names the label | Date listed, oldest first, inside seven days | Window off by one; clean or record-less report listed | `remote_short_dates_<label>` | `short_dates_lists_earlier_dates_the_host_missed` |
+| Nothing short | `none` | Key absent reads as an old runner | `remote_short_dates_<label>: none` | `short_dates_none_when_every_earlier_date_was_read` |
+| Label still failing tonight | No scan for it | Dates listed for a host that is still down | Failure line and banner | `short_dates_not_scanned_while_the_host_is_still_down` |
+| Report missing (findings dir exists) or unreadable | Skipped, counted | Read as clean | `remote_short_scan_unreadable: N` | `short_dates_counts_a_night_it_cannot_read` |
+| Label renamed or removed | Not listed | Listed under another label | Nothing | `short_dates_only_for_labels_in_the_config` |
+| Host failed, host back, date rebuilt with `--force` | Next night names the date; the rebuilt report's record is empty | Rebuilt date stays listed | Question and command, then nothing | `short_date_is_named_until_it_is_rebuilt` |
+| Rebuild dies in L2 | Old report moved aside, no report at the path; the next trigger rebuilds it and the record follows the new report | Old record lingers beside a missing report | Counted unreadable until the trigger delivers | `failed_rebuild_is_retried_by_the_next_trigger_and_its_record_follows_the_report` |
+| Rebuild configured with fewer hosts | Record keeps the dropped host's label | Dropped host erased | Record `a` after rebuilding with `b` only | `rebuild_with_fewer_hosts_keeps_the_record_of_the_one_it_dropped` |
+| Rebuild with remote sync off | Line still written with the carried labels | Record dropped | Record kept | `rebuild_with_remote_sync_off_keeps_the_record` |
+| Sync ok but a root could not be enumerated | Every configured label recorded short | Cleared because the sync was ok | Date offered for rebuild | `incomplete_enumeration_marks_every_host_short` |
+| Reserved label | Refused under key `invalid`, before the adapter check | Key collision | Cause names the label and the rule | `reserved_labels_are_refused`, `reserved_label_is_refused_before_the_adapter_check` |
+| Empty night, earlier date short | Question inside the sentinels, counted, with the warning | "None" and zero | Question and streak | `empty_night_stub_asks_the_question_and_counts_it` |
+| Empty night, scan or measurement failed | Stub says so | Silent | A sentence | `empty_night_stub_says_the_scan_could_not_read_a_night`, `mirror_size_failure_is_unknown_not_zero` |
+| Job dir cannot be made | No job starts, no result read | `/0.status` read | `failed (cannot make a job dir for the sync jobs)` | `no_job_dir_fails_each_host_and_says_why` |
 
 ## What does not change
 
-Marker file semantics, the scan, the stub, the job dir and the mirror size stay as they pass today. Two tests are replaced: the one that had a host named `invalid` syncing (that name is now refused) and the one that kept a host named `studio_cause` (ditto). The stale text that described `invalid` as a malformed entry is updated in `bin/run.sh`, `CLAUDE.md`, `prompts/PROMPT.md` and `README.md`. `bin/remote-sync.sh` keeps its own character check and no reserved-name check, because only `run.sh` builds run-stats keys.
+Parallel sync, the job dir keyed by pid, the mirror archive and its size keys, and the PROMPT question title stay. Tests that seeded run-stats or a marker are rewritten to seed a report with a record line.

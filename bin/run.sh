@@ -2020,6 +2020,7 @@ REMOTE_SHORT_QUESTIONS=""  # Open-questions items naming earlier dates a host mi
 REMOTE_SHORT_QCOUNT=0      # how many items that is
 REMOTE_SHORT_UNREADABLE=0  # earlier nights the scan could not judge
 REMOTE_SYNC_NOTMP=0        # 1 when the per-run job dir could not be made, so no job was started
+REMOTE_MIRROR_UNKNOWN=0    # mirrors whose size could not be measured tonight
 remote_sync_stat() { REMOTE_SYNC_LINES="${REMOTE_SYNC_LINES}$1"$'\n'; }
 
 # $1=entry $2=key $3=why $4=real: an entry refused before any ssh. $4=real when the key is a real
@@ -2074,6 +2075,8 @@ remote_sync_locked() {
 remote_mirror_size() {
   [ -d "$1" ] || { echo "0 0"; return 0; }
   local out
+  # A newline in a path would split wc's line for it into two records.
+  [ -z "$(find "$1" -name $'*\n*' -print -quit 2>/dev/null)" ] || { echo "unknown unknown"; return 0; }
   out=$(set -o pipefail; find "$1" -type f -name '*.jsonl' -exec wc -c {} + 2>/dev/null \
     | awk '$2 == "total" && NF == 2 { next } { f++; b += $1 } END { print f + 0, b + 0 }') \
     || { echo "unknown unknown"; return 0; }
@@ -2131,6 +2134,7 @@ remote_sync_finish() {
   remote_sync_stat "remote_sync_$label: $word"
   remote_sync_stat "remote_sync_${label}_cause: $cause"
   remote_sync_stat "remote_sync_${label}_last_ok: ${last:-never}"
+  case "$size" in unknown*) REMOTE_MIRROR_UNKNOWN=$((REMOTE_MIRROR_UNKNOWN + 1)) ;; esac
   remote_sync_stat "remote_mirror_files_$label: ${size% *}"
   remote_sync_stat "remote_mirror_bytes_$label: ${size#* }"
   log "remote sync $label: $status in ${secs:-?}s"
@@ -2140,58 +2144,78 @@ remote_sync_finish() {
 # A finished report stops every later trigger at the guard, and the next night's mtime lower bound
 # skips a transcript last written on the failed day, so a date whose host was down is never
 # retried (#230). Rebuilding it replaces a report the user may have triaged, so nothing rebuilds on
-# its own. Instead, a run whose sync worked looks back over the trailing week and names every date
-# where the same label was not fully read, with the rebuild command.
+# its own. Instead, a run whose sync worked looks back over the trailing week of reports and names
+# every date whose report did not fully read the same label, with the rebuild command.
 #
-# What says a date was short is `findings/<date>/remote-short.txt`, one label per line, written only
-# when that date's run delivered a complete report (write_remote_short_marker). A forced rebuild
-# that syncs fine and then dies before a report leaves the old marker alone, so the date stays
-# listed; run-stats.txt could not say that, because a rebuild rewrites it before L2 runs. A date
-# with no marker (a night from before the marker existed) falls back to its run-stats.txt lines.
-# `partial` counts as short: rsync 23 can leave a file uncopied, and the next sync copies it with
-# its old mtime, which the next day's lower bound skips. Only labels configured tonight are read, so
-# a renamed or removed host lists nothing. A night whose findings dir exists but holds nothing
-# readable is counted in remote_short_scan_unreadable and never read as clean; a night with no
-# findings dir did not run. Each file is read once into memory, so a file that goes unreadable
-# between a check and a read cannot read as "no match".
+# The record is a line inside the report, `<!-- autodream:remote-short=a,b -->`: the labels that
+# report did not fully read, empty when none. It is written in the same atomic write as the report
+# body (remote_short_line, called by the L2 writer and the stub), so the record and the report are
+# one file and cannot disagree. A run killed before it publishes, a rebuild that defers, and a
+# write that fails all leave the old report with its old record. An earlier design kept the record
+# in a second file and spent four review rounds on the orders in which the two could diverge.
+# A report with no such line was written with remote sync off (or before the record existed) and is
+# skipped. A night with a findings dir and no report (a rebuild that failed in L2 moved the old one
+# aside, and the next trigger rebuilds it) or a report that will not read is counted in
+# remote_short_scan_unreadable. Only labels configured tonight are listed.
+#
+# What a report did not fully read: every configured label whose sync was not ok (partial counts:
+# rsync 23 can leave a file uncopied, which the next sync copies with an old mtime that the next
+# day's lower bound skips); every configured label when the enumeration was incomplete, because the
+# roots that failed cannot be told apart from a mirror; and every label the report it replaces
+# listed that this run does not configure, so a rebuild with fewer hosts cannot erase them.
 REMOTE_SHORT_SCAN_DAYS=7
-REMOTE_SHORT_STATUSES="failed invalid skipped_locked partial"   # statuses that mean a host was not fully read
+REMOTE_PREV_SHORT=""   # the record of the report this run replaces, comma-separated
 
-# $1=marker|stats $2=file text $3=label: 0 when that night's text lists the label as short.
-remote_short_has() {
-  local w
-  if [ "$1" = marker ]; then
-    printf '%s\n' "$2" | grep -Fxq -- "$3"
-    return
-  fi
-  for w in $REMOTE_SHORT_STATUSES; do
-    if printf '%s\n' "$2" | grep -Fxq -- "remote_sync_$3: $w"; then return 0; fi
+# $1=report text -> its record, comma-separated and possibly empty; exit 1 when it has no record line.
+remote_report_record() {
+  local line
+  line=$(printf '%s\n' "$1" | grep '^<!-- autodream:remote-short=.* -->$') || return 1
+  line=${line##*$'\n'}
+  line=${line#'<!-- autodream:remote-short='}
+  printf '%s' "${line% -->}"
+}
+
+# The labels the report being written did not fully read, comma-separated.
+remote_short_labels() {
+  local l all="$REMOTE_SHORT_LABELS" out="" configured="$REMOTE_SYNCED_LABELS $REMOTE_SHORT_LABELS"
+  if [ $(( ${ROOTS_FAILED:-0} + ${ROOTS_UNAVAILABLE:-0} + ${PARTIAL_ROOTS:-0} )) -gt 0 ]; then all="$configured"; fi
+  for l in ${REMOTE_PREV_SHORT//,/ }; do
+    case " $configured " in *" $l "*) ;; *) all="$all $l" ;; esac
   done
-  return 1
+  for l in $all; do
+    case ",$out," in *",$l,"*) ;; *) out="${out:+$out,}$l" ;; esac
+  done
+  printf '%s' "$out"
+}
+
+# The record line, or nothing when remote sync is off and the report it replaces has none to keep.
+remote_short_line() {
+  { [ -n "${AUTODREAM_REMOTE_ROOTS:-}" ] || [ -n "$REMOTE_PREV_SHORT" ]; } || return 0
+  printf '<!-- autodream:remote-short=%s -->\n' "$(remote_short_labels)"
 }
 
 remote_short_scan() {
-  local i k n=0 d dir f kind body label dates
-  local dnames=() dkinds=() dbodies=()
+  local i k n=0 d report body rec label dates
+  local dnames=() drecs=()
   REMOTE_SHORT_QUESTIONS=""; REMOTE_SHORT_QCOUNT=0; REMOTE_SHORT_UNREADABLE=0
   i=$REMOTE_SHORT_SCAN_DAYS
   while [ "$i" -ge 1 ]; do
-    d=$(pdate_shift "$TARGET_DATE" "-$i" d) || { i=$((i - 1)); continue; }
+    d=$(pdate_shift "$TARGET_DATE" "-$i" d) || { REMOTE_SHORT_UNREADABLE=$((REMOTE_SHORT_UNREADABLE + 1)); i=$((i - 1)); continue; }
     i=$((i - 1))
-    dir="$AUTODREAM_DIR/findings/$d"
-    [ -d "$dir" ] || continue
-    f="$dir/run-stats.txt"; kind=stats
-    if [ -e "$dir/remote-short.txt" ]; then f="$dir/remote-short.txt"; kind=marker; fi
-    if [ -f "$f" ] && body=$(cat "$f" 2>/dev/null); then
-      dnames[n]=$d; dkinds[n]=$kind; dbodies[n]=$body; n=$((n + 1))
-    else
-      REMOTE_SHORT_UNREADABLE=$((REMOTE_SHORT_UNREADABLE + 1))
+    report="$DREAMS_DIR/$d.md"
+    if [ ! -e "$report" ]; then
+      [ ! -d "$AUTODREAM_DIR/findings/$d" ] || REMOTE_SHORT_UNREADABLE=$((REMOTE_SHORT_UNREADABLE + 1))
+      continue
     fi
+    if ! body=$(cat "$report" 2>/dev/null); then
+      REMOTE_SHORT_UNREADABLE=$((REMOTE_SHORT_UNREADABLE + 1)); continue
+    fi
+    if rec=$(remote_report_record "$body"); then dnames[n]=$d; drecs[n]=$rec; n=$((n + 1)); fi
   done
   for label in $REMOTE_SYNCED_LABELS; do
     dates=""; k=0
     while [ "$k" -lt "$n" ]; do
-      if remote_short_has "${dkinds[k]}" "${dbodies[k]}" "$label"; then dates="${dates:+$dates }${dnames[k]}"; fi
+      case ",${drecs[k]}," in *",$label,"*) dates="${dates:+$dates }${dnames[k]}" ;; esac
       k=$((k + 1))
     done
     remote_sync_stat "remote_short_dates_$label: ${dates:-none}"
@@ -2208,50 +2232,12 @@ remote_short_scan() {
   remote_sync_stat "remote_short_scan_unreadable: $REMOTE_SHORT_UNREADABLE"
 }
 
-# Run when this run delivered a complete report: record which labels it did not fully read, for the
-# scan above. Written to a temp file and renamed, and an empty file is a real answer (every label
-# was read), which is what clears a rebuilt date.
-write_remote_short_marker() {
-  [ -n "${AUTODREAM_REMOTE_ROOTS:-}" ] || return 0
-  local f="$FINDINGS_DIR/remote-short.txt" label
-  { for label in $REMOTE_SHORT_LABELS; do printf '%s\n' "$label"; done; } > "$f.tmp.$$" 2>/dev/null \
-    && mv -f "$f.tmp.$$" "$f" 2>/dev/null \
-    || { rm -f "$f.tmp.$$" 2>/dev/null; log "WARNING: could not write $f; this date will not be listed if a host was short"; }
-}
-
-# A night from before remote-short.txt existed keeps its record only in run-stats.txt, which a
-# forced rebuild rewrites before L2 runs. Copy it into the marker before this run can overwrite it,
-# so a rebuild that dies before a report leaves the date's earlier state in place, short hosts or
-# none. A night whose old run-stats has no `remote_sync: on` line was not syncing remote hosts and
-# gets no marker, and a night that already has one is left alone.
-#
-# A status line names a label exactly when its key is not `invalid` and does not end in `_cause`
-# or `_last_ok`: sync_remote_roots refuses those as label names, so no label can print like another
-# line. Remove this function and the run-stats branch of remote_short_has after 2026-11-28, once
-# every night inside the scan window was written by a run that writes the marker.
-migrate_remote_short_marker() {
-  local f="$FINDINGS_DIR/run-stats.txt" m="$FINDINGS_DIR/remote-short.txt" labels
-  [ ! -e "$m" ] || return 0
-  [ -e "$f" ] || return 0
-  if ! grep -Fxq 'remote_sync: on' "$f" 2>/dev/null; then
-    [ -r "$f" ] || log "WARNING: $f is unreadable, so a rebuild of $TARGET_DATE cannot keep that night's short hosts"
-    return 0
-  fi
-  labels=$(awk -F': ' -v st="$REMOTE_SHORT_STATUSES" '
-    /^remote_sync_/ && index(" " st " ", " " $2 " ") {
-      k = $1; sub(/^remote_sync_/, "", k)
-      if (k != "invalid" && k !~ /_(cause|last_ok)$/) print k
-    }' "$f" 2>/dev/null) || { log "WARNING: could not read $f, so a rebuild of $TARGET_DATE cannot keep that night's short hosts"; return 0; }
-  if { [ -z "$labels" ] || printf '%s\n' "$labels"; } > "$m.tmp.$$" 2>/dev/null && mv -f "$m.tmp.$$" "$m" 2>/dev/null; then
-    log "remote sync: kept the earlier run's short hosts for $TARGET_DATE in remote-short.txt before this run rewrites run-stats.txt"
-  else
-    rm -f "$m.tmp.$$" 2>/dev/null
-    log "WARNING: could not write $m from the earlier run-stats.txt"
-  fi
-}
-
 sync_remote_roots() {
-  migrate_remote_short_marker
+  local prev
+  REMOTE_PREV_SHORT=""
+  if [ -f "$REPORT_PATH" ] && prev=$(cat "$REPORT_PATH" 2>/dev/null); then
+    REMOTE_PREV_SHORT=$(remote_report_record "$prev") || REMOTE_PREV_SHORT=""
+  fi
   if [ -z "${AUTODREAM_REMOTE_ROOTS:-}" ]; then remote_sync_stat "remote_sync: off"; return 0; fi
   remote_sync_stat "remote_sync: on"
   local entries=() entry label seen=" " sdir="" n i
@@ -4272,7 +4258,10 @@ $( if [ "${ROOTS_FAILED:-0}" -gt 0 ] || [ "${ROOTS_UNAVAILABLE:-0}" -gt 0 ]; the
 $( if [ "$REMOTE_SHORT_UNREADABLE" -gt 0 ]; then
      # A night with nothing to triage skips L2, so this stub is the only place a failure of the
      # historical scan itself (#230) can be said.
-     printf '%s earlier night(s) had no readable record of their remote sync, so whether a remote host missed them could not be checked. See remote_short_scan_unreadable in run-stats.txt.' "$REMOTE_SHORT_UNREADABLE"
+     printf '%s earlier night(s) had no readable report, so whether a remote host missed them could not be checked. See remote_short_scan_unreadable in run-stats.txt.\n\n' "$REMOTE_SHORT_UNREADABLE"
+   fi
+   if [ "$REMOTE_MIRROR_UNKNOWN" -gt 0 ]; then
+     printf '%s remote mirror(s) could not be measured tonight (unknown in remote_mirror_files_* and remote_mirror_bytes_*), so the walk of them may have been incomplete.' "$REMOTE_MIRROR_UNKNOWN"
    fi )
 
 (Generated $(date -u +%Y-%m-%dT%H:%M:%SZ))
@@ -4290,8 +4279,8 @@ $( if [ "$REMOTE_SHORT_QCOUNT" -gt 0 ]; then
 
 <!-- autodream:open-questions=$REMOTE_SHORT_QCOUNT -->
 AUTODREAM_QUESTIONS_END
+$(remote_short_line)
 EOF
-    STUB_WRITTEN=$?
     if [ -s "$FINDINGS_DIR/dropped-threads.md" ]; then
       awk -v section="$FINDINGS_DIR/dropped-threads.md" '
         $0 == "AUTODREAM_QUESTIONS_BEGIN" {
@@ -4302,9 +4291,6 @@ EOF
         { print }
       ' "$REPORT_PATH" > "$REPORT_PATH.threads" && mv "$REPORT_PATH.threads" "$REPORT_PATH"
     fi
-    # Only a stub this run wrote counts: a write that failed to open leaves whatever report was at
-    # the path, which report_complete would accept.
-    if [ "$STUB_WRITTEN" = 0 ] && report_complete; then write_remote_short_marker; fi
     # A question-free report still counts as a report. Without this the streak
     # store would keep yesterday's questions alive across an empty night, and a
     # question that reappeared two reports later would be called consecutive when
@@ -5368,7 +5354,7 @@ PY
     L2_COMPLETE=0
     if report_has_sentinel "$L2_STDOUT"; then
       write_session_cwds "$FINDINGS_DIR" || log "WARNING: could not write session-cwds.tsv; Lately will fall back to project buckets"
-      if report_body "$L2_STDOUT" > "$REPORT_PATH.tmp" && mv "$REPORT_PATH.tmp" "$REPORT_PATH"; then
+      if { report_body "$L2_STDOUT" && remote_short_line; } > "$REPORT_PATH.tmp" && mv "$REPORT_PATH.tmp" "$REPORT_PATH"; then
         L2_COMPLETE=1
       else
         log "WARNING: could not stage the sentinel-stripped report at $REPORT_PATH"
@@ -5474,9 +5460,6 @@ PY
 
   if [ -f "$REPORT_PATH" ]; then
     log "report bytes: $(wc -c < "$REPORT_PATH" | tr -d ' ')"
-    # The remote hosts this report did not fully read, recorded only now that a report stands
-    # behind them. A run that died before this line leaves the date's earlier record in place.
-    if [ "${L2_DELIVERED:-0}" = 1 ] && report_complete; then write_remote_short_marker; fi
 
     # ---- Escalate questions this report has now asked N nights running ----
     # Before the pins and notify.sh, deliberately: it only reads the report and writes one
