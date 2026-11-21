@@ -291,7 +291,15 @@ let threadRenderer;
 const threadActionStates = new Map();
 let currentView = 'lately';
 let threadFetches = 0;
+let drawnThreadSeq = 0;
 function drawThreads(data, seq, selectedId) {
+  if (seq < drawnThreadSeq) {
+    const content = document.getElementById('content');
+    if (selectedId && /^t-[0-9a-f]{8}$/.test(selectedId) && threadRenderer && content.contains(threadRenderer.element))
+      threadRenderer.select(selectedId);
+    return;
+  }
+  drawnThreadSeq = seq;
   for (const [id, state] of threadActionStates) {
     if (state.settledAt !== undefined && seq > state.settledAt) threadActionStates.delete(id);
   }

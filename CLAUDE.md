@@ -570,6 +570,22 @@ Charts use inline SVG, accessible labels and tables of values.
 “Finished that day” counts current done threads whose `last_seen` is that day.
 It changes on reopen and does not reconstruct historical status transitions.
 
+The server class skips `HTTPServer.server_bind`'s `socket.getfqdn` (a reverse DNS lookup of
+127.0.0.1). On the macOS runner it stalled for many seconds before the server printed its
+origin, so 25 of the suite's 31 tests failed in `start_server` (#223; a faulthandler dump
+named the line). Test fixture servers use `tests/loopback_http.py` for the same reason. `open`
+writes a per-call handoff `web-login-<16 hex>.html` (0600, exclusive create) and puts `h=<id>`
+in the login URL; a successful login deletes only its own file, and the next `open` sweeps
+handoff files older than ten minutes (#199). The browser suite runs Chrome through `dump_dom`,
+which retries with a larger virtual-time budget and a fresh profile while the page has not
+written `data-result`, because a missing result means unfinished and `FAIL:` means failed
+(#202). All Chrome time in one process shares a 270 second budget (`ADWEB_BROWSER_BUDGET`):
+each attempt is clamped to what is left, a retry that restarts the live backend needs 40
+seconds left, and `tests/autodream-web.sh` gives the suite 330 seconds, so an exhausted budget
+fails one test with `TimeoutExpired` and the suite still prints its counts. Stats treats a night whose `run-stats.txt` exists but whose `sessions.txt` does not as
+damaged: it is degraded and its sidecar-only top-level hashes count as pending (#204).
+`launchd.yml`'s manual dispatch takes `suite=web` to run only this suite on macOS.
+
 Run `TMPDIR=/tmp/adw41 /bin/bash tests/autodream-web.sh` for the data, HTTP security
 and local browser suites. HTTP tests use ephemeral ports. The browser suite needs
 Chrome; browser checks skip in CI and when Chrome is unavailable. The data and
