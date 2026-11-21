@@ -18,6 +18,7 @@ resolve_install_dir "$THREADS_SRC" threads.sh
 . "$THREADS_LIB_DIR/adapters.sh" || exit 1
 . "$THREADS_LIB_DIR/lib-project.sh" || exit 1
 . "$THREADS_LIB_DIR/report-format.sh" || exit 1
+. "$THREADS_LIB_DIR/lib-flock.sh" || exit 1
 
 CONFIG_FILE=${AUTODREAM_CONFIG:-$AUTODREAM_DIR/config}
 if [ -f "$CONFIG_FILE" ]; then
@@ -124,47 +125,23 @@ PY_OFFERS
   fi
 }
 
+# The lock is lib-flock.sh's flock on $STATE.flock, with the older version's mkdir lock honored while it
+# is young. question-streaks.sh takes the same lock the same way.
 threads_acquire_lock() {
-  command -v python3 >/dev/null 2>&1 || { threads_error "python3 is required for thread locking"; return 1; }
-  if ! { exec 9>>"$LOCK"; }; then
-    threads_error "cannot open lock at $LOCK"
-    return 1
-  fi
-  # flock follows the open file description inherited from the shell, even after Python exits.
-  if python3 -c '
-import fcntl, sys, time
-for attempt in range(4):
-    try:
-        fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        sys.exit(0)
-    except BlockingIOError:
-        if attempt == 3:
-            sys.exit(1)
-        time.sleep(1)
-'; then
-    threads_legacy_lock_live || return 0
-    threads_release_lock
-    threads_error "a writer from an older version holds $STATE.lock"
-    return 1
-  fi
-  threads_release_lock
-  threads_error "lock is held or unavailable at $LOCK"
+  local rc=0
+  flock_acquire "$LOCK" 3 "$STATE.lock" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    3) threads_error "python3 is required for thread locking" ;;
+    5) threads_error "a writer from an older version holds $STATE.lock" ;;
+    2) threads_error "cannot open lock at $LOCK" ;;
+    *) threads_error "lock is held or unavailable at $LOCK" ;;
+  esac
   return 1
 }
 
-# Before the flock, writers locked with a directory at $STATE.lock. During an upgrade one can
-# still be running. Its holds last seconds, so a directory younger than 5 minutes is a live
-# writer; an older one is debris from a killed run and is ignored, never removed.
-threads_legacy_lock_live() {
-  local legacy="$STATE.lock" mtime now
-  [ -d "$legacy" ] || return 1
-  mtime=$(pstat_mtime "$legacy") || return 0
-  now=$(date +%s)
-  [ $((now - mtime)) -lt 300 ]
-}
-
 threads_release_lock() {
-  exec 9>&-
+  flock_release
 }
 
 threads_write_atomic() {

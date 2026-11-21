@@ -548,19 +548,6 @@ fi
 # shellcheck source=./failure-class.sh
 . "$FAILURE_CLASS"
 
-# The mkdir lock (run lock, remote sync lock). Looked up the way the classifier is: an install made
-# before lib-lock.sh existed has no link for it, and the directory run.sh links to always does.
-LOCK_LIB=""
-for candidate in "$SCRIPT_DIR" "$RUNNER_REPO_DIR" "$AUTODREAM_DIR"; do
-  [ -n "$candidate" ] && [ -r "$candidate/lib-lock.sh" ] && { LOCK_LIB="$candidate/lib-lock.sh"; break; }
-done
-if [ -z "$LOCK_LIB" ]; then
-  printf 'fatal: required lock library not found next to %s, %s or %s\n' "$SCRIPT_DIR" "${RUNNER_REPO_DIR:-?}" "$AUTODREAM_DIR" >&2
-  exit 1
-fi
-# shellcheck source=./lib-lock.sh
-. "$LOCK_LIB"
-
 mkdir -p "$FINDINGS_DIR" "$DREAMS_DIR" "$LOG_DIR" "$WORK_DIR"
 
 # Append rather than replace: launchd hands the job a minimal PATH that lacks the engine
@@ -1942,9 +1929,60 @@ sweep_stranded_pins() {
 # pid now belongs to a different process, is reclaimed. The lock sits outside the findings
 # dir, so clearing a date's findings for a clean rebuild cannot release it under a live run.
 RUN_LOCK="$AUTODREAM_DIR/locks/run-$TARGET_DATE.lock"
-# The mkdir locks (the per-date run lock below and the per-label remote sync lock) are
-# lib-lock.sh's acquire_lock, release_lock and lock_holder_state, each taking the lock directory
-# as $1. A holder that is alive keeps its lock however long it holds it.
+LOCK_HOLDER=""
+
+proc_start() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '; }
+
+# The mkdir locks: the per-date run lock below and the per-label remote sync lock. Each takes the
+# lock directory as $1.
+# 0 = the lock's holder is alive, 1 = gone (stale), 2 = the holder has not written its pid yet.
+lock_holder_state() { # $1=lock dir
+  local pid start
+  pid=$(cat "$1/pid" 2>/dev/null) || pid=""
+  [ -n "$pid" ] || return 2
+  kill -0 "$pid" 2>/dev/null || return 1
+  start=$(cat "$1/start" 2>/dev/null) || start=""
+  # No recorded start (ps unavailable): the live pid is all there is to go on.
+  [ -z "$start" ] || [ "$(proc_start "$pid")" = "$start" ]
+}
+
+# Move the stale lock aside (rename is atomic, so one reclaimer wins) rather than rmdir it:
+# a second reclaimer that judged the same stale holder must not delete the winner's NEW lock.
+reclaim_lock() { # $1=lock dir $2=the pid judged stale ("" when none was ever written)
+  local dead="$1.stale.$$"
+  mv "$1" "$dead" 2>/dev/null || return 0
+  if [ "$(cat "$dead/pid" 2>/dev/null)" = "$2" ]; then
+    rm -rf "$dead"
+    return 0
+  fi
+  # We moved a lock that a faster reclaimer had already replaced. Put it back.
+  mv "$dead" "$1" 2>/dev/null || { log "WARNING: could not restore another run's lock from $dead"; return 0; }
+}
+
+# 0 = taken, 1 = another live run holds it (its pid in LOCK_HOLDER), 3 = the lock's directory
+# cannot be made at all (a read-only state dir).
+acquire_lock() { # $1=lock dir
+  mkdir -p "$(dirname "$1")" 2>/dev/null || return 3
+  local tries=0 st pid
+  until mkdir "$1" 2>/dev/null; do
+    pid=$(cat "$1/pid" 2>/dev/null) || pid=""
+    lock_holder_state "$1"; st=$?
+    [ "$st" -ne 0 ] || { LOCK_HOLDER="$pid"; return 1; }
+    tries=$((tries + 1))
+    if [ "$st" -eq 2 ] && [ "$tries" -le 3 ]; then sleep 1; continue; fi
+    reclaim_lock "$1" "$pid"
+    [ "$tries" -lt 8 ] || { LOCK_HOLDER="${pid:-unknown}"; return 1; }
+  done
+  printf '%s\n' "$$" > "$1/pid"
+  proc_start "$$" > "$1/start"
+  return 0
+}
+
+# Only the owner removes it.
+release_lock() { # $1=lock dir
+  [ "$(cat "$1/pid" 2>/dev/null)" = "$$" ] || return 0
+  rm -rf "$1"
+}
 
 # 0 = taken, 1 = another live run holds it. A lock directory that cannot be made at all does not
 # stop the night: an unlocked run is the old behaviour.
@@ -1960,7 +1998,7 @@ acquire_run_lock() {
 
 # This is also installed as the EXIT trap, which a run that never took the lock reaches too, and
 # which must not touch the holder's.
-release_run_lock() { release_lock "$RUN_LOCK" || true; }
+release_run_lock() { release_lock "$RUN_LOCK"; }
 
 # ---- Remote session roots (#226) ----
 # AUTODREAM_REMOTE_ROOTS names other hosts whose ~/.claude/projects this run should read, as

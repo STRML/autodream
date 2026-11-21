@@ -4481,7 +4481,7 @@ test_install_deploys_the_adapter_runtime(){
     bash "$REPO/install.sh" --no-schedule > "$T/install.out" 2>&1 || true
   local target="$T/home/.claude/autodream"
   assert_file "$target/lib-project.sh" "lib-project.sh is installed"
-  assert_file "$target/lib-lock.sh" "lib-lock.sh is installed"
+  assert_file "$target/lib-flock.sh" "lib-flock.sh is installed"
   assert_file "$target/adapters.sh"    "adapters.sh is installed"
   assert_file "$target/preflight.sh"   "preflight.sh is installed"
   assert_file "$target/session-window.sh" "session-window.sh is installed"
@@ -7674,7 +7674,7 @@ if [ -z "$_list" ]; then
 fi
 # The suites that drive launchd need plutil and launchctl, so they run on macOS only (CI runs
 # them in launchd.yml, when a launchd file changes).
-_suites="portable rollup lib-project lib-lock preflight adapters adapter-claude adapter-omp adapter-contract threads-state slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux review-prompt notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt autodream-web shard ci-scope"
+_suites="portable rollup lib-project preflight adapters adapter-claude adapter-omp adapter-contract threads-state slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux review-prompt notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt autodream-web shard ci-scope"
 [ "$(uname -s)" = Darwin ] && _suites="$_suites scheduler-label autodream-now install-review-agent install-web-agent install-dry-run install-dir install-skill"
 for _suite in $_suites; do
   _owns || continue
@@ -7700,10 +7700,24 @@ done
 
 streak_rows(){ awk '!/^#/ && NF' "$1" 2>/dev/null | wc -l | tr -d ' '; }
 
-qs_hold_lock(){ # $1=lock dir $2=pid -> a lock directory held by that pid, with its start time when ps can say
-  mkdir -p "$1"
-  printf '%s\n' "$2" > "$1/pid"
-  ps -o lstart= -p "$2" 2>/dev/null | tr -s ' ' > "$1/start" || true
+hold_flock(){ # $1=lock file -> a python process holds its flock; sets HOLD_PID once it does
+  local ready="$1.ready" i=0
+  rm -f "$ready"
+  python3 -c 'import fcntl, sys, time
+f = open(sys.argv[1], "a")
+fcntl.flock(f, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close()
+time.sleep(600)' "$1" "$ready" &
+  HOLD_PID=$!
+  while [ ! -e "$ready" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+}
+flock_free(){ # $1=lock file: 0 when a non-blocking flock on it succeeds
+  python3 -c 'import fcntl, sys
+f = open(sys.argv[1], "a")
+try:
+    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(1)' "$1"
 }
 
 test_question_streaks_state_lives_with_the_install(){
@@ -7754,14 +7768,13 @@ test_question_streaks_state_lives_with_the_install(){
   # clear takes the same lock as update, or an update that already read the old state puts
   # the cleared streak back when it writes.
   printf 'k\t1\t2026-03-03\t2026-03-03\tHeld?\n' > "$st"
-  sleep 120 & local holder=$!
-  qs_hold_lock "$st.lock" "$holder"
+  hold_flock "$st.flock"; local holder=$HOLD_PID
   # AUTODREAM_QUESTION_LOCK_WAIT=1: the default is 15 one-second tries, and this case and the next
   # each held a lock on purpose for all of them (32 of the suite's seconds, one test in 46).
   local t0=$SECONDS
   AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" bash "$QS" clear all >/dev/null 2>&1; local rc=$?
   local waited=$((SECONDS - t0))
-  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null; rm -rf "$st.lock"
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
   assert_eq "$rc" "1" "clear fails while an update holds the lock"
   [ "$waited" -le 6 ] && ok "and gives up after the configured wait, not the default 15 tries (${waited}s)" || no "and gives up after the configured wait, not the default 15 tries (took ${waited}s)"
   assert_eq "$(streak_rows "$st")" "1" "and leaves the state for that update"
@@ -7769,10 +7782,9 @@ test_question_streaks_state_lives_with_the_install(){
   # An EMPTY board is not a reason to skip the lock: an update holding it may be about to
   # write the first streak, which clear would then report as cleared (Codex review of 4eea84d).
   : > "$st"
-  sleep 120 & holder=$!
-  qs_hold_lock "$st.lock" "$holder"
+  hold_flock "$st.flock"; holder=$HOLD_PID
   AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" bash "$QS" clear all >/dev/null 2>&1; rc=$?
-  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null; rm -rf "$st.lock"
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
   assert_eq "$rc" "1" "clear on an empty board still waits for the lock and fails while it is held"
 
   # A state file that exists but cannot be read is not an empty board. Reading it as empty
@@ -7981,105 +7993,140 @@ test_question_streaks_reruns_and_mismatch(){
   rm -rf "$root"
 }
 
-test_question_streaks_lock_is_owned(){
-  echo "# question streaks: the lock belongs to its holder; nobody else's release or rename touches it (#192)"
+test_question_streaks_lock_is_a_kernel_flock(){
+  echo "# question streaks: the lock is an flock; a live holder keeps it, a dead one loses it at once (#192)"
+  command -v python3 >/dev/null 2>&1 || { echo "  skip - python3 not available"; return 0; }
   local root; root=$(setup_env)
   local QS="$REPO/bin/question-streaks.sh"
   [ -x "$QS" ] || { no "question-streaks.sh executable"; return 0; }
-  local st="$root/own.tsv" lk="$root/own.tsv.lock" out rc holder
-  qs(){ AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" AUTODREAM_NOTIFY_DRYRUN=1 bash "$QS" "$@" 2>&1; }
-  printf '## Open questions for the user\n\n1. **Owned?** body\n\n<!-- autodream:open-questions=1 -->\n' > "$root/2026-04-01.md"
-  printf '## Open questions for the user\n\n1. **Owned?** body\n\n<!-- autodream:open-questions=1 -->\n' > "$root/2026-04-02.md"
-  printf '## Open questions for the user\n\n1. **Owned?** body\n\n<!-- autodream:open-questions=1 -->\n' > "$root/2026-04-03.md"
+  local st="$root/own.tsv" lk="$root/own.tsv.flock" out rc t0
+  qs(){ AUTODREAM_QUESTION_LOCK_WAIT="${QS_WAIT:-1}" AUTODREAM_QUESTION_STATE="$st" AUTODREAM_NOTIFY_DRYRUN=1 /bin/bash "$QS" "$@" 2>&1; }
+  local body; body=$(printf '## Open questions for the user\n\n1. **Owned?** body\n\n<!-- autodream:open-questions=1 -->\n')
+  local d; for d in 2026-04-01 2026-04-02 2026-04-03; do printf '%s\n' "$body" > "$root/$d.md"; done
   qs update "$root/2026-04-01.md" >/dev/null
   cp "$st" "$root/own.before"
 
-  # A holder that stalled past the old 120 s bound is still the holder. Reclaiming it by age is how a
-  # second writer ended up inside the first one's critical section.
-  sleep 120 & holder=$!
-  qs_hold_lock "$lk" "$holder"; touch -t 200001010000 "$lk"
+  # 1. A live holder keeps the lock however old its lock file looks. The old mkdir lock was reclaimed by age.
+  hold_flock "$lk"; local holder=$HOLD_PID
+  touch -t 200001010000 "$lk"
   out=$(qs update "$root/2026-04-02.md"); rc=$?
-  assert_eq "$rc" "0" "update beside a stalled live holder still exits 0"
+  assert_eq "$rc" "0" "update beside a live holder exits 0"
   case "$out" in *"another run holds"*) ok "and skips loudly" ;; *) no "and skips loudly (got: $out)" ;; esac
-  assert_eq "$(cat "$lk/pid" 2>/dev/null)" "$holder" "the stalled holder's lock is left alone"
   cmp -s "$st" "$root/own.before" && ok "and the state is untouched" || no "and the state is untouched"
   out=$(qs clear all); rc=$?
-  assert_eq "$rc" "1" "clear beside a stalled live holder fails"
+  assert_eq "$rc" "1" "clear beside a live holder fails"
   case "$out" in *"FAILED to clear: another run holds"*) ok "with its message unchanged" ;; *) no "with its message unchanged (got: $out)" ;; esac
-  assert_eq "$(cat "$lk/pid" 2>/dev/null)" "$holder" "and leaves that lock alone too"
-  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null; rm -rf "$lk"
+  t0=$SECONDS
+  out=$(QS_WAIT=0 qs update "$root/2026-04-02.md")
+  [ $((SECONDS - t0)) -le 2 ] && ok "a zero-second wait returns at once" || no "a zero-second wait took $((SECONDS - t0))s"
+  case "$out" in *"another run holds"*) ok "with the skip message" ;; *) no "with the skip message (got: $out)" ;; esac
 
-  # A holder that died is reclaimed at once, not after the lock has aged.
-  true & local dead=$!; wait "$dead" 2>/dev/null
-  qs_hold_lock "$lk" "$dead"
+  # 2. A holder killed with SIGKILL loses the lock at once: no age to wait out, nothing to reclaim.
+  kill -9 "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+  t0=$SECONDS
   out=$(qs update "$root/2026-04-02.md")
-  case "$out" in *"1 question(s) in 2026-04-02"*) ok "a lock whose holder died is reclaimed at once" ;; *) no "a lock whose holder died is reclaimed at once (got: $out)" ;; esac
-  [ ! -e "$lk" ] && ok "and released when the update finishes" || no "and released when the update finishes"
-  case "$out" in *"lost the lock"*|*"no longer ours"*) no "a clean update does not claim it lost the lock (got: $out)" ;; *) ok "a clean update does not claim it lost the lock" ;; esac
-  out=$(qs clear all); rc=$?
-  assert_eq "$rc" "0" "a clean clear succeeds"
-  case "$out" in *"lost the lock"*|*"no longer ours"*) no "and does not claim it lost the lock (got: $out)" ;; *) ok "and does not claim it lost the lock" ;; esac
-  [ ! -e "$lk" ] && ok "and released its lock" || no "and released its lock"
-  qs update "$root/2026-04-02.md" >/dev/null
+  case "$out" in *"1 question(s) in 2026-04-02"*) ok "after the holder is killed the next update runs" ;; *) no "after the holder is killed the next update runs (got: $out)" ;; esac
+  [ $((SECONDS - t0)) -le 3 ] && ok "at once, not after an age bound" || no "took $((SECONDS - t0))s"
+  flock_free "$lk" && ok "and releases the lock when it finishes" || no "and releases the lock when it finishes"
+  case "$out" in *"lost the lock"*|*"no longer ours"*) no "a clean update does not claim it lost the lock" ;; *) ok "a clean update does not claim it lost the lock" ;; esac
 
-  # An older version's lock is a bare directory. Young, it may be a live writer mid-update; old, it is debris.
-  mkdir "$lk"
-  out=$(qs update "$root/2026-04-03.md")
-  case "$out" in *"another run holds"*) ok "a young pid-less lock is respected" ;; *) no "a young pid-less lock is respected (got: $out)" ;; esac
-  [ -d "$lk" ] && ok "and left in place" || no "and left in place"
-  touch -t 200001010000 "$lk"
-  out=$(qs update "$root/2026-04-03.md")
-  case "$out" in *"another run holds"*) no "an old pid-less lock is reclaimed by age (got: $out)" ;; *) ok "an old pid-less lock is reclaimed by age" ;; esac
-  [ ! -e "$lk" ] && ok "and released when the update finishes" || no "and released when the update finishes"
-
-  # A regular file at the lock path is not a lock: the old code only ever tried rmdir on it, so it stays.
-  printf 'not a lock\n' > "$lk"; touch -t 200001010000 "$lk"
-  out=$(qs update "$root/2026-04-03.md"); rc=$?
-  assert_eq "$rc" "0" "update beside a regular file at the lock path exits 0"
-  case "$out" in *"another run holds"*) ok "and skips loudly" ;; *) no "and skips loudly (got: $out)" ;; esac
-  assert_eq "$(cat "$lk" 2>/dev/null)" "not a lock" "and the file is left as it was"
-  rm -f "$lk"
-
-  # The lock is replaced between the check and the rename (an older version's age reclaim does exactly
-  # that). A shim mktemp stands in for the other writer: it takes over the lock the instant the state
-  # temp file is requested, which is the last thing before the rename.
+  # 3. The script itself is the holder. A shim mktemp stalls it inside its critical section: from outside the
+  # lock is taken, clear is refused, and the state is not touched.
   mkdir -p "$root/shim"
   local real_mktemp; real_mktemp=$(command -v mktemp)
   # shellcheck disable=SC2016 # the dollar signs belong to the shim
-  printf '#!/bin/sh\ncase "$*" in *.tsv.XXXXXX) printf "%%s\\n" "$SHIM_PID" > "$SHIM_LOCK/pid" ;; esac\nexec "%s" "$@"\n' "$real_mktemp" > "$root/shim/mktemp"
+  printf '#!/bin/sh\ncase "$*" in *.tsv.XXXXXX) echo $$ > "$SHIM_READY"; exec sleep 600 ;; esac\nexec "%s" "$@"\n' "$real_mktemp" > "$root/shim/mktemp"
   chmod +x "$root/shim/mktemp"
-  sleep 120 & local other=$!
-  printf '#last\t2026-04-01\nabc123def456\t1\t2026-04-01\t2026-04-01\tOwned?\n' > "$st"
   cp "$st" "$root/own.before"
-  out=$(PATH="$root/shim:$PATH" SHIM_PID="$other" SHIM_LOCK="$lk" qs update "$root/2026-04-02.md"); rc=$?
-  assert_eq "$rc" "0" "update that lost its lock mid-write still exits 0"
-  case "$out" in *"lost the lock"*) ok "and says it lost the lock" ;; *) no "and says it lost the lock (got: $out)" ;; esac
-  cmp -s "$st" "$root/own.before" && ok "its pending rename is refused: the state is untouched" || no "its pending rename is refused: the state is untouched"
-  assert_eq "$(cat "$lk/pid" 2>/dev/null)" "$other" "the new holder's lock is left alone"
-  assert_eq "$(ls "$root" | grep -c '^own\.tsv\.[A-Za-z0-9]\{6\}$')" "0" "and the staged temp file is removed"
-  rm -rf "$lk"; cp "$root/own.before" "$st"
-  out=$(PATH="$root/shim:$PATH" SHIM_PID="$other" SHIM_LOCK="$lk" qs clear all); rc=$?
-  assert_eq "$rc" "1" "clear that lost its lock fails"
-  case "$out" in *"lost the lock"*) ok "and says so" ;; *) no "and says so (got: $out)" ;; esac
-  cmp -s "$st" "$root/own.before" && ok "and leaves the state untouched" || no "and leaves the state untouched"
-  assert_eq "$(cat "$lk/pid" 2>/dev/null)" "$other" "and leaves the other holder's lock alone"
-  kill "$other" 2>/dev/null; wait "$other" 2>/dev/null; rm -rf "$lk"
-
-  # The pid file vanishes (token missing): not ours, so no rmdir, and it is logged.
-  # shellcheck disable=SC2016
-  printf '#!/bin/sh\ncase "$*" in *.tsv.XXXXXX) rm -f "$SHIM_LOCK/pid" ;; esac\nexec "%s" "$@"\n' "$real_mktemp" > "$root/shim/mktemp"
-  cp "$root/own.before" "$st"
-  out=$(PATH="$root/shim:$PATH" SHIM_LOCK="$lk" qs update "$root/2026-04-02.md"); rc=$?
-  case "$out" in *"lost the lock"*) ok "a lock whose pid file vanished is reported as lost" ;; *) no "a lock whose pid file vanished is reported as lost (got: $out)" ;; esac
-  [ -d "$lk" ] && ok "and its directory is not removed" || no "and its directory is not removed"
+  rm -f "$root/ready"
+  ( PATH="$root/shim:$PATH" SHIM_READY="$root/ready" AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" AUTODREAM_NOTIFY_DRYRUN=1 \
+      /bin/bash "$QS" update "$root/2026-04-03.md" >/dev/null 2>&1 ) &
+  local upid=$!
+  local i=0; while [ ! -s "$root/ready" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -s "$root/ready" ] && ok "the update is stalled inside its critical section" || no "the update never reached its critical section"
+  flock_free "$lk" && no "the running update holds the lock" || ok "the running update holds the lock"
+  out=$(qs clear all); rc=$?
+  assert_eq "$rc" "1" "clear is refused while an update is mid-write"
   cmp -s "$st" "$root/own.before" && ok "and the state is untouched" || no "and the state is untouched"
+  kill "$(cat "$root/ready" 2>/dev/null)" 2>/dev/null; kill "$upid" 2>/dev/null; wait "$upid" 2>/dev/null
+  rm -rf "$root/shim"
+
+  # 4. A child that outlives the holder must not keep the lock: the banner runs with fd 9 closed. An osascript shim
+  # stalls the banner; killing the script leaves the shim running and the lock free.
+  mkdir -p "$root/shim2"
+  printf '#!/bin/sh\necho $$ > "$SHIM_PID"\nexec sleep 600\n' > "$root/shim2/osascript"; chmod +x "$root/shim2/osascript"
+  rm -f "$root/ospid"
+  printf '%s\n' "$body" > "$root/2026-04-04.md"
+  ( PATH="$root/shim2:$PATH" SHIM_PID="$root/ospid" AUTODREAM_QUESTION_ESCALATE_AT=1 AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" \
+      /bin/bash "$QS" update "$root/2026-04-04.md" >/dev/null 2>&1 ) &
+  upid=$!
+  i=0; while [ ! -s "$root/ospid" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -s "$root/ospid" ] && ok "the banner is stalled in osascript" || no "the banner never reached osascript"
+  kill -9 "$upid" 2>/dev/null; wait "$upid" 2>/dev/null
+  flock_free "$lk" && ok "a killed update leaves no lock behind even with osascript still running" || no "osascript kept the lock after the update was killed"
+  kill "$(cat "$root/ospid" 2>/dev/null)" 2>/dev/null; rm -rf "$root/shim2"
+
+  # 5. A lock path that cannot be opened is a loud permanent refusal, not a wait and not a held lock.
+  rm -f "$lk"; mkdir "$lk"
+  cp "$st" "$root/own.before"
+  t0=$SECONDS
+  out=$(qs update "$root/2026-04-04.md"); rc=$?
+  assert_eq "$rc" "0" "update with an unopenable lock path exits 0"
+  case "$out" in *"cannot lock"*) ok "and says it cannot lock" ;; *) no "and says it cannot lock (got: $out)" ;; esac
+  [ $((SECONDS - t0)) -le 2 ] && ok "without waiting out the deadline" || no "waited $((SECONDS - t0))s"
+  out=$(qs clear all); rc=$?
+  assert_eq "$rc" "1" "clear with an unopenable lock path fails"
+  [ -d "$lk" ] && ok "and the directory is untouched" || no "the directory at the lock path was removed"
+  cmp -s "$st" "$root/own.before" && ok "and the state is untouched" || no "and the state is untouched"
+  rmdir "$lk"
+
+  # 6. An older version's mkdir lock: a young directory blocks, an old one is ignored and left in place.
+  mkdir "$st.lock"
+  out=$(qs update "$root/2026-04-04.md")
+  case "$out" in *"another run holds"*) ok "a young older-version lock directory blocks" ;; *) no "a young older-version lock directory blocks (got: $out)" ;; esac
+  t0=$SECONDS; out=$(QS_WAIT=0 qs update "$root/2026-04-04.md")
+  [ $((SECONDS - t0)) -le 2 ] && ok "and a zero-second wait returns at once" || no "a zero-second wait took $((SECONDS - t0))s"
+  flock_free "$lk" && ok "the flock is released after a refusal" || no "the flock stayed held after a refusal"
+  touch -t 200001010000 "$st.lock"
+  out=$(qs update "$root/2026-04-04.md")
+  case "$out" in *"another run holds"*) no "an old older-version lock directory is ignored (got: $out)" ;; *) ok "an old older-version lock directory is ignored" ;; esac
+  [ -d "$st.lock" ] && ok "and never removed" || no "and was removed"
+  rmdir "$st.lock"
+
+  # 7. A missing python3 is loud and permanent: update skips with the reason and a banner is attempted, clear fails.
+  mkdir -p "$root/bare"
+  local t
+  for t in bash sh awk sed grep sort tail head tr cut wc cat cp mv rm mkdir mktemp dirname basename readlink date stat shasum env uname touch printf ls; do
+    local tp; tp=$(command -v "$t" 2>/dev/null) && [ -x "$tp" ] && ln -sf "$tp" "$root/bare/$t"
+  done
+  cp "$st" "$root/own.before"
+  out=$(PATH="$root/bare" AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" AUTODREAM_NOTIFY_DRYRUN=1 /bin/bash "$QS" update "$root/2026-04-04.md" 2>&1); rc=$?
+  assert_eq "$rc" "0" "update without python3 exits 0"
+  case "$out" in *"python3 is required"*) ok "and says why" ;; *) no "and says why (got: $out)" ;; esac
+  case "$out" in *"no banner"*|*"posted banner"*|*"banner"*) ok "and a banner is attempted for a permanent refusal" ;; *) no "and a banner is attempted for a permanent refusal (got: $out)" ;; esac
+  out=$(PATH="$root/bare" AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" /bin/bash "$QS" clear all 2>&1); rc=$?
+  assert_eq "$rc" "1" "clear without python3 fails"
+  cmp -s "$st" "$root/own.before" && ok "and the state is untouched" || no "and the state is untouched"
+  # A python3 that fails for a reason other than contention is not a held lock.
+  mkdir -p "$root/badpy"; printf '#!/bin/sh\nexit 7\n' > "$root/badpy/python3"; chmod +x "$root/badpy/python3"
+  out=$(PATH="$root/badpy:$PATH" AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" AUTODREAM_NOTIFY_DRYRUN=1 /bin/bash "$QS" update "$root/2026-04-04.md" 2>&1)
+  case "$out" in *"cannot lock"*) ok "a python3 that fails is reported as cannot lock, not as a held lock" ;; *) no "a python3 that fails is reported as cannot lock (got: $out)" ;; esac
+
+  # 8. A second acquire in one process is refused and does not drop the first lock.
+  out=$( ( . "$REPO/bin/lib-flock.sh"; flock_acquire "$root/dbl.flock" 0; first=$?; flock_acquire "$root/dbl.flock" 0; second=$?
+           flock_free_probe=$(python3 -c 'import fcntl,sys
+f=open(sys.argv[1],"a")
+try: fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB); print("free")
+except BlockingIOError: print("held")' "$root/dbl.flock")
+           echo "$first $second $flock_free_probe" ) )
+  assert_eq "$out" "0 4 held" "a second flock_acquire in one process is refused and the first lock stays held"
   rm -rf "$root"
 }
 
 _run test_question_streaks
 _run test_question_streaks_reruns_and_mismatch
 _run test_question_streaks_state_lives_with_the_install
-_run test_question_streaks_lock_is_owned
+_run test_question_streaks_lock_is_a_kernel_flock
 
 # ---- L2 attempt diagnostics (issue 42): a signal-shaped L2 death leaves evidence ----
 # Exit 143 on the aggregator was seen on 2026-08-01, 08-31, 09-02, 09-04, 09-19 and 10-02 with
