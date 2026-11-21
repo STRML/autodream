@@ -2016,6 +2016,7 @@ REMOTE_SYNC_FIRST_ERR=""
 REMOTE_SYNC_HELPER=""
 REMOTE_SYNCED_LABELS=" "   # labels whose sync was ok or partial this run, space-delimited
 REMOTE_SHORT_NOTE=""       # stub-report lines naming earlier dates a host missed (#230)
+REMOTE_SYNC_NOTMP=0        # 1 when the per-run temp dir could not be made, so no job was started
 remote_sync_stat() { REMOTE_SYNC_LINES="${REMOTE_SYNC_LINES}$1"$'\n'; }
 
 # $1=entry $2=key $3=why: an entry refused before any ssh.
@@ -2091,7 +2092,10 @@ remote_sync_finish() {
   secs=$(head -n 1 "$p.secs" 2>/dev/null) || secs=""
   size=$(cat "$p.mirror" 2>/dev/null) || size=""
   [ -n "$size" ] || size=$(remote_mirror_size "$mirror")
-  [ -n "$status" ] || status="failed (remote-sync.sh printed nothing)"
+  if [ -z "$status" ]; then
+    status="failed (remote-sync.sh printed nothing)"
+    [ "$REMOTE_SYNC_NOTMP" != 1 ] || status="failed (cannot make a temp dir for the sync jobs)"
+  fi
   word=${status%% *}
   case "$status" in *" ("*")") cause=${status#* (}; cause=${cause%)} ;; esac
   case "$word" in
@@ -2174,7 +2178,7 @@ sync_remote_roots() {
   resolve_enabled_adapters
   case " $ENABLED_ADAPTERS " in *" claude "*) ;; *) claude_on=0 ;; esac
   sdir=$(mktemp -d "${TMPDIR:-/tmp}/remote-sync.XXXXXX" 2>/dev/null) \
-    || { sdir=""; log "WARNING: remote sync: cannot make a temp dir, so no host is synced"; }
+    || { sdir=""; REMOTE_SYNC_NOTMP=1; log "WARNING: remote sync: cannot make a temp dir, so no host is synced"; }
   read -r -a entries <<< "$AUTODREAM_REMOTE_ROOTS"
   # Pass 1 validates and starts every sync at once. A host that is asleep costs ConnectTimeout and a
   # stalled copy costs rsync's --timeout, so with several hosts down the waits overlap (#229).

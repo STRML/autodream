@@ -10485,6 +10485,23 @@ test_remote_sync_mirror_size_is_zero_before_the_first_good_sync(){
   rm -rf "$root"
 }
 
+test_remote_sync_no_temp_dir_fails_each_host_and_says_why(){
+  echo "# remote sync: when the per-run temp dir cannot be made no job starts, and the cause says so"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"; stub_notify "$root"
+  printf '#!/bin/bash\ncase "$*" in *remote-sync.*) exit 1 ;; esac\nexec /usr/bin/mktemp "$@"\n' > "$root/rsshim/mktemp"
+  chmod +x "$root/rsshim/mktemp"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_sync_studio2: failed$' "the host reads failed"
+  assert_grep "$rs" '^remote_sync_studio2_cause: cannot make a temp dir for the sync jobs$' "the cause names the temp dir, not the helper"
+  assert_no_file "$root/rsync.log" "no sync was started"
+  assert_grep "$root/run.out" 'WARNING: remote sync: cannot make a temp dir' "the run log warns once"
+  assert_grep "$root/notify-args.txt" '^--warning .*cannot make a temp dir' "every host failing still posts the banner, with the real cause"
+  assert_eq "$(cat "$root/run.exit")" "0" "and the run still succeeds"
+  rm -rf "$root"
+}
+
+_run test_remote_sync_no_temp_dir_fails_each_host_and_says_why
 _run test_remote_sync_short_dates_lists_earlier_dates_the_host_missed
 _run test_remote_sync_short_dates_none_when_every_earlier_date_was_read
 _run test_remote_sync_short_dates_not_scanned_while_the_host_is_still_down

@@ -122,7 +122,8 @@ A pull is read-only on the remote and needs only sshd there.
   `ConnectTimeout` and `--timeout` waits overlap instead of adding up. A job cannot set the parent's
   variables, so it leaves `<label>.status`, `.secs` and `.mirror` in a per-run temp dir
   (`mktemp -d`, removed with `rm -rf`). A job that dies before writing reads `failed
-  (remote-sync.sh printed nothing)`. Run-stats lines, `SESSION_ROOTS` and the refusal warnings are
+  (remote-sync.sh printed nothing)`; if the temp dir itself cannot be made, no job starts and every
+  valid entry reads `failed (cannot make a temp dir for the sync jobs)`. Run-stats lines, `SESSION_ROOTS` and the refusal warnings are
   written in the second pass, in the order of `AUTODREAM_REMOTE_ROOTS`, so a refused entry keeps its
   place and the artifact does not depend on which host answered first. `bin/remote-sync.sh` is
   unchanged.
