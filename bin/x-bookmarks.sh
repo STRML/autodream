@@ -471,9 +471,11 @@ ab() {
     run_bounded "$BROWSER_TIMEOUT" "$BROWSER_BIN" "$@"
 }
 
+# The flag is cleared AFTER the close, because `ab` sets it on every call, `close` included:
+# clearing it first left it set, and the EXIT trap then closed a second time.
 browser_close() {
-  BROWSER_OPEN=0
   ab close >/dev/null 2>&1 || true
+  BROWSER_OPEN=0
 }
 
 # First line of the last command's stderr, single-lined and cut, for a failure reason.

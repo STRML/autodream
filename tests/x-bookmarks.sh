@@ -660,11 +660,20 @@ test_browser_is_closed_on_every_outcome(){
   echo "# the dedicated browser session is closed after success and after failure"
   local root; root=$(bsetup)
   run_br "$root" collect "$root/findings"
-  assert_grep "$root/ab.log" " close" "closed after a good run"
+  assert_eq "$(grep -c ' close$' "$root/ab.log")" "1" "closed exactly once after a good run (the EXIT trap does not close it again)"
   rm -rf "$root"
   root=$(bsetup)
   AB_FAIL=har-stop X_CREDS_FILE="$root/does-not-exist" run_br "$root" collect "$root/findings"
-  assert_grep "$root/ab.log" " close" "closed after a failed run"
+  assert_eq "$(grep -c ' close$' "$root/ab.log")" "1" "closed exactly once after a failed run"
+  rm -rf "$root"
+  root=$(bsetup)
+  AB_FAIL=open run_br "$root" collect "$root/findings"
+  assert_eq "$(grep -c ' close$' "$root/ab.log")" "1" "closed exactly once when open failed before the page loaded"
+  rm -rf "$root"
+  root=$(bsetup)
+  AB_FAIL=close run_br "$root" collect "$root/findings"
+  assert_eq "$(grep -c ' close$' "$root/ab.log")" "1" "a close that itself fails is not retried by the EXIT trap"
+  assert_eq "$(fetch_path "$root/findings")" "browser" "and a failed close does not change the path that served the night"
   rm -rf "$root"
 }
 
