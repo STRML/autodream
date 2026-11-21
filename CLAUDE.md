@@ -220,7 +220,7 @@ run.sh handles it with:
 - **L1 retry loop** (`dispatch_l1` + `l1_missing_count`): re-dispatches only the sessions still missing a findings JSON, up to `AUTODREAM_L1_ROUNDS` (5), calling `wait_for_network` between rounds. The worker is idempotent, so retries are cheap.
 - **L2 retry loop**: retries the aggregator up to `AUTODREAM_L2_ATTEMPTS` (3) until `$REPORT_PATH` is non-empty.
 - **Idempotency guard**: at the top of `run()`, if a finished report exists for the date it exits in a second (`AUTODREAM_FORCE=1` to rebuild). Finished means the open-questions marker is present (or the date predates `AUTODREAM_MARKER_EPOCH`); a marker-less report is moved aside and rebuilt (#111). This is what makes multiple launchd catch-up triggers safe.
-- **Per-date run lock** (#55): `run()` takes `$AUTODREAM_DIR/locks/run-<date>.lock` (a `mkdir`, with the owner's pid and start time inside) before touching the findings dir, because launchd serialises a label only against itself and `autodream-now.sh` uses another. A live holder makes the second run log and exit 0; a dead holder (a killed run, the normal failure here) or a reused pid is reclaimed.
+- **Per-date run lock** (#55): `run()` takes `$AUTODREAM_DIR/locks/run-<date>.lock` (a `mkdir`, with the owner's pid and start time inside) before touching the findings dir, because launchd serialises a label only against itself and `autodream-now.sh` uses another. A live holder makes the second run log and exit 0; a dead holder (a killed run, the normal failure here) or a reused pid is reclaimed. The lock code is `bin/lib-lock.sh`, shared with `question-streaks.sh` and the remote sync lock (#192): liveness decides, never the directory's age, and `release_lock` and every write under the lock check `lock_owned` first. `threads.sh` is not on it (it holds an flock, which the kernel releases with the process), and `review.sh`'s launch marker is a dedup claim with its own confirmed-token rules. `tests/lib-lock.sh` pins the matrix; run.sh finds the lib the way it finds `failure-class.sh`, so an install made before it existed still starts.
 - The plist example schedules several morning triggers (03:15/06:15/09:15/12:15) so a failed-overnight date gets retried on later wakes; the guard no-ops the rest.
 
 `net_up` checks reachability of `api.anthropic.com` (any HTTP code beats `000`). Disable the wait with `AUTODREAM_NETCHECK=0` (tests set this).
@@ -775,8 +775,12 @@ after the suite was green. Four are why the file reads as it does now:
   now — otherwise a question reappearing two reports later was called consecutive.
 - **Concurrency could lose an increment.** The scheduled nightly and `autodream-now.sh`
   carry different launchd labels, so one-instance-per-label does not keep them apart. The
-  read-modify-write takes an atomic `mkdir` lock, reclaims a stale one by age, and SKIPS
-  rather than blocks when it cannot get it.
+  read-modify-write takes the shared `mkdir` lock (`bin/lib-lock.sh`), and SKIPS rather than
+  blocks when it cannot get it. It used to reclaim by age (120 s), so a holder that stalled
+  past the bound lost its lock to a second writer while still running, and its release then
+  removed the second writer's (#192). Now a live holder keeps the lock however long it takes;
+  only a gone holder (or a reused pid) is reclaimed, a pid-less directory from an older version
+  by age as before, and `write_state` re-checks `lock_owned` immediately before the rename.
 - **A parser breakage only wrote to the run log.** That is this feature's own failure mode
   one level up: every streak silently frozen, no escalation ever again, indistinguishable
   from a quiet week. A mismatch now posts a banner saying the escalation is down.

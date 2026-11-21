@@ -4481,6 +4481,7 @@ test_install_deploys_the_adapter_runtime(){
     bash "$REPO/install.sh" --no-schedule > "$T/install.out" 2>&1 || true
   local target="$T/home/.claude/autodream"
   assert_file "$target/lib-project.sh" "lib-project.sh is installed"
+  assert_file "$target/lib-lock.sh" "lib-lock.sh is installed"
   assert_file "$target/adapters.sh"    "adapters.sh is installed"
   assert_file "$target/preflight.sh"   "preflight.sh is installed"
   assert_file "$target/session-window.sh" "session-window.sh is installed"
@@ -7673,7 +7674,7 @@ if [ -z "$_list" ]; then
 fi
 # The suites that drive launchd need plutil and launchctl, so they run on macOS only (CI runs
 # them in launchd.yml, when a launchd file changes).
-_suites="portable rollup lib-project preflight adapters adapter-claude adapter-omp adapter-contract threads-state slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux review-prompt notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt autodream-web shard ci-scope"
+_suites="portable rollup lib-project lib-lock preflight adapters adapter-claude adapter-omp adapter-contract threads-state slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux review-prompt notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt autodream-web shard ci-scope"
 [ "$(uname -s)" = Darwin ] && _suites="$_suites scheduler-label autodream-now install-review-agent install-web-agent install-dry-run install-dir install-skill"
 for _suite in $_suites; do
   _owns || continue
@@ -7698,6 +7699,12 @@ for _suite in $_suites; do
 done
 
 streak_rows(){ awk '!/^#/ && NF' "$1" 2>/dev/null | wc -l | tr -d ' '; }
+
+qs_hold_lock(){ # $1=lock dir $2=pid -> a lock directory held by that pid, with its start time when ps can say
+  mkdir -p "$1"
+  printf '%s\n' "$2" > "$1/pid"
+  ps -o lstart= -p "$2" 2>/dev/null | tr -s ' ' > "$1/start" || true
+}
 
 test_question_streaks_state_lives_with_the_install(){
   echo "# question streaks: the store is the install's, one file holds the watermark, clear takes the lock"
@@ -7747,13 +7754,14 @@ test_question_streaks_state_lives_with_the_install(){
   # clear takes the same lock as update, or an update that already read the old state puts
   # the cleared streak back when it writes.
   printf 'k\t1\t2026-03-03\t2026-03-03\tHeld?\n' > "$st"
-  mkdir "$st.lock"
+  sleep 120 & local holder=$!
+  qs_hold_lock "$st.lock" "$holder"
   # AUTODREAM_QUESTION_LOCK_WAIT=1: the default is 15 one-second tries, and this case and the next
   # each held a lock on purpose for all of them (32 of the suite's seconds, one test in 46).
   local t0=$SECONDS
   AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" bash "$QS" clear all >/dev/null 2>&1; local rc=$?
   local waited=$((SECONDS - t0))
-  rmdir "$st.lock" 2>/dev/null
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null; rm -rf "$st.lock"
   assert_eq "$rc" "1" "clear fails while an update holds the lock"
   [ "$waited" -le 6 ] && ok "and gives up after the configured wait, not the default 15 tries (${waited}s)" || no "and gives up after the configured wait, not the default 15 tries (took ${waited}s)"
   assert_eq "$(streak_rows "$st")" "1" "and leaves the state for that update"
@@ -7761,9 +7769,10 @@ test_question_streaks_state_lives_with_the_install(){
   # An EMPTY board is not a reason to skip the lock: an update holding it may be about to
   # write the first streak, which clear would then report as cleared (Codex review of 4eea84d).
   : > "$st"
-  mkdir "$st.lock"
+  sleep 120 & holder=$!
+  qs_hold_lock "$st.lock" "$holder"
   AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" bash "$QS" clear all >/dev/null 2>&1; rc=$?
-  rmdir "$st.lock" 2>/dev/null
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null; rm -rf "$st.lock"
   assert_eq "$rc" "1" "clear on an empty board still waits for the lock and fails while it is held"
 
   # A state file that exists but cannot be read is not an empty board. Reading it as empty
@@ -7972,9 +7981,91 @@ test_question_streaks_reruns_and_mismatch(){
   rm -rf "$root"
 }
 
+test_question_streaks_lock_is_owned(){
+  echo "# question streaks: the lock belongs to its holder; nobody else's release or rename touches it (#192)"
+  local root; root=$(setup_env)
+  local QS="$REPO/bin/question-streaks.sh"
+  [ -x "$QS" ] || { no "question-streaks.sh executable"; return 0; }
+  local st="$root/own.tsv" lk="$root/own.tsv.lock" out rc holder
+  qs(){ AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" AUTODREAM_NOTIFY_DRYRUN=1 bash "$QS" "$@" 2>&1; }
+  printf '## Open questions for the user\n\n1. **Owned?** body\n\n<!-- autodream:open-questions=1 -->\n' > "$root/2026-04-01.md"
+  printf '## Open questions for the user\n\n1. **Owned?** body\n\n<!-- autodream:open-questions=1 -->\n' > "$root/2026-04-02.md"
+  printf '## Open questions for the user\n\n1. **Owned?** body\n\n<!-- autodream:open-questions=1 -->\n' > "$root/2026-04-03.md"
+  qs update "$root/2026-04-01.md" >/dev/null
+  cp "$st" "$root/own.before"
+
+  # A holder that stalled past the old 120 s bound is still the holder. Reclaiming it by age is how a
+  # second writer ended up inside the first one's critical section.
+  sleep 120 & holder=$!
+  qs_hold_lock "$lk" "$holder"; touch -t 200001010000 "$lk"
+  out=$(qs update "$root/2026-04-02.md"); rc=$?
+  assert_eq "$rc" "0" "update beside a stalled live holder still exits 0"
+  case "$out" in *"another run holds"*) ok "and skips loudly" ;; *) no "and skips loudly (got: $out)" ;; esac
+  assert_eq "$(cat "$lk/pid" 2>/dev/null)" "$holder" "the stalled holder's lock is left alone"
+  cmp -s "$st" "$root/own.before" && ok "and the state is untouched" || no "and the state is untouched"
+  out=$(qs clear all); rc=$?
+  assert_eq "$rc" "1" "clear beside a stalled live holder fails"
+  case "$out" in *"FAILED to clear: another run holds"*) ok "with its message unchanged" ;; *) no "with its message unchanged (got: $out)" ;; esac
+  assert_eq "$(cat "$lk/pid" 2>/dev/null)" "$holder" "and leaves that lock alone too"
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null; rm -rf "$lk"
+
+  # A holder that died is reclaimed at once, not after the lock has aged.
+  true & local dead=$!; wait "$dead" 2>/dev/null
+  qs_hold_lock "$lk" "$dead"
+  out=$(qs update "$root/2026-04-02.md")
+  case "$out" in *"1 question(s) in 2026-04-02"*) ok "a lock whose holder died is reclaimed at once" ;; *) no "a lock whose holder died is reclaimed at once (got: $out)" ;; esac
+  [ ! -e "$lk" ] && ok "and released when the update finishes" || no "and released when the update finishes"
+
+  # An older version's lock is a bare directory. Young, it may be a live writer mid-update; old, it is debris.
+  mkdir "$lk"
+  out=$(qs update "$root/2026-04-03.md")
+  case "$out" in *"another run holds"*) ok "a young pid-less lock is respected" ;; *) no "a young pid-less lock is respected (got: $out)" ;; esac
+  [ -d "$lk" ] && ok "and left in place" || no "and left in place"
+  touch -t 200001010000 "$lk"
+  out=$(qs update "$root/2026-04-03.md")
+  case "$out" in *"another run holds"*) no "an old pid-less lock is reclaimed by age (got: $out)" ;; *) ok "an old pid-less lock is reclaimed by age" ;; esac
+  [ ! -e "$lk" ] && ok "and released when the update finishes" || no "and released when the update finishes"
+
+  # The lock is replaced between the check and the rename (an older version's age reclaim does exactly
+  # that). A shim mktemp stands in for the other writer: it takes over the lock the instant the state
+  # temp file is requested, which is the last thing before the rename.
+  mkdir -p "$root/shim"
+  local real_mktemp; real_mktemp=$(command -v mktemp)
+  # shellcheck disable=SC2016 # the dollar signs belong to the shim
+  printf '#!/bin/sh\ncase "$*" in *.tsv.XXXXXX) printf "%%s\\n" "$SHIM_PID" > "$SHIM_LOCK/pid" ;; esac\nexec "%s" "$@"\n' "$real_mktemp" > "$root/shim/mktemp"
+  chmod +x "$root/shim/mktemp"
+  sleep 120 & local other=$!
+  printf '#last\t2026-04-01\nabc123def456\t1\t2026-04-01\t2026-04-01\tOwned?\n' > "$st"
+  cp "$st" "$root/own.before"
+  out=$(PATH="$root/shim:$PATH" SHIM_PID="$other" SHIM_LOCK="$lk" qs update "$root/2026-04-02.md"); rc=$?
+  assert_eq "$rc" "0" "update that lost its lock mid-write still exits 0"
+  case "$out" in *"lost the lock"*) ok "and says it lost the lock" ;; *) no "and says it lost the lock (got: $out)" ;; esac
+  cmp -s "$st" "$root/own.before" && ok "its pending rename is refused: the state is untouched" || no "its pending rename is refused: the state is untouched"
+  assert_eq "$(cat "$lk/pid" 2>/dev/null)" "$other" "the new holder's lock is left alone"
+  assert_eq "$(ls "$root" | grep -c '^own\.tsv\.[A-Za-z0-9]\{6\}$')" "0" "and the staged temp file is removed"
+  rm -rf "$lk"; cp "$root/own.before" "$st"
+  out=$(PATH="$root/shim:$PATH" SHIM_PID="$other" SHIM_LOCK="$lk" qs clear all); rc=$?
+  assert_eq "$rc" "1" "clear that lost its lock fails"
+  case "$out" in *"lost the lock"*) ok "and says so" ;; *) no "and says so (got: $out)" ;; esac
+  cmp -s "$st" "$root/own.before" && ok "and leaves the state untouched" || no "and leaves the state untouched"
+  assert_eq "$(cat "$lk/pid" 2>/dev/null)" "$other" "and leaves the other holder's lock alone"
+  kill "$other" 2>/dev/null; wait "$other" 2>/dev/null; rm -rf "$lk"
+
+  # The pid file vanishes (token missing): not ours, so no rmdir, and it is logged.
+  # shellcheck disable=SC2016
+  printf '#!/bin/sh\ncase "$*" in *.tsv.XXXXXX) rm -f "$SHIM_LOCK/pid" ;; esac\nexec "%s" "$@"\n' "$real_mktemp" > "$root/shim/mktemp"
+  cp "$root/own.before" "$st"
+  out=$(PATH="$root/shim:$PATH" SHIM_LOCK="$lk" qs update "$root/2026-04-02.md"); rc=$?
+  case "$out" in *"lost the lock"*) ok "a lock whose pid file vanished is reported as lost" ;; *) no "a lock whose pid file vanished is reported as lost (got: $out)" ;; esac
+  [ -d "$lk" ] && ok "and its directory is not removed" || no "and its directory is not removed"
+  cmp -s "$st" "$root/own.before" && ok "and the state is untouched" || no "and the state is untouched"
+  rm -rf "$root"
+}
+
 _run test_question_streaks
 _run test_question_streaks_reruns_and_mismatch
 _run test_question_streaks_state_lives_with_the_install
+_run test_question_streaks_lock_is_owned
 
 # ---- L2 attempt diagnostics (issue 42): a signal-shaped L2 death leaves evidence ----
 # Exit 143 on the aggregator was seen on 2026-08-01, 08-31, 09-02, 09-04, 09-19 and 10-02 with
