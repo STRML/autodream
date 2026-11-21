@@ -315,6 +315,22 @@ if [ -z "$sp_pid" ]; then no "the watchdog's sleep was observed"
 elif kill -0 "$sp_pid" 2>/dev/null; then no "the watchdog's sleep outlived the command"; kill "$sp_pid" 2>/dev/null
 else ok "no orphaned watchdog sleep after a command that finished in time"; fi
 
+echo "# the watchdog still KILLs a TERM-ignoring descendant after its wrapper dies from the TERM"
+new_case gchild
+mk_script "$SCRIPTS/wrapper.sh" <<SH
+#!/bin/bash
+( trap '' TERM; exec sh -c 'echo \$\$ > "\$1"; exec /bin/sleep 300' _ "$C/gchild.pid" ) &
+wait
+SH
+printf 'wrapper %s\n' "$SCRIPTS/wrapper.sh" > "$CONF"
+pgrep -P $$ > /dev/null 2>&1; if [ $? -le 1 ]; then
+  AUTODREAM_REPORT_TIMEOUT_BIN="" TMO=1 KG=1 collect
+  gpid=$(cat "$C/gchild.pid" 2>/dev/null)
+  if [ -z "$gpid" ]; then no "the grandchild started"
+  elif kill -0 "$gpid" 2>/dev/null; then no "a TERM-ignoring grandchild outlived the timeout and the wrapper"; kill -KILL "$gpid" 2>/dev/null
+  else ok "the grandchild was KILLed after the grace period"; fi
+else ok "grandchild check skipped, pgrep cannot read the process table here (the sandbox); CI and launchd can"; fi
+
 echo "# an unwritable findings dir is a loud failure, not a silent one"
 new_case nofind
 rc=0
@@ -381,6 +397,32 @@ SH
 snap_collect
 assert_no_file "$C/later-ran" "a script that did not exist at the snapshot is not run when it appears"
 assert_eq "$(row later)" "changed" "index row says changed"
+
+echo "# an interpreter entry pins its payload too: every argument that is an existing file is hashed with the script"
+snap_case tamper_payload
+mk_script "$SCRIPTS/payload.sh" <<'SH'
+#!/bin/bash
+echo "payload ran"
+SH
+printf 'viabash /bin/bash %s\n' "$SCRIPTS/payload.sh" > "$CONF"
+HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" snapshot > "$C/snap" 2> /dev/null
+snap_collect
+assert_grep "$F/report-viabash.md" 'payload ran' "an unchanged payload runs"
+printf '#!/bin/bash\ntouch "%s/evil-ran"\necho "payload ran"\n' "$C" > "$SCRIPTS/payload.sh"
+snap_collect
+assert_no_file "$C/evil-ran" "a payload rewritten after the snapshot is not executed, though the interpreter is unchanged"
+assert_eq "$(row viabash)" "changed" "index row says changed"
+
+snap_case tamper_payload_new
+printf 'viabash /bin/bash %s\n' "$SCRIPTS/later-payload.sh" > "$CONF"
+HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" snapshot > "$C/snap" 2> /dev/null
+mk_script "$SCRIPTS/later-payload.sh" <<SH
+#!/bin/bash
+touch "$C/later-ran"
+SH
+snap_collect
+assert_no_file "$C/later-ran" "a payload that did not exist at the snapshot is not run when it appears"
+assert_eq "$(row viabash)" "changed" "index row says changed"
 
 snap_case tamper_absent
 rm -f "$CONF"

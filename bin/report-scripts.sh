@@ -27,12 +27,14 @@
 # hash differs now, or that did not exist when the snapshot was taken. A `collect` with no snapshot
 # (by hand) reads the conf and checks nothing, because nothing has run since you wrote it.
 #
-# What the hash covers, and what it does not: only the file named as the entry's path is pinned. An
-# entry such as `name /usr/bin/python3 ~/x.py` pins python3 and leaves x.py, and anything a script
-# sources or reads, writable by a worker, so interpreter-style entries are unprotected: give the
-# conf the script itself, not an interpreter plus a file. And only the same-run window is defended:
-# a worker that plants a conf entry on night N gets it snapshotted as trusted on night N+1, because
-# nothing tells a planted line from one the operator wrote.
+# What the hash covers, and what it does not: the file named as the entry's path, and every argument
+# that is an existing file at snapshot time (`name /bin/bash ~/x.sh` pins bash and x.sh together; an
+# argument file that appears later is also "changed"). Not covered: anything a script sources, reads
+# or runs on its own, and the same-run window is all that is defended. A worker that plants a conf
+# entry or a script on night N gets it snapshotted as trusted on night N+1, because nothing tells a
+# planted line from one the operator wrote, and the snapshot cannot protect a trust anchor the worker
+# can also write. Both gaps close when workers can no longer write outside their own staging dir
+# (https://github.com/STRML/autodream/issues/169).
 #
 # THE FAILURE IS THE CONTENT
 #
@@ -102,30 +104,70 @@ hash_of() {
   shasum -a 256 -- "$1" 2>/dev/null | cut -d' ' -f1 | grep -E '^[0-9a-f]{64}$' || printf -- '-'
 }
 
-# $1=signal name, $2=pid -> the signal to the process and every descendant, children first
-kill_tree() {
+# $1=pid -> that process and every descendant, one per line, children first
+tree_pids() {
   local c
-  for c in $(pgrep -P "$2" 2>/dev/null); do kill_tree "$1" "$c"; done
-  kill -s "$1" "$2" 2>/dev/null
+  for c in $(pgrep -P "$1" 2>/dev/null); do tree_pids "$c"; done
+  printf '%s\n' "$1"
+}
+
+# $1=file of pids -> any that outlived a TERM get what is left of the grace period, then KILL.
+settle_tree() {
+  local p alive i=0 limit=$((KILL_GRACE * 10))
+  while [ "$i" -lt "$limit" ]; do
+    alive=0
+    for p in $(cat "$1" 2>/dev/null); do if kill -0 "$p" 2>/dev/null; then alive=1; fi; done
+    [ "$alive" = 0 ] && return 0
+    sleep 0.1; i=$((i + 1))
+  done
+  for p in $(cat "$1" 2>/dev/null); do kill -s KILL "$p" 2>/dev/null || true; done
 }
 
 # $1=seconds, rest=command -> runs it bounded: TERM at the timeout, KILL KILL_GRACE seconds later.
 # A command that traps or ignores TERM must not be able to hold the nightly run, and the processes
 # it started must not outlive it (the timeout binary signals the whole group; the watchdog walks the tree).
 run_bounded() {
-  local secs="$1" pid wd rc; shift
+  local secs="$1" pid wd rc flag; shift
   if [ -n "$TIMEOUT_BIN" ]; then "$TIMEOUT_BIN" -k "$KILL_GRACE" "$secs" "$@"; return $?; fi
+  flag=$(mktemp "${TMPDIR:-/tmp}/report-scripts-wd.XXXXXX") || flag=""
   "$@" & pid=$!
-  # The watchdog traps TERM and takes its own sleep with it, so a command that finishes in time
-  # leaves nothing behind, and a watchdog woken at that moment cannot fire at a recycled pid.
-  ( trap 'kill "$sp" 2>/dev/null; exit 0' TERM
+  # At the timeout the watchdog records the tree, then sends TERM. It traps TERM and takes its own
+  # sleep with it, so a command that finishes in time leaves nothing behind, and a watchdog woken at
+  # that moment cannot fire at a recycled pid.
+  ( trap 'kill "${sp:-}" 2>/dev/null; exit 0' TERM
     sleep "$secs" & sp=$!; wait "$sp" || exit 0
-    kill_tree TERM "$pid"
+    tree=$(tree_pids "$pid")
+    [ -z "$flag" ] || printf '%s\n' "$tree" > "$flag"
+    for p in $tree; do kill -s TERM "$p" 2>/dev/null || true; done
     sleep "$KILL_GRACE" & sp=$!; wait "$sp" || exit 0
-    kill_tree KILL "$pid" ) >/dev/null 2>&1 & wd=$!
+    for p in $tree; do kill -s KILL "$p" 2>/dev/null || true; done ) >/dev/null 2>&1 & wd=$!
   wait "$pid"; rc=$?
   kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
+  # TERM was sent. The command may be gone while a TERM-ignoring child it started is not, and it is no
+  # longer reachable through the command's process tree, so it is settled from the recorded list.
+  if [ -n "$flag" ] && [ -s "$flag" ]; then settle_tree "$flag"; fi
+  [ -z "$flag" ] || rm -f "$flag"
   return "$rc"
+}
+
+# $1=script path, rest=its arguments -> what an entry is pinned to. The script's own sha256 when no
+# argument names an existing file. Otherwise a sha256 over the script hash and each such file's path and
+# hash, so an interpreter entry (`name /bin/bash ~/x.sh`) is pinned to its payload too. A relative
+# argument is looked up from HOME, where the command runs. "-" when anything could not be hashed.
+entry_hash() {
+  local path="$1" h f fh a parts=""; shift
+  h=$(hash_of "$path")
+  if [ "$h" = "-" ]; then printf -- '-'; return 0; fi
+  for a in "$@"; do
+    f=$(expand_path "$a")
+    case "$f" in /*) ;; *) f="$HOME/$f" ;; esac
+    [ -f "$f" ] || continue
+    fh=$(hash_of "$f")
+    if [ "$fh" = "-" ]; then printf -- '-'; return 0; fi
+    parts="$parts$f $fh"$'\n'
+  done
+  if [ -z "$parts" ]; then printf '%s' "$h"; return 0; fi
+  printf '%s\n%s' "$h" "$parts" | shasum -a 256 2>/dev/null | cut -d' ' -f1 | grep -E '^[0-9a-f]{64}$' || printf -- '-'
 }
 
 # Prints "#present" or "#absent" for the conf, then "<sha256 or ->\t<conf line>" per entry line.
@@ -138,7 +180,11 @@ snapshot() {
     [ $# -gt 0 ] || continue
     case "$1" in '#'*) continue ;; esac
     w2="${2:-}"
-    printf '%s\t%s\n' "$(hash_of "$(expand_path "$w2")")" "$line"
+    if [ $# -ge 3 ]; then
+      printf '%s\t%s\n' "$(entry_hash "$(expand_path "$w2")" "${@:3}")" "$line"
+    else
+      printf '%s\t%s\n' "$(entry_hash "$(expand_path "$w2")")" "$line"
+    fi
   done < "$CONF"
 }
 
@@ -198,7 +244,7 @@ collect() {
       if [ "$status" = ok ] && [ "$checked" = 1 ]; then
         # Fail closed: run only when both hashes are real sha256 values and equal. A "-" on both
         # sides (hashing failed twice) must never read as "unchanged".
-        now=$(hash_of "$path")
+        now=$(entry_hash "$path" ${args[@]+"${args[@]}"})
         if ! printf '%s' "$want" | grep -Eq '^[0-9a-f]{64}$' || [ "$now" != "$want" ]; then
           status=changed; reason="FAILED: the script changed since this run started, did not exist then, or could not be hashed; not run: $path"
         fi

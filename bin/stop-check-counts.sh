@@ -40,7 +40,8 @@ command -v jq >/dev/null 2>&1 || { echo "stop-check-counts: jq not found" >&2; e
 
 # jq emits tagged TSV rows; awk lays them out, so the column widths do not depend on jq's version.
 jq -nrR --argjson now "$now" --argjson hours "$hours" '
-  def ts: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+  def frac: ((capture("\\.(?<f>[0-9]+)Z$") | .f) // null) | if . == null then 0 else ("0." + .) | tonumber end;
+  def ts: frac as $f | (sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) + $f;
   def day: (. / 86400 | floor) * 86400;
   def weekstart: day | . - ((gmtime[6] + 6) % 7) * 86400;
   def iso: strftime("%Y-%m-%dT%H:%M:%SZ");
@@ -92,4 +93,8 @@ jq -nrR --argjson now "$now" --argjson hours "$hours" '
   }
   END { }
 '
-exit "${PIPESTATUS[0]}"
+# Both stages must have succeeded: jq alone failing, or awk failing to write the layout, is a script
+# failure, and the collector reads exit 0 as ok.
+stages=("${PIPESTATUS[@]}")
+[ "${stages[0]}" -eq 0 ] || exit "${stages[0]}"
+exit "${stages[1]}"

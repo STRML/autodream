@@ -112,6 +112,24 @@ assert_eq "$(cell '^kind' ok 2)" "1" "a clean kind is still itself"
 assert_eq "$(cell '^kind' total 2)" "3" "the window total still adds up"
 assert_grep "$OUT" 'dated after now.*2' "lines dated after now are counted, not dropped without a word"
 
+echo "# a verdict a fraction of a second after the clock is after the clock"
+LOG3="$SUITE_TMP/verdicts3.jsonl"
+cat > "$LOG3" <<EOF
+{"kind":"ok","at":"2026-11-19T12:00:00Z",$M}
+{"kind":"ok","at":"2026-11-19T12:00:00.999Z",$M}
+{"kind":"ok","at":"2026-11-19T11:59:59.999Z",$M}
+EOF
+STOP_CHECK_VERDICTS="$LOG3" STOP_CHECK_NOW="$NOW" bash "$BIN" > "$SUITE_TMP/out" 2> "$SUITE_TMP/err"; RC=$?; OUT="$SUITE_TMP/out"
+assert_eq "$RC" "0" "fractional timestamps exit 0"
+assert_eq "$(cell '^kind' total 2)" "2" "the line 999 ms past the clock is not in the window"
+assert_grep "$OUT" 'dated after now.*1' "it is counted as dated after now"
+
+echo "# a failure in the layout stage is a failure of the script, not a silent empty report"
+mkdir -p "$SUITE_TMP/badawk"
+printf '#!/bin/sh\ncat > /dev/null\nexit 3\n' > "$SUITE_TMP/badawk/awk"; chmod +x "$SUITE_TMP/badawk/awk"
+PATH="$SUITE_TMP/badawk:$PATH" STOP_CHECK_VERDICTS="$LOG" STOP_CHECK_NOW="$NOW" bash "$BIN" > "$SUITE_TMP/out" 2> "$SUITE_TMP/err"; RC=$?
+[ "$RC" -ne 0 ] && ok "an awk that fails makes the script fail (exit $RC)" || no "an awk that fails makes the script fail (got exit 0)"
+
 echo "# failure modes are loud"
 STOP_CHECK_VERDICTS="$SUITE_TMP/nope.jsonl" STOP_CHECK_NOW="$NOW" bash "$BIN" > "$SUITE_TMP/out" 2> "$SUITE_TMP/err"; RC=$?
 assert_eq "$RC" "1" "a missing log exits 1"
