@@ -90,10 +90,19 @@ LAST_DATE="$(sed -n 's#.*<string>\([0-9]\{4\}-[0-9][0-9]-[0-9][0-9]\)</string>.*
 assert_eq "2020-01-03" "$LAST_DATE" "the holder's plist was not overwritten"
 
 # ---------------------------------------------------------------------- --watch --
-# The mock's bootstrap hook stands in for the run: it writes the log and the report the
-# way run.sh would, and MOCK_AFTER decides how long launchd keeps reporting a process.
-# Dates are before the questions-block epoch, so a report needs only the count marker.
+# The mock's bootstrap hook stands in for the run: it writes the log and the report the way run.sh
+# would, and MOCK_AFTER decides how long launchd keeps reporting a process. The watcher decides
+# from one thing: the line run.sh appends to logs/run-<date>.outcome, keyed by the token the
+# watcher put in the one-shot plist. outcome.sh is that line, with the token read from the plist.
 COMPLETE='# r\n<!-- autodream:open-questions=0 -->\n'
+cat > "$SANDBOX/outcome.sh" <<'SH'
+#!/bin/bash
+# outcome.sh <install-dir> <date> <status> [token]
+p=$(ls -t "$1"/*.plist | head -1)
+tok=${4:-$(sed -n 's#.*<key>AUTODREAM_RUN_TOKEN</key><string>\([^<]*\)</string>.*#\1#p' "$p" | head -1)}
+printf '%s %s\n' "$tok" "$3" >> "$1/logs/run-$2.outcome"
+SH
+outc() { printf "bash '%s' '%s' %s" "$SANDBOX/outcome.sh" "$SANDBOX/install" "$*"; }
 watch_launch() { # watch_launch <date> <running-polls> <on-bootstrap> [extra args] -> OUT, RC
   local d="$1" k="$2" hook="$3"; shift 3
   rm -f "$SANDBOX/mock/booted" "$SANDBOX/mock/prints"; : > "$CALLS"
@@ -112,47 +121,52 @@ D=2020-02-01
 watch_launch "$D" 2 "echo run-line >> '$(logf $D)'; printf 'Not logged in · Please run /login\n' > '$(repf $D)'"
 [ "$RC" -ne 0 ] && ok "a stub report is a failed run" || nope "a stub report is a failed run" "rc=$RC out=$OUT"
 case "$OUT" in *"✓"*) nope "it never says ✓ for a stub" "out: $OUT" ;; *) ok "it never says ✓ for a stub" ;; esac
-case "$OUT" in *"without a complete report"*) ok "it says the run ended without a complete report" ;; *) nope "it says the run ended without a complete report" "out: $OUT" ;; esac
+case "$OUT" in *"without delivering a report"*) ok "it says the run ended without delivering a report" ;; *) nope "it says the run ended without delivering a report" "out: $OUT" ;; esac
 [ "$(cat "$SANDBOX/mock/prints" 2>/dev/null || echo 0)" -ge 3 ] && ok "it waited for the job to finish" || nope "it waited for the job to finish" "prints: $(cat "$SANDBOX/mock/prints" 2>/dev/null)"
 
 echo "# --watch: a delivered report from this run is ready while the job is still going"
-# run.sh logs "report bytes: N" only for a report that stands after the move-aside of a degraded capture.
 D=2020-02-02
-watch_launch "$D" 1000 "echo run-line >> '$(logf $D)'; printf '$COMPLETE' > '$(repf $D)'; echo 'report bytes: 40' >> '$(logf $D)'"
+watch_launch "$D" 1000 "echo run-line >> '$(logf $D)'; printf '$COMPLETE' > '$(repf $D)'; $(outc $D delivered)"
 assert_eq "0" "$RC" "a delivered new report exits 0"
 case "$OUT" in *"✓ report ready"*) ok "it says the report is ready" ;; *) nope "it says the report is ready" "out: $OUT" ;; esac
 
-echo "# --watch: a degraded capture that already carries the marker is not a ready report"
-# L2 left a capture with the open-questions marker but no AUTODREAM_REPORT_END sentinel; run.sh keeps it
-# at the report path between attempts and moves it aside when it gives up. The job is still running.
+echo "# --watch: a degraded capture that already carries the marker is not a ready report, even if the run is killed with it in place"
+# L2 left a capture with the open-questions marker but no AUTODREAM_REPORT_END sentinel; run.sh keeps it at
+# the report path between attempts. Here the runner dies before it can move it aside: no outcome is written.
 D=2020-02-06
-watch_launch "$D" 8 "echo 'L2 attempt 1 wrote a complete-looking report but no AUTODREAM_REPORT_END sentinel; not a validated delivery, retrying' >> '$(logf $D)'; printf '$COMPLETE' > '$(repf $D)'; (sleep 0.3; mv '$(repf $D)' '$(repf $D).partial-1') >/dev/null 2>&1 &"
-case "$OUT" in *"✓"*) nope "it never says ✓ for a capture run.sh is about to retry" "out: $OUT" ;; *) ok "it never says ✓ for a capture run.sh is about to retry" ;; esac
-[ "$RC" -ne 0 ] && ok "the run that gave up fails" || nope "the run that gave up fails" "rc=$RC out=$OUT"
+watch_launch "$D" 8 "echo 'L2 attempt 1 wrote a complete-looking report but no AUTODREAM_REPORT_END sentinel; not a validated delivery, retrying' >> '$(logf $D)'; printf '$COMPLETE' > '$(repf $D)'"
+case "$OUT" in *"✓"*) nope "it never says ✓ for a capture nobody delivered" "out: $OUT" ;; *) ok "it never says ✓ for a capture nobody delivered" ;; esac
+[ "$RC" -ne 0 ] && ok "the run that ended without delivering fails" || nope "the run that ended without delivering fails" "rc=$RC out=$OUT"
 [ "$(cat "$SANDBOX/mock/prints" 2>/dev/null || echo 0)" -ge 3 ] && ok "it waited for the job to finish" || nope "it waited for the job to finish" "prints: $(cat "$SANDBOX/mock/prints" 2>/dev/null)"
 
-echo "# --watch: a degraded capture run.sh could not move aside is not ready either"
-# run.sh logs the WARNING and, because the capture is not a delivered report, no "report bytes" line
-# (test_report_bytes_is_logged_only_for_a_delivered_report in run-all.sh pins that side).
-D=2020-02-08
-watch_launch "$D" 1 "echo 'WARNING: an incomplete report is at $(repf $D) and could not be moved aside; later triggers will treat this date as done' >> '$(logf $D)'; printf '$COMPLETE' > '$(repf $D)'"
-[ "$RC" -ne 0 ] && ok "it fails" || nope "it fails" "rc=$RC out=$OUT"
+echo "# --watch: text in the log, even the runner's own wording, does not stand for a delivery"
+# A model's summary is appended to this log after the sentinel, so any line a person could write there
+# can be written by L2. Only the outcome line counts.
+D=2020-02-09
+watch_launch "$D" 4 "echo 'report bytes: 1' >> '$(logf $D)'; echo 'delivered' >> '$(logf $D)'; printf '$COMPLETE' > '$(repf $D)'"
+[ "$RC" -ne 0 ] && ok "a forged report-bytes line does not make the report ready" || nope "a forged report-bytes line does not make the report ready" "rc=$RC out=$OUT"
 case "$OUT" in *"✓"*) nope "and never says ✓" "out: $OUT" ;; *) ok "and never says ✓" ;; esac
-case "$OUT" in *"could not move it aside"*) ok "and says why" ;; *) nope "and says why" "out: $OUT" ;; esac
 
-echo "# --watch --force: a complete report this run wrote counts even with no report-bytes line (the no-sessions stub)"
-D=2020-02-07
-printf '%b' "$COMPLETE" > "$(repf $D)"; touch -t 202001010000 "$(repf $D)"
-watch_launch "$D" 1 "echo run-line >> '$(logf $D)'; printf '$COMPLETE' > '$(repf $D)'" --force
-assert_eq "0" "$RC" "a report written by this run is a success, not the previous one unchanged"
-case "$OUT" in *"✓ report ready"*) ok "it says the report is ready" ;; *) nope "it says the report is ready" "out: $OUT" ;; esac
+echo "# --watch: a report written in the second the run was launched is not mistaken for a new one"
+D=2020-02-10
+watch_launch "$D" 4 "printf '$COMPLETE' > '$(repf $D)'; touch '$(repf $D)'"
+[ "$RC" -ne 0 ] && ok "a report with a fresh mtime and no outcome is not ready" || nope "a report with a fresh mtime and no outcome is not ready" "rc=$RC out=$OUT"
 
-echo "# --watch: an existing complete report and a no-op run"
+echo "# --watch: another launch's outcome line is not this launch's"
+D=2020-02-11
+watch_launch "$D" 4 "echo 'some-other-token delivered' >> '$SANDBOX/install/logs/run-$D.outcome'; printf '$COMPLETE' > '$(repf $D)'"
+[ "$RC" -ne 0 ] && ok "a line with another token is ignored" || nope "a line with another token is ignored" "rc=$RC out=$OUT"
+
+echo "# --watch: a finished report the runner left alone (a no-op run) is a success, whatever its marker"
 D=2020-02-03
 printf '%b' "$COMPLETE" > "$(repf $D)"; touch -t 202001010000 "$(repf $D)"
-watch_launch "$D" 1 "echo run-line >> '$(logf $D)'"
+watch_launch "$D" 1 "echo run-line >> '$(logf $D)'; $(outc $D noop)"
 assert_eq "0" "$RC" "an existing report with nothing rebuilt exits 0"
 case "$OUT" in *"already existed"*) ok "it says the report already existed" ;; *) nope "it says the report already existed" "out: $OUT" ;; esac
+D=2020-02-12
+printf 'a legacy report with no marker\n' > "$(repf $D)"
+watch_launch "$D" 1 "echo run-line >> '$(logf $D)'; $(outc $D noop)"
+assert_eq "0" "$RC" "a legacy report the runner accepts is accepted by the watcher too"
 
 echo "# --watch --force: a rebuild that writes nothing new is a failure"
 D=2020-02-04
@@ -161,10 +175,17 @@ watch_launch "$D" 1 "echo run-line >> '$(logf $D)'" --force
 [ "$RC" -ne 0 ] && ok "--force with no new report fails" || nope "--force with no new report fails" "rc=$RC out=$OUT"
 case "$OUT" in *"previous one is unchanged"*) ok "it says the old report is unchanged" ;; *) nope "it says the old report is unchanged" "out: $OUT" ;; esac
 
+echo "# --watch --force: a report this run delivered (the no-sessions stub included) is a success"
+D=2020-02-07
+printf '%b' "$COMPLETE" > "$(repf $D)"; touch -t 202001010000 "$(repf $D)"
+watch_launch "$D" 1 "echo run-line >> '$(logf $D)'; printf '$COMPLETE' > '$(repf $D)'; $(outc $D delivered)" --force
+assert_eq "0" "$RC" "a delivered rebuild is a success, not the previous one unchanged"
+case "$OUT" in *"✓ report ready"*) ok "it says the report is ready" ;; *) nope "it says the report is ready" "out: $OUT" ;; esac
+
 echo "# --watch: only this run's log lines are shown"
 D=2020-02-05
 echo "OLD-RUN-LINE" > "$(logf $D)"
-watch_launch "$D" 1000 "echo NEW-RUN-LINE >> '$(logf $D)'; printf '$COMPLETE' > '$(repf $D)'; echo 'report bytes: 40' >> '$(logf $D)'"
+watch_launch "$D" 1000 "echo NEW-RUN-LINE >> '$(logf $D)'; printf '$COMPLETE' > '$(repf $D)'; $(outc $D delivered)"
 case "$OUT" in *NEW-RUN-LINE*) ok "this run's lines are shown" ;; *) nope "this run's lines are shown" "out: $OUT" ;; esac
 case "$OUT" in *OLD-RUN-LINE*) nope "an earlier attempt's lines are not replayed" "out: $OUT" ;; *) ok "an earlier attempt's lines are not replayed" ;; esac
 
@@ -212,6 +233,26 @@ echo "# the plist written for a real launch is owner-only"
 launch 2020-03-02 absent
 WRITTEN="$(ls "$SANDBOX"/install/com.test.autodream.ondemand.*.plist 2>/dev/null | head -n 1)"
 assert_eq "600" "$(stat -f %Lp "$WRITTEN" 2>/dev/null)" "the on-demand plist is mode 600"
+rm -f "$SANDBOX/LaunchAgents/com.test.autodream.plist"
+
+echo "# a value that ends in a newline reaches the one-shot as it is"
+make_sched com.test.autodream "$SANDBOX/install" \
+'        <key>MULTI</key><string>line one
+line two
+</string>'
+dry
+has $'<key>MULTI</key><string>line one\nline two\n</string>' "trailing newlines survive the copy"
+rm -f "$SANDBOX/LaunchAgents/com.test.autodream.plist"
+
+echo "# a scheduled job whose environment cannot be read refuses the launch, not a logged-out run"
+make_sched com.test.autodream "$SANDBOX/install" \
+'        <key>CLAUDE_CONFIG_DIR</key><string>/x/claude-profile</string>'
+dry AUTODREAM_JQ_BIN=/usr/bin/false
+assert_eq "65" "$RC" "a failing jq is exit 65"
+has "refusing to launch logged out" "and says why"
+lacks "<key>PATH</key>" "and no plist is built for it"
+dry AUTODREAM_JQ_BIN=/nonexistent/jq
+assert_eq "65" "$RC" "a jq that is not there is exit 65 too"
 rm -f "$SANDBOX/LaunchAgents/com.test.autodream.plist"
 
 echo "# another install's job is never read, even on the label"
