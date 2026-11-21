@@ -785,6 +785,70 @@ test_focus_cli_reclaims_a_stale_lock(){
   rm -rf "$root"
 }
 
+test_focus_cli_a_failed_read_never_becomes_a_write(){
+  echo "# autodream-focus.sh: a read that fails part-way cannot replace the tags with a partial copy"
+  local root; root=$(setup_env); local f="$root/autodream/tags.jsonl" sh="$root/shim" out rc real_tail
+  real_tail=$(command -v tail); mkdir -p "$sh"
+  printf '{"id":"keep:1","text":"one"}\n{"id":"keep:2","text":"two"}\n' > "$f"
+  cp "$f" "$root/before"
+  # cat that prints the first line of the tags file and then fails, as an I/O error part-way would
+  printf '#!/bin/bash\ncase "$*" in *tags.jsonl*) head -1 "$1"; exit 1 ;; esac\nexec /bin/cat "$@"\n' > "$sh/cat"
+  chmod +x "$sh/cat"
+  rc=0; out=$(PATH="$sh:$PATH" focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1) || rc=$?
+  assert_eq "$rc" "1" "a copy that fails part-way is a refusal"
+  assert_grep_str "$out" "nothing was changed" "and says nothing was changed"
+  assert_eq "$(cat "$f")" "$(cat "$root/before")" "the tags are exactly as they were"
+  assert_eq "$(ls -A "$root/autodream" | grep -c '^tags\.jsonl\.' || true)" "0" "no lock or scratch file is left behind"
+  rm -f "$sh/cat"
+  # tail that fails: the torn-line check cannot be answered, so it cannot be guessed
+  printf '#!/bin/bash\ncase "$*" in *tags.jsonl*) exit 1 ;; esac\nexec "%s" "$@"\n' "$real_tail" > "$sh/tail"
+  chmod +x "$sh/tail"
+  rc=0; out=$(PATH="$sh:$PATH" focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1) || rc=$?
+  assert_eq "$rc" "1" "a failed torn-line check is a refusal too"
+  assert_eq "$(cat "$f")" "$(cat "$root/before")" "and the tags are exactly as they were"
+  rm -rf "$root"
+}
+
+test_focus_cli_last_omp_leaves_no_copy_when_it_cannot_read_a_turn(){
+  echo "# autodream-focus.sh last: a failure after the live-branch copy is made leaves no copy of the transcript behind"
+  local root; root=$(setup_env); local f="$root/s.jsonl" sh="$root/shim" tmp="$root/tmp" real_jq out rc
+  real_jq=$(command -v jq); mkdir -p "$sh" "$tmp"
+  jq -cn --arg cwd "$root" '{type:"session",version:3,id:"live",timestamp:"2020-01-02T12:00:00.000Z",cwd:$cwd}' > "$f"
+  jq -cn '{type:"message",id:"u1",parentId:null,message:{role:"user",content:"hello"}}' >> "$f"
+  jq -cn '{type:"message",id:"a1",parentId:"u1",message:{role:"assistant",content:"hi"}}' >> "$f"
+  # jq that fails only on the turn-picking call (-c -s), so the copy exists when it dies
+  printf '#!/bin/bash\ncase " $* " in *" -c -s "*) exit 5 ;; esac\nexec "%s" "$@"\n' "$real_jq" > "$sh/jq"
+  chmod +x "$sh/jq"
+  rc=0; out=$(PATH="$sh:$PATH" TMPDIR="$tmp" focus_cli "$root" last --harness omp --file "$f" 2>&1) || rc=$?
+  assert_eq "$rc" "1" "it refuses"
+  assert_grep_str "$out" "nothing was changed" "and says nothing was changed"
+  assert_eq "$(ls -A "$tmp" | wc -l | tr -d ' ')" "0" "no copy of the transcript is left in TMPDIR"
+  assert_no_file "$root/autodream/tags.jsonl" "and nothing was tagged"
+  rm -rf "$root"
+}
+
+test_focus_cli_a_stale_lock_is_taken_by_one_waiter_only(){
+  echo "# autodream-focus.sh: two waiters that both see a stale lock cannot both take it over"
+  local root; root=$(setup_env); local d="$root/autodream" f="$root/autodream/tags.jsonl" out rc
+  mkdir -p "$d/tags.jsonl.lock" "$d/tags.jsonl.lock.reclaim"
+  touch -t 202001010000 "$d/tags.jsonl.lock"
+  rc=0; out=$(focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1) || rc=$?
+  assert_eq "$rc" "1" "another waiter is mid-takeover, so this one does not remove the lock under it"
+  assert_grep_str "$out" "nothing was changed" "and says nothing was changed"
+  [ -d "$d/tags.jsonl.lock" ] && ok "the lock was left for the waiter that is taking it" || no "the lock was left for the waiter that is taking it"
+  assert_no_file "$f" "and nothing was written"
+  touch -t 202001010000 "$d/tags.jsonl.lock.reclaim"
+  out=$(focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1)
+  assert_eq "$out" "tagged s1:r1" "a takeover claim that is itself stale does not block tagging forever"
+  assert_eq "$(ls -A "$d" | grep -c 'lock' || true)" "0" "and no lock or claim is left behind"
+  local i
+  mkdir -p "$d/tags.jsonl.lock"; touch -t 202001010000 "$d/tags.jsonl.lock"
+  for i in 1 2 3 4 5 6; do focus_cli "$root" tag --harness omp --session p --uuid "r$i" --role assistant --text "n$i" >/dev/null 2>&1 & done
+  wait
+  assert_eq "$(jq -s '[.[] | select(.session == "p")] | length' "$f")" "6" "six tags made at once over a stale lock are all kept"
+  rm -rf "$root"
+}
+
 mk_codex_session(){ # $1=codex home $2=session id $3=cwd — a rollout in the shape Codex writes
   local d="$1/sessions/2020/01/02"; mkdir -p "$d"
   local f="$d/rollout-2020-01-02T12-00-00-$2.jsonl"
@@ -3991,6 +4055,9 @@ _run test_focus_cli_unreadable_file_is_never_overwritten
 _run test_focus_cli_refuses_empty_text
 _run test_focus_cli_usage_errors
 _run test_focus_cli_reclaims_a_stale_lock
+_run test_focus_cli_a_failed_read_never_becomes_a_write
+_run test_focus_cli_last_omp_leaves_no_copy_when_it_cannot_read_a_turn
+_run test_focus_cli_a_stale_lock_is_taken_by_one_waiter_only
 _run test_focus_cli_last_codex
 _run test_focus_cli_last_omp
 _run test_focus_cli_last_omp_reads_the_live_branch

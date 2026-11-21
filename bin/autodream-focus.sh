@@ -70,28 +70,43 @@ usage() { sed -n '/^# Usage:/,/^# Exit:/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1
 
 command -v jq >/dev/null 2>&1 || die 3 "jq is required"
 
+lock_is_stale() { # $1=lock dir -> 0 when it is older than a minute
+  [ -d "$1" ] && [ $(( $(date +%s) - $(pstat_mtime "$1" || date +%s) )) -gt 60 ]
+}
+
+# Two waiters can both see a lock as stale. Removing it takes a claim of its own, and the age is read
+# again under the claim, so a waiter that lost the race cannot remove the lock the winner just took.
+# A claim left by a killed waiter goes the same way once it is old.
+reclaim_stale_lock() {
+  if ! mkdir "$LOCK.reclaim" 2>/dev/null; then
+    if lock_is_stale "$LOCK.reclaim"; then rmdir "$LOCK.reclaim" 2>/dev/null || true; fi
+    return 1
+  fi
+  if lock_is_stale "$LOCK"; then rmdir "$LOCK" 2>/dev/null || true; fi
+  rmdir "$LOCK.reclaim" 2>/dev/null || true
+}
+
 acquire_lock() {
   local i=0
   while ! mkdir "$LOCK" 2>/dev/null; do
-    if [ -d "$LOCK" ]; then
-      local age; age=$(( $(date +%s) - $(pstat_mtime "$LOCK" || date +%s) ))
-      if [ "$age" -gt 60 ]; then rmdir "$LOCK" 2>/dev/null || true; continue; fi
-    fi
     i=$(( i + 1 ))
     [ "$i" -gt 20 ] && return 1
+    if lock_is_stale "$LOCK" && reclaim_stale_lock; then continue; fi
     sleep 0.25
   done
   return 0
 }
 release_lock() { rmdir "$LOCK" 2>/dev/null || true; }
 
-# One cleanup for the lock and the scratch file, registered once. It must not name a function's
+# One cleanup for the lock and the scratch files, registered once. It must not name a function's
 # local: an EXIT trap runs after the function has returned, where `set -u` makes the reference
 # a fatal error that skips the rest of the trap, and a lock left behind blocks every later tag.
 TMP=""
+LIVE=""
 HAVE_LOCK=0
 cleanup() {
   [ -z "$TMP" ] || rm -f "$TMP"
+  [ -z "$LIVE" ] || rm -f "$LIVE"
   [ "$HAVE_LOCK" = 0 ] || release_lock
 }
 trap cleanup EXIT
@@ -115,7 +130,7 @@ cmd_tag() {
   [ -n "$session" ] && [ -n "$uuid" ] || usage
   case "$harness" in claude|omp|codex) ;; *) usage ;; esac
   case "$role" in user|assistant) ;; *) usage ;; esac
-  [ "$have_text" = 1 ] || text="$(cat)"
+  [ "$have_text" = 1 ] || text="$(cat)" || die 1 "could not read the turn text from stdin; nothing was changed"
   [ -n "$(printf '%s' "$text" | tr -d '[:space:]')" ] || die 1 "that turn has no text, so there is nothing to tag"
 
   local id="$session:$uuid"
@@ -159,14 +174,20 @@ cmd_tag() {
       cwd: $cwd, taggedAt: $at, harness: $harness}
      + (if $transcript == "" then {} else {transcript: $transcript} end)')" || die 1 "could not build the tag"
 
-  {
-    if [ -s "$TAGS_FILE" ]; then
-      cat "$TAGS_FILE"
-      # A torn last line has no newline; the new tag must not be glued onto it.
-      [ -z "$(tail -c1 "$TAGS_FILE")" ] || printf '\n'
-    fi
-    printf '%s\n' "$line"
-  } > "$tmp" || die 1 "could not write the tag; nothing was changed"
+  # Each step is its own checked command. A `{ ...; } > "$tmp" || die` group is not: bash ignores
+  # errexit for everything inside a group on the left of `||`, and the group's status is its last
+  # command's, so a `cat` that failed part-way was hidden by the `printf` after it and the rename
+  # below replaced every tag with a partial copy.
+  if [ -s "$TAGS_FILE" ]; then
+    local last
+    cat "$TAGS_FILE" > "$tmp" || die 1 "could not read $TAGS_FILE; nothing was changed"
+    # The mod's own writes are not locked, so the file can change under the copy.
+    cmp -s "$TAGS_FILE" "$tmp" || die 1 "$TAGS_FILE changed while it was being copied; nothing was changed"
+    # A torn last line has no newline; the new tag must not be glued onto it.
+    last="$(tail -c1 "$TAGS_FILE")" || die 1 "could not read $TAGS_FILE; nothing was changed"
+    if [ -n "$last" ]; then printf '\n' >> "$tmp" || die 1 "could not write the tag; nothing was changed"; fi
+  fi
+  printf '%s\n' "$line" >> "$tmp" || die 1 "could not write the tag; nothing was changed"
   mv -f "$tmp" "$TAGS_FILE" || die 1 "could not replace $TAGS_FILE; nothing was changed"
   say "tagged $id"
 }
@@ -224,7 +245,7 @@ cmd_last() {
   local session picked
   case "$harness" in
     codex)
-      session="$(head -1 "$file" | jq -rR 'fromjson? | .payload.id // .payload.session_id // empty')"
+      session="$(head -1 "$file" | jq -rR 'fromjson? | .payload.id // .payload.session_id // empty')" || session=""
       # A user message has no id in a Codex rollout, so its timestamp stands in; the turns Codex
       # injects as user messages (environment context, instructions) start with `<`.
       picked="$(jq -c -s --arg role "$role" '
@@ -233,28 +254,29 @@ cmd_last() {
             | select(.text != "" and ($role == "assistant" or (.text | startswith("<") | not)))) | last // empty' "$file")" \
         || die 1 "$file is not readable JSON lines; nothing was changed" ;;
     omp)
-      session="$(head -5 "$file" | jq -rR 'fromjson? | select(.type == "session") | .id // empty' | head -1)"
+      session="$(head -5 "$file" | jq -rR 'fromjson? | select(.type == "session") | .id // empty' | head -1)" || session=""
       [ -n "$session" ] || die 1 "$file has no session id, so it is not a $harness session"
       # The file is a tree that keeps every branch the user backed out of; read only the live
       # chain, and refuse rather than fall back to the raw file when it cannot be walked.
       [ -r "$LINEARIZE" ] || die 1 "cannot find adapters/omp/linearize.sh next to this script"
-      local live; live="$(mktemp "${TMPDIR:-/tmp}/autodream-focus.XXXXXX")"
-      if ! bash "$LINEARIZE" "$file" "$live" 2>/dev/null; then
-        rm -f "$live"; die 1 "$file could not be read as a single OMP conversation; nothing was changed"
-      fi
+      # LIVE is a global the EXIT trap removes: a 0600 copy of the transcript must go whichever
+      # step below ends the script.
+      LIVE="$(mktemp "${TMPDIR:-/tmp}/autodream-focus.XXXXXX")" || die 1 "cannot write a scratch file in ${TMPDIR:-/tmp}; nothing was changed"
+      bash "$LINEARIZE" "$file" "$LIVE" 2>/dev/null \
+        || die 1 "$file could not be read as a single OMP conversation; nothing was changed"
       # A user-role message attributed to the agent (a steering or injected turn) is not the human's.
       picked="$(jq -c -s --arg role "$role" '
         map(select(.type == "message" and .message.role == $role and .message.attribution != "agent")
             | {id: .id, text: (.message.content | if type == "string" then . else ([.[]? | select(.type == "text") | .text] | join("\n")) end)}
-            | select(.text != "")) | last // empty' "$live")"
-      rm -f "$live" ;;
+            | select(.text != "")) | last // empty' "$LIVE")" \
+        || die 1 "$file could not be read as OMP messages; nothing was changed" ;;
   esac
   [ -n "$session" ] || die 1 "$file has no session id, so it is not a $harness session"
   [ -n "$picked" ] || die 1 "no $role message with text in $file"
 
   local uuid text
-  uuid="$(printf '%s' "$picked" | jq -r '.id')"
-  text="$(printf '%s' "$picked" | jq -r '.text')"
+  uuid="$(printf '%s' "$picked" | jq -r '.id')" || die 1 "cannot read the turn picked from $file; nothing was changed"
+  text="$(printf '%s' "$picked" | jq -r '.text')" || die 1 "cannot read the turn picked from $file; nothing was changed"
 
   if [ "$dry" = 1 ]; then
     say "would tag $session:$uuid ($role) from $file"
