@@ -50,6 +50,12 @@ on:
   schedule:
     - cron: '17 9 * * 1'
   workflow_dispatch:
+    inputs:
+      suite:
+        description: 'full = the whole suite in four shards, web = only the dashboard suite (tests/autodream-web.sh)'
+        type: choice
+        options: [full, web]
+        default: full
 
 concurrency:
   group: launchd-${{ github.event.pull_request.number || github.ref }}
@@ -94,7 +100,7 @@ jobs:
   # Keep the matrix and the /4 in step: tests/shard.sh fails if they disagree.
   full:
     name: full suite (${{ matrix.shard }}/4)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.suite != 'web')
     runs-on: macos-latest
     timeout-minutes: 20
     strategy:
@@ -124,3 +130,28 @@ jobs:
           test -f "$RUNALL_TIMES" || { echo "no timings written"; exit 0; }
           awk '{ t += $1 } END { print "total seconds in tests and suites: " t }' "$RUNALL_TIMES"
           sort -rn "$RUNALL_TIMES" | head -12
+
+  # The dashboard suite alone, by hand. 25 of its 31 tests failed here only on the macOS image
+  # (#223), so a dispatch with suite=web is the cheap way to see whether a change to
+  # bin/autodream-web.py holds on this userland without paying for four full shards.
+  web:
+    name: web dashboard suite
+    if: github.event_name == 'workflow_dispatch' && inputs.suite == 'web'
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: diag (temporary)
+        run: |
+          python3 --version
+          python3 - <<'EOF'
+          import socket, time
+          for host in ("127.0.0.1", "localhost"):
+              start = time.monotonic()
+              name = socket.getfqdn(host)
+              print("getfqdn", host, "->", name, "in %.2fs" % (time.monotonic() - start), flush=True)
+          EOF
+
+      - name: web suite
+        run: /bin/bash tests/autodream-web.sh
