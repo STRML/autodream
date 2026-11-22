@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { extname } from "node:path";
 
@@ -9,6 +10,12 @@ const KINDS = {
 };
 
 const LEGACY_HTML_COMMENTS = new Set([".js", ".cjs"]);
+
+const NODE_MODES = {
+  ".js": [[], ["--input-type=module"]],
+  ".mjs": [["--input-type=module"]],
+  ".cjs": [["--input-type=commonjs"]],
+};
 
 function fail(code, message) {
   process.stderr.write(message + "\n");
@@ -52,16 +59,34 @@ function parse(code) {
   return { file, diagnostics: program.getSyntacticDiagnostics(file) };
 }
 
-let text = source;
-let parsed = parse(text);
-if (parsed.diagnostics.length > 0 && LEGACY_HTML_COMMENTS.has(extname(path))) {
-  const neutral = source.replace(/<!--/g, "//  ").replace(/^([ \t]*)-->/gm, "$1// ");
-  const retry = parse(neutral);
-  if (retry.diagnostics.length === 0) {
-    text = neutral;
-    parsed = retry;
+function nodeAccepts(args) {
+  return spawnSync(process.execPath, ["--check", ...args], { input: source, stdio: ["pipe", "ignore", "ignore"] }).status === 0;
+}
+
+const modes = NODE_MODES[extname(path)];
+if (modes && !modes.some(nodeAccepts)) fail(2, path + ": node --check rejects it as JavaScript");
+
+function legacyCommentAt(code, at) {
+  if (code.startsWith("<!--", at)) return at;
+  const closing = code[at] === ">" && /(?:^|[\n\r\u2028\u2029])[ \t]*--$/.test(code.slice(0, at));
+  return closing ? at - 2 : -1;
+}
+
+function neutralize(code) {
+  let current = code;
+  for (;;) {
+    const found = parse(current).diagnostics.map((d) => legacyCommentAt(current, d.start ?? -1)).filter((at) => at !== -1);
+    if (found.length === 0) return current;
+    for (const at of found) {
+      const width = current.startsWith("<!--", at) ? 4 : 3;
+      current = current.slice(0, at) + "//  ".slice(0, width) + current.slice(at + width);
+    }
   }
 }
+
+let text = source;
+if (parse(text).diagnostics.length > 0 && LEGACY_HTML_COMMENTS.has(extname(path))) text = neutralize(source);
+const parsed = parse(text);
 const file = parsed.file;
 if (parsed.diagnostics.length > 0) {
   const first = parsed.diagnostics[0];
@@ -75,10 +100,10 @@ function collect(ranges) {
 }
 
 const jsxTextStarts = new Set();
-const jsxCommentStarts = new Set();
+const jsxExpressionStarts = new Set();
 function findJsx(node) {
   if (node.kind === ts.SyntaxKind.JsxText) jsxTextStarts.add(node.getFullStart());
-  if (node.kind === ts.SyntaxKind.JsxExpression && !node.expression) jsxCommentStarts.add(node.getStart(file));
+  if (node.kind === ts.SyntaxKind.JsxExpression) jsxExpressionStarts.add(node.getStart(file));
   ts.forEachChild(node, findJsx);
 }
 findJsx(file);
@@ -107,7 +132,7 @@ for (const line of text.split(/\r\n|[\n\r\u2028\u2029]/)) {
     const at = offset + first;
     const afterBrace = line[first] === "{" ? line.slice(first + 1).search(/\S/) : -1;
     const jsxAt = afterBrace === -1 ? -1 : at + 1 + afterBrace;
-    const jsx = jsxAt !== -1 && jsxCommentStarts.has(at) && comments.has(jsxAt);
+    const jsx = jsxAt !== -1 && jsxExpressionStarts.has(at) && comments.has(jsxAt);
     const here = jsx ? comments.get(jsxAt) : comments.get(at);
     const exempt = here && here.kind === ts.SyntaxKind.SingleLineCommentTrivia && DIRECTIVE.test(source.slice(here.pos + 2, here.end));
     if ((jsx || inComment(at)) && !exempt) count += 1;
