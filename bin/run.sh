@@ -1094,15 +1094,16 @@ while owner_alive():
 lock_dir_young() { [ -n "$(find "$1" -maxdepth 0 -mmin -1 2>/dev/null)" ]; }
 
 lock_pid_alive() {
-  local rc=0
-  python3 -c 'import os, sys
+  local word rc=0
+  word=$(python3 -c 'import os, sys
 try:
     os.kill(int(sys.argv[1]), 0)
+    print("alive")
 except ProcessLookupError:
-    sys.exit(91)
+    print("dead")
 except Exception:
-    pass' "$1" >/dev/null 2>&1 || rc=$?
-  [ "$rc" -ne 91 ]
+    print("alive")' "$1" 2>/dev/null) || rc=$?
+  [ "$rc" -ne 0 ] || [ "$word" != "dead" ]
 }
 
 lock_names_live_run() {
@@ -1197,8 +1198,16 @@ lock_take_dir() {
     LOCK_DIR_MADE=1
   fi
   lock_meta_writable "$dir" || return 3
-  lock_write_meta "$dir" "$owner" || return 3
+  if ! lock_write_meta "$dir" "$owner"; then
+    [ "$LOCK_DIR_MADE" -eq 0 ] || lock_discard_dir "$dir"
+    return 3
+  fi
   return 0
+}
+
+lock_discard_dir() {
+  rm -f "$1/pid" "$1/start"
+  rmdir "$1" 2>/dev/null || true
 }
 
 lock_meta_writable() {
@@ -1210,16 +1219,21 @@ lock_meta_writable() {
   done
 }
 
+lock_write_new() {
+  ( set -C; printf '%s\n' "$1" > "$2" ) 2>/dev/null
+}
+
 lock_write_meta() {
-  local dir="$1" owner="$2" start oldstart="" oldpid="" hadstart=0 hadpid=0
+  local dir="$1" owner="$2" start
   start=$(proc_start "$owner")
-  if [ -e "$dir/start" ]; then hadstart=1; oldstart=$({ cat "$dir/start" && printf x; }) || return 1; fi
-  if [ -e "$dir/pid" ]; then hadpid=1; oldpid=$({ cat "$dir/pid" && printf x; }) || return 1; fi
-  if printf '%s\n' "$start" > "$dir/start" 2>/dev/null && printf '%s\n' "$owner" > "$dir/pid" 2>/dev/null; then
+  rm -f "$dir/start.tmp" "$dir/pid.tmp"
+  if lock_write_new "$start" "$dir/start.tmp" \
+    && lock_write_new "$owner" "$dir/pid.tmp" \
+    && mv -f "$dir/start.tmp" "$dir/start" 2>/dev/null \
+    && mv -f "$dir/pid.tmp" "$dir/pid" 2>/dev/null; then
     return 0
   fi
-  if [ "$hadstart" -eq 1 ]; then printf '%s' "${oldstart%x}" > "$dir/start" 2>/dev/null; else rm -f "$dir/start"; fi
-  if [ "$hadpid" -eq 1 ]; then printf '%s' "${oldpid%x}" > "$dir/pid" 2>/dev/null; else rm -f "$dir/pid"; fi
+  rm -f "$dir/start.tmp" "$dir/pid.tmp"
   return 1
 }
 
@@ -1236,8 +1250,7 @@ release_lock() {
     t*) meta=0; holder="${holder#t}" ;;
   esac
   if [ "$meta" -eq 1 ]; then
-    rm -f "$dir/pid" "$dir/start"
-    rmdir "$dir" 2>/dev/null || true
+    lock_discard_dir "$dir"
   fi
   lock_stop_holder "$holder"
   return 0

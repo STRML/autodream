@@ -11,3 +11,4 @@ inbox/
 .tmp/
 .claude/settings.local.json
 __pycache__/
+node_modules/

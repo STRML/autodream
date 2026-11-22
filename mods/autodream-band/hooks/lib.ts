@@ -18,7 +18,7 @@ const section = (text: string, heading: RegExp): string | null => {
 
   if (start < 0) return null
 
-  const end = lines.findIndex((line, at) => at > start && /^## /.test(line))
+  const end = lines.findIndex((line, at) => at > start && line.startsWith('## '))
 
   return lines.slice(start + 1, end < 0 ? undefined : end).join('\n')
 }

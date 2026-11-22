@@ -3316,7 +3316,7 @@ test_run_lock_a_stale_directory_is_taken_over_in_place(){
   true & dead=$!; wait "$dead" 2>/dev/null
   mkdir -p "$lk"; printf '%s\n' "$dead" > "$lk/pid"
   before=$(ls -di "$lk" | awk '{print $1}')
-  out=$(LK="$lk" BEFORE="$before" lock_fn "$root/autodream" 'mv(){ echo MOVED; }
+  out=$(LK="$lk" BEFORE="$before" lock_fn "$root/autodream" 'mv(){ case "$*" in *"/start.tmp "*|*"/pid.tmp "*) command mv "$@" ;; *) echo MOVED ;; esac; }
     acquire_lock "$LK" 0; echo rc=$?; p=$(cat "$LK/pid"); [ "$p" = "$$" ] && echo pid=self || echo pid=other
     [ "$(ls -di "$LK" | awk "{print \$1}")" = "$BEFORE" ] && echo same-dir || echo new-dir; release_lock "$LK"')
   assert_eq "$(printf '%s' "$out" | tr '\n' ' ')" "rc=0 pid=self same-dir" "the dead holder's directory now names the new owner and was never moved"
@@ -3394,8 +3394,8 @@ test_run_lock_release_leaves_a_directory_it_did_not_make(){
   rm -rf "$root"
 }
 
-test_run_lock_metadata_of_the_wrong_type_or_a_write_that_fails_midway_changes_nothing(){
-  echo "# the run lock: a pid that is a directory is refused before any write, and a write that fails midway restores what it replaced"
+test_run_lock_metadata_of_the_wrong_type_is_refused_before_any_write(){
+  echo "# the run lock: a pid that is a directory is refused before any write"
   local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
   local lk="$root/autodream/locks/x.lock" dead out
   true & dead=$!; wait "$dead" 2>/dev/null
@@ -3403,21 +3403,85 @@ test_run_lock_metadata_of_the_wrong_type_or_a_write_that_fails_midway_changes_no
   touch -t 202001010000 "$lk"
   out=$(LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"; cat "$LK/start"')
   assert_eq "$(printf '%s' "$out" | tr '\n' '|')" "rc=3|Mon Jan  1 00:00:00 2018" "a pid that is a directory is cannot-lock and start keeps its old value"
-  out=$(LK="$lk" lock_fn "$root/autodream" 'lock_meta_writable(){ return 0; }; acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"; cat "$LK/start"')
-  assert_eq "$(printf '%s' "$out" | tr '\n' '|')" "rc=3|Mon Jan  1 00:00:00 2018" "a pid write that fails after start was replaced puts the old start back"
   rm -rf "$root"
 }
 
-test_run_lock_a_liveness_probe_that_fails_to_run_is_not_a_dead_holder(){
-  echo "# the run lock: only no such process reads as dead, so a probe that exits 1 for any other reason keeps the holder"
+test_run_lock_a_temp_that_is_a_link_is_replaced_and_never_written_through(){
+  echo "# the run lock: a start.tmp or pid.tmp left as a symlink or a hard link is replaced by a fresh file, and what it pointed at is untouched (#266)"
+  local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
+  local lk="$root/autodream/locks/x.lock" dead out name kind
+  true & dead=$!; wait "$dead" 2>/dev/null
+  for name in start.tmp pid.tmp; do
+    for kind in symlink hardlink; do
+      rm -rf "$lk"; mkdir -p "$lk"; printf '%s\n' "$dead" > "$lk/pid"; printf 'Mon Jan  1 00:00:00 2018\n' > "$lk/start"
+      printf 'target\n' > "$root/target"
+      if [ "$kind" = symlink ]; then ln -s "$root/target" "$lk/$name"; else ln "$root/target" "$lk/$name"; fi
+      out=$(LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"')
+      assert_eq "$out" "rc=0" "a $kind named $name does not stop the takeover"
+      assert_eq "$(cat "$root/target")" "target" "and the file it pointed at is untouched"
+    done
+  done
+  rm -rf "$root"
+}
+
+test_run_lock_a_temp_that_cannot_be_removed_is_never_written_through(){
+  echo "# the run lock: when a leftover start.tmp or pid.tmp cannot be removed, the write is refused and what it links to is untouched (#266)"
+  local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
+  local lk="$root/autodream/locks/x.lock" dead out name
+  true & dead=$!; wait "$dead" 2>/dev/null
+  for name in start.tmp pid.tmp; do
+    rm -rf "$lk"; mkdir -p "$lk"; printf '%s\n' "$dead" > "$lk/pid"; printf 'Mon Jan  1 00:00:00 2018\n' > "$lk/start"
+    printf 'target\n' > "$root/target"; ln "$root/target" "$lk/$name"
+    out=$(LK="$lk" lock_fn "$root/autodream" 'rm(){ return 1; }; acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"')
+    assert_eq "$out" "rc=3" "a $name that cannot be removed is cannot-lock"
+    assert_eq "$(cat "$root/target")" "target" "and the file it is linked to is untouched"
+  done
+  rm -rf "$root"
+}
+
+test_run_lock_a_failed_pid_rename_leaves_a_dead_pid_no_rollback_and_no_temp(){
+  echo "# the run lock: start and pid are renamed into place with pid last, so a failed pid rename reads as a dead holder, rolls nothing back and leaves no temp (#266)"
+  local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
+  local lk="$root/autodream/locks/x.lock" dead out stale='Mon Jan  1 00:00:00 2018'
+  true & dead=$!; wait "$dead" 2>/dev/null
+  mkdir -p "$lk"; printf '%s\n' "$dead" > "$lk/pid"; printf '%s\n' "$stale" > "$lk/start"
+  out=$(LK="$lk" lock_fn "$root/autodream" 'mv(){ case "$*" in *"/pid.tmp"*) return 1 ;; esac; command mv "$@"; }; acquire_lock "$LK" 0; echo rc=$?; ls -A "$LK" | tr "\n" " "; echo; cat "$LK/pid"; [ "$(cat "$LK/start")" != "'"$stale"'" ] && echo start=new || echo start=old; release_lock "$LK"')
+  assert_eq "$(printf '%s' "$out" | tr '\n' '|')" "rc=3|pid start |$dead|start=new" "a failed pid rename is cannot-lock, leaves the old dead pid, the start is not rolled back, and no temp is left"
+  out=$(LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"')
+  assert_eq "$out" "rc=0" "and the next run reads that directory as stale and takes it over"
+  rm -rf "$lk"
+  out=$(LK="$lk" lock_fn "$root/autodream" 'mv(){ case "$*" in *"/pid.tmp"*) return 1 ;; esac; command mv "$@"; }; acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"; [ -d "$LK" ] && echo left || echo gone')
+  assert_eq "$(printf '%s' "$out" | tr '\n' ' ')" "rc=3 gone" "a directory this run made is removed on release even after a failed write"
+  rm -rf "$root"
+}
+
+test_run_lock_only_the_word_dead_from_the_liveness_probe_reads_as_dead(){
+  echo "# the run lock: only the word dead from a probe that exited 0 reads as dead, so a probe that fails, exits 91 or says anything else keeps the holder"
   local root; root=$(setup_env); local sh="$root/shim" dead out
   mkdir -p "$sh" "$root/autodream"
   printf '#!/bin/sh\nexit 1\n' > "$sh/python3"; chmod +x "$sh/python3"
   true & dead=$!; wait "$dead" 2>/dev/null
   out=$(PATH="$sh:$PATH" lock_fn "$root/autodream" 'lock_pid_alive 4242; echo rc=$?')
   assert_eq "$out" "rc=0" "a python that exits 1 before it probes reads as alive"
+  printf '#!/bin/sh\nexit 91\n' > "$sh/python3"
+  out=$(PATH="$sh:$PATH" lock_fn "$root/autodream" 'lock_pid_alive 4242; echo rc=$?')
+  assert_eq "$out" "rc=0" "a python that exits 91 and says nothing reads as alive"
+  printf '#!/bin/sh\necho dead; exit 91\n' > "$sh/python3"
+  out=$(PATH="$sh:$PATH" lock_fn "$root/autodream" 'lock_pid_alive 4242; echo rc=$?')
+  assert_eq "$out" "rc=0" "a python that prints the word dead and then fails is not believed"
+  printf '#!/bin/sh\necho dead; exit 1\n' > "$sh/python3"
+  out=$(PATH="$sh:$PATH" lock_fn "$root/autodream" 'lock_pid_alive 4242; echo rc=$?')
+  assert_eq "$out" "rc=0" "a python that prints the word dead and exits 1 reads as alive"
+  printf '#!/bin/sh\necho dead; exit 0\n' > "$sh/python3"
+  out=$(PATH="$sh:$PATH" lock_fn "$root/autodream" 'lock_pid_alive 4242; echo rc=$?')
+  assert_eq "$out" "rc=1" "a python that prints the word dead and exits 0 is believed"
+  printf '#!/bin/sh\necho later; exit 0\n' > "$sh/python3"
+  out=$(PATH="$sh:$PATH" lock_fn "$root/autodream" 'lock_pid_alive 4242; echo rc=$?')
+  assert_eq "$out" "rc=0" "any other word reads as alive"
   out=$(lock_fn "$root/autodream" "lock_pid_alive $dead; echo rc=\$?")
   assert_eq "$out" "rc=1" "a pid that no process has still reads as dead"
+  out=$(lock_fn "$root/autodream" "lock_pid_alive $$; echo rc=\$?")
+  assert_eq "$out" "rc=0" "and a live pid reads as alive"
   rm -rf "$root"
 }
 
@@ -4676,8 +4740,11 @@ _run test_run_lock_release_ignores_a_directory_it_never_acquired
 _run test_run_lock_an_older_runner_holding_the_directory_is_honored
 _run test_run_lock_a_stale_directory_that_cannot_be_written_is_left_as_found
 _run test_run_lock_release_leaves_a_directory_it_did_not_make
-_run test_run_lock_metadata_of_the_wrong_type_or_a_write_that_fails_midway_changes_nothing
-_run test_run_lock_a_liveness_probe_that_fails_to_run_is_not_a_dead_holder
+_run test_run_lock_metadata_of_the_wrong_type_is_refused_before_any_write
+_run test_run_lock_a_failed_pid_rename_leaves_a_dead_pid_no_rollback_and_no_temp
+_run test_run_lock_a_temp_that_cannot_be_removed_is_never_written_through
+_run test_run_lock_a_temp_that_is_a_link_is_replaced_and_never_written_through
+_run test_run_lock_only_the_word_dead_from_the_liveness_probe_reads_as_dead
 _run test_run_lock_a_lock_path_that_is_a_file_or_a_symlink_is_never_written_through
 _run test_run_lock_a_pid_of_zero_is_not_a_holder
 _run test_run_lock_a_failed_probe_is_not_a_dead_holder
@@ -4860,7 +4927,7 @@ test_multiroot_triages_alt_root(){
 }
 
 test_multiroot_heldout_and_dedup(){
-  echo "# multi-root: undecided dirs are held out (flagged, not triaged); a file reachable via symlink from two roots is triaged once"
+  echo "# multi-root: undecided dirs are held out (flagged, not triaged); a symlink to a transcript in another root is not followed, so the target is listed once"
   local root; root=$(setup_env_altroot)
   decide_index "$root" "$root/home/.claude-ds4/projects"
   mkdir -p "$root/home/.claude-sigint/projects/proj-a"
@@ -4873,9 +4940,21 @@ test_multiroot_heldout_and_dedup(){
   assert_grep "$fdir/unindexed-roots.txt" "$root/home/.claude-sigint/projects" "the undecided sigint dir is flagged"
   assert_nogrep "$fdir/sessions.txt.raw" "$root/home/.claude-sigint/projects/proj-a/s9.jsonl" "the undecided sigint session is NOT triaged"
   local n; n=$(grep -c "$root/home/.claude/projects/proj-a/s2.jsonl" "$fdir/sessions.txt.raw")
-  assert_eq "$n" "1" "the symlinked path appears once in sessions.txt.raw"
+  assert_eq "$n" "1" "the target appears once in sessions.txt.raw, and the symlink in the other root added nothing"
+  assert_nogrep "$fdir/sessions.txt.raw" "$root/home/.claude-ds4/projects/proj-a/s2.jsonl" "the symlink path in the other root is not listed"
   local p; p=$(printf '%s' "$root/home/.claude/projects/proj-a/s2.jsonl" | shasum | cut -c1-12)
   assert_file "$fdir/$p.json" "the one overlapping session has a findings JSON"
+  rm -rf "$root"
+}
+
+test_a_transcript_under_two_session_roots_is_listed_once(){
+  echo "# roots: one transcript reached through a root listed twice and a root nested inside another is in the worklist once"
+  local root; root=$(setup_env)
+  mk_session "$root" s1
+  SESSION_ROOTS="$root/projects:$root/projects:$root/projects/proj-a" run_dream "$root"
+  local raw="$root/autodream/findings/$DATE/sessions.txt.raw"
+  assert_eq "$(grep -cxF "$root/projects/proj-a/s1.jsonl" "$raw")" "1" "the path is in sessions.txt.raw once, from three overlapping roots"
+  assert_eq "$(grep -c . "$raw")" "1" "and nothing else is"
   rm -rf "$root"
 }
 
@@ -6851,6 +6930,7 @@ _run test_pins_l1_cannot_widen_the_worklist
 _run test_no_markdown_memory_writer_remains
 _run test_multiroot_triages_alt_root
 _run test_multiroot_heldout_and_dedup
+_run test_a_transcript_under_two_session_roots_is_listed_once
 _run test_multiroot_flags_unindexed
 _run test_rootprobe_remembers_choice
 _run test_rootprobe_no_write_mode_flags_but_does_not_write
