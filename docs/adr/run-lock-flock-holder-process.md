@@ -1,0 +1,22 @@
+# run: the per-date and remote sync locks are an flock held by a holder process that follows the run's pid
+
+Status: accepted · Date: 2026-11-22 · Code: `bin/run.sh` (`acquire_lock`, `release_lock`, `lock_is_held`, `lock_names_live_run`, `LOCK_HOLD_PY`, `run`), plan `docs/plans/2026-11-21-fix_run-lock-liveness.md`
+
+## Context
+
+The run lock and the remote sync lock were a `mkdir` plus a judgment about the holder's pid. A failed `kill -0` read as dead though EPERM means a live process of another user, an empty `ps` read as a reused pid, a pid-less directory was reclaimed after three tries, and the `mv` that put a displaced lock back could nest it inside one another run had taken. A shell cannot make "judge the holder gone, then take its lock" atomic.
+
+## Decision
+
+- An `flock(2)` on `<lock>.flock` decides who holds the lock. The kernel drops it when its holder ends, so nothing is judged or reclaimed. The lock directory only reports the owner's pid and start time for the web dashboard, and it is removed on release.
+- The flock file sits beside the directory and is never removed. A file unlinked while a contender has it open lets two processes hold two inodes, and one kept inside the directory would show every finished date as "starting" in the dashboard. It is opened read-only with create, because `flock` needs no write access, so a run of another user can lock it. A file this user cannot open belongs to someone else and reads as held.
+- A small python holder process owns the descriptor, not `run.sh`. Every child of a run (L1 workers, an engine, a banner, a sync job) would inherit an fd in the shell, and a leaked grandchild would keep the date locked after the run was killed.
+- The holder is handed the run's pid. It checks that pid with `kill -0` before every attempt and again before it answers, counts a pid it cannot signal as alive, and leaves when the owner is gone. Asking for its own parent at startup is wrong twice: a run killed between the fork and that call makes the reaper the owner, and a holder waiting behind another holder never looks at its parent until the wait ends. A pid reused within a quarter second of the owner's death is not covered.
+- Release acts only for a lock this process recorded. A pid read from a directory proves nothing once pids are reused: a later process with a dead run's pid that found the lock held would remove the real holder's directory. `run` is a wrapper that sets the EXIT trap and releases in its own process, because an interactive run is a pipeline element whose subshell the parent's trap cannot see.
+- A runner from before the flock holds only the directory. After the flock, a directory whose pid file names a live process that still has the recorded start reads as held (`lock_names_live_run`). A pid `ps` can see but `kill` cannot signal counts as alive, and a start `ps` cannot report counts as a match. It is the one pid judgment left, and it fails toward held. The pin sweep asks the same question and answers held when python3 is missing.
+- `acquire_lock <dir> [wait]` waits inside the holder. The run lock waits two seconds, because the sweep's probe takes the flock for milliseconds. The remote lock waits `AUTODREAM_REMOTE_LOCK_WAIT`. A failed pid or start write is a lock that was not taken. The holder answers through a file in the locks directory, and one a killed acquire left is swept after ten minutes. With no python3 a run goes ahead unlocked with a WARNING.
+- `sleep` in this code is plain `sleep`: under bash 3.2, `command -p sleep` inside a command substitution in a background job kills the subshell silently, which failed every remote sync until it was replaced.
+
+## Consequences
+
+The X browser lock in `x-bookmarks.sh` is a `mkdir` lock with the same shape and is not changed here. The pin sweep's window between probing a date and applying its pins existed with the pid check and still does.

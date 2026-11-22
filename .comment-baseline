@@ -12,7 +12,7 @@ bin/portable.sh	23
 bin/prune-worktrees.sh	116
 bin/remote-sync.sh	33
 bin/report-scripts.sh	98
-bin/run.sh	2122
+bin/run.sh	2101
 bin/stop-check-counts.sh	24
 docs/demo/demo-fetch.js	10
 docs/screenshots/fixture.py	3

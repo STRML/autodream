@@ -1942,21 +1942,7 @@ sweep_stranded_pins() {
 # under a different label than the scheduled nightly, so an on-demand run and a trigger for
 # the same date are two processes sharing one findings dir, one sidecar set and one report
 # path. The second one's move-aside would even carry off the first one's report mid-build.
-# An flock(2) on <lock>.flock is the lock (#242). The kernel drops it when its holder ends, so
-# nothing judges a holder dead and nothing is reclaimed. The lock directory only reports: it holds
-# the owner's pid and process start time for the web dashboard, and it is removed on release. The
-# flock file sits beside it and is never removed: a file unlinked while a contender has it open
-# lets two processes hold two inodes, and one kept inside the directory would show every finished
-# date as "starting" in the dashboard. The lock sits outside the findings dir, so clearing a date's
-# findings for a clean rebuild cannot release it under a live run.
-#
-# The descriptor belongs to a small holder process, not to this shell, because every child of a
-# run (L1 workers, an engine, a banner, a sync job) would inherit it and could keep the date
-# locked after the run is killed. The holder is handed its owner's pid, and leaves as soon as that
-# process is gone, whether it was waiting for the lock or holding it.
-#
-# A runner from before the flock holds only the directory, with its pid and start, so a directory
-# whose pid is alive and still has its recorded start is honored too (lock_names_live_run).
+# The lock is an flock held by a holder process: docs/adr/run-lock-flock-holder-process.md.
 RUN_LOCK="$AUTODREAM_DIR/locks/run-$TARGET_DATE.lock"
 LOCK_HOLDER=""
 LOCK_HOLDERS=""
@@ -2013,10 +1999,6 @@ while owner_alive():
     time.sleep(0.25)
 '
 
-# $1=lock dir -> 0 when its pid file names a live process that still has the start recorded beside
-# it: a runner from before the flock, which holds only the directory. A pid that cannot be
-# signalled still counts as alive (ps answers for any user's process), and a start that ps cannot
-# report counts as a match, so the judgment fails toward "held".
 lock_names_live_run() {
   local pid start now
   pid=$(cat "$1/pid" 2>/dev/null) || return 1
@@ -2028,17 +2010,12 @@ lock_names_live_run() {
   [ -z "$now" ] || [ "$now" = "$start" ]
 }
 
-# End a holder this shell started, and wait until it is gone, so its flock is free when this returns.
-lock_stop_holder() { # $1=holder pid, a child of this shell
+lock_stop_holder() {
   kill "$1" 2>/dev/null || return 0
   wait "$1" 2>/dev/null || true
   return 0
 }
 
-# $1=lock dir $2=seconds to wait for a holder (default 0). 0 = taken, 1 = another run holds it (its
-# pid in LOCK_HOLDER, "unknown" when none is written), 3 = the lock cannot be made: the locks
-# directory is read-only, there is no python3 to take the flock, the holder did not answer, or the
-# pid and start files could not be written.
 acquire_lock() {
   local dir="$1" wait="${2:-0}" flk="${1%.lock}.flock" locks res holder verdict="" i=0 end
   locks=$(dirname "$dir")
@@ -2079,11 +2056,7 @@ acquire_lock() {
   return 0
 }
 
-# Only a process that took the lock releases it, and it knows that from its own record: a pid read
-# from a directory proves nothing once pids are reused. The directory goes first and the holder
-# last, so the lock is free when this returns. A run that found the lock held, or ran without it,
-# has no record and does nothing.
-release_lock() { # $1=lock dir
+release_lock() {
   local dir="$1" holder="" rest="" line
   while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -2096,9 +2069,6 @@ release_lock() { # $1=lock dir
   return 0
 }
 
-# $1=lock dir -> 0 when the lock is held, or cannot be proven free, 1 when it is free. Without
-# python3 nothing can be proven. The probe takes the flock for a few milliseconds, which is why
-# acquire_run_lock waits two seconds.
 lock_is_held() {
   local flk="${1%.lock}.flock" word
   command -v python3 >/dev/null 2>&1 || return 0
@@ -2115,8 +2085,6 @@ except BlockingIOError:
   lock_names_live_run "$1"
 }
 
-# 0 = taken, 1 = another live run holds it. A lock that cannot be taken at all does not stop the
-# night: an unlocked run is the old behaviour.
 acquire_run_lock() {
   local rc=0
   acquire_lock "$RUN_LOCK" 2 || rc=$?
@@ -2127,7 +2095,6 @@ acquire_run_lock() {
   esac
 }
 
-# Installed as the EXIT trap inside run, and it does nothing in a process that never took the lock.
 release_run_lock() { release_lock "$RUN_LOCK"; }
 
 # ---- Remote session roots (#226) ----
@@ -4367,8 +4334,6 @@ report_scripts_stats() {
   printf 'report_scripts: %s\nreport_scripts_not_ok: %s\n' "$n" "${names:-none}" >> "$FINDINGS_DIR/run-stats.txt"
 }
 
-# run takes the per-date lock and must release it in the process that took it: an interactive run is
-# a pipeline element, so run executes in a subshell whose record the parent's EXIT trap cannot see.
 run() {
   trap release_run_lock EXIT
   run_body
