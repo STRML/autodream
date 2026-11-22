@@ -164,7 +164,7 @@ emit_prefix() { # $1=tool $2=stage, rest: writable paths -> NUL-delimited argv
       for p in "$@"; do
         case "$p" in
           "") continue ;;
-          *"*") set +f; for f in "${p%\*}"*; do [ -e "$f" ] && printf '%s\0' --bind "$f" "$f"; done; set -f ;;
+          *"*") set +f; for f in "${p%\*}"*; do [ -L "$f" ] && continue; [ -e "$f" ] && printf '%s\0' --bind "$f" "$f"; done; set -f ;;
           *) [ -e "$p" ] && printf '%s\0' --bind "$p" "$p" ;;
         esac
       done

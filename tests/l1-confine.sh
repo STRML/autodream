@@ -119,6 +119,10 @@ ro_line=$(printf '%s\n' "$txt" | grep -n "^$D/state/dir/inner\$" | head -1 | cut
 stage_line=$(printf '%s\n' "$txt" | grep -n "^$PS\$" | tail -1 | cut -d: -f1)
 [ -n "$bind_line" ] && [ -n "$ro_line" ] && [ -n "$stage_line" ] && [ "$bind_line" -lt "$ro_line" ] && [ "$ro_line" -lt "$stage_line" ] \
   && ok "the read-only bind comes after the state path and before the stage" || no "bwrap order bind=$bind_line ro=$ro_line stage=$stage_line"
+mkdir -p "$D/lk"; : > "$D/lk/a.json"; ln -s "$D/realdir" "$D/lk/a.json.lock"
+txt=$(prefix_text env L1_CONFINE_TOOL=bwrap bash "$H" prefix "$S" "$D/lk/a.json*")
+has "$txt" "$D/lk/a.json" "a prefix rule binds the regular file that matches it"
+lacks "$txt" "a.json.lock" "and skips a match that is a symlink: it would grant its target"
 printf '%s\n' "$(env PATH="$D/bare" L1_CONFINE_TOOL=none bash "$H" prefix "$S" 2>&1; echo "rc=$?")" | tail -1 | grep -q 'rc=1' && ok "an unknown L1_CONFINE_TOOL is refused" || no "an unknown L1_CONFINE_TOOL is refused"
 
 echo "# engine-prefix: one definition of an engine's prefix, built from the adapter's own write list"
