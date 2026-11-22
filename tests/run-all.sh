@@ -4317,6 +4317,35 @@ EOF
   assert_no_file "$root/evil-ran" "and never runs"
   rm -rf "$root"
 }
+test_report_scripts_a_confined_worker_cannot_write_the_allowlist_or_a_listed_script(){
+  echo "# report scripts: a confined L1 worker cannot rewrite report-scripts.conf or a script it lists (and an unconfined one could)"
+  local root conf script
+  root=$(setup_env); mk_session "$root" sess1
+  mkdir -p "$root/rs"
+  printf '#!/bin/bash\necho "good ran"\n' > "$root/rs/good.sh"; chmod +x "$root/rs/good.sh"
+  conf="$root/autodream/report-scripts.conf"; script="$root/rs/good.sh"
+  printf 'good %s\n' "$script" > "$conf"
+  # Unconfined first: the same hostile worker lands both writes, so the refusals below mean something.
+  FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_PATHS="$conf $script" run_dream "$root"
+  assert_grep "$conf" '# FORGED' "unconfined, a worker appends to the allowlist the next night reads"
+  assert_grep "$script" '# FORGED' "and to a script the allowlist names"
+  assert_file "$(fdir "$root")/report-index.txt" "the collector still writes its index"
+  assert_eq "$(awk -F'\t' '$1 == "good" { print $2 }' "$(fdir "$root")/report-index.txt")" "changed" \
+    "and the pinned hash refuses the rewritten script, which is the second line of defence"
+  rm -rf "$root"
+  if ! l1_confine_real; then echo "  skip - no working sandbox on this host: the refusals below are untested here"; return 0; fi
+  root=$(setup_env); mk_session "$root" sess1
+  mkdir -p "$root/rs"
+  printf '#!/bin/bash\necho "good ran"\n' > "$root/rs/good.sh"; chmod +x "$root/rs/good.sh"
+  conf="$root/autodream/report-scripts.conf"; script="$root/rs/good.sh"
+  printf 'good %s\n' "$script" > "$conf"
+  FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_PATHS="$conf $script" AUTODREAM_L1_CONFINE=1 run_dream "$root"
+  assert_eq "$(cat "$conf")" "good $script" "confined, the allowlist is byte for byte what the operator wrote"
+  assert_nogrep "$script" '# FORGED' "and the script it lists is unchanged"
+  assert_grep "$(fdir "$root")/report-good.md" 'good ran' "and the entry still runs"
+  assert_eq "$(awk -F'\t' '$1 == "good" { print $2 }' "$(fdir "$root")/report-index.txt")" "ok" "with status ok"
+  rm -rf "$root"
+}
 test_report_scripts_a_collector_changed_after_the_run_started_is_not_executed(){
   echo "# report scripts: the collector is hashed before L1 and checked again, so a worker that rewrites it gets nothing run"
   local root; root=$(setup_env); mk_session "$root" sess1
@@ -11284,6 +11313,7 @@ _run test_report_scripts_land_in_the_findings_dir_and_a_failure_is_content
 _run test_report_scripts_no_conf_still_writes_the_index
 _run test_report_scripts_a_broken_or_missing_collector_never_aborts_the_run
 _run test_report_scripts_a_conf_rewritten_after_the_snapshot_runs_nothing_new
+_run test_report_scripts_a_confined_worker_cannot_write_the_allowlist_or_a_listed_script
 _run test_report_scripts_a_collector_changed_after_the_run_started_is_not_executed
 _run test_report_scripts_earlier_files_that_cannot_be_cleared_stop_the_run
 _run test_report_scripts_prompt_names_the_index_by_exact_path
