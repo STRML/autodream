@@ -50,7 +50,8 @@ if [ -n "${AUTODREAM_TRIAGE_REPOS:-}" ]; then
 fi
 git_repos=""
 while IFS= read -r r; do
-  [ -n "$r" ] && git -C "$r" rev-parse --git-dir >/dev/null 2>&1 || continue
+  [ -n "$r" ] || continue
+  git -C "$r" rev-parse --git-dir >/dev/null 2>&1 || continue
   git_repos="$git_repos$r"$'\n'
 done <<< "$(printf '%s\n' "$repos" | sort -u)"
 
@@ -61,6 +62,8 @@ spans=$(awk '
       printf "%d\t%d\t%s\n", NR, sk, tok
       s = substr(s, RSTART + RLENGTH)
     } }' "$report")
+
+claim_count() { wc -l < "$claims" | tr -d ' '; }
 
 emit() {
   jq -nc --arg k "$1" --arg c "$2" --arg s "$3" --arg e "$4" --argjson l "$5" \
@@ -128,13 +131,16 @@ while IFS=$'\t' read -r line sk tok; do
   case "$seen" in *$'\n'"$tok"$'\n'*) continue ;; esac
   seen="$seen$tok"$'\n'
   [ "$n" -lt "$MAX" ] || { truncated=true; break; }
-  before=$(wc -l < "$claims" | tr -d ' ')
+  before=$(claim_count)
   classify "$line" "$sk" "$tok"
-  [ "$(wc -l < "$claims" | tr -d ' ')" -gt "$before" ] && n=$((n + 1))
+  [ "$(claim_count)" -gt "$before" ] && n=$((n + 1))
 done <<< "$spans"
 
 repo_json=$(printf '%s' "$git_repos" | jq -R . | jq -sc 'map(select(length > 0))')
-jq -s --arg report "$report" --argjson sk "$skills_known" --argjson al "$allow_count" --argjson repos "$repo_json" --argjson trunc "$truncated" \
+if ! jq -s --arg report "$report" --argjson sk "$skills_known" --argjson al "$allow_count" --argjson repos "$repo_json" --argjson trunc "$truncated" \
   '{report:$report, skills_known:$sk, allowlist_entries:$al, repos:$repos, truncated:$trunc, claims:.}' "$claims" > "$out.tmp" \
-  && mv -f "$out.tmp" "$out" || { echo "dream-grounding: could not write $out" >&2; exit 2; }
+  || ! mv -f "$out.tmp" "$out"; then
+  echo "dream-grounding: could not write $out" >&2
+  exit 2
+fi
 exit 0

@@ -8,7 +8,8 @@ is_pos() { case "$1" in ''|*[!0-9]*) return 1 ;; *) [ "$((10#$1))" -gt 0 ] ;; es
 
 [ "$#" -eq 4 ] || usage
 src="$1"; outdir="$2"; limit="$3"; maxc="$4"
-is_pos "$limit" && is_pos "$maxc" || usage
+is_pos "$limit" || usage
+is_pos "$maxc" || usage
 limit=$((10#$limit)); maxc=$((10#$maxc))
 [ -r "$src" ] || { echo "chunk-transcript: cannot read $src" >&2; exit 2; }
 [ -s "$src" ] || exit 1

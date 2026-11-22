@@ -114,9 +114,14 @@ if [ -n "$SCHED_PLIST" ]; then
     echo "autodream-now: the scheduled job $SCHED_PLIST has an environment to copy and this needs both plutil and jq (not found); refusing to launch logged out" >&2
     exit 65
   fi
-  "$PLUTIL_BIN" -convert json -o "$ENV_WORK/job.json" "$SCHED_PLIST" 2>/dev/null \
-    && "$JQ_BIN" -j '(.EnvironmentVariables // {}) | to_entries[] | select(.value | type == "string") | .key, "\u0000", .value, "\u0000"' "$ENV_WORK/job.json" > "$ENV_WORK/env.nul" 2>/dev/null \
-    || { rm -rf "$ENV_WORK"; echo "autodream-now: could not read the environment of the scheduled job $SCHED_PLIST; refusing to launch logged out" >&2; exit 65; }
+  if ! {
+    "$PLUTIL_BIN" -convert json -o "$ENV_WORK/job.json" "$SCHED_PLIST" 2>/dev/null \
+      && "$JQ_BIN" -j '(.EnvironmentVariables // {}) | to_entries[] | select(.value | type == "string") | .key, "\u0000", .value, "\u0000"' "$ENV_WORK/job.json" > "$ENV_WORK/env.nul" 2>/dev/null
+  }; then
+    rm -rf "$ENV_WORK"
+    echo "autodream-now: could not read the environment of the scheduled job $SCHED_PLIST; refusing to launch logged out" >&2
+    exit 65
+  fi
   ek=""; ev=""
   while IFS= read -r -d '' k && IFS= read -r -d '' v; do
     case "$k" in PATH|AUTODREAM_DIR|DREAMS_DIR|AUTODREAM_FORCE|AUTODREAM_RUN_TOKEN) continue ;; esac
