@@ -81,5 +81,20 @@ for f in $web_files; do
 done
 assert_eq "$leaks" "" "no full-suite code names a web-classified file"
 
+echo "# the comment ratchet covers every PR, web-only ones included"
+TESTS_YML="$REPO/.github/workflows/tests.yml"
+LAUNCHD_YML="$REPO/.github/workflows/launchd.yml"
+ratchet_step=$(awk '/- name: comment ratchet, web scope/ { grab = 1 } grab { print } grab && /run:/ { exit }' "$TESTS_YML")
+assert_eq "$(printf '%s\n' "$ratchet_step" | grep -c "scope == 'web'")" 1 "tests.yml has a web-scope step for the ratchet"
+assert_eq "$(printf '%s\n' "$ratchet_step" | grep -c 'run: bash tests/comment-ratchet.sh')" 1 "and it runs tests/comment-ratchet.sh"
+shfmt_step=$(awk '/- name: shfmt/ { grab = 1 } grab { print } grab && /shfmt --version/ { exit }' "$TESTS_YML")
+assert_eq "$(printf '%s\n' "$shfmt_step" | grep -c 'apt-get install.* shfmt')" 1 "tests.yml installs shfmt for the ratchet"
+assert_eq "$(printf '%s\n' "$shfmt_step" | grep -c "scope == 'full' || matrix.shard == 0")" 1 "on every full shard and on shard 0 of a web run"
+assert_eq "$(grep -c 'brew install shfmt' "$LAUNCHD_YML")" 1 "launchd.yml's full suite installs shfmt too"
+
+assert_eq "$(grep -c "^      - '!docs/\*\*'$" "$TESTS_YML") $(grep -c "^      - '!example/\*\*'$" "$TESTS_YML")" "2 2" "tests.yml keeps skipping docs/ and example/ in both lists (CI cost; the ratchet catches a comment added there on the next code PR)"
+assert_eq "$(grep -c "^      - 'docs/demo/\*\*'$" "$TESTS_YML") $(grep -c "^      - 'docs/screenshots/fixture.py'$" "$TESTS_YML")" "2 2" "and keeps the re-includes for the demo and the screenshot fixture"
+assert_eq "$(grep -c "^      - '!\*\*\.md'$" "$TESTS_YML")" 2 "and skips markdown, in both lists"
+
 printf '\npassed: %s   failed: %s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
