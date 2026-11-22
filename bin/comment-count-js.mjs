@@ -55,7 +55,7 @@ findJsx(file);
 function visit(node) {
   if (!jsxTextStarts.has(node.getFullStart())) collect(ts.getLeadingCommentRanges(text, node.getFullStart()));
   if (node.getChildCount(file) === 0) {
-    collect(ts.getTrailingCommentRanges(text, node.getEnd()));
+    if (!jsxTextStarts.has(node.getEnd())) collect(ts.getTrailingCommentRanges(text, node.getEnd()));
     return;
   }
   for (const child of node.getChildren(file)) visit(child);

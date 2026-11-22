@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "ignorePatterns": ["node_modules", "**/*.d.ts", "**/.claude-plugin"],
+  "ignorePatterns": ["node_modules", "**/.claude-plugin"],
   "overrides": [
     {
       "files": ["web/threads.js"],

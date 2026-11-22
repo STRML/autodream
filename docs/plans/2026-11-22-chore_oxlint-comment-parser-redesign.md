@@ -44,18 +44,33 @@ The coverage fixture (class D) makes oxlint a complete judge: a tracked JS or TS
 |---|---|---|---|
 | `const x = 1; const x = 2;` in a tracked `.js`, `.jsx` or `.mjs` | counts its comments | error, `lint` fails | no |
 | TypeScript syntax in a tracked `.js` | counts its comments | error, `lint` fails | no |
-| a tracked script with a legacy `<!--` comment | exit 2, names the file | accepts | no: the ratchet fails closed. No tracked file has one, and the fix is to delete the construct |
-| a tracked file TypeScript cannot parse (`const x = ;`) | exit 2, names the file | error | no |
+| a tracked script with a legacy `<!--` comment at the start of a line | fails, names the file (the wrapper exits 1) | accepts | no: the ratchet fails closed. No tracked file has one, and the fix is to delete the construct |
+| a legacy `<!--` after code on the same line (`x <!-- note`) | reads it as the expression `x < !(--note)` and counts 0 | accepts | yes. Accepted: the counter under-counts only this form, in a script, and no tracked file uses it |
+| JSX text that looks like a block comment (`<p>/* shown`) | text, counts 0 | accepts | yes, correctly |
+| a tracked `.d.ts` file | counts its comments | linted (the ignore pattern for `.d.ts` is gone) | by the same rules as any file |
+| a tracked file TypeScript cannot parse (`const x = ;`) | fails, names the file (the wrapper exits 1) | error | no |
 | a tracked JS or TS file outside the linted directories | counts it | not run | no: the coverage fixture fails |
-| invalid UTF-8 | exit 2, names the file | not run on it | no |
-| `typescript` module missing | exit 3, says `npm ci` | n/a | no |
+| invalid UTF-8 | fails, names the file (the wrapper exits 1) | not run on it | no |
+| `typescript` module missing | fails, says `npm ci` (the wrapper exits 1) | n/a | no |
 | a comment added to a tracked file | count rises | n/a | no: over the baseline |
 
 ## Rebuild
 
 1. `bin/comment-count-js.mjs` drops `spawnSync`, `NODE_MODES`, `nodeAccepts`, the one-file program, `legacyCommentAt` and `neutralize`.
-2. The fixtures that expected the counter to reject `typed.js`, `typed.jsx`, `dup.js`, `dup.mjs` and `dup.cjs` now expect it to count them. The legacy-comment fixture expects exit 2.
-3. `lint_is_the_grammar_judge_fixture` runs the pinned oxlint on four shapes and fails when one passes.
+2. The grammar fixtures that expected the counter to reject TypeScript syntax in `.js` and `.jsx` and a duplicate declaration are replaced by one that counts a duplicate declaration in `dup.js` and `dup.jsx`. The legacy-comment fixture expects a failure that names the file.
+3. `lint_is_the_grammar_judge_fixture` runs the pinned oxlint with every rule off (`-A all`), so only a syntax or early error can make it exit non-zero, on four shapes, and fails when one passes.
 4. ADR 0027 states the contract in one paragraph.
+
+## Plan review
+
+A `counsel` subagent read the plan against the code (the external `/debate:run tight` panel was denied an unsandboxed run). Verdict REVISE. Each finding was checked before it was acted on.
+
+| Finding | Check | Disposition |
+|---|---|---|
+| `.oxlintrc.json` ignored `**/*.d.ts`, so two tracked declaration files were counted but never linted | `git ls-files '*.d.ts'` lists `mods/autodream-band/types/index.d.ts` and `mods/autodream-focus/types/index.d.ts`; a duplicate declaration in a probe `.d.ts` is now an error | Fixed: the ignore is gone and a fixture fails if the oxlint config ignores a JS or TS file by extension |
+| the grammar fixture treated any non-zero oxlint exit as a rejection, so an unused-variable warning would pass it | `oxlint --deny-warnings` on `const x = 1;` warns; with `-A all` it exits 0 and a duplicate declaration still exits 1 | Fixed: the fixture runs with `-A all` |
+| the plan named fixtures that do not exist, and called the failure exit 2 and 3 | the wrapper reports exit 1 | Fixed in this plan |
+| JSX text `<p>/* shown` then `as text */</p>` was counted as a comment | probe printed 1; after the fix, 0 | Fixed: no trailing-comment scan right before JSX text, with a fixture |
+| `x <!-- note` after code counts 0 | probe printed 0 | Accepted, and in the matrix above |
 
 One gap remains: a file that `node` rejects and oxlint accepts. oxlint's parser follows the specification, so the gap is a bug in oxlint. `package.json` pins its version and the fixture watches the four shapes.

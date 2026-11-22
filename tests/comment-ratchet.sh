@@ -273,6 +273,8 @@ counter_fixtures() {
   printf '%s\n' 'const x = 1; const x = 2;' > "$d/dup.js"
   printf '%s\n' '// one' 'const x = 1; const x = 2;' > "$d/dup.jsx"
   eq "$(num "$d/dup.js") $(num "$d/dup.jsx")" "0 1" "the counter reads comments only: a duplicate declaration is the linter's to reject, not the counter's"
+  printf '%s\n' 'const el = (' '  <p>/* shown' '  as text */</p>' ');' > "$d/jsx-text-block.jsx"
+  eq "$(num "$d/jsx-text-block.jsx")" 0 "JSX text that looks like a block comment is text, not a comment"
   printf '%s\n' 'const el = (' '  <div>' '    { /* a comment */ value }' '  </div>' ');' > "$d/jsx-value.jsx"
   eq "$(num "$d/jsx-value.jsx")" 1 "a JSX expression that starts a line with a comment before its value is a comment line"
   COMMENT_COUNT_NODE="$d/no-such-node" bash "$COUNT" "$d/types.d.ts" > "$d/out" 2> "$d/err"
@@ -481,7 +483,7 @@ lint_is_the_grammar_judge_fixture() {
   for shape in 'dup.js:const x = 1; const x = 2;' 'dup.jsx:const x = 1; const x = 2;' 'dup.mjs:const x = 1; const x = 2;' 'typed.js:const a: number = 1;'; do
     printf '%s\n' "${shape#*:}" > "$d/${shape%%:*}"
     n=$((n + 1))
-    "$lint" --deny-warnings "$d/${shape%%:*}" > /dev/null 2>&1 && bad_shapes="$bad_shapes ${shape%%:*}"
+    "$lint" -A all --deny-warnings "$d/${shape%%:*}" > /dev/null 2>&1 && bad_shapes="$bad_shapes ${shape%%:*}"
   done
   eq "$n$bad_shapes" "4" "oxlint rejects a duplicate declaration in .js, .jsx and .mjs and TypeScript syntax in .js, the grammar the counter leaves to it"
   rm -rf "$d"
@@ -501,6 +503,7 @@ lint_coverage_fixture() {
 $(git -C "$REPO" ls-files '*.js' '*.mjs' '*.cjs' '*.jsx' '*.ts' '*.mts' '*.cts' '*.tsx')
 EOF
   eq "$missing" "" "every tracked JS and TS file is under a path the lint script covers"
+  eq "$(grep '"ignorePatterns"' "$REPO/.oxlintrc.json" | grep -cE '\.(js|mjs|cjs|jsx|ts|mts|cts|tsx)"')" 0 "the oxlint config ignores no JS or TS file by extension"
 }
 
 counter_exit_fixtures() {
