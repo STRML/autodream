@@ -86,13 +86,15 @@ A pull is read-only on the remote and needs only sshd there.
   first sync that fails leaves no empty mirror in the roots. The mirror is not under
   `$HOME/.claude*`, so root-probe never reports it as an unasked folder.
 - **Lock.** `$AUTODREAM_DIR/locks/remote-<label>.lock` uses the run lock's helpers
-  (`acquire_lock`, `lock_holder_state`, `reclaim_lock`, `release_lock`, each taking the lock dir),
-  so a dead holder is reclaimed the same way. The nightly and an `autodream-now.sh` run for another
+  (`acquire_lock` and `release_lock`, each taking the lock dir), so the flock on
+  `remote-<label>.flock` decides and a dead holder frees it with no reclaim. The nightly and an
+  `autodream-now.sh` run for another
   date take different run locks and would otherwise rsync into one directory at once. A live holder
   is waited for (`AUTODREAM_REMOTE_LOCK_WAIT`, default 600 seconds) and the run then syncs itself,
   because scanning a mirror mid-copy misses the files not yet renamed into place, and the next
   day's mtime bound never picks them up. A holder still alive after the wait gives
-  `skipped_locked`, and the mirror is scanned as it stands.
+  `skipped_locked`, and the mirror is scanned as it stands. A lock that cannot be taken at all
+  (read-only locks directory, no python3) gives `failed (cannot take the lock ...)`.
 - **Reporting.** run-stats gets `remote_sync: off|on` and, per label, `remote_sync_<label>`
   (`ok|partial|failed|skipped_locked|invalid`), `remote_sync_<label>_cause` and
   `remote_sync_<label>_last_ok` (stamped in `remote/<label>/last-ok` on ok and partial, else
@@ -304,7 +306,7 @@ run.sh handles it with:
 - **L1 retry loop** (`dispatch_l1` + `l1_missing_count`): re-dispatches only the sessions still missing a findings JSON, up to `AUTODREAM_L1_ROUNDS` (5), calling `wait_for_network` between rounds. The worker is idempotent, so retries are cheap.
 - **L2 retry loop**: retries the aggregator up to `AUTODREAM_L2_ATTEMPTS` (3) until `$REPORT_PATH` is non-empty.
 - **Idempotency guard**: at the top of `run()`, if a finished report exists for the date it exits in a second (`AUTODREAM_FORCE=1` to rebuild). Finished means the open-questions marker is present (or the date predates `AUTODREAM_MARKER_EPOCH`); a marker-less report is moved aside and rebuilt (#111). This is what makes multiple launchd catch-up triggers safe.
-- **Per-date run lock** (#55): `run()` takes `$AUTODREAM_DIR/locks/run-<date>.lock` (a `mkdir`, with the owner's pid and start time inside) before touching the findings dir, because launchd serialises a label only against itself and `autodream-now.sh` uses another. A live holder makes the second run log and exit 0; a dead holder (a killed run, the normal failure here) or a reused pid is reclaimed. This lock stays a reclaimable mkdir lock; the three defects it still carries are https://github.com/STRML/autodream/issues/242, and `question-streaks.sh` and `threads.sh` do not use it (see "Open questions that never get answered").
+- **Per-date run lock** (#55, #242): `run()` takes the lock for the date before touching the findings dir, because launchd serialises a label only against itself and `autodream-now.sh` uses another. A live holder makes the second run log and exit 0. An flock(2) on `$AUTODREAM_DIR/locks/run-<date>.flock` is the lock, held by a small python holder process that `acquire_lock` starts, so the kernel drops it when the holder ends and nothing judges a holder dead (the mkdir lock this replaces read EPERM from `kill -0` as dead, read an empty `ps` as a reused pid, nested a restored lock inside a new one, and reclaimed a pid-less directory after three tries). The directory `run-<date>.lock` only reports: the owner's pid and start time for the web dashboard, and `holder`, the holder's pid for `release_lock`. It is removed on release. The flock file stays: one unlinked while a contender has it open lets two processes hold two inodes, and one kept inside the directory would show every finished date as "starting" in Progress. A holder process and not an fd in `run.sh`, because every child of a run (L1 workers, an engine, a banner, a sync job) would inherit the fd and a leaked one would keep the date locked after the run was killed; the holder exits within a quarter second of its parent (the parent pid changes on reparent) and `release_lock` ends it and waits, so the lock is free when release returns. `acquire_lock <dir> [wait]` waits inside the holder: the run lock waits 2 seconds (the pin sweep probes with `lock_is_held`, which takes the flock for milliseconds), the remote lock `AUTODREAM_REMOTE_LOCK_WAIT`. No python3 means the run goes ahead unlocked with a WARNING, as it does when the locks directory cannot be made. `question-streaks.sh` and `threads.sh` use `bin/lib-flock.sh` instead (see "Open questions that never get answered"). The X browser lock in `x-bookmarks.sh` is still a mkdir lock with a pid check.
 - The plist example schedules several morning triggers (03:15/06:15/09:15/12:15) so a failed-overnight date gets retried on later wakes; the guard no-ops the rest.
 
 `net_up` checks reachability of `api.anthropic.com` (any HTTP code beats `000`). Disable the wait with `AUTODREAM_NETCHECK=0` (tests set this).

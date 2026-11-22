@@ -778,14 +778,23 @@ test_focus_cli_usage_errors(){
   rm -rf "$root"
 }
 
-hold_flock(){ # $1=lock file -> a background process holds flock(2) on it until killed; its pid is HOLDER
+hold_flock(){ # $1=lock file -> a background process holds flock(2) on it until killed; its pid is HOLDER (and HOLD_PID)
+  rm -f "$1.held"
   python3 -c 'import fcntl, os, sys, time
 fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)
 fcntl.flock(fd, fcntl.LOCK_EX)
 open(sys.argv[2], "w").write("held")
 time.sleep(600)' "$1" "$1.held" &
-  HOLDER=$!
+  HOLDER=$!; HOLD_PID=$HOLDER
   local i; for i in $(seq 1 100); do [ -f "$1.held" ] && break; sleep 0.1; done
+}
+flock_free(){ # $1=lock file: 0 when a non-blocking flock on it succeeds
+  python3 -c 'import fcntl, sys
+f = open(sys.argv[1], "a")
+try:
+    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(1)' "$1"
 }
 
 test_focus_cli_a_killed_holder_leaves_no_stale_lock(){
@@ -3095,6 +3104,7 @@ test_idempotency_guard_needs_a_complete_report(){
 }
 
 lock_dir(){ printf '%s' "$1/autodream/locks/run-$DATE.lock"; }   # the per-date run lock for a root
+lock_flock(){ printf '%s' "$1/autodream/locks/run-$DATE.flock"; }   # the flock that decides who holds it
 mk_lock(){ # $1=root $2=pid -> a lock directory held by that pid (with its real start time when ps can say)
   local d; d=$(lock_dir "$1"); mkdir -p "$d"
   printf '%s\n' "$2" > "$d/pid"
@@ -3356,7 +3366,8 @@ test_l1_answer_is_moved_aside_before_it_is_tested(){
 test_run_lock_is_per_date_and_live_holders_win(){
   echo "# a second run for a date does not start while a live run holds the date's lock (#55)"
   local root; root=$(setup_env); mk_session "$root" sess1
-  sleep 120 & local holder=$!
+  mkdir -p "$(dirname "$(lock_flock "$root")")"
+  hold_flock "$(lock_flock "$root")"; local holder=$HOLDER
   mk_lock "$root" "$holder"
   run_dream "$root"
   local rc=$?
@@ -3377,16 +3388,79 @@ test_run_lock_is_reclaimed_from_a_dead_holder(){
   assert_nogrep "$root/run.out" 'holds the lock' "a dead holder does not block the run"
   assert_file "$root/dreams/$DATE.md" "the run produced its report"
   assert_no_file "$(lock_dir "$root")" "and released the lock when it finished"
-  # An unrelated live process that reuses the pid is not the holder: the start time differs.
+  # A live pid in the pid file is a note for the dashboard: without the flock it holds nothing.
   if [ -n "$(ps -o lstart= -p $$ 2>/dev/null)" ]; then
     sleep 120 & local other=$!
     mk_lock "$root" "$other"; printf 'Mon Jan  1 00:00:00 1990\n' > "$(lock_dir "$root")/start"
     rm -f "$root/dreams/$DATE.md"
     run_dream "$root"
     kill "$other" 2>/dev/null; wait "$other" 2>/dev/null
-    assert_nogrep "$root/run.out" 'holds the lock' "a live pid with a different start time is a stale lock"
+    assert_nogrep "$root/run.out" 'holds the lock' "a live pid in the pid file, with no flock held, is not a holder"
     assert_file "$root/dreams/$DATE.md" "and the run went ahead"
   fi
+  rm -rf "$root"
+}
+
+test_run_lock_a_live_holder_of_another_user_is_still_held(){
+  echo "# the run lock: a live holder whose pid kill -0 cannot signal (EPERM) still holds it (#242)"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  mkdir -p "$(dirname "$(lock_flock "$root")")"
+  hold_flock "$(lock_flock "$root")"
+  mk_lock "$root" 1
+  run_dream "$root"
+  kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
+  assert_grep "$root/run.out" 'holds the lock' "pid 1 is root's, so kill -0 fails with EPERM, and the run still sees the lock held"
+  assert_no_file "$(fdir "$root")/sessions.txt" "it did not touch the findings dir"
+  assert_no_file "$root/dreams/$DATE.md" "and wrote no report"
+  assert_eq "$(cat "$(lock_dir "$root")/pid")" "1" "the holder's pid file was left alone"
+  rm -rf "$root"
+}
+
+test_run_lock_a_live_holder_is_held_when_ps_cannot_report_its_start(){
+  echo "# the run lock: a live holder is not read as a reused pid because ps came back empty (#242)"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  mkdir -p "$(dirname "$(lock_flock "$root")")" "$root/psshim"
+  hold_flock "$(lock_flock "$root")"
+  mk_lock "$root" "$HOLDER"; printf 'Mon Jan  1 00:00:00 1990\n' > "$(lock_dir "$root")/start"
+  printf '#!/bin/sh\nexit 1\n' > "$root/psshim/ps"; chmod +x "$root/psshim/ps"
+  PATH="$root/psshim:$PATH" run_dream "$root"
+  kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
+  assert_grep "$root/run.out" 'holds the lock' "an empty ps answer does not make the recorded start differ"
+  assert_no_file "$root/dreams/$DATE.md" "so the run did not go ahead"
+  rm -rf "$root"
+}
+
+test_run_lock_a_holder_that_has_not_written_its_pid_is_held(){
+  echo "# the run lock: a holder still between taking the lock and writing its pid keeps it, however long that takes (#242)"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  mkdir -p "$(dirname "$(lock_flock "$root")")" "$(lock_dir "$root")"
+  hold_flock "$(lock_flock "$root")"
+  run_dream "$root"
+  kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
+  assert_grep "$root/run.out" 'holds the lock' "a pid-less directory under a held flock is not reclaimed"
+  assert_no_file "$(fdir "$root")/sessions.txt" "the run did not touch the findings dir"
+  rm -rf "$root"
+}
+
+test_run_lock_a_killed_run_frees_it_while_its_child_lives(){
+  echo "# the run lock: SIGKILL of the run frees the lock at once, and a child it left behind does not keep it (#242)"
+  if [ -z "$(command -v timeout || command -v gtimeout)" ]; then
+    echo "  skip - no timeout binary (brew install coreutils)"; return 0
+  fi
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local pidfile="$root/hang-pids.txt" i=0 runpid child p; : > "$pidfile"
+  ( MOCK_MODE=l1_hang MOCK_HANG_PIDS="$pidfile" AUTODREAM_L1_TIMEOUT=30 AUTODREAM_L1_ROUNDS=1 run_dream "$root" ) &
+  local job=$!
+  while [ ! -s "$pidfile" ] && [ "$i" -lt 150 ]; do sleep 0.2; i=$((i + 1)); done
+  runpid=$(cat "$(lock_dir "$root")/pid" 2>/dev/null)
+  child=$(head -n 1 "$pidfile")
+  flock_free "$(lock_flock "$root")" && no "the running run holds the lock" || ok "the running run holds the lock"
+  kill -9 "$runpid" 2>/dev/null
+  i=0; while ! flock_free "$(lock_flock "$root")" && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
+  flock_free "$(lock_flock "$root")" && ok "the lock is free within 10 seconds of the kill" || no "the lock outlived the killed run"
+  kill -0 "$child" 2>/dev/null && ok "while the child the run left behind is still alive" || no "the child died with the run, so this proved nothing"
+  kill "$job" 2>/dev/null; wait "$job" 2>/dev/null
+  while read -r p; do kill "$p" 2>/dev/null; done < "$pidfile"
   rm -rf "$root"
 }
 
@@ -4440,6 +4514,10 @@ _run test_l1_confine_setup_stops_before_l1_when_an_engine_prefix_cannot_be_built
 _run test_l1_answer_is_moved_aside_before_it_is_tested
 _run test_l1_confine_setup_stops_when_a_protected_directory_cannot_be_listed
 _run test_run_lock_is_reclaimed_from_a_dead_holder
+_run test_run_lock_a_live_holder_of_another_user_is_still_held
+_run test_run_lock_a_live_holder_is_held_when_ps_cannot_report_its_start
+_run test_run_lock_a_holder_that_has_not_written_its_pid_is_held
+_run test_run_lock_a_killed_run_frees_it_while_its_child_lives
 _run test_killed_run_temps_are_swept_at_the_start_of_the_next_run
 _run test_self_audit_stats
 _run test_x_fetch_path_reaches_run_stats
@@ -6760,11 +6838,12 @@ test_pins_sweep_respects_a_live_run_and_a_stale_result(){
   local root; root=$(setup_env); mk_session "$root" sess1
   local clean=$'pins_total: 1\npins_applied: 1\npins_failed: 0\npins_cli_missing: 0\npins_unreadable: 0'
   mk_stranded_pins "$root" 2019-12-30 ""
-  mkdir -p "$root/autodream/locks/run-2019-12-30.lock"; printf '%s\n' "$$" > "$root/autodream/locks/run-2019-12-30.lock/pid"
+  mkdir -p "$root/autodream/locks"; hold_flock "$root/autodream/locks/run-2019-12-30.flock"
   # A forced rebuild replaced these pins after the settled result was written, then died.
   mk_stranded_pins "$root" 2019-12-31 "$clean"
   sleep 1; touch "$root/autodream/findings/2019-12-31/pins.jsonl"; sleep 1; touch "$root/dreams/2019-12-31.md"
   pins_run "$root"
+  kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
   assert_eq "$(sm_calls "$root")" "1" "one pin stored: the rebuilt date's, not the locked date's"
   assert_eq "$(jq -r .payload.metadata.project "$root/sm-calls.jsonl" 2>/dev/null)" "proj-2019-12-31" "it is the date with the stale result"
   assert_grep "$root/run.out" '2019-12-30 has a run in flight' "the locked date is named"
@@ -8023,26 +8102,6 @@ for _suite in $_suites; do
 done
 
 streak_rows(){ awk '!/^#/ && NF' "$1" 2>/dev/null | wc -l | tr -d ' '; }
-
-hold_flock(){ # $1=lock file -> a python process holds its flock; sets HOLD_PID once it does
-  local ready="$1.ready" i=0
-  rm -f "$ready"
-  python3 -c 'import fcntl, sys, time
-f = open(sys.argv[1], "a")
-fcntl.flock(f, fcntl.LOCK_EX)
-open(sys.argv[2], "w").close()
-time.sleep(600)' "$1" "$ready" &
-  HOLD_PID=$!
-  while [ ! -e "$ready" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
-}
-flock_free(){ # $1=lock file: 0 when a non-blocking flock on it succeeds
-  python3 -c 'import fcntl, sys
-f = open(sys.argv[1], "a")
-try:
-    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except BlockingIOError:
-    sys.exit(1)' "$1"
-}
 
 test_question_streaks_state_lives_with_the_install(){
   echo "# question streaks: the store is the install's, one file holds the watermark, clear takes the lock"
@@ -11110,7 +11169,9 @@ test_remote_sync_lock_held_skips_the_sync(){
   local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"; rs_seed_mirror "$root" studio2
   local lock="$root/autodream/locks/remote-studio2.lock"; mkdir -p "$lock"
   printf '%s\n' "$$" > "$lock/pid"; ps -o lstart= -p "$$" | tr -s ' ' > "$lock/start"
+  hold_flock "$root/autodream/locks/remote-studio2.flock"
   AUTODREAM_REMOTE_LOCK_WAIT=1 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
   assert_grep "$(rs_stats "$root")" '^remote_sync_studio2: skipped_locked$' "the host reads skipped_locked"
   assert_grep "$(rs_stats "$root")" "^remote_sync_studio2_cause: pid $$ still held" "the cause names the holder"
   assert_no_file "$root/rsync.log" "rsync is not run into a mirror another run holds"
@@ -11123,7 +11184,8 @@ test_remote_sync_waits_for_a_lock_that_is_released(){
   echo "# remote sync: a mirror another run is still copying into is waited for, then synced, never read half-copied"
   local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
   local lock="$root/autodream/locks/remote-studio2.lock" holder; mkdir -p "$lock"
-  sleep 3 & holder=$!
+  hold_flock "$root/autodream/locks/remote-studio2.flock"; holder=$HOLDER
+  ( sleep 3; kill "$holder" 2>/dev/null ) &
   printf '%s\n' "$holder" > "$lock/pid"
   AUTODREAM_REMOTE_LOCK_WAIT=30 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
   wait "$holder" 2>/dev/null

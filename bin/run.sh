@@ -1887,14 +1887,6 @@ report_finishes_date() {
 # failed, cli_missing, unreadable or unsupported_harness pins. The ledger makes the rerun
 # safe: a pin already stored is a duplicate. A pin that cannot be stored is retried each
 # night until its date leaves the window.
-# $1=date label -> 0 when that date's run lock exists and its pid is alive. Unlike
-# acquire_run_lock it never reclaims a stale lock; it only reads.
-lock_held_by_live_run() {
-  local lock="$AUTODREAM_DIR/locks/run-$1.lock" pid
-  pid=$(cat "$lock/pid" 2>/dev/null) || return 1
-  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
-}
-
 sweep_stranded_pins() {
   local window="${AUTODREAM_UNASSEMBLED_WINDOW:-7}" root="$AUTODREAM_DIR/findings"
   local d label report res n
@@ -1911,7 +1903,7 @@ sweep_stranded_pins() {
     # Another date's own run may be in its pin step right now (autodream-now.sh runs under a
     # different launchd label). Two apply-pins on one date both read the ledger before either
     # appends, and store a pin twice, so a date whose lock is held by a live pid is left alone.
-    if [ "$label" != "$TARGET_DATE" ] && lock_held_by_live_run "$label"; then
+    if [ "$label" != "$TARGET_DATE" ] && lock_is_held "$AUTODREAM_DIR/locks/run-$label.lock"; then
       log "pin sweep: $label has a run in flight; leaving its pins to that run"
       continue
     fi
@@ -1939,75 +1931,136 @@ sweep_stranded_pins() {
 # under a different label than the scheduled nightly, so an on-demand run and a trigger for
 # the same date are two processes sharing one findings dir, one sidecar set and one report
 # path. The second one's move-aside would even carry off the first one's report mid-build.
-# `mkdir` is the lock: atomic on every filesystem here, and needs no flock. The directory
-# holds the owner's pid and process start time. A run killed mid-flight (this pipeline's
-# documented failure mode) leaves the directory behind, so a holder that is gone, or whose
-# pid now belongs to a different process, is reclaimed. The lock sits outside the findings
-# dir, so clearing a date's findings for a clean rebuild cannot release it under a live run.
+# An flock(2) on <lock>.flock is the lock (#242). The kernel drops it when its holder ends, so
+# nothing judges a holder dead and nothing is reclaimed. The lock directory only reports: it holds
+# the owner's pid and process start time for the web dashboard and the holder's pid for release,
+# and it is removed on release. The flock file sits beside it and is never removed: a file
+# unlinked while a contender has it open lets two processes hold two inodes, and one kept inside
+# the directory would show every finished date as "starting" in the dashboard. The lock sits
+# outside the findings dir, so clearing a date's findings for a clean rebuild cannot release it
+# under a live run.
+#
+# The descriptor belongs to a small holder process, not to this shell, because every child of a
+# run (L1 workers, an engine, a banner, a sync job) would inherit it and could keep the date
+# locked after the run is killed. The holder exits when its parent does.
 RUN_LOCK="$AUTODREAM_DIR/locks/run-$TARGET_DATE.lock"
 LOCK_HOLDER=""
 
 proc_start() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '; }
 
-# The mkdir locks: the per-date run lock below and the per-label remote sync lock. Each takes the
-# lock directory as $1.
-# 0 = the lock's holder is alive, 1 = gone (stale), 2 = the holder has not written its pid yet.
-lock_holder_state() { # $1=lock dir
-  local pid start
-  pid=$(cat "$1/pid" 2>/dev/null) || pid=""
-  [ -n "$pid" ] || return 2
-  kill -0 "$pid" 2>/dev/null || return 1
-  start=$(cat "$1/start" 2>/dev/null) || start=""
-  # No recorded start (ps unavailable): the live pid is all there is to go on.
-  [ -z "$start" ] || [ "$(proc_start "$pid")" = "$start" ]
-}
+LOCK_HOLD_PY='
+import fcntl, os, sys, time
+path, res, wait = sys.argv[1], sys.argv[2], float(sys.argv[3])
+owner = os.getppid()
 
-# Move the stale lock aside (rename is atomic, so one reclaimer wins) rather than rmdir it:
-# a second reclaimer that judged the same stale holder must not delete the winner's NEW lock.
-reclaim_lock() { # $1=lock dir $2=the pid judged stale ("" when none was ever written)
-  local dead="$1.stale.$$"
-  mv "$1" "$dead" 2>/dev/null || return 0
-  if [ "$(cat "$dead/pid" 2>/dev/null)" = "$2" ]; then
-    rm -rf "$dead"
-    return 0
-  fi
-  # We moved a lock that a faster reclaimer had already replaced. Put it back.
-  mv "$dead" "$1" 2>/dev/null || { log "WARNING: could not restore another run's lock from $dead"; return 0; }
-}
+def say(word):
+    with open(res, "w") as out:
+        out.write(word + "\n")
 
-# 0 = taken, 1 = another live run holds it (its pid in LOCK_HOLDER), 3 = the lock's directory
-# cannot be made at all (a read-only state dir).
-acquire_lock() { # $1=lock dir
-  mkdir -p "$(dirname "$1")" 2>/dev/null || return 3
-  local tries=0 st pid
-  until mkdir "$1" 2>/dev/null; do
-    pid=$(cat "$1/pid" 2>/dev/null) || pid=""
-    lock_holder_state "$1"; st=$?
-    [ "$st" -ne 0 ] || { LOCK_HOLDER="$pid"; return 1; }
-    tries=$((tries + 1))
-    if [ "$st" -eq 2 ] && [ "$tries" -le 3 ]; then sleep 1; continue; fi
-    reclaim_lock "$1" "$pid"
-    [ "$tries" -lt 8 ] || { LOCK_HOLDER="${pid:-unknown}"; return 1; }
-  done
-  printf '%s\n' "$$" > "$1/pid"
-  proc_start "$$" > "$1/start"
+try:
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    end = time.monotonic() + wait
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.monotonic() >= end:
+                say("held")
+                sys.exit(0)
+            time.sleep(min(0.2, max(0.0, end - time.monotonic())))
+except SystemExit:
+    raise
+except BaseException:
+    say("error")
+    sys.exit(0)
+say("ok")
+while os.getppid() == owner:
+    time.sleep(0.25)
+'
+
+# End a holder and wait until its flock is gone. It is this shell's child when this shell took the
+# lock, so wait reaps it; otherwise (release from a parent, after a pipeline subshell ran the
+# run) it is polled.
+lock_stop_holder() { # $1=holder pid
+  local i=0
+  kill "$1" 2>/dev/null || return 0
+  wait "$1" 2>/dev/null || true
+  while kill -0 "$1" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
   return 0
 }
 
-# Only the owner removes it.
-release_lock() { # $1=lock dir
-  [ "$(cat "$1/pid" 2>/dev/null)" = "$$" ] || return 0
-  rm -rf "$1"
+# $1=lock dir $2=seconds to wait for a holder (default 0). 0 = taken, 1 = another run holds it (its
+# pid in LOCK_HOLDER, "unknown" when none is written), 3 = the lock cannot be made: the locks
+# directory is read-only, there is no python3 to take the flock, or the holder did not answer.
+acquire_lock() {
+  local dir="$1" wait="${2:-0}" flk="${1%.lock}.flock" res holder verdict="" i=0 end
+  mkdir -p "$(dirname "$dir")" 2>/dev/null || return 3
+  command -v python3 >/dev/null 2>&1 || return 3
+  res=$(mktemp "$(dirname "$dir")/.hold.XXXXXX" 2>/dev/null) || return 3
+  python3 -c "$LOCK_HOLD_PY" "$flk" "$res" "$wait" </dev/null >/dev/null 2>&1 &
+  holder=$!
+  end=$((SECONDS + wait + 10))
+  until [ -s "$res" ]; do
+    kill -0 "$holder" 2>/dev/null || break
+    [ "$SECONDS" -lt "$end" ] || break
+    if [ "$i" -lt 40 ]; then sleep 0.05; else sleep 0.5; fi
+    i=$((i + 1))
+  done
+  verdict=$(head -n 1 "$res" 2>/dev/null) || verdict=""
+  rm -f "$res"
+  case "$verdict" in
+    ok) ;;
+    held)
+      wait "$holder" 2>/dev/null || true
+      LOCK_HOLDER=$(cat "$dir/pid" 2>/dev/null) || LOCK_HOLDER=""
+      [ -n "$LOCK_HOLDER" ] || LOCK_HOLDER="unknown"
+      return 1 ;;
+    *) lock_stop_holder "$holder"; return 3 ;;
+  esac
+  if ! mkdir -p "$dir" 2>/dev/null; then lock_stop_holder "$holder"; return 3; fi
+  printf '%s\n' "$holder" > "$dir/holder"
+  printf '%s\n' "$$" > "$dir/pid"
+  proc_start "$$" > "$dir/start"
+  return 0
 }
 
-# 0 = taken, 1 = another live run holds it. A lock directory that cannot be made at all does not
-# stop the night: an unlocked run is the old behaviour.
+# Only the owner removes the directory, and the holder goes last, so the lock is free when this
+# returns. A process that never took the lock (the EXIT trap of a run that found it held) has no
+# matching pid file and does nothing.
+release_lock() { # $1=lock dir
+  local holder
+  [ "$(cat "$1/pid" 2>/dev/null)" = "$$" ] || return 0
+  holder=$(cat "$1/holder" 2>/dev/null) || holder=""
+  rm -rf "$1"
+  [ -z "$holder" ] || lock_stop_holder "$holder"
+  return 0
+}
+
+# $1=lock dir -> 0 when its flock is held, or cannot be probed, 1 when it is free. The probe takes
+# the flock for a few milliseconds, which is why acquire_run_lock waits two seconds.
+lock_is_held() {
+  local flk="${1%.lock}.flock" word
+  [ -e "$flk" ] || return 1
+  command -v python3 >/dev/null 2>&1 || return 0
+  word=$(python3 -c 'import fcntl, sys
+try:
+    f = open(sys.argv[1], "r")
+    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    print("free")
+except BlockingIOError:
+    print("held")' "$flk" 2>/dev/null) || word=""
+  [ "$word" != free ]
+}
+
+# 0 = taken, 1 = another live run holds it. A lock that cannot be taken at all does not stop the
+# night: an unlocked run is the old behaviour.
 acquire_run_lock() {
   local rc=0
-  acquire_lock "$RUN_LOCK" || rc=$?
+  acquire_lock "$RUN_LOCK" 2 || rc=$?
   case "$rc" in
     0) return 0 ;;
-    3) log "WARNING: could not create $(dirname "$RUN_LOCK"); running without the per-date lock"; return 0 ;;
+    3) log "WARNING: could not take the per-date lock in $(dirname "$RUN_LOCK") (read-only, or no python3); running without it"; return 0 ;;
     *) RUN_LOCK_HOLDER="$LOCK_HOLDER"; return 1 ;;
   esac
 }
@@ -2053,33 +2106,19 @@ remote_sync_refuse() {
   [ -n "$REMOTE_SYNC_FIRST_ERR" ] || REMOTE_SYNC_FIRST_ERR="$2: invalid ($3)"
 }
 
-# $1=lock dir $2=seconds: 0 once the lock is free or its holder is gone, 1 if it is still held.
-# A run that scanned a mirror another run was still copying into would miss the files not yet
-# renamed into place, and the next day's mtime bound would never pick them up, so a held mirror
-# is waited for rather than read at once.
-wait_for_lock_release() {
-  local waited=0
-  while [ -d "$1" ]; do
-    lock_holder_state "$1" || return 0
-    [ "$waited" -lt "$2" ] || return 1
-    sleep 1; waited=$((waited + 1))
-  done
-  return 0
-}
-
-# $1=label $2=target $3=mirror $4=lock -> the helper's status line, synced under the lock.
+# $1=label $2=target $3=mirror $4=lock -> the helper's status line, synced under the lock. A run
+# that scanned a mirror another run was still copying into would miss the files not yet renamed
+# into place, and the next day's mtime bound would never pick them up, so a held mirror is waited
+# for (AUTODREAM_REMOTE_LOCK_WAIT) rather than read at once.
 remote_sync_locked() {
   local rc=0 wait="${AUTODREAM_REMOTE_LOCK_WAIT:-600}"
   case "$wait" in ''|*[!0-9]*) wait=600 ;; esac
-  acquire_lock "$4" || rc=$?
-  if [ "$rc" -eq 1 ] && wait_for_lock_release "$4" "$((10#$wait))"; then
-    rc=0; acquire_lock "$4" || rc=$?
-  fi
+  acquire_lock "$4" "$((10#$wait))" || rc=$?
   case "$rc" in
     0) bash "$REMOTE_SYNC_HELPER" "$1" "$2" "$3" 2>>"$RUN_LOG"
        release_lock "$4" ;;
     1) printf 'skipped_locked (pid %s still held %s after %ss)\n' "${LOCK_HOLDER:-unknown}" "$4" "$wait" ;;
-    *) printf 'failed (cannot create %s)\n' "$(dirname "$4")" ;;
+    *) printf 'failed (cannot take the lock %s: read-only locks directory or no python3)\n' "$4" ;;
   esac
 }
 
