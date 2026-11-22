@@ -499,11 +499,14 @@ lint_coverage_fixture() {
   lint="$REPO/node_modules/.bin/oxlint"
   [ -x "$lint" ] || { bad "oxlint is installed (npm ci)"; return; }
   args=$(node -e 'const w = require(process.argv[1]).scripts.lint.split(/\s+/); process.stdout.write(w.slice(w.indexOf("oxlint") + 1).join("\n"))' "$REPO/package.json" 2>/dev/null) || { bad "read the lint script from package.json"; return; }
-  tracked=$(git -C "$REPO" ls-files '*.js' '*.mjs' '*.cjs' '*.jsx' '*.ts' '*.mts' '*.cts' '*.tsx' | sort) || { bad "list the tracked JS and TS files"; return; }
-  linted=$(cd "$REPO" && "$lint" --debug=files $args 2>/dev/null | sort)
-  [ -n "$linted" ] || { bad "oxlint listed the files the lint script selects"; return; }
-  missing=$(comm -23 <(printf '%s\n' "$tracked") <(printf '%s\n' "$linted") | tr '\n' ' ')
-  eq "$missing" "" "oxlint, run as the lint script runs it, selects every tracked JS and TS file"
+  tracked=$(git -C "$REPO" ls-files '*.js' '*.mjs' '*.cjs' '*.jsx' '*.ts' '*.mts' '*.cts' '*.tsx') || { bad "list the tracked JS and TS files"; return; }
+  [ -n "$tracked" ] || { bad "the repo tracks JS or TS files"; return; }
+  linted=$(cd "$REPO" && "$lint" --debug=files $args 2>/dev/null) || { bad "oxlint listed the files the lint script selects"; return; }
+  [ -n "$linted" ] || { bad "oxlint listed at least one file"; return; }
+  tracked=$(printf '%s\n' "$tracked" | sort) || { bad "sort the tracked files"; return; }
+  linted=$(printf '%s\n' "$linted" | sort) || { bad "sort the linted files"; return; }
+  missing=$(comm -23 <(printf '%s\n' "$tracked") <(printf '%s\n' "$linted")) || { bad "compare the tracked and linted files"; return; }
+  eq "$(printf '%s' "$missing" | tr '\n' ' ')" "" "oxlint, run as the lint script runs it, selects every tracked JS and TS file"
 }
 
 counter_exit_fixtures() {
