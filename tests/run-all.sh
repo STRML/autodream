@@ -4924,6 +4924,7 @@ test_multiroot_heldout_and_dedup(){
   assert_nogrep "$fdir/sessions.txt.raw" "$root/home/.claude-sigint/projects/proj-a/s9.jsonl" "the undecided sigint session is NOT triaged"
   local n; n=$(grep -c "$root/home/.claude/projects/proj-a/s2.jsonl" "$fdir/sessions.txt.raw")
   assert_eq "$n" "1" "the target appears once in sessions.txt.raw, and the symlink in the other root added nothing"
+  assert_nogrep "$fdir/sessions.txt.raw" "$root/home/.claude-ds4/projects/proj-a/s2.jsonl" "the symlink path in the other root is not listed"
   local p; p=$(printf '%s' "$root/home/.claude/projects/proj-a/s2.jsonl" | shasum | cut -c1-12)
   assert_file "$fdir/$p.json" "the one overlapping session has a findings JSON"
   rm -rf "$root"
