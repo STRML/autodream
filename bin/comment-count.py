@@ -27,10 +27,12 @@ JS_DIRECTIVE = re.compile(
 
 REGEX_PRECEDERS = set("(,=:[!&|?{};+-*%<>~^")
 CONTROL_KEYWORDS = {"if", "while", "for", "with"}
-REGEX_KEYWORDS = {
+BLOCK_KEYWORDS = {"do", "else"}
+VALUE_KEYWORDS = {
     "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
-    "throw", "case", "do", "else", "yield", "await",
+    "throw", "case", "yield", "await",
 }
+REGEX_KEYWORDS = VALUE_KEYWORDS | BLOCK_KEYWORDS
 
 
 class CountError(Exception):
@@ -188,11 +190,15 @@ class JsScanner:
         self.code_lines = set()
         self.comment_lines = {}
         self.prev = ""
-        self.prev2 = ""
+        self.prev_at = -1
+        self.pair_at = -1
         self.word = ""
+        self.word_is_property = False
         self.stack = []
         self.parens = []
         self.paren_is_control = False
+        self.braces = []
+        self.brace_is_expression = False
 
     def peek(self, k=0):
         j = self.i + k
@@ -208,10 +214,15 @@ class JsScanner:
             return 1
         return 0
 
-    def set_prev(self, ch, word=""):
-        self.prev2 = self.prev
+    def set_prev(self, ch, word="", at=None):
+        at = self.i if at is None else at
+        self.pair_at = at if self.prev == ch and self.prev_at == at - 1 else -1
         self.prev = ch
+        self.prev_at = at
         self.word = word
+
+    def keyword(self, names):
+        return self.word in names and not self.word_is_property
 
     def code(self):
         self.code_lines.add(self.line)
@@ -309,25 +320,35 @@ class JsScanner:
         if self.prev == ")":
             return self.paren_is_control
         if self.prev == "}":
-            return True
-        if self.prev in "+-" and self.prev2 == self.prev:
+            return not self.brace_is_expression
+        if self.prev in "+-" and self.pair_at == self.prev_at:
             return False
         if self.prev in REGEX_PRECEDERS:
             return True
-        return self.word in REGEX_KEYWORDS
+        return self.keyword(REGEX_KEYWORDS)
+
+    def opens_expression(self):
+        if self.prev in "{};)>":
+            return False
+        if self.prev in REGEX_PRECEDERS:
+            return True
+        return self.keyword(VALUE_KEYWORDS)
 
     def mark(self, ch):
         self.code()
         in_word = bool(self.prev) and (self.prev.isalnum() or self.prev in "_$")
+        is_word_char = ch.isalnum() or ch in "_$"
+        if is_word_char and not in_word:
+            self.word_is_property = self.prev == "."
         if ch == "(":
-            self.parens.append(in_word and self.word in CONTROL_KEYWORDS)
+            self.parens.append(in_word and self.keyword(CONTROL_KEYWORDS))
         elif ch == ")":
             self.paren_is_control = self.parens.pop() if self.parens else False
-        if ch.isalnum() or ch in "_$":
-            word = self.word + ch if in_word else ch
-        else:
-            word = ""
-        self.set_prev(ch, word)
+        elif ch == "{":
+            self.braces.append(self.opens_expression())
+        elif ch == "}":
+            self.brace_is_expression = self.braces.pop() if self.braces else False
+        self.set_prev(ch, self.word + ch if is_word_char and in_word else (ch if is_word_char else ""))
 
     def run(self):
         in_template = False
