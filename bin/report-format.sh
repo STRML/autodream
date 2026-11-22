@@ -57,16 +57,20 @@ report_finishes(){
 }
 
 report_last_line(){
-  local trailers
-  trailers=$(printf 'report: %s\n' "$@")
-  RF_TRAILERS="$trailers" LC_ALL=C awk '
-    BEGIN { n = split(ENVIRON["RF_TRAILERS"], t, "\n"); for (i = 1; i <= n; i++) want[t[i]] = 1 }
-    { l[NR] = $0 }
-    $0 in want { r = NR }
+  LC_ALL=C awk '
+    $0 ~ /[^[:space:]]/ && $0 !~ /^<!-- autodream:remote-short=.* -->$/ { line = $0 }
+    END { print line }' "$1" 2>/dev/null | LC_ALL=C sed 's/[[:space:]]*$//'
+}
+
+report_tail_question(){
+  LC_ALL=C awk '
+    $0 ~ /[^[:space:]]/ && $0 !~ /^<!-- autodream:remote-short=.* -->$/ { l[++n] = $0 }
     END {
-      stop = (r && NR - r <= 4) ? r : NR + 1
-      for (i = stop - 1; i >= 1; i--)
-        if (l[i] ~ /[^[:space:]]/ && l[i] !~ /^<!-- autodream:remote-short=.* -->$/) { print l[i]; exit }
+      for (i = n; i >= 1 && i > n - 5; i--) {
+        t = l[i]
+        sub(/[[:space:]*_)"`\047]+$/, "", t)
+        if (t ~ /\?$/) { print l[i]; exit }
+      }
     }' "$1" 2>/dev/null | LC_ALL=C sed 's/[[:space:]]*$//'
 }
 
@@ -86,20 +90,25 @@ report_cut_chars(){
   }'
 }
 
-report_last_line_excerpt(){ report_last_line "$@" | LC_ALL=C tr -d '[:cntrl:]' | report_cut_chars 80; }
+report_last_line_excerpt(){
+  local line
+  line=$(report_tail_question "$1")
+  [ -n "$line" ] || line=$(report_last_line "$1")
+  printf '%s\n' "$line" | LC_ALL=C tr -d '[:cntrl:]' | report_cut_chars 80
+}
 
 report_incomplete_cause(){
-  local report="$1" last
+  local report="$1"
   report_has_questions_block "$report" && return 0
   if report_has_marker "$report"; then
     printf 'an open-questions marker but no AUTODREAM_QUESTIONS_BEGIN/END block\n'
     return 0
   fi
-  last=$(report_last_line "$@")
-  case "$last" in
-    *'?') printf 'no open-questions marker, and the report ends in a question written as prose outside an AUTODREAM_QUESTIONS_BEGIN/END block\n' ;;
-    *)    printf 'no open-questions marker and no AUTODREAM_QUESTIONS_BEGIN/END block\n' ;;
-  esac
+  if [ -n "$(report_tail_question "$report")" ]; then
+    printf 'no open-questions marker, and the report carries a question written as prose near its end, outside an AUTODREAM_QUESTIONS_BEGIN/END block\n'
+  else
+    printf 'no open-questions marker and no AUTODREAM_QUESTIONS_BEGIN/END block\n'
+  fi
 }
 
 report_body(){

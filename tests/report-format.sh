@@ -123,13 +123,13 @@ fx cprose   '# R\n\nbody\n\nShould .claude in .adapters-rejected be cleaned up?\
 fx cprosebl '# R\n\nbody\n\n- Should we clean up?\n\n\n'
 fx cplain   '# R\n\nbody with no question at all.\n'
 fx cmarkonly '# R\n\nbody\n<!-- autodream:open-questions=1 -->\n'
-assert_eq "$(report_incomplete_cause "$D/cprose")" "no open-questions marker, and the report ends in a question written as prose outside an AUTODREAM_QUESTIONS_BEGIN/END block" "no marker and a prose question at the end is named as such"
-assert_eq "$(report_incomplete_cause "$D/cprosebl")" "no open-questions marker, and the report ends in a question written as prose outside an AUTODREAM_QUESTIONS_BEGIN/END block" "trailing blank lines and a bullet do not hide it"
+assert_eq "$(report_incomplete_cause "$D/cprose")" "no open-questions marker, and the report carries a question written as prose near its end, outside an AUTODREAM_QUESTIONS_BEGIN/END block" "no marker and a prose question at the end is named as such"
+assert_eq "$(report_incomplete_cause "$D/cprosebl")" "no open-questions marker, and the report carries a question written as prose near its end, outside an AUTODREAM_QUESTIONS_BEGIN/END block" "trailing blank lines and a bullet do not hide it"
 assert_eq "$(report_incomplete_cause "$D/cplain")" "no open-questions marker and no AUTODREAM_QUESTIONS_BEGIN/END block" "no marker and no question is the plain case"
 assert_eq "$(report_incomplete_cause "$D/cmarkonly")" "an open-questions marker but no AUTODREAM_QUESTIONS_BEGIN/END block" "a marker without the block is named too"
 assert_eq "$(report_incomplete_cause "$D/fdate")" "" "a report with the block has no cause to name"
 fx cprosers '# R\n\nbody\n\nShould we clean up?\n<!-- autodream:remote-short=studio -->\n'
-assert_eq "$(report_incomplete_cause "$D/cprosers")" "no open-questions marker, and the report ends in a question written as prose outside an AUTODREAM_QUESTIONS_BEGIN/END block" "a trailing remote-short record does not hide the prose question"
+assert_eq "$(report_incomplete_cause "$D/cprosers")" "no open-questions marker, and the report carries a question written as prose near its end, outside an AUTODREAM_QUESTIONS_BEGIN/END block" "a trailing remote-short record does not hide the prose question"
 fx cwide    "# R\n\n$(printf 'x%.0s' $(seq 1 100))\n\n"
 fx cctl     '# R\n\nbody\tends\033[31m here?\n'
 assert_eq "$(report_last_line_excerpt "$D/cprose")" "Should .claude in .adapters-rejected be cleaned up?" "the excerpt is the last non-blank line"
@@ -148,18 +148,36 @@ fx csent    '# R\n\nquoted:\nAUTODREAM_REPORT_END\nreport: quoted input\n\nShoul
 fx cstray   "# R\n\nx$(printf '\\200%.0s' $(seq 1 1000))\n"
 if [ -n "$UTF8_LOCALE" ]; then
   assert_eq "$(LC_ALL=$UTF8_LOCALE report_last_line_excerpt "$D/cbad")" "Should we clean up?" "invalid UTF-8 earlier in the capture does not blank the last line"
-  assert_eq "$(LC_ALL=$UTF8_LOCALE report_incomplete_cause "$D/cbad")" "no open-questions marker, and the report ends in a question written as prose outside an AUTODREAM_QUESTIONS_BEGIN/END block" "and the prose question is still named"
+  assert_eq "$(LC_ALL=$UTF8_LOCALE report_incomplete_cause "$D/cbad")" "no open-questions marker, and the report carries a question written as prose near its end, outside an AUTODREAM_QUESTIONS_BEGIN/END block" "and the prose question is still named"
 fi
 assert_eq "$(LC_ALL=C report_last_line_excerpt "$D/cmb")" "$(printf 'x%.0s' $(seq 1 79))$(printf '\303\251')" "the cut keeps a multibyte character whole, 80 characters in any locale"
 assert_eq "$(report_last_line_excerpt "$D/ctrail")" "Should we clean up?" "trailing report: and summary lines do not hide the last body line"
-assert_eq "$(report_incomplete_cause "$D/ctrail")" "no open-questions marker, and the report ends in a question written as prose outside an AUTODREAM_QUESTIONS_BEGIN/END block" "so the prose question is named when the sentinel is missing"
+assert_eq "$(report_incomplete_cause "$D/ctrail")" "no open-questions marker, and the report carries a question written as prose near its end, outside an AUTODREAM_QUESTIONS_BEGIN/END block" "so the prose question is named when the sentinel is missing"
 assert_eq "$(report_last_line_excerpt "$D/csent")" "Should we clean up?" "a quoted sentinel or report: line in the body hides nothing after it"
-assert_eq "$(report_last_line_excerpt "$D/ctraildt" /tmp/f/dropped-threads.md)" "Should we clean up?" "the trailer may name the dropped-threads path L2 was given as line 2"
-assert_eq "$(report_last_line_excerpt "$D/ctraildt")" "summary three" "that path counts only when the caller names it"
+assert_eq "$(report_last_line_excerpt "$D/ctraildt")" "Should we clean up?" "a dropped-threads trailer needs no special case"
 fx cquoteddt '# R\n\nreport: /quoted/dropped-threads.md\nShould we clean up?\n'
-assert_eq "$(report_last_line_excerpt "$D/cquoteddt" /real/dropped-threads.md)" "Should we clean up?" "a quoted dropped-threads path that is not the caller's is body text"
+assert_eq "$(report_last_line_excerpt "$D/cquoteddt")" "Should we clean up?" "a quoted dropped-threads path is body text"
 assert_eq "$(report_last_line_excerpt "$D/cquotedabs")" "Should we clean up?" "a quoted absolute report: line near the end is body text, not the trailer"
 assert_eq "$(report_last_line_excerpt "$D/cquoted")" "Should we clean up?" "an absolute report: line quoted high in the body is not the trailer"
+fx cqexact  '# R\n\nbody\n\nreport: /real/dropped-threads.md\nShould we clean up?\n'
+assert_eq "$(report_last_line_excerpt "$D/cqexact")" "Should we clean up?" "a quoted trailer line, exact path and all, hides nothing"
+fx cq6      '# R\n\nShould we clean up?\nl1\nl2\nl3\nl4\nl5\n'
+assert_eq "$(report_incomplete_cause "$D/cq6")" "no open-questions marker and no AUTODREAM_QUESTIONS_BEGIN/END block" "a question 6th from the end is outside the window"
+assert_eq "$(report_last_line_excerpt "$D/cq6")" "l5" "and the excerpt falls back to the last line"
+fx cq5      '# R\n\nShould we clean up?\nl2\nl3\nl4\nl5\n'
+assert_eq "$(report_last_line_excerpt "$D/cq5")" "Should we clean up?" "a question 5th from the end is inside it"
+fx ccrlf    '# R\r\n\r\nShould we clean up?\r\n'
+assert_eq "$(report_last_line_excerpt "$D/ccrlf")" "Should we clean up?" "a CRLF capture keeps its question"
+assert_eq "$(report_incomplete_cause "$D/ccrlf")" "no open-questions marker, and the report carries a question written as prose near its end, outside an AUTODREAM_QUESTIONS_BEGIN/END block" "and is named as one"
+fx cbold    '# R\n\n**Should we clean up?**\n'
+assert_eq "$(report_incomplete_cause "$D/cbold")" "no open-questions marker, and the report carries a question written as prose near its end, outside an AUTODREAM_QUESTIONS_BEGIN/END block" "closing bold markdown does not hide it"
+fx cquote   '# R\n\n(Should we clean up?)"\n'
+assert_eq "$(report_incomplete_cause "$D/cquote")" "no open-questions marker, and the report carries a question written as prose near its end, outside an AUTODREAM_QUESTIONS_BEGIN/END block" "nor do a closing parenthesis and quote"
+fx ctrailrs 'Q\n\nShould we clean up?\nreport: /x/y.md\ns1\ns2\ns3\n<!-- autodream:remote-short=studio -->\n'
+assert_eq "$(report_last_line_excerpt "$D/ctrailrs")" "Should we clean up?" "the remote-short record takes no slot in the window"
+fx crsonly  '# R\n\nbody\n<!-- autodream:remote-short=studio -->\n'
+assert_eq "$(report_last_line_excerpt "$D/crsonly")" "body" "a remote-short record alone is skipped, the line before it is the last line"
+assert_eq "$(report_last_line_excerpt "$D/empty")" "" "an empty capture has an empty excerpt"
 assert_eq "$(LC_ALL=C report_last_line_excerpt "$D/cstray" | wc -c | tr -d ' ')" "81" "stray continuation bytes count as characters, so the excerpt stays at 80 (plus the newline)"
 
 fx cbadall  '# R\n\nbad \377\376 bytes\n## Open questions\n- one\n- two\nAUTODREAM_QUESTIONS_BEGIN\n1. **Q** a?\nAUTODREAM_QUESTIONS_END\n<!-- autodream:open-questions=2 -->\nAUTODREAM_REPORT_END\nAUTODREAM_PINS_BEGIN\n{"project":"p"}\nAUTODREAM_PINS_END\nreport: x\n'

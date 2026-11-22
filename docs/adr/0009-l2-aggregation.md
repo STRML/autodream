@@ -10,7 +10,7 @@ This record holds 21 sections: one per decision, and a Background section for ea
 - [a cited 12-hex token with no findings file still resolves when it matches a triaged session path](#a-cited-12-hex-token-with-no-findings-file-still-resolves-when-it-matches-a-triaged-session-path)
 - [report claims are grounded by fixed, read-only checks in code, and a check that cannot run says unknown](#report-claims-are-grounded-by-fixed-read-only-checks-in-code-and-a-check-that-cannot-run-says-unknown)
 - [the installed-skill search follows symlinks and stops at depth 7](#the-installed-skill-search-follows-symlinks-and-stops-at-depth-7)
-- [report-format.sh reads a capture as bytes, and the retry log's last line stops at the report: trailer](#report-formatsh-reads-a-capture-as-bytes-and-the-retry-logs-last-line-stops-at-the-report-trailer)
+- [report-format.sh reads a capture as bytes, and the retry log looks for a question in the last five lines](#report-formatsh-reads-a-capture-as-bytes-and-the-retry-log-looks-for-a-question-in-the-last-five-lines)
 - [L2's report is everything before the LAST `AUTODREAM_REPORT_END`, and pins come only from a closed block after it](#l2s-report-is-everything-before-the-last-autodream_report_end-and-pins-come-only-from-a-closed-block-after-it)
 - [the open-questions count is read strictly, completeness loosely, and anything unrecognised is "unknown"](#the-open-questions-count-is-read-strictly-completeness-loosely-and-anything-unrecognised-is-unknown)
 - [the open-questions section is found by sentinel lines, with a fenced-heading fallback only for legacy dates](#the-open-questions-section-is-found-by-sentinel-lines-with-a-fenced-heading-fallback-only-for-legacy-dates)
@@ -357,7 +357,7 @@ When L2 was attempted and either delivery was not validated or `report_complete`
 ### Consequences
 Never make the guard accept a marker-less report. See `superseded-dream-copies-retired-outside-existence-test` for how partials are retired.
 
-## report-format.sh reads a capture as bytes, and the retry log's last line stops at the report: trailer
+## report-format.sh reads a capture as bytes, and the retry log looks for a question in the last five lines
 
 Status: accepted · Date: 2026-11-22 · Code: `bin/report-format.sh` (every `awk`, `sed` and `grep`, `report_last_line`, `report_cut_chars`), `bin/run.sh` (the staging `awk`)
 
@@ -365,8 +365,9 @@ Status: accepted · Date: 2026-11-22 · Code: `bin/report-format.sh` (every `awk
 Under a UTF-8 locale on macOS, `sed` fails and `awk` aborts on an invalid byte, so one stray byte in an L2 capture emptied `report_marker_count`, `report_body`, `report_after_sentinel` and `report_pin_lines`, and the retry line lost the text it quotes. `cut -c1-80` split a multibyte character in the C locale. And with no sentinel the capture still ends with `report: <path>` and a 3-line summary, which hid a prose question from the cause.
 
 ### Decision
-Every text tool in `report-format.sh` that reads a capture runs under `LC_ALL=C`, as does the `awk` that stages the report in `run.sh`. The excerpt is cut by `report_cut_chars`: a lead byte starts a character and takes up to its sequence length in continuation bytes, and a stray continuation byte counts as a character, so no byte sequence gets past the 80-character limit. The trailer is the last `report:` line whose path is one the caller names (`run.sh` passes the report path and `$FINDINGS_DIR/dropped-threads.md`), with at most four lines after it. L2 is told "the literal path from line 2", which in the current prompt layout is the dropped-threads line and not the report destination, so a model can print either; any other `report:` line, an absolute path included, is body text.
+Every text tool in `report-format.sh` that reads a capture runs under `LC_ALL=C`, as does the `awk` that stages the report in `run.sh`. The excerpt is cut by `report_cut_chars`: a lead byte starts a character and takes up to its sequence length in continuation bytes, and a stray continuation byte counts as a character, so no byte sequence gets past the 80-character limit.
+
+No line of a capture is ever classified as a trailer. Four review rounds each narrowed a pattern for the `report:` line and each time a body that quoted the narrower pattern hid the question, because the model wrote both. `report_tail_question` drops blank lines and the remote-short record, takes the last five lines left (a `report:` line and a 3-line summary fit behind a question), strips trailing whitespace and closing markdown (`*`, `_`, `)`, quotes, backticks, the `\r` of a CRLF line), and prints the last of them that ends in `?`. The cause and the excerpt both call it, so they cannot disagree, and the excerpt falls back to `report_last_line` when there is none. The retry line says `its tail reads:` and the cause says the report carries a prose question near its end, because the question is no longer the last line.
 
 ### Consequences
-A new `awk`, `sed` or `grep` over capture text in that file needs the prefix. A body that quotes exactly one of the two named paths after `report: ` within four lines of its end loses those last lines from the excerpt, which costs log text and nothing else. A caller that passes no second path treats a dropped-threads trailer as body text.
-
+A new `awk`, `sed` or `grep` over capture text in that file needs the `LC_ALL=C` prefix. The window is positional: a question followed by more than four non-blank lines (a fourth summary line, a wrapped summary, a pin block with no sentinel) is missed and the log says the generic cause. A summary line that ends in `?` replaces the real question in the excerpt, and a truncated report with any question-ending line in its last five lines gets the prose-question cause. All of these cost log text and nothing else. `docs/plans/2026-11-22-fix_report-format-log-text-redesign.md` has the rounds and the failure matrix.
