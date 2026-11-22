@@ -29,10 +29,10 @@ collect(){ # runs the collector the way run.sh does; sets RC
   RC=$?
 }
 row(){ awk -F'\t' -v n="$1" '$1 == n { print $2 }' "$F/report-index.txt"; }
-GROUPS_SKIP="process table: pgrep cannot list process groups here (the sandbox); CI and launchd can"
-groups_probe_usable(){ pgrep -g "$$" > /dev/null 2>&1; [ $? -le 1 ]; }
-if ! groups_probe_usable && [ "${CI:-}" != true ]; then
-  skip "$GROUPS_SKIP: every entry would be failed, so the whole suite is skipped"
+PROCS_SKIP="process table: ps cannot list processes here (the sandbox); CI and launchd can"
+procs_probe_usable(){ ps axeww -o pid= > /dev/null 2>&1; }
+if ! procs_probe_usable && [ "${CI:-}" != true ]; then
+  skip "$PROCS_SKIP: every entry would be failed, so the whole suite is skipped"
   echo "passed: 0   failed: 0   skipped: $skipped"
   exit 0
 fi
@@ -367,8 +367,8 @@ sleep 0.5
 exit 0
 SH
 printf 'orphan %s\n' "$SCRIPTS/orphan.sh" > "$CONF"
-if groups_probe_usable; then
-  collect
+if procs_probe_usable; then
+  KG=1 collect
   leaked=$(cat "$C/orphan.pid" 2>/dev/null)
   if [ -z "$leaked" ]; then no "the orphan's child started"
   elif kill -0 "$leaked" 2>/dev/null; then no "a background child outlived the command that started it (pid $leaked)"; kill -KILL "$leaked" 2>/dev/null
@@ -376,7 +376,27 @@ if groups_probe_usable; then
   assert_eq "$(row orphan)" "failed" "a command that leaves a process behind is failed, not ok"
   assert_grep "$F/report-orphan.md" 'left a background process running' "the report says what was left behind"
   assert_eq "$RC" "0" "the collector itself still exits 0"
-else skip_unless_ci "$GROUPS_SKIP (a background child after its command exits)"; fi
+else skip_unless_ci "$PROCS_SKIP (a background child after its command exits)"; fi
+
+echo "# a child that moves itself into its own process group is still found, through the marker in its environment"
+new_case pgrp
+mk_script "$SCRIPTS/pgrp.sh" <<SH
+#!/bin/bash
+set -m
+sleep 300 &
+echo \$! > "$C/pgrp.pid"
+set +m
+exit 0
+SH
+printf 'pgrp %s\n' "$SCRIPTS/pgrp.sh" > "$CONF"
+if procs_probe_usable; then
+  KG=1 collect
+  moved=$(cat "$C/pgrp.pid" 2>/dev/null)
+  if [ -z "$moved" ]; then no "the regrouped child started"
+  elif kill -0 "$moved" 2>/dev/null; then no "a child in its own process group outlived the command (pid $moved)"; kill -KILL "$moved" 2>/dev/null
+  else ok "a child in its own process group was stopped"; fi
+  assert_eq "$(row pgrp)" "failed" "and the row is failed"
+else skip_unless_ci "$PROCS_SKIP (a child in its own process group)"; fi
 
 echo "# a command that exits 0 and leaves nothing behind stays ok"
 new_case tidy
@@ -387,10 +407,10 @@ wait
 echo done
 SH
 printf 'tidy %s\n' "$SCRIPTS/tidy.sh" > "$CONF"
-if groups_probe_usable; then
+if procs_probe_usable; then
   collect
   assert_eq "$(row tidy)" "ok" "a command that reaps its own children is ok"
-else skip_unless_ci "$GROUPS_SKIP (a clean command next to the leftover check)"; fi
+else skip_unless_ci "$PROCS_SKIP (a clean command next to the leftover check)"; fi
 
 echo "# an unwritable findings dir is a loud failure, not a silent one"
 new_case nofind

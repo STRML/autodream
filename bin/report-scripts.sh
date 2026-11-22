@@ -53,37 +53,45 @@ settle_tree() {
   for p in $(cat "$1" 2>/dev/null); do kill -s KILL "$p" 2>/dev/null || true; done
 }
 
-reap_group() {
-  local g="$1" leftflag="$2" rc i=0 limit=$((KILL_GRACE * 10))
-  pgrep -g "$g" > /dev/null 2>&1; rc=$?
+marked_pids() {
+  local out found
+  out=$(ps axeww -o pid=,command= 2>/dev/null) || return 2
+  found=$(printf '%s\n' "$out" | grep -e "AUTODREAM_REPORT_[R]UN=$1\( \|\$\)" | awk '{ print $1 }')
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
+}
+
+reap_marked() {
+  local tok="$1" leftflag="$2" pids rc i=0 limit=$((KILL_GRACE * 10))
+  pids=$(marked_pids "$tok"); rc=$?
   case "$rc" in
     1) return 0 ;;
     0) ;;
     *) printf 'unknown\n' > "$leftflag"; return 0 ;;
   esac
   printf 'stopped\n' > "$leftflag"
-  kill -s TERM -- "-$g" 2>/dev/null || true
+  kill -s TERM $pids 2>/dev/null || true
   while [ "$i" -lt "$limit" ]; do
-    pgrep -g "$g" > /dev/null 2>&1 || return 0
+    marked_pids "$tok" > /dev/null || return 0
     sleep 0.1; i=$((i + 1))
   done
-  kill -s KILL -- "-$g" 2>/dev/null || true
+  kill -s KILL $(marked_pids "$tok") 2>/dev/null || true
   sleep 0.2
-  if pgrep -g "$g" > /dev/null 2>&1; then printf 'alive\n' > "$leftflag"; fi
+  if marked_pids "$tok" > /dev/null; then printf 'alive\n' > "$leftflag"; fi
 }
 
 leftover_reason() {
   local rc="$1" leftflag="$2"
   case "$(cat "$leftflag" 2>/dev/null)" in
     alive) printf 'FAILED: left a background process running after exit %s and it could not be stopped' "$rc" ;;
-    unknown) printf 'FAILED: could not check whether the command left a process running after exit %s (pgrep failed)' "$rc" ;;
+    unknown) printf 'FAILED: could not check whether the command left a process running after exit %s (ps failed)' "$rc" ;;
     *) printf 'FAILED: left a background process running after exit %s; it was stopped' "$rc" ;;
   esac
 }
 
 run_bounded() {
-  local secs="$1" flag="$2" leftflag="$3" pid wd rc; shift 3
-  perl -MPOSIX -e 'POSIX::setsid(); exec { $ARGV[0] } @ARGV; exit 127' "$@" & pid=$!
+  local secs="$1" flag="$2" leftflag="$3" tok="$4" pid wd rc; shift 4
+  env "AUTODREAM_REPORT_RUN=$tok" "$@" & pid=$!
   ( trap 'kill "${sp:-}" 2>/dev/null; exit 0' TERM
     sleep "$secs" & sp=$!; wait "$sp" || exit 0
     tree=$(tree_pids "$pid")
@@ -94,7 +102,7 @@ run_bounded() {
   wait "$pid"; rc=$?
   kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
   if [ -s "$flag" ]; then settle_tree "$flag"; fi
-  reap_group "$pid" "$leftflag"
+  reap_marked "$tok" "$leftflag"
   return "$rc"
 }
 
@@ -184,7 +192,6 @@ collect() {
       esac
       if [ "$status" = ok ] && [ ! -f "$path" ]; then status=missing; reason="FAILED: script not found: $path"; fi
       if [ "$status" = ok ] && [ ! -x "$path" ]; then status=missing; reason="FAILED: script is not executable: $path"; fi
-      if [ "$status" = ok ] && ! command -v perl > /dev/null 2>&1; then status=missing; reason="FAILED: perl not found; it starts each command in its own session so a leftover process can be stopped: $path"; fi
       if [ "$status" = ok ] && [ "$checked" = 1 ]; then
         now=$(entry_hash "$path" ${args[@]+"${args[@]}"})
         if ! printf '%s' "$want" | grep -Eq '^[0-9a-f]{64}$' || [ "$now" != "$want" ]; then
@@ -202,7 +209,7 @@ collect() {
 
       tflag="$work/timeout.$n"; : > "$tflag"
       lflag="$work/left.$n"; : > "$lflag"
-      ( ulimit -f "$FILE_LIMIT_KB" 2>/dev/null; cd "$HOME" 2>/dev/null || cd /; run_bounded "$TIMEOUT_S" "$tflag" "$lflag" "$path" ${args[@]+"${args[@]}"} ) < /dev/null > "$out" 2> "$err"
+      ( ulimit -f "$FILE_LIMIT_KB" 2>/dev/null; cd "$HOME" 2>/dev/null || cd /; run_bounded "$TIMEOUT_S" "$tflag" "$lflag" "$$.$n.$RANDOM" "$path" ${args[@]+"${args[@]}"} ) < /dev/null > "$out" 2> "$err"
       rc=$?
       if [ -s "$tflag" ]; then
         status=timeout; reason="FAILED: timed out after ${TIMEOUT_S}s and was stopped (exit $rc)"
