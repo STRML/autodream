@@ -25,6 +25,8 @@ JS_DIRECTIVE = re.compile(
     r"\s*(@ts-expect-error|@ts-ignore|oxlint-disable(?:-next-line|-line)?)(?=$|\s|:)"
 )
 
+REGEX_RISK = re.compile(r"[`'\"{}()/]")
+MAX_SPECULATIONS = 64
 REGEX_PRECEDERS = set("(,=:[!&|?{};+-*%<>~^")
 CONTROL_KEYWORDS = {"if", "while", "for", "with"}
 BLOCK_KEYWORDS = {"do", "else"}
@@ -181,9 +183,11 @@ def count_python(path, data):
 
 
 class JsScanner:
-    def __init__(self, path, text):
+    def __init__(self, path, text, forced=()):
         self.path = path
         self.text = text
+        self.forced = list(forced)
+        self.decisions = []
         self.n = len(text)
         self.i = 0
         self.line = 1
@@ -296,23 +300,39 @@ class JsScanner:
             self.i += 1
         raise CountError("%s: template literal is never closed" % self.path)
 
-    def regex(self):
-        self.code()
-        self.i += 1
+    def regex_end(self):
+        j = self.i + 1
         in_class = False
-        while self.i < self.n:
-            ch = self.text[self.i]
+        while j < self.n:
+            ch = self.text[j]
             if ch == "\n":
-                return
-            self.i += 1
+                return None
+            j += 1
             if ch == "\\":
-                self.i += 1
+                j += 1
             elif ch == "[":
                 in_class = True
             elif ch == "]":
                 in_class = False
             elif ch == "/" and not in_class:
-                return
+                return j
+        return None
+
+    def slash_starts_regex(self):
+        end = self.regex_end()
+        if end is None:
+            return None
+        guess = self.regex_allowed()
+        if not REGEX_RISK.search(self.text[self.i + 1:end - 1]):
+            return end if guess else None
+        k = len(self.decisions)
+        choice = self.forced[k] if k < len(self.forced) else guess
+        self.decisions.append(choice)
+        return end if choice else None
+
+    def regex(self, end):
+        self.code()
+        self.i = end
 
     def regex_allowed(self):
         if self.prev == "":
@@ -376,9 +396,8 @@ class JsScanner:
             elif ch == "`":
                 self.i += 1
                 in_template = True
-            elif ch == "/" and self.regex_allowed():
-                self.regex()
-                self.set_prev("/")
+            elif ch == "/" and self.regex_or_division():
+                pass
             elif ch == "#" and self.i == 0 and nxt == "!":
                 self.line_comment()
             else:
@@ -396,6 +415,14 @@ class JsScanner:
         if self.stack:
             raise CountError("%s: template expression is never closed" % self.path)
 
+    def regex_or_division(self):
+        end = self.slash_starts_regex()
+        if end is None:
+            return False
+        self.regex(end)
+        self.set_prev("/")
+        return True
+
     def count(self):
         self.run()
         return sum(
@@ -406,7 +433,26 @@ class JsScanner:
 
 
 def count_js(path, data):
-    return JsScanner(path, decode(path, data)).count()
+    text = decode(path, data)
+    budget = [MAX_SPECULATIONS]
+
+    def attempt(forced):
+        scanner = JsScanner(path, text, forced)
+        try:
+            return scanner.count()
+        except CountError as err:
+            taken = scanner.decisions
+            for j in range(len(taken) - 1, len(forced) - 1, -1):
+                if budget[0] <= 0:
+                    break
+                budget[0] -= 1
+                try:
+                    return attempt(taken[:j] + [not taken[j]])
+                except CountError:
+                    continue
+            raise err
+
+    return attempt([])
 
 
 COUNTERS = {"sh": count_shell, "py": count_python, "js": count_js}

@@ -218,6 +218,12 @@ counter_fixtures() {
   eq "$(num "$d/obj-div.ts")" 1 "division after an object literal is not a regex"
   printf '%s\n' 'if (a) {} else {}' '/[/*]/.test(v);' '// real comment' > "$d/else-block.ts"
   eq "$(num "$d/else-block.ts")" 1 "a regex after a block that follows else is a regex"
+  printf '%s\n' 'label: {} /[/*]/.test(v);' '// real comment' > "$d/label-block.ts"
+  eq "$(num "$d/label-block.ts")" 1 "a regex after a labeled block is read the only way the whole file lexes"
+  printf '%s\n' 'const a = b /[/*]/ c;' '// real comment' > "$d/flip-div.ts"
+  eq "$(num "$d/flip-div.ts")" 1 "a slash the heuristic reads as division is flipped when only the regex reading lexes"
+  printf '%s\n' 'const t = 1 +' '/ 2;' '// real comment' > "$d/no-close.ts"
+  eq "$(num "$d/no-close.ts")" 1 "a slash with no closing slash on its line is a division"
   printf '%s\n' 'const q = (a + b) / 2 / 3;' 'i++ / 2 / 4;' '// real comment' > "$d/div.ts"
   eq "$(num "$d/div.ts")" 1 "division after a parenthesis or an increment is not a regex"
 
