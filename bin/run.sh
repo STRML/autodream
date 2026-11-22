@@ -2689,6 +2689,218 @@ report_scripts_stats() {
   printf 'report_scripts: %s\nreport_scripts_not_ok: %s\n' "$n" "${names:-none}" >> "$FINDINGS_DIR/run-stats.txt"
 }
 
+collect_operator_notes() {
+  if [ -x "$VAULT_NOTES" ]; then
+    "$VAULT_NOTES" collect "$FINDINGS_DIR" || log "operator-note collection failed (continuing)"
+  else
+    log "vault-notes.sh not found at $VAULT_NOTES; skipping operator-note collection"
+  fi
+}
+
+collect_x_bookmarks() {
+  rm -f "$FINDINGS_DIR/x-bookmarks-fetch.txt" "$FINDINGS_DIR/x-bookmarks-queryid.txt"
+  if [ -x "$XBOOKMARKS" ]; then
+    "$XBOOKMARKS" collect "$FINDINGS_DIR" || log "x-bookmark collection failed (continuing)"
+  else
+    log "x-bookmarks.sh not found at $XBOOKMARKS; skipping bookmark collection"
+  fi
+}
+
+record_x_bookmark_stats() {
+  XQID_SOURCE=not_attempted
+  if [ -s "$FINDINGS_DIR/x-bookmarks-queryid.txt" ]; then
+    XQID_SOURCE=$(tr -d '[:space:]' < "$FINDINGS_DIR/x-bookmarks-queryid.txt")
+    [ -n "$XQID_SOURCE" ] || XQID_SOURCE=not_attempted
+  fi
+  printf 'x_queryid_source: %s\n' "$XQID_SOURCE" >> "$FINDINGS_DIR/run-stats.txt"
+
+  XFETCH_PATH=not_attempted; XFETCH_CAUSE=""
+  if [ -s "$FINDINGS_DIR/x-bookmarks-fetch.txt" ]; then
+    XFETCH_PATH=$(sed -n 1p "$FINDINGS_DIR/x-bookmarks-fetch.txt" | tr -d '[:space:]')
+    XFETCH_CAUSE=$(sed -n 2p "$FINDINGS_DIR/x-bookmarks-fetch.txt" | tr '\t\r' '  ')
+    [ -n "$XFETCH_PATH" ] || XFETCH_PATH=not_attempted
+  fi
+  printf 'x_fetch_path: %s\n' "$XFETCH_PATH" >> "$FINDINGS_DIR/run-stats.txt"
+  [ -z "$XFETCH_CAUSE" ] || printf 'x_fetch_browser_cause: %s\n' "$XFETCH_CAUSE" >> "$FINDINGS_DIR/run-stats.txt"
+}
+
+prune_finished_worktrees() {
+  PRUNE_SUMMARY="prune: not configured"
+  if [ -z "${AUTODREAM_PRUNE_ROOTS:-}" ]; then
+    :
+  elif [ -x "$PRUNE_WORKTREES" ]; then
+    PRUNE_SUMMARY=$("$PRUNE_WORKTREES" "$FINDINGS_DIR" 2>>"$RUN_LOG" | tail -1) || PRUNE_SUMMARY="prune: failed"
+    [ -n "$PRUNE_SUMMARY" ] || PRUNE_SUMMARY="prune: failed"
+    log "$PRUNE_SUMMARY (details: $FINDINGS_DIR/worktree-prune.md)"
+  else
+    log "prune-worktrees.sh not found at $PRUNE_WORKTREES; skipping worktree prune"
+    PRUNE_SUMMARY="prune: helper missing"
+  fi
+  printf 'worktree_prune: %s\n' "$PRUNE_SUMMARY" >> "$FINDINGS_DIR/run-stats.txt"
+}
+
+list_repos_to_triage() {
+  TRIAGE_SUMMARY="triage: off"
+  rm -f "$FINDINGS_DIR/triage-candidates.md" "$FINDINGS_DIR/triage-candidates.tsv" 2>/dev/null
+  if [ "${AUTODREAM_TRIAGE_SUGGEST:-1}" = 0 ]; then
+    :
+  elif [ -x "$TRIAGE_CANDIDATES" ]; then
+    TRIAGE_SUMMARY=$(printf '%s\n' "$SESSION_ROWS" | "$TRIAGE_CANDIDATES" "$FINDINGS_DIR" 2>>"$RUN_LOG" | tail -1) || TRIAGE_SUMMARY="triage: failed"
+    [ -n "$TRIAGE_SUMMARY" ] || TRIAGE_SUMMARY="triage: failed"
+    log "$TRIAGE_SUMMARY (details: $FINDINGS_DIR/triage-candidates.md)"
+  else
+    log "triage-candidates.sh not found at $TRIAGE_CANDIDATES; skipping the triage list"
+    TRIAGE_SUMMARY="triage: helper missing"
+  fi
+  printf 'triage_candidates: %s\n' "$TRIAGE_SUMMARY" >> "$FINDINGS_DIR/run-stats.txt"
+}
+
+resolve_l2_command() {
+  L2_ENGINE=$(review_engine)
+  L2_MODEL=$(adapter_l2_model "$L2_ENGINE" 2>/dev/null) || L2_MODEL=""
+  log "L2 engine: $L2_ENGINE, model: ${L2_MODEL:-<engine default>}"
+  printf 'l2_engine: %s\n' "$L2_ENGINE" >> "$FINDINGS_DIR/run-stats.txt"
+  printf 'l2_model: %s\n' "${L2_MODEL:-default}" >> "$FINDINGS_DIR/run-stats.txt"
+  L2_ARGV=()
+  while IFS= read -r -d "" _a; do L2_ARGV+=("$_a"); done < <(adapter_run "$L2_ENGINE" l2-argv ${L2_MODEL:+"$L2_MODEL"} 2>/dev/null)
+  L2_ENVS=()
+  while IFS= read -r _l; do [ -n "$_l" ] && L2_ENVS+=("$_l"); done < <(adapter_run "$L2_ENGINE" l1-env 2>/dev/null)
+  unset _a _l
+  if [ "${#L2_ARGV[@]}" -eq 0 ] && [ "$L2_ENGINE" = "claude" ]; then
+    log "  the claude adapter printed no L2 command here (an adapters/ tree that predates l2-argv); using the built-in claude invocation"
+    # shellcheck source=/dev/null
+    L2_SYS=$(_l=$(find_lib l2-prompt.sh) && . "$_l" && l2_system_prompt) || L2_SYS=""
+    if [ -n "$L2_SYS" ]; then
+      L2_ARGV=("$CLAUDE_BIN" --print --permission-mode bypassPermissions ${L2_MODEL:+--model "$L2_MODEL"} \
+        --no-session-persistence --tools Glob Read --disable-slash-commands --strict-mcp-config \
+        --settings '{"disableAllHooks":true}' \
+        --append-system-prompt "$L2_SYS")
+    else
+      log "WARNING: the built-in claude invocation needs prompts/L2_SYSTEM.txt through bin/l2-prompt.sh, and neither could be read"
+    fi
+  fi
+  if [ "${#L2_ARGV[@]}" -eq 0 ]; then
+    log "WARNING: the $L2_ENGINE adapter produced no L2 command; every L2 attempt will fail"
+    L2_ARGV=(false)
+  fi
+}
+
+move_stale_report_aside() {
+  CONSUME_SAFE=1
+  PINS_SAFE=1
+  if [ -s "$REPORT_PATH" ]; then
+    STALE_REPORT="$REPORT_PATH.stale-$(date +%s)"
+    if mv "$REPORT_PATH" "$STALE_REPORT"; then
+      log "existing report for $TARGET_DATE moved aside to $STALE_REPORT before rebuilding"
+    else
+      log "WARNING: could not move the existing report aside; this run will NOT archive notes or mark bookmarks read, because a stale report can no longer be told apart from a fresh one"
+      STALE_REPORT=""
+      CONSUME_SAFE=0
+    fi
+  fi
+}
+
+retire_superseded_report_copies() {
+  if [ -f "$REPORT_PATH" ] && [ "$L2_ATTEMPTED" = "1" ] && { [ "$L2_DELIVERED" != "1" ] || ! report_complete; }; then
+    PARTIAL_REPORT="$REPORT_PATH.partial-$(date +%s)"
+    if mv "$REPORT_PATH" "$PARTIAL_REPORT"; then
+      log "WARNING: every L2 attempt left an incomplete report; moved it to $PARTIAL_REPORT so a later trigger retries this date"
+    else
+      log "WARNING: an incomplete report is at $REPORT_PATH and could not be moved aside; later triggers will treat this date as done"
+    fi
+  fi
+
+  if [ -n "${STALE_REPORT:-}" ] && [ -s "$STALE_REPORT" ]; then
+    if report_complete; then
+      rm -f "$STALE_REPORT" && log "rebuild succeeded; discarded the superseded report copy"
+    else
+      log "this run produced no complete report; the previous one for $TARGET_DATE is still at $STALE_REPORT"
+    fi
+  fi
+  if [ "${L2_DELIVERED:-0}" = 1 ] && report_complete; then drop_stale_report_copies; fi
+
+  if report_complete; then
+    for partial in "$REPORT_PATH".partial-*; do
+      [ -e "$partial" ] || continue
+      if rm -f "$partial"; then log "discarded superseded partial report $partial"; fi
+    done
+  elif [ -n "${PARTIAL_REPORT:-}" ] && [ -s "$PARTIAL_REPORT" ]; then
+    log "the incomplete report for $TARGET_DATE is readable at $PARTIAL_REPORT"
+  fi
+}
+
+apply_memory_pins() {
+  PINS="$FINDINGS_DIR/pins.jsonl"
+  if [ -s "$PINS" ] && { ! report_complete || [ "${CONSUME_SAFE:-1}" != "1" ] || [ "$PINS_SAFE" != "1" ]; }; then
+    log "skipping memory pins: no complete report from this run stands behind $PINS"
+  elif [ -s "$PINS" ] && ! write_pin_projects "$FINDINGS_DIR"; then
+    log "skipping memory pins: could not write pin-projects.tsv, so no project is authorized"
+  elif [ -s "$PINS" ] && ! restore_pins_ledger "$FINDINGS_DIR"; then
+    log "skipping memory pins: could not restore pins-applied.tsv, so duplicates cannot be ruled out"
+  elif [ -s "$PINS" ]; then
+    if bash "$APPLY_PINS" "$FINDINGS_DIR" "$TARGET_DATE" >> "$RUN_LOG" 2>&1; then
+      log "memory pins: $(tr '\n' ' ' 2>/dev/null < "$FINDINGS_DIR/pins-result.txt" || echo "counters unavailable")"
+    else
+      log "memory pin counters unavailable: apply-pins exited non-zero (check pins-applied.tsv for what it stored; unstored pins stay in $PINS)"
+    fi
+  fi
+}
+
+check_report_citations() {
+  if [ -x "$CITECHECK" ]; then
+    if CITE_OUT=$("$CITECHECK" "$REPORT_PATH" "$FINDINGS_DIR" 2>>"$RUN_LOG"); then
+      printf '%s\n' "$CITE_OUT" >> "$FINDINGS_DIR/run-stats.txt"
+      CITE_BAD=$(printf '%s\n' "$CITE_OUT" | awk -F': ' '/^citations_(unresolved|to_gated): /{n+=$2} END{print n+0}')
+      if [ "$CITE_BAD" -gt 0 ]; then
+        log "WARNING: $CITE_BAD report citation(s) do not resolve to a triaged session — see citations_* in run-stats.txt"
+      else
+        log "citations: all resolved to triaged sessions"
+      fi
+    else
+      printf 'citations_total: unmeasured\ncitations_unresolved: unmeasured\ncitations_to_gated: unmeasured\n' \
+        >> "$FINDINGS_DIR/run-stats.txt"
+      log "citations: check did not run (keys recorded as unmeasured)"
+    fi
+  fi
+}
+
+archive_consumed_inputs() {
+  NORMAL_TARGET_DATE="${AUTODREAM_CONSUME_DATE:-$(pdate_yesterday)}"
+  if ! report_complete; then
+    log "report is present but carries no open-questions marker; skipping vault-notes archive and x-bookmark mark-read rather than consuming input against a truncated report"
+  else
+    if [ -x "$VAULT_NOTES" ]; then
+      "$VAULT_NOTES" publish "$REPORT_PATH" || log "vault report publish failed (continuing)"
+    fi
+    if [ "${CONSUME_SAFE:-1}" != "1" ]; then
+      log "skipping vault-notes archive and x-bookmark mark-read: a stale report could not be moved aside, so this report cannot be attributed to this run"
+    elif [ "$TARGET_DATE" = "$NORMAL_TARGET_DATE" ]; then
+      if [ -x "$VAULT_NOTES" ]; then
+        "$VAULT_NOTES" archive "$FINDINGS_DIR" || log "vault note archive failed (notes stay in the inbox)"
+      fi
+      if [ -x "$XBOOKMARKS" ]; then
+        "$XBOOKMARKS" mark-read "$FINDINGS_DIR" || log "x-bookmark mark-read failed (they stay unread)"
+      fi
+    else
+      log "target date $TARGET_DATE is not $NORMAL_TARGET_DATE (today's normal nightly date); skipping vault-notes archive and x-bookmark mark-read so today's inbox/unread bookmarks aren't consumed by this reprocess (still collected as L2 context)"
+    fi
+  fi
+}
+
+run_dream_triage() {
+  if [ "${AUTODREAM_TRIAGE:-0}" = "1" ] && [ "$L2_DELIVERED" = "1" ] && report_complete; then
+    if [ -x "$TRIAGE_DREAM" ]; then
+      log "dream triage: running ($TRIAGE_DREAM)"
+      env AUTODREAM_DIR="$AUTODREAM_DIR" DREAMS_DIR="$DREAMS_DIR" PROJECTS_DIR="$PROJECTS_DIR" \
+        AUTODREAM_L2_ENGINE="$L2_ENGINE" "$TRIAGE_DREAM" "$TARGET_DATE" >> "$RUN_LOG" 2>&1 \
+        || log "dream triage produced no worklist (continuing)"
+      clean_work_bucket
+    else
+      log "dream triage requested but triage-dream.sh was not found; skipping"
+    fi
+  fi
+}
+
 run() {
   log "===== autodream start: $(date) ====="
   log "runner: $RUNNER_COMMIT$([ "$RUNNER_DIRTY" = "yes" ] && echo " (dirty)")"
@@ -3478,18 +3690,9 @@ PY
 
   changelog_window
 
-  if [ -x "$VAULT_NOTES" ]; then
-    "$VAULT_NOTES" collect "$FINDINGS_DIR" || log "operator-note collection failed (continuing)"
-  else
-    log "vault-notes.sh not found at $VAULT_NOTES; skipping operator-note collection"
-  fi
+  collect_operator_notes
 
-  rm -f "$FINDINGS_DIR/x-bookmarks-fetch.txt" "$FINDINGS_DIR/x-bookmarks-queryid.txt"
-  if [ -x "$XBOOKMARKS" ]; then
-    "$XBOOKMARKS" collect "$FINDINGS_DIR" || log "x-bookmark collection failed (continuing)"
-  else
-    log "x-bookmarks.sh not found at $XBOOKMARKS; skipping bookmark collection"
-  fi
+  collect_x_bookmarks
 
   if ! fingerprint_unchanged report_output_fingerprint "$REPORT_OUT_FP"; then
     report_scripts_unavailable "the report files changed after collection or could not be hashed (an L1 worker that is not confined can write here)" || {
@@ -3499,48 +3702,11 @@ PY
   fi
   report_scripts_stats
 
-  XQID_SOURCE=not_attempted
-  if [ -s "$FINDINGS_DIR/x-bookmarks-queryid.txt" ]; then
-    XQID_SOURCE=$(tr -d '[:space:]' < "$FINDINGS_DIR/x-bookmarks-queryid.txt")
-    [ -n "$XQID_SOURCE" ] || XQID_SOURCE=not_attempted
-  fi
-  printf 'x_queryid_source: %s\n' "$XQID_SOURCE" >> "$FINDINGS_DIR/run-stats.txt"
+  record_x_bookmark_stats
 
-  XFETCH_PATH=not_attempted; XFETCH_CAUSE=""
-  if [ -s "$FINDINGS_DIR/x-bookmarks-fetch.txt" ]; then
-    XFETCH_PATH=$(sed -n 1p "$FINDINGS_DIR/x-bookmarks-fetch.txt" | tr -d '[:space:]')
-    XFETCH_CAUSE=$(sed -n 2p "$FINDINGS_DIR/x-bookmarks-fetch.txt" | tr '\t\r' '  ')
-    [ -n "$XFETCH_PATH" ] || XFETCH_PATH=not_attempted
-  fi
-  printf 'x_fetch_path: %s\n' "$XFETCH_PATH" >> "$FINDINGS_DIR/run-stats.txt"
-  [ -z "$XFETCH_CAUSE" ] || printf 'x_fetch_browser_cause: %s\n' "$XFETCH_CAUSE" >> "$FINDINGS_DIR/run-stats.txt"
+  prune_finished_worktrees
 
-  PRUNE_SUMMARY="prune: not configured"
-  if [ -z "${AUTODREAM_PRUNE_ROOTS:-}" ]; then
-    :
-  elif [ -x "$PRUNE_WORKTREES" ]; then
-    PRUNE_SUMMARY=$("$PRUNE_WORKTREES" "$FINDINGS_DIR" 2>>"$RUN_LOG" | tail -1) || PRUNE_SUMMARY="prune: failed"
-    [ -n "$PRUNE_SUMMARY" ] || PRUNE_SUMMARY="prune: failed"
-    log "$PRUNE_SUMMARY (details: $FINDINGS_DIR/worktree-prune.md)"
-  else
-    log "prune-worktrees.sh not found at $PRUNE_WORKTREES; skipping worktree prune"
-    PRUNE_SUMMARY="prune: helper missing"
-  fi
-  printf 'worktree_prune: %s\n' "$PRUNE_SUMMARY" >> "$FINDINGS_DIR/run-stats.txt"
-
-  TRIAGE_SUMMARY="triage: off"
-  rm -f "$FINDINGS_DIR/triage-candidates.md" "$FINDINGS_DIR/triage-candidates.tsv" 2>/dev/null
-  if [ "${AUTODREAM_TRIAGE_SUGGEST:-1}" = 0 ]; then
-    :
-  elif [ -x "$TRIAGE_CANDIDATES" ]; then
-    TRIAGE_SUMMARY=$(printf '%s\n' "$SESSION_ROWS" | "$TRIAGE_CANDIDATES" "$FINDINGS_DIR" 2>>"$RUN_LOG" | tail -1) || TRIAGE_SUMMARY="triage: failed"
-    [ -n "$TRIAGE_SUMMARY" ] || TRIAGE_SUMMARY="triage: failed"
-    log "$TRIAGE_SUMMARY (details: $FINDINGS_DIR/triage-candidates.md)"
-  else
-    log "triage-candidates.sh not found at $TRIAGE_CANDIDATES; skipping the triage list"
-    TRIAGE_SUMMARY="triage: helper missing"
-  fi
-  printf 'triage_candidates: %s\n' "$TRIAGE_SUMMARY" >> "$FINDINGS_DIR/run-stats.txt"
+  list_repos_to_triage
 
   write_rollup
 
@@ -3552,46 +3718,9 @@ PY
 
   write_adapter_inputs
 
-  L2_ENGINE=$(review_engine)
-  L2_MODEL=$(adapter_l2_model "$L2_ENGINE" 2>/dev/null) || L2_MODEL=""
-  log "L2 engine: $L2_ENGINE, model: ${L2_MODEL:-<engine default>}"
-  printf 'l2_engine: %s\n' "$L2_ENGINE" >> "$FINDINGS_DIR/run-stats.txt"
-  printf 'l2_model: %s\n' "${L2_MODEL:-default}" >> "$FINDINGS_DIR/run-stats.txt"
-  L2_ARGV=()
-  while IFS= read -r -d "" _a; do L2_ARGV+=("$_a"); done < <(adapter_run "$L2_ENGINE" l2-argv ${L2_MODEL:+"$L2_MODEL"} 2>/dev/null)
-  L2_ENVS=()
-  while IFS= read -r _l; do [ -n "$_l" ] && L2_ENVS+=("$_l"); done < <(adapter_run "$L2_ENGINE" l1-env 2>/dev/null)
-  unset _a _l
-  if [ "${#L2_ARGV[@]}" -eq 0 ] && [ "$L2_ENGINE" = "claude" ]; then
-    log "  the claude adapter printed no L2 command here (an adapters/ tree that predates l2-argv); using the built-in claude invocation"
-    # shellcheck source=/dev/null
-    L2_SYS=$(_l=$(find_lib l2-prompt.sh) && . "$_l" && l2_system_prompt) || L2_SYS=""
-    if [ -n "$L2_SYS" ]; then
-      L2_ARGV=("$CLAUDE_BIN" --print --permission-mode bypassPermissions ${L2_MODEL:+--model "$L2_MODEL"} \
-        --no-session-persistence --tools Glob Read --disable-slash-commands --strict-mcp-config \
-        --settings '{"disableAllHooks":true}' \
-        --append-system-prompt "$L2_SYS")
-    else
-      log "WARNING: the built-in claude invocation needs prompts/L2_SYSTEM.txt through bin/l2-prompt.sh, and neither could be read"
-    fi
-  fi
-  if [ "${#L2_ARGV[@]}" -eq 0 ]; then
-    log "WARNING: the $L2_ENGINE adapter produced no L2 command; every L2 attempt will fail"
-    L2_ARGV=(false)
-  fi
+  resolve_l2_command
 
-  CONSUME_SAFE=1
-  PINS_SAFE=1
-  if [ -s "$REPORT_PATH" ]; then
-    STALE_REPORT="$REPORT_PATH.stale-$(date +%s)"
-    if mv "$REPORT_PATH" "$STALE_REPORT"; then
-      log "existing report for $TARGET_DATE moved aside to $STALE_REPORT before rebuilding"
-    else
-      log "WARNING: could not move the existing report aside; this run will NOT archive notes or mark bookmarks read, because a stale report can no longer be told apart from a fresh one"
-      STALE_REPORT=""
-      CONSUME_SAFE=0
-    fi
-  fi
+  move_stale_report_aside
 
   L2_ATTEMPTS="${AUTODREAM_L2_ATTEMPTS:-3}"
   L2_ATTEMPTED=0
@@ -3690,32 +3819,7 @@ PY
   L2_ELAPSED=$(( $(date +%s) - L2_START ))
   log "L2 done in ${L2_ELAPSED}s (exit $L2_RC, $attempt attempt(s))"
 
-  if [ -f "$REPORT_PATH" ] && [ "$L2_ATTEMPTED" = "1" ] && { [ "$L2_DELIVERED" != "1" ] || ! report_complete; }; then
-    PARTIAL_REPORT="$REPORT_PATH.partial-$(date +%s)"
-    if mv "$REPORT_PATH" "$PARTIAL_REPORT"; then
-      log "WARNING: every L2 attempt left an incomplete report; moved it to $PARTIAL_REPORT so a later trigger retries this date"
-    else
-      log "WARNING: an incomplete report is at $REPORT_PATH and could not be moved aside; later triggers will treat this date as done"
-    fi
-  fi
-
-  if [ -n "${STALE_REPORT:-}" ] && [ -s "$STALE_REPORT" ]; then
-    if report_complete; then
-      rm -f "$STALE_REPORT" && log "rebuild succeeded; discarded the superseded report copy"
-    else
-      log "this run produced no complete report; the previous one for $TARGET_DATE is still at $STALE_REPORT"
-    fi
-  fi
-  if [ "${L2_DELIVERED:-0}" = 1 ] && report_complete; then drop_stale_report_copies; fi
-
-  if report_complete; then
-    for partial in "$REPORT_PATH".partial-*; do
-      [ -e "$partial" ] || continue
-      if rm -f "$partial"; then log "discarded superseded partial report $partial"; fi
-    done
-  elif [ -n "${PARTIAL_REPORT:-}" ] && [ -s "$PARTIAL_REPORT" ]; then
-    log "the incomplete report for $TARGET_DATE is readable at $PARTIAL_REPORT"
-  fi
+  retire_superseded_report_copies
 
   if [ -f "$REPORT_PATH" ]; then
     log "report bytes: $(wc -c < "$REPORT_PATH" | tr -d ' ')"
@@ -3726,74 +3830,18 @@ PY
         || log "question-streaks returned non-zero (continuing)"
     fi
 
-    PINS="$FINDINGS_DIR/pins.jsonl"
-    if [ -s "$PINS" ] && { ! report_complete || [ "${CONSUME_SAFE:-1}" != "1" ] || [ "$PINS_SAFE" != "1" ]; }; then
-      log "skipping memory pins: no complete report from this run stands behind $PINS"
-    elif [ -s "$PINS" ] && ! write_pin_projects "$FINDINGS_DIR"; then
-      log "skipping memory pins: could not write pin-projects.tsv, so no project is authorized"
-    elif [ -s "$PINS" ] && ! restore_pins_ledger "$FINDINGS_DIR"; then
-      log "skipping memory pins: could not restore pins-applied.tsv, so duplicates cannot be ruled out"
-    elif [ -s "$PINS" ]; then
-      if bash "$APPLY_PINS" "$FINDINGS_DIR" "$TARGET_DATE" >> "$RUN_LOG" 2>&1; then
-        log "memory pins: $(tr '\n' ' ' 2>/dev/null < "$FINDINGS_DIR/pins-result.txt" || echo "counters unavailable")"
-      else
-        log "memory pin counters unavailable: apply-pins exited non-zero (check pins-applied.tsv for what it stored; unstored pins stay in $PINS)"
-      fi
-    fi
+    apply_memory_pins
 
-    if [ -x "$CITECHECK" ]; then
-      if CITE_OUT=$("$CITECHECK" "$REPORT_PATH" "$FINDINGS_DIR" 2>>"$RUN_LOG"); then
-        printf '%s\n' "$CITE_OUT" >> "$FINDINGS_DIR/run-stats.txt"
-        CITE_BAD=$(printf '%s\n' "$CITE_OUT" | awk -F': ' '/^citations_(unresolved|to_gated): /{n+=$2} END{print n+0}')
-        if [ "$CITE_BAD" -gt 0 ]; then
-          log "WARNING: $CITE_BAD report citation(s) do not resolve to a triaged session — see citations_* in run-stats.txt"
-        else
-          log "citations: all resolved to triaged sessions"
-        fi
-      else
-        printf 'citations_total: unmeasured\ncitations_unresolved: unmeasured\ncitations_to_gated: unmeasured\n' \
-          >> "$FINDINGS_DIR/run-stats.txt"
-        log "citations: check did not run (keys recorded as unmeasured)"
-      fi
-    fi
+    check_report_citations
 
     if [ -x "$AUTODREAM_DIR/notify.sh" ]; then
       log "writing open-questions inbox file..."
       "$AUTODREAM_DIR/notify.sh" "$REPORT_PATH" || log "notify step returned non-zero (continuing)"
     fi
 
-    NORMAL_TARGET_DATE="${AUTODREAM_CONSUME_DATE:-$(pdate_yesterday)}"
-    if ! report_complete; then
-      log "report is present but carries no open-questions marker; skipping vault-notes archive and x-bookmark mark-read rather than consuming input against a truncated report"
-    else
-      if [ -x "$VAULT_NOTES" ]; then
-        "$VAULT_NOTES" publish "$REPORT_PATH" || log "vault report publish failed (continuing)"
-      fi
-      if [ "${CONSUME_SAFE:-1}" != "1" ]; then
-        log "skipping vault-notes archive and x-bookmark mark-read: a stale report could not be moved aside, so this report cannot be attributed to this run"
-      elif [ "$TARGET_DATE" = "$NORMAL_TARGET_DATE" ]; then
-        if [ -x "$VAULT_NOTES" ]; then
-          "$VAULT_NOTES" archive "$FINDINGS_DIR" || log "vault note archive failed (notes stay in the inbox)"
-        fi
-        if [ -x "$XBOOKMARKS" ]; then
-          "$XBOOKMARKS" mark-read "$FINDINGS_DIR" || log "x-bookmark mark-read failed (they stay unread)"
-        fi
-      else
-        log "target date $TARGET_DATE is not $NORMAL_TARGET_DATE (today's normal nightly date); skipping vault-notes archive and x-bookmark mark-read so today's inbox/unread bookmarks aren't consumed by this reprocess (still collected as L2 context)"
-      fi
-    fi
+    archive_consumed_inputs
 
-    if [ "${AUTODREAM_TRIAGE:-0}" = "1" ] && [ "$L2_DELIVERED" = "1" ] && report_complete; then
-      if [ -x "$TRIAGE_DREAM" ]; then
-        log "dream triage: running ($TRIAGE_DREAM)"
-        env AUTODREAM_DIR="$AUTODREAM_DIR" DREAMS_DIR="$DREAMS_DIR" PROJECTS_DIR="$PROJECTS_DIR" \
-          AUTODREAM_L2_ENGINE="$L2_ENGINE" "$TRIAGE_DREAM" "$TARGET_DATE" >> "$RUN_LOG" 2>&1 \
-          || log "dream triage produced no worklist (continuing)"
-        clean_work_bucket
-      else
-        log "dream triage requested but triage-dream.sh was not found; skipping"
-      fi
-    fi
+    run_dream_triage
   else
     log "WARNING: no report at $REPORT_PATH"
   fi
