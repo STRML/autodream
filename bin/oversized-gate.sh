@@ -89,6 +89,10 @@ fi
 
 [ "${#DIRS[@]}" -gt 0 ] || { echo "no dated findings dirs found" >&2; exit 1; }
 
+table_row() {
+  printf '%-12s %7s %10s %9s %7s %8s %8s %8s  %s\n' "$@"
+}
+
 total_oversized=0
 total_errored=0
 total_silent=0
@@ -99,18 +103,18 @@ total_nolist=0
 total_unmeasurable=0
 dates_measured=0
 
-printf '%-12s %7s %10s %9s %7s %8s %8s %8s  %s\n' \
+table_row \
   DATE SESSIONS OVERSIZED ERRORED SILENT PROVIDER UNCLASS SHARE SOURCE
 for d in "${DIRS[@]}"; do
   date_label=$(basename "$d")
   list="$d/sessions.txt"
   if [ ! -r "$list" ]; then
-    printf '%-12s %7s %10s %9s %7s %8s %8s %8s  %s\n' "$date_label" - - - - - - - "no sessions.txt"
+    table_row "$date_label" - - - - - - - "no sessions.txt"
     total_nolist=$((total_nolist + 1))
     continue
   fi
   if grep -qx 'network_deferred: yes' "$d/run-stats.txt" 2>/dev/null; then
-    printf '%-12s %7s %10s %9s %7s %8s %8s %8s  %s\n' "$date_label" - - - - - - - "network-deferred run, excluded"
+    table_row "$date_label" - - - - - - - "network-deferred run, excluded"
     total_deferred=$((total_deferred + 1))
     continue
   fi
@@ -169,7 +173,7 @@ for d in "${DIRS[@]}"; do
   fi
   source_note="$from_sidecar/$sessions from sidecars"
   [ "$unmeasurable" -gt 0 ] && source_note="$source_note, $unmeasurable unmeasurable"
-  printf '%-12s %7s %10s %9s %7s %8s %8s %8s  %s\n' \
+  table_row \
     "$date_label" "$sessions" "$oversized" "$errored" "$silent" "$provider" "$unclassified" "$share" "$source_note"
 done
 

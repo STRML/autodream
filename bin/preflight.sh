@@ -22,11 +22,15 @@ _forced_missing() {
   esac
 }
 
+record_missing() {
+  MISSING_KEYS="${MISSING_KEYS:+$MISSING_KEYS,}$1"
+  missing=$((missing + 1))
+}
+
 need() {
   if _forced_missing "$1" || ! command -v "$1" >/dev/null 2>&1; then
     printf 'MISSING: %s — %s\n' "$1" "$2" >&2
-    MISSING_KEYS="${MISSING_KEYS:+$MISSING_KEYS,}$1"
-    missing=$((missing + 1))
+    record_missing "$1"
   fi
 }
 
@@ -39,8 +43,7 @@ need realpath "adapter directory containment and cwd canonicalisation; without i
 
 if [ -n "$L2_BIN" ] && ! command -v "$L2_BIN" >/dev/null 2>&1; then
   printf 'MISSING: %s — the configured L2 engine; no report is possible without it\n' "$L2_BIN" >&2
-  MISSING_KEYS="${MISSING_KEYS:+$MISSING_KEYS,}l2_engine"
-  missing=$((missing + 1))
+  record_missing l2_engine
 fi
 
 if [ "$missing" -ne 0 ]; then

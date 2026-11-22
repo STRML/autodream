@@ -1,6 +1,11 @@
 #!/bin/bash
 set -u
 
+publish_staged() {
+  mv -f "$1" "$2" 2>/dev/null || { rm -f "$1"; exit 1; }
+  [ -f "$2" ] || { rm -f "$2/$(basename "$1")" 2>/dev/null; exit 1; }
+}
+
 cmd="${1:-}"
 [ "$#" -gt 0 ] && shift
 
@@ -10,14 +15,13 @@ case "$cmd" in
     find "$1" -type f -name '*.fixture' -print0 2>/dev/null
     ;;
 
-  normalize)
+  normalize|slim)
     [ -r "$1" ] || exit 1
-    jq -e . "$1" >/dev/null 2>&1 || exit 1
+    [ "$cmd" = normalize ] && { jq -e . "$1" >/dev/null 2>&1 || exit 1; }
     [ ! -d "$2" ] || exit 1
     t=$(mktemp "$2.tmp.XXXXXX" 2>/dev/null) || exit 1
     cp "$1" "$t" 2>/dev/null || { rm -f "$t"; exit 1; }
-    mv -f "$t" "$2" 2>/dev/null || { rm -f "$t"; exit 1; }
-    [ -f "$2" ] || { rm -f "$2/$(basename "$t")" 2>/dev/null; exit 1; }
+    publish_staged "$t" "$2"
     ;;
 
   project)
@@ -35,17 +39,7 @@ case "$cmd" in
     t=$(mktemp "$2.tmp.XXXXXX" 2>/dev/null) || exit 1
     printf '{"transcript_bytes":%s,"user_message_count":%s,"tool_call_count":0}\n' \
       "${bytes:-0}" "${turns:-0}" > "$t" 2>/dev/null || { rm -f "$t"; exit 1; }
-    mv -f "$t" "$2" 2>/dev/null || { rm -f "$t"; exit 1; }
-    [ -f "$2" ] || { rm -f "$2/$(basename "$t")" 2>/dev/null; exit 1; }
-    ;;
-
-  slim)
-    [ -r "$1" ] || exit 1
-    [ ! -d "$2" ] || exit 1
-    t=$(mktemp "$2.tmp.XXXXXX" 2>/dev/null) || exit 1
-    cp "$1" "$t" 2>/dev/null || { rm -f "$t"; exit 1; }
-    mv -f "$t" "$2" 2>/dev/null || { rm -f "$t"; exit 1; }
-    [ -f "$2" ] || { rm -f "$2/$(basename "$t")" 2>/dev/null; exit 1; }
+    publish_staged "$t" "$2"
     ;;
 
   is-self)
@@ -57,12 +51,7 @@ case "$cmd" in
   l2-argv)
     printf '%s\0' true ${1:+"$1"}
     ;;
-  l1-argv)
-    [ "$#" -ge 1 ] && [ -n "$1" ] || exit 2
-    printf '%s\0' true "$1"
-    ;;
-
-  warmup-argv)
+  l1-argv|warmup-argv)
     [ "$#" -ge 1 ] && [ -n "$1" ] || exit 2
     printf '%s\0' true "$1"
     ;;

@@ -22,8 +22,9 @@ session_hash() {
   out=$(printf '%s' "$1" | shasum -a 1 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
   h=${out:0:12}
+  [ "${#h}" -eq 12 ] || return 1
   case "$h" in
-    [0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef][0123456789abcdef]) printf '%s' "$h" ;;
-    *) return 1 ;;
+    *[!0123456789abcdef]*) return 1 ;;
   esac
+  printf '%s' "$h"
 }

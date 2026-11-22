@@ -18,13 +18,18 @@ if [ "$FAILURE_MODE" = "0" ]; then
   REPORT="${1:?Usage: notify.sh <report.md>  |  notify.sh --failure|--warning <date> <reason>}"
   DATE=$(basename "$REPORT" .md)
 fi
-_src="${BASH_SOURCE[0]}"; _lib="$(dirname "$_src")/lib-install-dir.sh"
-[ -r "$_lib" ] || _lib="$(dirname "$(readlink "$_src" 2>/dev/null || echo "$_src")")/lib-install-dir.sh"
+_src="${BASH_SOURCE[0]}"
+sibling_path(){
+  local path
+  path="$(dirname "$_src")/$1"
+  [ -r "$path" ] || path="$(dirname "$(readlink "$_src" 2>/dev/null || echo "$_src")")/$1"
+  printf '%s\n' "$path"
+}
+_lib=$(sibling_path lib-install-dir.sh)
 # shellcheck source=/dev/null
 . "$_lib"
 resolve_install_dir "$_src"
-_rf="$(dirname "$_src")/report-format.sh"
-[ -r "$_rf" ] || _rf="$(dirname "$(readlink "$_src" 2>/dev/null || echo "$_src")")/report-format.sh"
+_rf=$(sibling_path report-format.sh)
 [ -r "$_rf" ] || { echo "notify: report-format.sh not found beside $_src or its link target" >&2; exit 1; }
 # shellcheck source=/dev/null
 . "$_rf"
@@ -97,8 +102,10 @@ if [ -z "$QUESTIONS" ] || [ "$COUNT" -eq 0 ]; then
   exit 0
 fi
 
+plural=$([ "$COUNT" -eq 1 ] || echo s)
+
 if [ "${AUTODREAM_NOTIFY_DRYRUN:-0}" = "1" ]; then
-  echo "notify.sh: [dry run] $DATE has $COUNT open question$([ "$COUNT" -eq 1 ] || echo s); nothing written or posted"
+  echo "notify.sh: [dry run] $DATE has $COUNT open question$plural; nothing written or posted"
   exit 0
 fi
 
@@ -106,7 +113,7 @@ OUT="$INBOX_DIR/$DATE-open-questions.md"
 cat > "$OUT" <<EOF
 # Autodream — $DATE
 
-**$COUNT open question$([ "$COUNT" -eq 1 ] || echo s)**
+**$COUNT open question$plural**
 
 - Full report: \`$REPORT\`
 - Triage interactively: \`$AUTODREAM_DIR/review.sh $DATE\`
@@ -116,7 +123,6 @@ cat > "$OUT" <<EOF
 $QUESTIONS
 EOF
 
-plural=$([ "$COUNT" -eq 1 ] || echo s)
 OSA_BACKUP="${AUTODREAM_NOTIFY_OSA_BACKUP:-1}"
 posted=0
 

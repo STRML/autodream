@@ -2,8 +2,7 @@
 set -u
 
 adapters_reject_log() {
-  if [ -n "${ADAPTERS_REJECT_LOG:-}" ]; then printf '%s' "$ADAPTERS_REJECT_LOG"; return 0; fi
-  printf '%s' "${TMPDIR:-/tmp}/autodream-adapters-rejected.$$"
+  printf '%s' "${ADAPTERS_REJECT_LOG:-${TMPDIR:-/tmp}/autodream-adapters-rejected.$$}"
 }
 
 adapters_root() {
@@ -39,13 +38,25 @@ _adapter_reject() {
 
 _adapter_name_safe() {
   case "$1" in
-    [abcdefghijklmnopqrstuvwxyz]*) : ;;
-    *) return 1 ;;
-  esac
-  case "$1" in
+    ""|[!abcdefghijklmnopqrstuvwxyz]*) return 1 ;;
     *[!abcdefghijklmnopqrstuvwxyz0123456789_-]*) return 1 ;;
   esac
   return 0
+}
+
+_adapter_env_suffix() {
+  printf '%s' "$1" | tr 'a-z-' 'A-Z_'
+}
+
+_adapter_model() {
+  local stage="$1" name="$2" manifest_key="$3" var v
+  var="AUTODREAM_${stage}_MODEL_$(_adapter_env_suffix "$name")"
+  v="${!var:-}"
+  var="AUTODREAM_${stage}_MODEL"
+  [ -n "$v" ] || v="${!var:-}"
+  [ -n "$v" ] || v=$(adapter_manifest_get "$name" "$manifest_key" 2>/dev/null) || v=""
+  [ -n "$v" ] || return 1
+  printf '%s' "$v"
 }
 
 _adapter_ok() {
@@ -101,10 +112,9 @@ adapter_run() {
 }
 
 adapter_l1_engine() {
-  local name="$1" reviewer="${2:-}" up var v
+  local name="$1" reviewer="${2:-}" var v
   _adapter_name_safe "$name" || return 1
-  up=$(printf '%s' "$name" | tr 'a-z-' 'A-Z_')
-  var="AUTODREAM_L1_ENGINE_$up"
+  var="AUTODREAM_L1_ENGINE_$(_adapter_env_suffix "$name")"
   v="${!var:-${AUTODREAM_L1_ENGINE:-${reviewer:-$name}}}"
   if [ "$v" != "$name" ]; then
     _adapter_name_safe "$v" && _adapter_ok "$v" || return 1
@@ -113,27 +123,14 @@ adapter_l1_engine() {
 }
 
 adapter_l1_model() {
-  local engine up var v
+  local engine
   engine=$(adapter_l1_engine "$1" "${2:-}") || return 1
-  up=$(printf '%s' "$engine" | tr 'a-z-' 'A-Z_')
-  var="AUTODREAM_L1_MODEL_$up"
-  v="${!var:-}"
-  [ -n "$v" ] || v="${AUTODREAM_L1_MODEL:-}"
-  [ -n "$v" ] || v=$(adapter_manifest_get "$engine" '.l1_model' 2>/dev/null) || v=""
-  [ -n "$v" ] || return 1
-  printf '%s' "$v"
+  _adapter_model L1 "$engine" '.l1_model'
 }
 
 adapter_l2_model() {
-  local name="$1" up var v
-  _adapter_name_safe "$name" || return 1
-  up=$(printf '%s' "$name" | tr 'a-z-' 'A-Z_')
-  var="AUTODREAM_L2_MODEL_$up"
-  v="${!var:-}"
-  [ -n "$v" ] || v="${AUTODREAM_L2_MODEL:-}"
-  [ -n "$v" ] || v=$(adapter_manifest_get "$name" '.l2_model' 2>/dev/null) || v=""
-  [ -n "$v" ] || return 1
-  printf '%s' "$v"
+  _adapter_name_safe "$1" || return 1
+  _adapter_model L2 "$1" '.l2_model'
 }
 
 provider_probe_url() {
