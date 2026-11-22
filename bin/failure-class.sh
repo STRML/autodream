@@ -9,6 +9,8 @@ worker_text_of() {
       if (in_dump) next
       if (/^worker wrote output with no usable \.findings key/) { in_dump = 1; next }
       if (/^worker exceeded AUTODREAM_L1_TIMEOUT=/ || /^worker produced no findings JSON for /) next
+      # run.sh names the session path in its staging and sandbox lines too (#169).
+      if (/^the sandbox for .* could not be built/ || /^could not make the staging directory / || /^no staging root is set, / || /^the answer path was a symlink/) next
       print
       next
     }
@@ -62,7 +64,7 @@ classify_failure() {
   # "HTTP status code was 500"; otherwise the reason phrase has to say it.
   code='(429|401|403|5[0-9][0-9]|5xx)([^0-9]|$)'
   if printf '%s\n' "$worker_text" \
-      | grep -Eiq "(http(/[0-9.]+)?|status|code|error)([^0-9a-z]+(http|status|code|was|is|of|returned|with))*[^0-9a-z]{1,3}${code}|(^|[^0-9a-z])5xx([^0-9a-z]|$)|rate${sep}?limit|too${sep}+many${sep}+requests|overload|quota|unauthori[sz]ed|forbidden|service${sep}+unavailable|bad${sep}+gateway|gateway${sep}+time${sep}?out|internal${sep}+server${sep}+error|invalid${sep}+api${sep}+key|auth(entication|ori[sz]ation)?${sep}+(error|failed|failure)|token${sep}+expired"; then
+      | grep -Eiq "(http(/[0-9.]+)?|status|code|error)([^0-9a-z]+(http|status|code|was|is|of|returned|with))*[^0-9a-z]{1,3}${code}|(^|[^0-9a-z])5xx([^0-9a-z]|$)|rate${sep}?limit|too${sep}+many${sep}+requests|overload|quota|unauthori[sz]ed|forbidden|service${sep}+unavailable|bad${sep}+gateway|gateway${sep}+time${sep}?out|internal${sep}+server${sep}+error|invalid${sep}+api${sep}+key|auth(entication|ori[sz]ation)?${sep}+(error|failed|failure)|token${sep}+expired|not${sep}+logged${sep}+in|please${sep}+run${sep}+/login|oauth${sep}+token${sep}+(has${sep}+)?expired"; then
     printf '%s\n' provider
     return 0
   fi

@@ -1846,6 +1846,21 @@ EOF
   # run.sh's own network note can follow the stdout section directly when no omp log was touched.
   printf 'worker exit code: 1 after 9s\n--- worker stdout, last 40 lines ---\ndone\nno route to api.anthropic.com when this worker failed (curl http_code=503)\n' > "$dir/netnote.err"
   assert_eq "$(classify_failure "$dir/netnote.err")" "size" "run.sh's network note after the stdout section is not worker output"
+  # A login failure inside the sandbox is a provider failure the next round can retry, and the lines
+  # run.sh writes about staging and the sandbox are not the worker's output, so a path in them
+  # cannot make a failure provider.
+  local login
+  for login in 'Not logged in · Please run /login' 'OAuth token has expired' 'Invalid API key · Please run /login'; do
+    printf 'worker exit code: 1 after 4s\n--- worker stdout, last 40 lines ---\n%s\n' "$login" > "$dir/login.err"
+    assert_eq "$(classify_failure "$dir/login.err")" "provider" "[$login] is provider"
+  done
+  for login in 'the sandbox for /tmp/quota-run/s.jsonl could not be built, and a confined run does not fall back to an unconfined worker' \
+    'could not make the staging directory /tmp/quota-run/stage for /tmp/s.jsonl' \
+    'no staging root is set, so there is nowhere to stage the answer for /tmp/quota-run/s.jsonl' \
+    'the answer path was a symlink; it was not read'; do
+    printf '%s\nworker exit code: 1 after 4s\n--- worker stdout, last 40 lines ---\ndone\n' "$login" > "$dir/runner.err"
+    assert_eq "$(classify_failure "$dir/runner.err")" "size" "[$login] is run.sh's line, not worker output"
+  done
   rm -rf "$dir"
 }
 
@@ -3102,7 +3117,6 @@ test_l1_answers_are_staged_then_copied(){
   assert_nogrep "$root/cap/l1-stdin-$h.txt" "Write your findings JSON to this literal absolute path: .*/findings/" "and never the findings dir"
   assert_file "$(fdir "$root")/$h.json" "the runner copied the answer into the findings dir"
   assert_eq "$(jq -r '.outcome' "$(fdir "$root")/$h.json")" "fully_achieved" "and it is the worker's answer"
-  assert_eq "$(cat "$root/cap/l1-bucket-$h.txt" 2>/dev/null)" "yes" "the work bucket exists when the worker starts, so bwrap can bind it"
   assert_file "$(fdir "$root")/$h.json.served" "with its served verdict beside it"
   assert_no_file "$(fdir "$root")/$h.json.stage" "and no half-copied temp file"
   assert_eq "$(ls -A "$root/autodream/staging/run-$$" 2>/dev/null | wc -l | tr -d ' ')" "1" "a live run's staging root is left alone"
@@ -3236,9 +3250,75 @@ test_l1_confine_names_the_engine_without_a_write_profile(){
   case "$out" in *"$SUITE_TMP/globx/a.json*"*) ok "an extra entry that matches files on disk stays a prefix" ;; *) no "an extra entry that matches files on disk stays a prefix (got: $out)" ;; esac
   case "$out" in *"a.json.lock"*) no "and is not expanded to the files that match it" ;; *) ok "and is not expanded to the files that match it" ;; esac
   out=$(env -u CLAUDE_CONFIG_DIR AUTODREAM_WORK_BUCKET=/work/bucket bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1)
-  case "$out" in *"/work/bucket"*) ok "the work bucket is writable when the runner names it" ;; *) no "the work bucket is writable when the runner names it (got: $out)" ;; esac
+  case "$out" in *"/work/bucket"*) no "the work bucket is not on the write list, whatever the runner exports (got: $out)" ;; *) ok "the work bucket is not on the write list, whatever the runner exports" ;; esac
   bash "$REPO/adapters/omp/adapter.sh" l1-writes >/dev/null 2>&1; rc=$?
   assert_eq "$rc" "2" "the omp adapter declares no write profile, so its workers stay unconfined and run-stats says so"
+}
+
+# A sandbox-exec stand-in that passes the probe and confines nothing else: it makes the probe's
+# "outside" directory (the probe's last argument) read-only, then runs the command. The run-level
+# tests below need a host whose probe says yes, and this lets them run inside another sandbox.
+fake_sandbox(){ # $1=root -> dir to put on PATH
+  mkdir -p "$1/shim-sb"
+  printf '#!/bin/sh\nshift 2\nfor last; do :; done\n[ -d "$last" ] && chmod a-w "$last"\nexec "$@"\n' > "$1/shim-sb/sandbox-exec"
+  chmod +x "$1/shim-sb/sandbox-exec"
+}
+
+test_l1_confine_setup_stops_before_l1_when_an_engine_prefix_cannot_be_built(){
+  echo "# L1 confinement: a write list the profile cannot hold stops the run before any worker, with no stubs"
+  local extra
+  for extra in '/x/bad"quote' 'relative/dir'; do
+    local root; root=$(setup_env); mk_session "$root" s1
+    local h; h=$(hash_of "$root/projects/proj-a/s1.jsonl")
+    fake_sandbox "$root"
+    PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec AUTODREAM_L1_WRITES_EXTRA="$extra" run_dream "$root"
+    assert_no_file "$root/dreams/$DATE.md" "[$extra] no report is written"
+    assert_no_file "$(fdir "$root")/$h.json" "[$extra] and no session gets a stub"
+    assert_grep "$(fdir "$root")/run-stats.txt" '^fatal: .*claude' "[$extra] run-stats names the fatal and the engine"
+    assert_grep "$root/run.out" 'FATAL:' "[$extra] and the log says so"
+    rm -rf "$root"
+  done
+}
+
+test_l1_confined_stat_is_partial_when_an_engine_runs_unconfined(){
+  echo "# L1 confinement: l1_confined is yes only when every engine with sessions is confined"
+  local root; root=$(setup_env); mk_session "$root" s1
+  fake_sandbox "$root"
+  PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec run_dream "$root"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: yes$' "claude alone, confined: yes"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined_claude: yes$' "the per-engine line agrees"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" s1; mk_omp_session "$root" aaaa >/dev/null
+  fake_sandbox "$root"
+  PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec run_dream_omp "$root"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: partial$' "claude confined and omp not: partial"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined_omp: no$' "the per-engine line names omp"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_reason: .*omp' "and the reason names the engine"
+  rm -rf "$root"
+  root=$(setup_env); mk_omp_session "$root" aaaa >/dev/null
+  fake_sandbox "$root"
+  PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: no$' "omp alone: no, although the sandbox works"
+  rm -rf "$root"
+}
+
+test_l1_answer_is_moved_aside_before_it_is_tested(){
+  echo "# L1 confinement: a leftover .stage beside an answer is swept, and a symlink answer is moved, not followed"
+  local root; root=$(setup_env); mk_session "$root" s1
+  local h; h=$(hash_of "$root/projects/proj-a/s1.jsonl")
+  mkdir -p "$(fdir "$root")/.chunks/abc"
+  : > "$(fdir "$root")/stale.json.stage"; : > "$(fdir "$root")/.chunks/abc/01-x.chunkout.stage"
+  run_dream "$root"
+  assert_no_file "$(fdir "$root")/stale.json.stage" "a .stage left by a killed run is swept"
+  assert_no_file "$(fdir "$root")/.chunks/abc/01-x.chunkout.stage" "including one beside a chunk answer"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" s1
+  h=$(hash_of "$root/projects/proj-a/s1.jsonl")
+  printf '{"session_path":"SECRET","findings":[]}\n' > "$root/secret.json"
+  MOCK_MODE=l1_symlink_answer MOCK_SYMLINK_TARGET="$root/secret.json" AUTODREAM_L1_ROUNDS=1 run_dream "$root"
+  assert_no_file "$(fdir "$root")/$h.json.stage" "the rejected symlink is not left in the findings dir"
+  assert_eq "$(cat "$root/secret.json")" '{"session_path":"SECRET","findings":[]}' "and its target is untouched"
+  rm -rf "$root"
 }
 
 test_run_lock_is_per_date_and_live_holders_win(){
@@ -4324,6 +4404,8 @@ _run test_l1_symlink_answer_is_not_read
 _run test_l1_work_bucket_is_wiped_before_l2
 _run test_l1_staging_failure_is_a_worker_failure_with_evidence
 _run test_l1_confine_names_the_engine_without_a_write_profile
+_run test_l1_confine_setup_stops_before_l1_when_an_engine_prefix_cannot_be_built
+_run test_l1_answer_is_moved_aside_before_it_is_tested
 _run test_run_lock_is_reclaimed_from_a_dead_holder
 _run test_killed_run_temps_are_swept_at_the_start_of_the_next_run
 _run test_self_audit_stats
@@ -6816,6 +6898,7 @@ _run test_skill_fields_are_enforced_from_the_sidecar
 _run test_builtin_slash_commands_are_not_skill_invocations
 _run test_omp_adapter_is_opt_in
 _run test_l1_precheck_probes_the_l1_provider
+_run test_l1_confined_stat_is_partial_when_an_engine_runs_unconfined
 _run test_worker_failure_probe_names_the_l1_provider
 _run test_one_dead_provider_does_not_hold_back_the_others
 _run test_omp_session_is_linearized_for_the_worker

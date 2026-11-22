@@ -277,12 +277,13 @@ case "$cmd" in
     #   ~/.claude.json and its backups (mcpServers, allowedTools, enabledMcpjsonServers), the config dir's
     #   settings, hooks, skills and plugins, session-env (sessionstart-hook env files a live session
     #   sources), and the CLI's install dir (auto-update writes executables there).
-    # What is: the isolated work bucket (an AI-title stub lands there, and run.sh wipes it after L1 and
-    # again after L2) and the CLI's own cache, which holds logs and nothing that is read as code.
+    # What is: the CLI's own cache, which holds logs and nothing that is read as code. The isolated work
+    # bucket (where an AI-title stub lands) is NOT: it is the one directory every worker, the thread linker
+    # and a concurrent date's L2 share, and a confined call exits 0 with its write refused
+    # (tests/l1-confine-real.sh --no-bucket, measured 2026-11-21).
     # A host whose confined call fails without something else names it in AUTODREAM_L1_WRITES_EXTRA
-    # (colon-separated, a trailing * is a prefix) and accepts that path's exposure; see docs/plans/
+    # (colon-separated, absolute, a trailing * is a prefix) and accepts that path's exposure; see docs/plans/
     # 2026-11-21-l1-confine-write-list.md for how to find the paths and what each one costs.
-    [ -z "${AUTODREAM_WORK_BUCKET:-}" ] || printf '%s\n' "$AUTODREAM_WORK_BUCKET"
     printf '%s\n' "$HOME/Library/Caches/claude-cli-nodejs" "$HOME/.cache/claude-cli-nodejs"
     # Globbing off: an entry such as ~/.claude.json* must stay a prefix, not expand to the files that exist.
     old_ifs=$IFS; IFS=:; set -f
