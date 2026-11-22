@@ -5,15 +5,15 @@ QUESTIONS_END='AUTODREAM_QUESTIONS_END'
 QUESTIONS_EPOCH_DEFAULT='2026-10-27'
 
 report_marker_count(){
-  sed -n 's/.*<!-- *autodream:open-questions=\([0-9][0-9]*\) *-->.*/\1/p' "$1" 2>/dev/null | head -1
+  LC_ALL=C sed -n 's/.*<!-- *autodream:open-questions=\([0-9][0-9]*\) *-->.*/\1/p' "$1" 2>/dev/null | head -1
 }
 
-report_has_marker(){ grep -q 'autodream:open-questions=' "$1" 2>/dev/null; }
+report_has_marker(){ LC_ALL=C grep -q 'autodream:open-questions=' "$1" 2>/dev/null; }
 
-report_has_sentinel(){ grep -q '^AUTODREAM_REPORT_END$' "$1" 2>/dev/null; }
+report_has_sentinel(){ LC_ALL=C grep -q '^AUTODREAM_REPORT_END$' "$1" 2>/dev/null; }
 
 report_has_questions_block(){
-  awk -v b="$QUESTIONS_BEGIN" -v e="$QUESTIONS_END" '
+  LC_ALL=C awk -v b="$QUESTIONS_BEGIN" -v e="$QUESTIONS_END" '
     $0 == b { open = 1; next }
     $0 == e { if (open) { closed = 1 } }
     END { exit closed ? 0 : 1 }' "$1" 2>/dev/null
@@ -22,13 +22,13 @@ report_has_questions_block(){
 report_questions(){
   local report="$1"
   if report_has_questions_block "$report"; then
-    awk -v b="$QUESTIONS_BEGIN" -v e="$QUESTIONS_END" '
+    LC_ALL=C awk -v b="$QUESTIONS_BEGIN" -v e="$QUESTIONS_END" '
       $0 == b { if (!open) { open = 1 }; next }
       open { line[++n] = $0; if ($0 == e) last = n }
       END { for (i = 1; i < last; i++) print line[i] }' "$report" 2>/dev/null
     return 0
   fi
-  awk '
+  LC_ALL=C awk '
     {
       if ($0 ~ /^[ \t]*(```+|~~~+)/) {
         tmp = $0; sub(/^[ \t]*/, "", tmp); ch = substr(tmp, 1, 1); n = 0
@@ -57,10 +57,31 @@ report_finishes(){
 }
 
 report_last_line(){
-  awk 'NF && $0 !~ /^<!-- autodream:remote-short=.* -->$/ { line = $0 } END { print line }' "$1" 2>/dev/null | sed 's/[[:space:]]*$//'
+  LC_ALL=C awk '
+    { l[NR] = $0 }
+    /^AUTODREAM_REPORT_END$/ { e = NR }
+    /^report: / { r = NR }
+    END {
+      stop = e ? e : (r ? r : NR + 1)
+      for (i = stop - 1; i >= 1; i--)
+        if (l[i] ~ /[^[:space:]]/ && l[i] !~ /^<!-- autodream:remote-short=.* -->$/) { print l[i]; exit }
+    }' "$1" 2>/dev/null | LC_ALL=C sed 's/[[:space:]]*$//'
 }
 
-report_last_line_excerpt(){ report_last_line "$1" | tr -d '[:cntrl:]' | cut -c1-80; }
+report_cut_chars(){
+  LC_ALL=C awk -v max="$1" '{
+    n = 0; out = ""
+    for (i = 1; i <= length($0); i++) {
+      c = substr($0, i, 1)
+      if (c < "\200" || c >= "\300") n++
+      if (n > max) break
+      out = out c
+    }
+    print out
+  }'
+}
+
+report_last_line_excerpt(){ report_last_line "$1" | LC_ALL=C tr -d '[:cntrl:]' | report_cut_chars 80; }
 
 report_incomplete_cause(){
   local report="$1" last
@@ -77,13 +98,13 @@ report_incomplete_cause(){
 }
 
 report_body(){
-  awk '/^AUTODREAM_REPORT_END$/ { last=NR } { line[NR]=$0 } END { for (i=1; i<last; i++) print line[i] }' "$1"
+  LC_ALL=C awk '/^AUTODREAM_REPORT_END$/ { last=NR } { line[NR]=$0 } END { for (i=1; i<last; i++) print line[i] }' "$1"
 }
 
-report_after_sentinel(){ awk '/^AUTODREAM_REPORT_END$/ { f=1; next } f { print }' "$1" 2>/dev/null; }
+report_after_sentinel(){ LC_ALL=C awk '/^AUTODREAM_REPORT_END$/ { f=1; next } f { print }' "$1" 2>/dev/null; }
 
 report_pin_lines(){
-  awk '
+  LC_ALL=C awk '
     /^AUTODREAM_REPORT_END$/ { last = NR }
     { line[NR] = $0 }
     END {
@@ -97,7 +118,7 @@ report_pin_lines(){
 }
 
 report_section_item_count(){
-  awk -v h="## $2" 'index($0, h) == 1 { f = 1; next } /^## / { f = 0 } f' "$1" | grep -cE '^([-*]|[0-9]+\.) ' || true
+  LC_ALL=C awk -v h="## $2" 'index($0, h) == 1 { f = 1; next } /^## / { f = 0 } f' "$1" | LC_ALL=C grep -cE '^([-*]|[0-9]+\.) ' || true
 }
 
 report_open_questions(){
@@ -106,10 +127,10 @@ report_open_questions(){
   marker=$(report_marker_count "$report")
   if [ -n "$marker" ]; then printf '%s\n' "$marker"; return 0; fi
 
-  if grep -q '^No Claude Code sessions were modified' "$report"; then echo 0; return 0; fi
+  if LC_ALL=C grep -q '^No Claude Code sessions were modified' "$report"; then echo 0; return 0; fi
 
-  section=$(awk '/^## Open questions/{f=1;next} /^## /{f=0} f' "$report")
-  first=$(printf '%s\n' "$section" | grep -v '^[[:space:]]*$' | head -1)
+  section=$(LC_ALL=C awk '/^## Open questions/{f=1;next} /^## /{f=0} f' "$report")
+  first=$(printf '%s\n' "$section" | LC_ALL=C grep -v '^[[:space:]]*$' | head -1)
   [ -n "$first" ] || { echo unknown; return 0; }
 
   case "$(printf '%s' "$first" | tr '[:upper:]' '[:lower:]')" in
@@ -118,7 +139,7 @@ report_open_questions(){
   echo unknown
 }
 
-report_is_triaged(){ grep -q '^## Triage decisions' "$1"; }
+report_is_triaged(){ LC_ALL=C grep -q '^## Triage decisions' "$1"; }
 
 report_progress_count(){ report_section_item_count "$1" 'Triage in progress'; }
 

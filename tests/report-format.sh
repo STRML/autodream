@@ -137,6 +137,33 @@ assert_eq "$(printf '%s' "$(report_last_line_excerpt "$D/cwide")" | wc -c | tr -
 assert_eq "$(report_last_line_excerpt "$D/cprosers")" "Should we clean up?" "it skips the remote-short record, as the cause does"
 assert_eq "$(report_last_line_excerpt "$D/cctl")" "bodyends[31m here?" "control characters are dropped, so a capture cannot forge a log line"
 
+UTF8_LOCALE=$(locale -a 2>/dev/null | grep -i -m1 -E '^(en_US|C)\.utf-?8$')
+fx cbad     '# R\n\nbody \377\376 and then\nShould we clean up?\n'
+fx cmb      "# R\n\n$(printf 'x%.0s' $(seq 1 79))$(printf '\303\251%.0s' 1 2 3 4 5)\n"
+fx ctrail   '# R\n\nbody\n\nShould we clean up?\nreport: /tmp/dreams/2020-01-02.md\nsummary one\nsummary two\nsummary three\n'
+fx csent    '# R\n\nbody\n\nShould we clean up?\nAUTODREAM_REPORT_END\nreport: /tmp/dreams/2020-01-02.md\nsummary one\n'
+if [ -n "$UTF8_LOCALE" ]; then
+  assert_eq "$(LC_ALL=$UTF8_LOCALE report_last_line_excerpt "$D/cbad")" "Should we clean up?" "invalid UTF-8 earlier in the capture does not blank the last line"
+  assert_eq "$(LC_ALL=$UTF8_LOCALE report_incomplete_cause "$D/cbad")" "no open-questions marker, and the report ends in a question written as prose outside an AUTODREAM_QUESTIONS_BEGIN/END block" "and the prose question is still named"
+fi
+assert_eq "$(LC_ALL=C report_last_line_excerpt "$D/cmb")" "$(printf 'x%.0s' $(seq 1 79))$(printf '\303\251')" "the cut keeps a multibyte character whole, 80 characters in any locale"
+assert_eq "$(report_last_line_excerpt "$D/ctrail")" "Should we clean up?" "trailing report: and summary lines do not hide the last body line"
+assert_eq "$(report_incomplete_cause "$D/ctrail")" "no open-questions marker, and the report ends in a question written as prose outside an AUTODREAM_QUESTIONS_BEGIN/END block" "so the prose question is named when the sentinel is missing"
+assert_eq "$(report_last_line_excerpt "$D/csent")" "Should we clean up?" "a sentinel ends the body for the last line as well"
+
+fx cbadall  '# R\n\nbad \377\376 bytes\n## Open questions\n- one\n- two\nAUTODREAM_QUESTIONS_BEGIN\n1. **Q** a?\nAUTODREAM_QUESTIONS_END\n<!-- autodream:open-questions=2 -->\nAUTODREAM_REPORT_END\nAUTODREAM_PINS_BEGIN\n{"project":"p"}\nAUTODREAM_PINS_END\nreport: x\n'
+if [ -n "$UTF8_LOCALE" ]; then
+  export LC_ALL=$UTF8_LOCALE
+  assert_eq "$(report_marker_count "$D/cbadall")" "2" "the marker count survives invalid UTF-8 under a UTF-8 locale"
+  assert_eq "$(report_open_questions "$D/cbadall")" "2" "so does the open-questions count that reads it"
+  assert_eq "$(report_body "$D/cbadall" | wc -l | tr -d ' ')" "$(report_body "$D/cbadall" | LC_ALL=C wc -l | tr -d ' ')" "the body is not cut short by a bad byte"
+  assert_eq "$(report_body "$D/cbadall" | LC_ALL=C wc -l | tr -d ' ')" "10" "and holds every line before the sentinel"
+  assert_eq "$(report_after_sentinel "$D/cbadall" | LC_ALL=C wc -l | tr -d ' ')" "4" "the lines after the sentinel are all read"
+  assert_eq "$(report_pin_lines "$D/cbadall")" '{"project":"p"}' "a pin after a bad byte is still found"
+  assert_eq "$(report_section_item_count "$D/cbadall" 'Open questions')" "3" "section items are counted past a bad byte"
+  unset LC_ALL
+fi
+
 echo "# the body: everything before the LAST sentinel"
 same report_body old_body
 assert_eq "$(report_body "$D/twosent" | tail -1)" "<!-- autodream:open-questions=1 -->" "the last sentinel ends the body"
