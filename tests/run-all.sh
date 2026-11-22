@@ -8093,6 +8093,19 @@ test_question_streaks_lock_is_a_kernel_flock(){
   [ -d "$st.lock" ] && ok "and never removed" || no "and was removed"
   rmdir "$st.lock"
 
+  # 6b. An older version's lock path that cannot be read (a symlink loop) is a permanent refusal that says so,
+  # not a live older writer: a quiet skip every night would freeze the streaks with no banner.
+  ln -s "$(basename "$st.lock")" "$st.lock"
+  cp "$st" "$root/own.before"
+  out=$(qs update "$root/2026-04-04.md"); rc=$?
+  assert_eq "$rc" "0" "update with an unreadable older-version lock path exits 0"
+  case "$out" in *"cannot lock"*) ok "and reports cannot lock, not a routine hold" ;; *) no "and reports cannot lock (got: $out)" ;; esac
+  case "$out" in *"banner"*) ok "and attempts a banner" ;; *) no "and attempts a banner (got: $out)" ;; esac
+  out=$(qs clear all); rc=$?
+  assert_eq "$rc" "1" "clear with an unreadable older-version lock path fails"
+  cmp -s "$st" "$root/own.before" && ok "and the state is untouched" || no "and the state is untouched"
+  rm -f "$st.lock"
+
   # 7. A missing python3 is loud and permanent: update skips with the reason and a banner is attempted, clear fails.
   mkdir -p "$root/bare"
   local t

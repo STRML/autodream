@@ -22,8 +22,9 @@
 #   5 an older version's lock directory is still live (see below)
 #
 # The legacy directory is the one age judgment left. An older writer held it as a mkdir lock, so a
-# directory younger than 300 s is read as that writer still running, one whose age cannot be read is
-# read as live, and an older one is ignored and never removed. It is checked inside the same deadline
+# directory younger than 300 s is read as that writer still running (5), one whose state cannot be
+# read (a symlink loop, a permission error) is cannot-lock (2), a permanent state to report and not a
+# live writer, and an older one is ignored and never removed. It is checked inside the same deadline
 # loop, after the flock is taken. An old writer that creates its directory after the check, or one
 # stalled past 300 s, is not covered: the upgrade window bounds both.
 #
@@ -52,28 +53,34 @@ flock_acquire() { # $1=lock file $2=seconds $3=legacy lock directory
 import fcntl, os, stat, sys, time
 legacy = sys.argv[2]
 
-def legacy_live():
+def legacy_state():
+    # "none" no older writer, "live" one is running, "unknown" the directory cannot be read (a symlink loop,
+    # a permission error): not proof of a writer, and a permanent state to report, not to skip quietly.
     if not legacy:
-        return False
+        return "none"
     try:
         st = os.stat(legacy)
     except FileNotFoundError:
-        return False
+        return "none"
     except OSError:
-        return True
+        return "unknown"
     if not stat.S_ISDIR(st.st_mode):
-        return False
-    return time.time() - st.st_mtime < 300
+        return "none"
+    return "live" if time.time() - st.st_mtime < 300 else "none"
 
 try:
     end = time.monotonic() + float(sys.argv[1])
     while True:
         try:
             fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            if not legacy_live():
+            seen = legacy_state()
+            if seen == "none":
                 print("flock-ok")
                 sys.exit(0)
             fcntl.flock(9, fcntl.LOCK_UN)
+            if seen == "unknown":
+                print("flock-unknown")
+                sys.exit(0)
             word = "flock-legacy"
         except BlockingIOError:
             word = "flock-held"
@@ -91,6 +98,7 @@ except BaseException:
     flock-ok) FLOCK_HELD="$file"; return 0 ;;
     flock-held) exec 9>&-; return 1 ;;
     flock-legacy) exec 9>&-; return 5 ;;
+    flock-unknown) exec 9>&-; return 2 ;;
     *) exec 9>&-; return 2 ;;
   esac
 }

@@ -786,7 +786,8 @@ after the suite was green. Four are why the file reads as it does now:
   python3 (permanent: `update` skips with the reason and posts a banner, because skipping every night
   looks like a quiet week), a double acquire in one process (refused: a second `exec 9>>` would drop the
   first lock). An older version's mkdir lock at `$STATE.lock` is honored while younger than 300 s, checked
-  inside the same deadline loop, and never removed: the one age judgment left. Children that can outlive
+  inside the same deadline loop, and never removed (one whose state cannot be read, such as a symlink loop, is
+  cannot-lock: permanent, banner): the one age judgment left. Children that can outlive
   the holder run with fd 9 closed (the banner's `osascript` does), or they would keep the lock alive after
   a kill.
 - **A parser breakage only wrote to the run log.** That is this feature's own failure mode
