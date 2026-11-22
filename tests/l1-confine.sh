@@ -121,6 +121,15 @@ stage_line=$(printf '%s\n' "$txt" | grep -n "^$PS\$" | tail -1 | cut -d: -f1)
   && ok "the read-only bind comes after the state path and before the stage" || no "bwrap order bind=$bind_line ro=$ro_line stage=$stage_line"
 printf '%s\n' "$(env PATH="$D/bare" L1_CONFINE_TOOL=none bash "$H" prefix "$S" 2>&1; echo "rc=$?")" | tail -1 | grep -q 'rc=1' && ok "an unknown L1_CONFINE_TOOL is refused" || no "an unknown L1_CONFINE_TOOL is refused"
 
+echo "# the manual real-call check reads the nightly's configuration, and the caller's environment wins as in run.sh"
+RC="$REPO/tests/l1-confine-real.sh"
+mkdir -p "$D/nightly"; printf 'export AUTODREAM_L1_WRITES_EXTRA=/config-only\n' > "$D/nightly/config"
+out=$(env -u AUTODREAM_L1_WRITES_EXTRA AUTODREAM_DIR="$D/nightly" HOME="$D/home" bash "$RC" --writes 2>&1)
+has "$out" "/config-only" "an AUTODREAM_L1_WRITES_EXTRA set only in the config reaches the adapter"
+out=$(AUTODREAM_L1_WRITES_EXTRA=/caller-override AUTODREAM_DIR="$D/nightly" HOME="$D/home" bash "$RC" --writes 2>&1)
+has "$out" "/caller-override" "one the caller exported wins over the config"
+lacks "$out" "/config-only" "and the config's value is not used beside it"
+
 echo "# real confinement (only where a sandbox works here)"
 real=$(env TMPDIR="$D" bash "$H" probe)
 if [ "$(verdict "$real")" != "yes" ]; then

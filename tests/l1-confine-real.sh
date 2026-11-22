@@ -4,6 +4,7 @@
 # other sandbox (sandbox-exec cannot start inside one: "sandbox_apply: Operation not permitted").
 #
 #   bash tests/l1-confine-real.sh [model]            default model: the claude adapter's l1_model
+#   bash tests/l1-confine-real.sh --writes           print the write list the nightly would use, under its config
 #   bash tests/l1-confine-real.sh --measure [model]  one UNCONFINED call that lists what the engine writes
 #                                                    under $HOME, to check adapters/claude/adapter.sh l1-writes
 #
@@ -27,17 +28,24 @@ pass(){ printf 'PASS  %s\n' "$1"; }
 fail(){ printf 'FAIL  %s\n' "$1"; fails=$((fails + 1)); }
 
 measure=0
+writes_only=0
 [ "${1:-}" = "--measure" ] && { measure=1; shift; }
+[ "${1:-}" = "--writes" ] && { writes_only=1; shift; }
 
 # The nightly's own configuration: the same AUTODREAM_DIR and config file, so an AUTODREAM_L1_WRITES_EXTRA the
 # operator put there is the one this check runs under, and the same protected paths and work bucket run.sh uses.
 AUTODREAM_DIR="${AUTODREAM_DIR:-$HOME/.claude/autodream}"
 CONFIG="${AUTODREAM_CONFIG:-$AUTODREAM_DIR/config}"
 if [ -r "$CONFIG" ]; then
+  # As run.sh sources it: the config's keys are exported, and what the caller already exported wins
+  # (the snapshot is replayed after), so the profile this checks is the one the nightly builds.
+  env_snapshot=$(export -p)
   set -a
   # shellcheck source=/dev/null
   . "$CONFIG"
   set +a
+  eval "$env_snapshot"
+  unset env_snapshot
   echo "# configuration: $CONFIG"
 else
   echo "# configuration: none at $CONFIG (defaults)"
@@ -49,7 +57,7 @@ export AUTODREAM_WORK_BUCKET="${PROJECTS_DIR:-$HOME/.claude/projects}/$(printf '
 mkdir -p "$AUTODREAM_WORK_BUCKET" 2>/dev/null
 protect="$AUTODREAM_DIR:$FINDINGS_DIR:$DREAMS_DIR"
 
-if [ "$measure" != 1 ]; then
+if [ "$measure" != 1 ] && [ "$writes_only" != 1 ]; then
   probe=$(bash "$H" probe)
   if [ "$(printf '%s' "$probe" | cut -f1)" != yes ]; then
     fail "probe: $(printf '%s' "$probe" | cut -f2-)"
@@ -71,6 +79,11 @@ sleep 1
 
 wpaths=()
 while IFS= read -r l; do [ -n "$l" ] && wpaths+=("$l"); done < <(bash "$ADAPTER" l1-writes)
+if [ "$writes_only" = 1 ]; then
+  # The write list the nightly would use under this configuration, and nothing else (no call, no sandbox).
+  printf '%s\n' "${wpaths[@]}"
+  exit 0
+fi
 pre=()
 if [ "$measure" != 1 ]; then
   while IFS= read -r -d '' a; do pre+=("$a"); done < <(L1_CONFINE_PROTECT="$protect" bash "$H" prefix "$stage" "${wpaths[@]}")
