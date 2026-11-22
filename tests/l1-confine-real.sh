@@ -163,6 +163,8 @@ if [ "$measure" = 1 ]; then
   fi
   exit 0
 fi
+mem_before_rc=2; mem_before_msg=""
+if [ "$engine" = omp ]; then mem_before_msg=$(store_snapshot "$real_agent_dir/memories" "$W/mem.before"); mem_before_rc=$?; fi
 echo "# running one real call (model $model) under the sandbox prefix ${pre[0]}"
 ( cd "$work" && printf '%s' "$prompt" | env ${envs[@]+"${envs[@]}"} "TMPDIR=$stage/tmp" ${senv[@]+"${senv[@]}"} "${pre[@]}" "${argv[@]}" ) > "$W/stdout" 2> "$W/stderr"
 rc=$?
@@ -188,9 +190,15 @@ if [ "$engine" = omp ]; then
   # store that every later session recalls from, through a server or daemon that is not the worker. The overlay
   # turns the backend off; this is the proof, on the real store. Another live omp session writes here too, so a
   # FAIL needs a rerun on a quiet host before it is read as a leak.
-  mem_msg=$(store_unchanged "$real_agent_dir/memories" "$marker"); mem_rc=$?
+  mem_msg=""; mem_rc=$mem_before_rc
+  if [ "$mem_rc" -eq 0 ]; then
+    mem_msg=$(store_snapshot "$real_agent_dir/memories" "$W/mem.after"); mem_rc=$?
+    if [ "$mem_rc" -eq 0 ]; then mem_msg=$(store_unchanged "$W/mem.before" "$W/mem.after"); mem_rc=$?; fi
+  else
+    mem_msg="$mem_before_msg"
+  fi
   case "$mem_rc" in
-    0) pass "$mem_msg during the confined call" ;;
+    0) pass "nothing under $real_agent_dir/memories changed during the confined call (no file added, removed or modified)" ;;
     2) echo "SKIP  $mem_msg"; skipped=$((skipped + 1)) ;;
     *) fail "$mem_msg (a live omp session, or a leak through the memory server; rerun on a quiet host)" ;;
   esac

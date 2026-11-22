@@ -3451,6 +3451,26 @@ PY
   rm -rf "$root"
 }
 
+test_l1_setup_prepares_only_engines_with_work_left(){
+  echo "# L1 confinement: a retry whose findings are all cached does not prepare an engine nothing will run"
+  local root h o
+  root=$(setup_env); o=$(mk_omp_session "$root" aaaa); h=$(hash_of "$o")
+  mkdir -p "$root/home/.omp/agent"; : > "$root/home/.omp/agent/agent.db"; chmod 000 "$root/home/.omp/agent/agent.db"
+  mkdir -p "$(fdir "$root")"
+  printf '{"session_path":"x","findings":[]}\n' > "$(fdir "$root")/$h.json"; printf 'runner\n' > "$(fdir "$root")/$h.json.served"
+  if [ ! -r "$root/home/.omp/agent/agent.db" ]; then
+    fake_sandbox "$root"
+    PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+    chmod 600 "$root/home/.omp/agent/agent.db"
+    assert_file "$root/dreams/$DATE.md" "an unreadable omp database does not stop L2 over findings that already exist"
+    assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: n/a$' "and run-stats says no confinement was needed"
+    assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_reason: no L1 work this run' "with the reason"
+  else
+    chmod 600 "$root/home/.omp/agent/agent.db"; echo "  skip - this user can read a mode 000 file"
+  fi
+  rm -rf "$root"
+}
+
 test_run_lock_is_per_date_and_live_holders_win(){
   echo "# a second run for a date does not start while a live run holds the date's lock (#55)"
   local root; root=$(setup_env); mk_session "$root" sess1
@@ -7033,6 +7053,7 @@ _run test_l1_precheck_probes_the_l1_provider
 _run test_l1_confined_stat_is_partial_when_an_engine_runs_unconfined
 _run test_l1_confined_omp_worker_runs_on_a_throwaway_home
 _run test_l1_omp_state_setup_is_checked_before_any_worker
+_run test_l1_setup_prepares_only_engines_with_work_left
 _run test_worker_failure_probe_names_the_l1_provider
 _run test_one_dead_provider_does_not_hold_back_the_others
 _run test_omp_session_is_linearized_for_the_worker

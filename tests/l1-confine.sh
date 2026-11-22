@@ -309,11 +309,25 @@ mkdir -p "$D/blocked/home/.omp"; chmod 000 "$D/blocked"
 if [ ! -x "$D/blocked" ]; then
   env HOME="$D/blocked/home" bash "$OA" l1-stage-env "$D/ostage" >/dev/null 2>"$D/err"; rc=$?
   assert_eq "$rc" "1" "an agent dir under a directory this user cannot search is not read as absent"
-  has "$(cat "$D/err")" "cannot search" "with the reason"
+  has "$(cat "$D/err")" "cannot tell whether" "with the reason"
 else
   printf '  skip - this user can search a mode 000 directory\n'
 fi
 chmod 700 "$D/blocked"
+
+echo "# omp l1-stage-env: a path that cannot be reached is not an absent one"
+mkdir -p "$D/trihome/.omp/agent"
+ln -s "$D/nowhere/agent.db" "$D/trihome/.omp/agent/agent.db"
+env HOME="$D/trihome" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>"$D/err"; rc=$?
+assert_eq "$rc" "1" "an agent.db that is a dangling symlink refuses: a database that cannot be snapshotted is not an absent one"
+has "$(cat "$D/err")" "cannot tell whether" "with the reason"
+rm -f "$D/trihome/.omp/agent/agent.db"; ln -s "$D/nowhere/.env" "$D/trihome/.omp/agent/.env"
+env HOME="$D/trihome" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "1" "so does a .env that is one"
+rm -f "$D/trihome/.omp/agent/.env"; ln -s "$D/nowhere/xdg-omp" "$D/xdg-dangling-omp-parent" 2>/dev/null
+mkdir -p "$D/xdg-bad"; ln -s "$D/nowhere/x" "$D/xdg-bad/omp"
+env HOME="$D/trihome" XDG_STATE_HOME="$D/xdg-bad" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "1" "an XDG omp entry that cannot be followed refuses: omp may keep state there"
 
 echo "# omp l1-stage-env: a model whose only credential is OAuth"
 python3 - "$RH/.omp/agent" <<'PY'
@@ -351,30 +365,62 @@ PY
 env HOME="$D/apikeyhome" bash "$OA" l1-stage-env "$D/ostage" "fuzzy-selector" >/dev/null 2>&1; rc=$?
 assert_eq "$rc" "0" "a host with no live OAuth credential has nothing to lose: a bare selector passes"
 
-echo "# the real check's store comparison: a check that cannot look is not a pass"
+echo "# the real check's store comparison: a check that cannot look is not a pass, and a deletion is a change"
 # shellcheck source=/dev/null
 . "$HERE/lib-store-unchanged.sh"
-mkdir -p "$D/store/bank"; : > "$D/store-marker"; sleep 1
-msg=$(store_unchanged "$D/store" "$D/store-marker"); rc=$?
-assert_eq "$rc" "0" "an untouched store passes"
-printf x > "$D/store/bank/mnemopi.db"
-msg=$(store_unchanged "$D/store" "$D/store-marker"); rc=$?
-assert_eq "$rc" "1" "a file written after the marker fails"
-has "$msg" "mnemopi.db" "and names it"
-msg=$(store_unchanged "$D/no-such-store" "$D/store-marker"); rc=$?
+mkdir -p "$D/store/bank" "$D/store-target"; printf a > "$D/store/bank/mnemopi.db"; printf n > "$D/store-target/linked.db"
+ln -s "$D/store-target" "$D/store/via-link"
+msg=$(store_snapshot "$D/store" "$D/snap.before"); rc=$?
+assert_eq "$rc" "0" "a store snapshots"
+store_snapshot "$D/store" "$D/snap.same" >/dev/null; msg=$(store_unchanged "$D/snap.before" "$D/snap.same"); rc=$?
+assert_eq "$rc" "0" "an untouched store compares equal"
+sleep 1; printf b > "$D/store/bank/mnemopi.db"
+store_snapshot "$D/store" "$D/snap.mod" >/dev/null; msg=$(store_unchanged "$D/snap.before" "$D/snap.mod"); rc=$?
+assert_eq "$rc" "1" "a modified file is a change"
+has "$msg" "mnemopi.db" "and named"
+printf a > "$D/store/bank/mnemopi.db"
+store_snapshot "$D/store" "$D/snap.b2" >/dev/null
+rm -f "$D/store/bank/mnemopi.db"
+store_snapshot "$D/store" "$D/snap.del" >/dev/null; msg=$(store_unchanged "$D/snap.b2" "$D/snap.del"); rc=$?
+assert_eq "$rc" "1" "a deleted file is a change (a list of files newer than a marker cannot see it)"
+printf a > "$D/store/bank/mnemopi.db"; store_snapshot "$D/store" "$D/snap.b3" >/dev/null
+sleep 1; printf changed > "$D/store-target/linked.db"
+store_snapshot "$D/store" "$D/snap.link" >/dev/null; msg=$(store_unchanged "$D/snap.b3" "$D/snap.link"); rc=$?
+assert_eq "$rc" "1" "a file reached only through a symlinked directory below the root is watched"
+msg=$(store_snapshot "$D/no-such-store" "$D/snap.none"); rc=$?
 assert_eq "$rc" "2" "a store that does not exist is a skip, not a pass"
 has "$msg" "nothing to compare" "and says so"
+ln -s "$D/nowhere/at/all" "$D/dangling-store"
+msg=$(store_snapshot "$D/dangling-store" "$D/snap.dang"); rc=$?
+assert_eq "$rc" "1" "a store that is a dangling symlink cannot be told from an absent one, so it fails"
 mkdir -p "$D/lockedstore"; chmod 000 "$D/lockedstore"
 if [ ! -r "$D/lockedstore" ]; then
-  msg=$(store_unchanged "$D/lockedstore" "$D/store-marker"); rc=$?
+  msg=$(store_snapshot "$D/lockedstore" "$D/snap.lock"); rc=$?
   assert_eq "$rc" "1" "a store that cannot be scanned fails"
   has "$msg" "could not scan" "and says why"
+  mkdir -p "$D/lockedparent/store"; chmod 000 "$D/lockedparent"
+  msg=$(store_snapshot "$D/lockedparent/store" "$D/snap.lockp"); rc=$?
+  assert_eq "$rc" "1" "a store under a directory this user cannot search is not read as absent"
+  chmod 700 "$D/lockedparent"
 else
   printf '  skip - this user can read a mode 000 directory\n'
 fi
 chmod 700 "$D/lockedstore"
-msg=$(store_unchanged "$D/store" "$D/no-such-marker"); rc=$?
-assert_eq "$rc" "1" "a marker that does not exist is a failed scan, not an empty result"
+
+echo "# path_state: present, absent, and cannot tell"
+# shellcheck source=/dev/null
+. "$REPO/bin/lib-path-state.sh"
+: > "$D/ps-file"; path_state "$D/ps-file"; assert_eq "$?" "0" "a file is present"
+path_state "$D/ps-none"; assert_eq "$?" "1" "a missing path under a searchable directory is absent"
+ln -s "$D/nowhere/x" "$D/ps-dangling"; path_state "$D/ps-dangling"; assert_eq "$?" "2" "a dangling symlink cannot be told from absent"
+mkdir -p "$D/ps-locked/inner"; : > "$D/ps-locked/inner/f"; ln -s "$D/ps-locked/inner/f" "$D/ps-link-into-locked"; chmod 000 "$D/ps-locked"
+if [ ! -x "$D/ps-locked" ]; then
+  path_state "$D/ps-link-into-locked"; assert_eq "$?" "2" "a symlink into an unsearchable directory cannot be told from absent"
+  path_state "$D/ps-locked/inner/f"; assert_eq "$?" "2" "a path under an unsearchable directory cannot be told from absent"
+else
+  printf '  skip - this user can search a mode 000 directory\n'
+fi
+chmod 700 "$D/ps-locked"
 
 echo "# real confinement (only where a sandbox works here)"
 real=$(env TMPDIR="$D" bash "$H" probe)

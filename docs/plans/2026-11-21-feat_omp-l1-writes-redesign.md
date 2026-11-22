@@ -1,6 +1,6 @@
 # omp L1 confinement: redesign plan after four gate rounds (#169)
 
-Twelve blocking findings and one P2 in four rounds reduce to six mistakes. A fable-review pass on this plan then found a seventh class (G, below) and ten defects in the branch against rules A to F, all fixed or recorded here. Each section below names one mistake,
+Twelve blocking findings and one P2 in four rounds reduce to six mistakes, and round 5 added three more classes (H, I and a sharper C). A fable-review pass on this plan then found a seventh class (G, below) and ten defects in the branch against rules A to F, all fixed or recorded here. Each section below names one mistake,
 states the rule that rules it out, and says where the branch applies the rule. The findings are in
 `.git/review-gate/246/round-{1..4}.md`.
 
@@ -21,6 +21,10 @@ states the rule that rules it out, and says where the branch applies the rule. T
 | 2 | An inaccessible source can still be treated as empty state (an unsearchable ancestor) | C |
 | 3 | OAuth-only workers again: a bare model selector derived no provider | A |
 | 4 | Memory verification can pass without scanning the store | C |
+| 5 | State setup hides inaccessible paths as absent (a database symlink into an unsearchable directory, `.env` links, an XDG tree) | C |
+| 5 | The memory check misses deleted files and symlinked directories below the root | C |
+| 5 | An overlay override bypasses the memory shutdown | H |
+| 5 | Cached work still depends on preparing an unused engine | I |
 
 ## The six mistakes and the rule for each
 
@@ -57,9 +61,13 @@ config root, the agent dir), where a provider key can live.
 each answered "nothing there" when the true answer was "could not look".
 
 Rule: every existence or comparison check has three outcomes (present, absent, could not look), and "could
-not look" fails. The verb checks the nearest existing ancestor. The store comparison is one function,
-`store_unchanged` in `tests/lib-store-unchanged.sh`, with unit cases for an untouched store, a changed one,
-a missing one (a skip), an unreadable one and a missing marker (both failures).
+not look" fails. `path_state` in `bin/lib-path-state.sh` is the one definition: absent is believed only when
+the nearest existing ancestor is a searchable directory, and a symlink that cannot be followed is "cannot
+tell". The adapter uses it at every site that decides whether a file exists (the agent dir, each seeded
+file, each `.env`, the XDG trees). Change detection is a before and after snapshot of the whole store
+(`store_snapshot` and `store_unchanged` in `tests/lib-store-unchanged.sh`), so a deleted file, a new file and
+a file behind a symlinked directory are all changes. Unit cases cover each, plus a missing store (a skip)
+and unreadable or dangling stores (failures).
 
 **D. The runner writing into territory the worker controls.**
 The runner runs outside the sandbox, so every path inside a stage is attacker-chosen. A symlink the worker
@@ -81,6 +89,16 @@ nothing and a deferral names nothing.
 
 **F. A diagnostic that needed the thing it diagnoses.**
 `--measure` seeded state it never used. It no longer does.
+
+**H. Inherited configuration that bypasses a safeguard.** `NO_ADVISOR_CFG` replaces the overlay that turns
+the memory backend off. Rule: a replacement overlay is used only if it sets the backend off, and an argv verb
+fails (exit 2) rather than run without the safeguard. All four verbs (worker, linker, warmup, L2) go through
+one function, `overlay_cfg`.
+
+**I. Setup for an execution path that will not run.** Setup prepared every engine in the source map, so a
+retry after L2 failed, with every finding already cached, fatalled over an unreadable omp database no worker
+needed. Rule: setup prepares only engines that still have a session without findings, says `l1_confined: n/a`
+when there are none, and an attempt for an engine setup skipped fails (never runs unconfined).
 
 **G. State other processes must see, copied into a private tree.** Found by the plan review, not by the
 gate. With a private `HOME`, omp's in-flight request leases are per worker, so a configured

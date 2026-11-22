@@ -16,6 +16,21 @@ set -u
 # physically, so ADIR is the real adapters/omp and BIN the real bin/.
 ADIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BIN=$(cd -P "$ADIR/../../bin" && pwd)
+# shellcheck source=/dev/null
+. "$BIN/lib-path-state.sh"
+
+# The overlay every headless omp call passes to --config. NO_ADVISOR_CFG replaces it, and a replacement that
+# does not turn the memory backend off would put back the channel the default closes (omp retains and
+# consolidates memory into a store every later session recalls from), so it is used only if it says so.
+# An unusable one makes the argv verbs fail (exit 2) rather than run without the safeguard.
+overlay_cfg() {
+  if [ -z "${NO_ADVISOR_CFG:-}" ]; then printf '%s' "$ADIR/l1-no-advisor.yml"; return 0; fi
+  if [ -r "$NO_ADVISOR_CFG" ] && grep -Eq '^[[:space:]]*backend:[[:space:]]*"?off"?[[:space:]]*$' "$NO_ADVISOR_CFG" 2>/dev/null; then
+    printf '%s' "$NO_ADVISOR_CFG"; return 0
+  fi
+  printf 'omp adapter: NO_ADVISOR_CFG=%s does not set the memory backend off (a backend: "off" line), so it is not used\n' "$NO_ADVISOR_CFG" >&2
+  return 1
+}
 
 # Which omp runs. An explicit OMP_BIN wins, for pinning a build; then PATH; then the places
 # omp installs to, because a launchd job has a minimal PATH. On 2026-08-25 a 17.3.7-versus-
@@ -109,12 +124,13 @@ case "$cmd" in
     #                        headless workers exit 0 with empty stdout before any model call.
     #   --tools=Read,Write   read the transcript, write the findings JSON, nothing else.
     #   --no-session         leave no transcript, so the next night does not triage this one.
+    ovl=$(overlay_cfg) || exit 2
     printf '%s\0' "$(omp_bin)" \
       --allow-home \
       -p \
       --approval-mode yolo \
       --no-session \
-      --config "${NO_ADVISOR_CFG:-$ADIR/l1-no-advisor.yml}" \
+      --config "$ovl" \
       --model "$1" \
       --tools=Read,Write \
       --append-system-prompt 'Headless triage worker. Read the session transcript and write exactly one findings JSON object, via the Write tool, to the literal output path given on line 2 of the prompt. Those paths are literal strings, not shell variables — never $-expand them. Print only the literal word done and exit.'
@@ -122,12 +138,13 @@ case "$cmd" in
 
   threads-argv) # $1=model -> NUL-delimited argv for the tool-less thread linker
     [ "$#" -ge 1 ] && [ -n "$1" ] || exit 2
+    ovl=$(overlay_cfg) || exit 2
     printf '%s\0' "$(omp_bin)" \
       --allow-home \
       -p \
       --approval-mode=always-ask \
       --no-session \
-      --config "${NO_ADVISOR_CFG:-$ADIR/l1-no-advisor.yml}" \
+      --config "$ovl" \
       --model "$1" \
       --tools= \
       --no-tools \
@@ -144,12 +161,13 @@ case "$cmd" in
     # omp-autodream's warmup: the worker's flags minus --tools, and a system prompt that asks for
     # one word. It carries the same overlay, so the call that refreshes the token is the call a
     # worker would have made.
+    ovl=$(overlay_cfg) || exit 2
     printf '%s\0' "$(omp_bin)" \
       --allow-home \
       -p \
       --approval-mode yolo \
       --no-session \
-      --config "${NO_ADVISOR_CFG:-$ADIR/l1-no-advisor.yml}" \
+      --config "$ovl" \
       --model "$1" \
       --append-system-prompt 'Reply with the single word ok and exit.'
     ;;
@@ -198,7 +216,10 @@ case "$cmd" in
     # omp redirects a directory category to $XDG_<CATEGORY>_HOME/omp on Linux and on macOS, but only when that
     # directory exists, so the refusal is on the same condition and not on the variable alone.
     for xv in "${XDG_DATA_HOME:-}" "${XDG_STATE_HOME:-}" "${XDG_CACHE_HOME:-}"; do
-      [ -z "$xv" ] || [ ! -e "$xv/omp" ] || err "$xv/omp exists, so omp keeps part of its state there instead of under HOME"
+      [ -n "$xv" ] || continue
+      path_state "$xv/omp"; xrc=$?
+      [ "$xrc" -ne 0 ] || err "$xv/omp exists, so omp keeps part of its state there instead of under HOME"
+      [ "$xrc" -ne 2 ] || err "cannot tell whether $xv/omp exists (an unreachable path), so cannot tell where omp keeps its state"
     done
     # Path overrides omp reads that point outside any tree this seeds (dirs.ts): refuse, as for a profile.
     for ov in OMP_WORKTREE_DIR OMP_GITHUB_CACHE_DB OMP_COMMIT_CACHE_DB OMP_JUDGMENT_CACHE_DB OMP_AUTH_BROKER_SNAPSHOT_CACHE PI_NATIVES_DIR; do
@@ -219,20 +240,23 @@ case "$cmd" in
     trap 'rm -rf "$obuild"' EXIT
     odst="$obuild/$cname/agent"
     mkdir -p "$odst" || err "could not make $odst"
-    # Absent is not the same as unreachable: a missing path under a directory this user cannot search tests
-    # as absent too. The nearest ancestor that does exist must be searchable for "absent" to be believed.
-    probe="$osrc"
-    while [ ! -e "$probe" ] && [ "$probe" != / ] && [ "$probe" != . ]; do probe=$(dirname "$probe"); done
-    { [ "$probe" = "$osrc" ] || { [ -d "$probe" ] && [ -x "$probe" ]; }; } || err "cannot search $probe, so $osrc cannot be told from absent"
-    if [ -e "$osrc" ]; then
+    # path_state has three answers: present, absent, and "cannot tell" (an unreachable path, a symlink into a
+    # directory this user cannot search). Only "absent" is believed to mean nothing there; "cannot tell" refuses.
+    path_state "$osrc"; src_state=$?
+    [ "$src_state" -ne 2 ] || err "cannot tell whether the agent directory $osrc exists (an unreachable path)"
+    if [ "$src_state" -eq 0 ]; then
       { [ -d "$osrc" ] && [ -r "$osrc" ] && [ -x "$osrc" ]; } || err "cannot read the agent directory $osrc"
       command -v python3 >/dev/null 2>&1 || err "python3 is needed to snapshot omp's databases"
       for f in config.yml config.yaml models.yml models.yaml AGENTS.md APPEND_SYSTEM.md RULES.md kimi-device-id .env; do
-        [ -e "$osrc/$f" ] || continue
+        path_state "$osrc/$f"; fst=$?
+        [ "$fst" -ne 2 ] || err "cannot tell whether $osrc/$f exists (an unreachable path)"
+        [ "$fst" -eq 0 ] || continue
         cp "$osrc/$f" "$odst/$f" || err "could not copy $osrc/$f"
       done
       for f in agent.db models.db; do
-        [ -e "$osrc/$f" ] || continue
+        path_state "$osrc/$f"; fst=$?
+        [ "$fst" -ne 2 ] || err "cannot tell whether $osrc/$f exists (an unreachable path): a database that cannot be snapshotted is not an absent one"
+        [ "$fst" -eq 0 ] || continue
         if [ "$f" = agent.db ]; then
           if [ "${2+set}" = set ]; then
             oprov=""; case "$2" in */*) oprov="${2%%/*}" ;; esac
@@ -252,7 +276,9 @@ case "$cmd" in
     fi
     # omp also reads a .env at HOME and at the config root (utils/src/env.ts): a provider key may live there.
     for f in "$HOME/.env" "$HOME/$cname/.env"; do
-      [ -e "$f" ] || continue
+      path_state "$f"; fst=$?
+      [ "$fst" -ne 2 ] || err "cannot tell whether $f exists (an unreachable path)"
+      [ "$fst" -eq 0 ] || continue
       case "$f" in "$HOME/.env") cp "$f" "$obuild/.env" || err "could not copy $f" ;; *) cp "$f" "$obuild/$cname/.env" || err "could not copy $f" ;; esac
     done
     [ -e "$HOME/Library" ] && ln -s "$HOME/Library" "$obuild/Library"
@@ -270,12 +296,13 @@ case "$cmd" in
     # The system prompt is prompts/L2_SYSTEM.txt, read through the loader. No file means no argv.
     # shellcheck source=/dev/null
     sysprompt=$(. "$BIN/l2-prompt.sh" && l2_system_prompt) || exit 2
+    ovl=$(overlay_cfg) || exit 2
     printf '%s\0' "$(omp_bin)" \
       --allow-home \
       -p \
       --approval-mode yolo \
       --no-session \
-      --config "${NO_ADVISOR_CFG:-$ADIR/l1-no-advisor.yml}" \
+      --config "$ovl" \
       --model "$1" \
       --tools=Glob,Read \
       --append-system-prompt "$sysprompt"

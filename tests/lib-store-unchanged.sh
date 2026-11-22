@@ -1,27 +1,64 @@
 #!/bin/bash
-# store_unchanged <dir> <marker>: did anything under <dir> change after <marker> was touched?
-# Prints one line and returns 0 (nothing changed), 1 (something changed, or the directory could not be
-# scanned) or 2 (there is no such directory, so there is nothing to compare). A scan that cannot look is
-# never a pass: an unreadable store and a failed find both return 1.
-store_unchanged() {
-  local dir="$1" marker="$2" out rc
-  if [ ! -e "$dir" ]; then
-    printf 'no store at %s, nothing to compare\n' "$dir"
-    return 2
-  fi
+# Did a directory tree change between two moments? Two functions, because "changed" includes a file that
+# is gone, a file that is new, and a file reached only through a symlinked directory below the root: a
+# check that lists files newer than a marker sees none of the first and not all of the others.
+#
+#   store_snapshot <dir> <out>   writes one "size mtime_ns path" line per regular file under <dir>, following
+#                                symlinks at every level, sorted. Returns 0 (written), 1 (could not scan) or
+#                                2 (no such directory). Prints a reason on 1 and 2.
+#   store_unchanged <before> <after>   0 when the two snapshots are identical, 1 with the differences printed.
+#
+# A store the snapshot cannot read is never a pass: path_state's "cannot tell" and an unreadable directory
+# both return 1.
+HERE_LIB=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=/dev/null
+. "$HERE_LIB/../bin/lib-path-state.sh"
+
+store_snapshot() {
+  local dir="$1" out="$2" st
+  path_state "$dir"; st=$?
+  if [ "$st" -eq 1 ]; then printf 'no store at %s, nothing to compare\n' "$dir"; return 2; fi
+  if [ "$st" -eq 2 ]; then printf 'cannot tell whether %s exists (an unreachable path)\n' "$dir"; return 1; fi
   if ! [ -d "$dir" ] || ! [ -r "$dir" ] || ! [ -x "$dir" ]; then
-    printf 'could not scan %s (not a readable directory)\n' "$dir"
+    printf 'could not scan %s (not a readable directory)\n' "$dir"; return 1
+  fi
+  command -v python3 >/dev/null 2>&1 || { printf 'python3 is needed to snapshot %s\n' "$dir"; return 1; }
+  if ! python3 - "$dir" > "$out.raw" 2> "$out.err" <<'PY'
+import os, sys
+root = sys.argv[1]
+seen, errs = set(), []
+def onerr(e):
+    errs.append(str(e))
+for d, dirs, files in os.walk(root, followlinks=True, onerror=onerr):
+    real = os.path.realpath(d)
+    if real in seen:
+        dirs[:] = []
+        continue
+    seen.add(real)
+    for f in files:
+        p = os.path.join(d, f)
+        try:
+            st = os.stat(p)
+        except OSError as exc:
+            errs.append(str(exc))
+            continue
+        print("%d %d %s" % (st.st_size, st.st_mtime_ns, p))
+if errs:
+    sys.stderr.write("; ".join(errs[:3]) + "\n")
+    sys.exit(1)
+PY
+  then
+    printf 'could not scan %s: %s\n' "$dir" "$(head -c 200 "$out.err" | tr '\n' ' ')"
+    rm -f "$out.raw" "$out.err"
     return 1
   fi
-  out=$(find -H "$dir" -newer "$marker" -type f 2>&1); rc=$?
-  if [ "$rc" -ne 0 ]; then
-    printf 'could not scan %s (find exited %s): %s\n' "$dir" "$rc" "$(printf '%s' "$out" | head -c 200 | tr '\n' ' ')"
-    return 1
-  fi
-  if [ -n "$out" ]; then
-    printf 'files under %s changed: %s\n' "$dir" "$(printf '%s\n' "$out" | head -5 | tr '\n' ' ')"
-    return 1
-  fi
-  printf 'nothing under %s changed\n' "$dir"
+  sort "$out.raw" > "$out"; rm -f "$out.raw" "$out.err"
   return 0
+}
+
+store_unchanged() {
+  local before="$1" after="$2" d
+  d=$(diff "$before" "$after" 2>&1) && return 0
+  printf 'the store changed: %s\n' "$(printf '%s\n' "$d" | grep '^[<>]' | head -5 | tr '\n' ' ')"
+  return 1
 }

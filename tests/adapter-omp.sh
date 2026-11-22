@@ -21,6 +21,7 @@ assert_rc(){ # $1=got $2=want $3=label
                                   printf '\npassed: 0   failed: 1\n'; exit 1; }
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/adomp.XXXXXX")
+ovl="$tmp/overlay.yml"; printf 'memory:\n  backend: "off"\n' > "$ovl"   # an override that keeps the memory safeguard
 trap 'rm -rf "$tmp"' EXIT
 
 HDR_TITLE='{"type":"title","title":"t","v":1}'
@@ -436,16 +437,21 @@ echo "# unknown subcommand and arity"
 
 echo "# l1-argv reproduces omp-autodream's worker invocation"
 OLD_SYS="Headless triage worker. Read the session transcript and write exactly one findings JSON object, via the Write tool, to the literal output path given on line 2 of the prompt. Those paths are literal strings, not shell variables — never \$-expand them. Print only the literal word done and exit."
-printf '%s\0' /opt/test/omp --allow-home -p --approval-mode yolo --no-session --config /opt/test/overlay.yml \
+printf '%s\0' /opt/test/omp --allow-home -p --approval-mode yolo --no-session --config "$ovl" \
   --model deepseek/deepseek-flash --tools=Read,Write --append-system-prompt "$OLD_SYS" > "$tmp/old-argv"
-OMP_BIN=/opt/test/omp NO_ADVISOR_CFG=/opt/test/overlay.yml "$A" l1-argv deepseek/deepseek-flash > "$tmp/new-argv"
+printf 'advisor:\n  enabled: false\n' > "$tmp/no-memory-line.yml"
+for verb in l1-argv threads-argv warmup-argv l2-argv; do
+  OMP_BIN=/opt/test/omp NO_ADVISOR_CFG="$tmp/no-memory-line.yml" "$A" "$verb" deepseek/deepseek-flash >/dev/null 2>"$tmp/ovl-err"; rc=$?
+  [ "$rc" -ne 0 ] && grep -q 'memory backend off' "$tmp/ovl-err" && ok "$verb refuses an overlay override that leaves the memory backend on" || no "$verb ran with an overlay that does not turn memory off (rc=$rc)"
+done
+OMP_BIN=/opt/test/omp NO_ADVISOR_CFG="$ovl" "$A" l1-argv deepseek/deepseek-flash > "$tmp/new-argv"
 if cmp -s "$tmp/old-argv" "$tmp/new-argv"; then ok "the omp L1 argv is byte for byte omp-autodream's"
 else no "the omp L1 argv is byte for byte omp-autodream's"; fi
 
 echo "# threads-argv: linker has no tools or ambient context"
 threads_argv=()
 threads_count=0
-OMP_BIN=/opt/test/omp NO_ADVISOR_CFG=/opt/test/overlay.yml "$A" threads-argv fixture-model > "$tmp/threads-argv" 2>/dev/null
+OMP_BIN=/opt/test/omp NO_ADVISOR_CFG="$ovl" "$A" threads-argv fixture-model > "$tmp/threads-argv" 2>/dev/null
 rc=$?
 while IFS= read -r -d '' arg; do threads_argv[$threads_count]="$arg"; threads_count=$((threads_count + 1)); done < "$tmp/threads-argv"
 assert_eq "$rc" 0 "threads-argv exists"
@@ -504,9 +510,9 @@ fi
 assert_eq "$("$A" l1-env | wc -c | tr -d ' ')" "0" "omp needs no environment for its L1 worker"
 
 echo "# warmup-argv reproduces omp-autodream's warmup invocation"
-printf '%s\0' /opt/test/omp --allow-home -p --approval-mode yolo --no-session --config /opt/test/overlay.yml \
+printf '%s\0' /opt/test/omp --allow-home -p --approval-mode yolo --no-session --config "$ovl" \
   --model deepseek/deepseek-flash --append-system-prompt "Reply with the single word ok and exit." > "$tmp/old-w"
-OMP_BIN=/opt/test/omp NO_ADVISOR_CFG=/opt/test/overlay.yml "$A" warmup-argv deepseek/deepseek-flash > "$tmp/new-w"
+OMP_BIN=/opt/test/omp NO_ADVISOR_CFG="$ovl" "$A" warmup-argv deepseek/deepseek-flash > "$tmp/new-w"
 if cmp -s "$tmp/old-w" "$tmp/new-w"; then ok "the omp warmup argv is byte for byte omp-autodream's"
 else no "the omp warmup argv is byte for byte omp-autodream's"; fi
 

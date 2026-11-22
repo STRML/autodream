@@ -2632,6 +2632,22 @@ l1_missing_count() { # count sessions in $SESSIONS_LIST that still have no findi
   printf '%s' "$m"
 }
 
+# Which engines still have a session with no valid findings JSON, one per line. Setup prepares only these:
+# preparing an engine nothing will run fatals a night whose findings are already complete (a retry after L2
+# failed) over a database that no worker needs.
+l1_missing_engines() {
+  local s h src e out=""
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    h=$(session_hash "$s") || continue
+    jq -s -e "$L1_FINDINGS_OK" "$FINDINGS_DIR/$h.json" >/dev/null 2>&1 && continue
+    src=$(printf '%s\n' "$AUTODREAM_SOURCE_MAP" | awk -F'\t' -v h="$h" '$1 == h { print $2; exit }')
+    e=$(printf '%s\n' "$AUTODREAM_L1_ENGINES" | awk -F'\t' -v s="$src" '$1 == s { print $2; exit }')
+    [ -n "$e" ] && out="$out$e"$'\n'
+  done < "$SESSIONS_LIST"
+  printf '%s' "$out" | sort -u
+}
+
 # What chunked triage cost tonight, from the two ledgers: "sessions chunks elided calls". Sessions
 # and chunks count what the chunker planned (the last plan per session, since a retry plans again),
 # elided the chunks it dropped from the middle, calls the engine calls actually made. A night with
@@ -3061,8 +3077,8 @@ L1_CONFINE_PROTECT=""
 L1_CONFINED_STAT=no
 L1_CONFINE_FATAL=""
 l1_confine_setup() {
-  local probe verdict reason eng d p ok_engines="" no_engines="" all_engines err sstage wrc swhy
-  L1_CONFINED=no; L1_CONFINE_USING=none; L1_CONFINED_ENGINES=""; L1_CONFINE_STATS=""; L1_CONFINE_FATAL=""
+  local probe verdict reason eng d p ok_engines="" no_engines="" all_engines err sstage wrc swhy needed
+  L1_CONFINED=no; L1_CONFINE_USING=none; L1_CONFINED_ENGINES=""; L1_CONFINE_STATS=""; L1_CONFINE_FATAL=""; L1_SETUP_SKIPPED=""
   L1_STAGE_ROOT="$AUTODREAM_DIR/staging/run-$$"
   L1_CONFINE_PROTECT="$AUTODREAM_DIR:$FINDINGS_DIR:$DREAMS_DIR"
   # A run killed mid-flight leaves its staging root behind. Only roots whose run is gone are removed:
@@ -3090,7 +3106,12 @@ l1_confine_setup() {
       L1_CONFINE_REASON="ok"
     fi
   fi
-  if [ "$L1_CONFINED" = yes ]; then
+  if [ -z "$(l1_missing_engines)" ] && [ "$L1_CONFINED" = yes ]; then
+    # Every session already has findings, so no worker starts and there is nothing to confine or prepare.
+    L1_CONFINED_STAT="n/a"
+    L1_CONFINE_REASON="no L1 work this run: every session already has findings"
+    log "L1 confinement not set up: $L1_CONFINE_REASON"
+  elif [ "$L1_CONFINED" = yes ]; then
     # The protected directories are joined with a colon, so one that holds a colon would be split into
     # two paths and left unprotected; a relative one protects nothing.
     for p in "$AUTODREAM_DIR" "$FINDINGS_DIR" "$DREAMS_DIR"; do
@@ -3101,6 +3122,11 @@ l1_confine_setup() {
       esac
     done
     all_engines=$(printf '%s' "$AUTODREAM_L1_ENGINES" | awk -F'\t' 'NF >= 2 && $2 != "" && !seen[$2]++ { print $2 }')
+    # Only engines with work left are prepared. The others are named, so a worker that reaches one anyway fails
+    # its attempt (l1_attempt) and is never run unconfined by default.
+    needed=$(l1_missing_engines)
+    all_engines=$(printf '%s\n' "$all_engines" | grep -Fx -f <(printf '%s\n' "$needed") 2>/dev/null || true)
+    L1_SETUP_SKIPPED=$(printf '%s\n' "$AUTODREAM_L1_ENGINES" | awk -F'\t' -v need="$(printf '%s' "$needed" | tr '\n' ' ')" 'BEGIN { n = split(need, a, " "); for (i = 1; i <= n; i++) want[a[i]] = 1 } NF >= 2 && $2 != "" && !($2 in want) && !seen[$2]++ { printf "%s ", $2 }')
     while IFS= read -r eng; do
       [ -n "$eng" ] || continue
       "$ADAPTERS_DIR/$eng/adapter.sh" l1-writes >/dev/null 2>&1; wrc=$?
@@ -3155,7 +3181,7 @@ l1_confine_setup() {
     L1_CONFINED_STAT=no
     [ "${AUTODREAM_L1_CONFINE:-1}" = 0 ] || log "WARNING: L1 workers run unconfined (l1_confined: no): $L1_CONFINE_REASON"
   fi
-  export L1_CONFINER L1_CONFINED L1_CONFINED_ENGINES L1_STAGE_ROOT L1_CONFINE_PROTECT DREAMS_DIR
+  export L1_CONFINER L1_CONFINED L1_CONFINED_ENGINES L1_SETUP_SKIPPED L1_STAGE_ROOT L1_CONFINE_PROTECT DREAMS_DIR
   # Where a worker launched from $WORK_DIR may leave an AI-title stub. It is not on the write list, so a
   # confined worker cannot write it; an unconfined one still can, which is why run.sh wipes it.
   export AUTODREAM_WORK_BUCKET="$WORK_BUCKET"
@@ -3469,6 +3495,11 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       rm -f "$l1ans" "$2"
       l1pre=()
       l1senv=()
+      case " ${L1_SETUP_SKIPPED:-} " in
+        *" $engine "*)
+          printf "the %s engine was not prepared at setup (it had no work then) and is not run unconfined now\n" "$engine" >> "$3"
+          l1_infra_fail "$@"; return 1 ;;
+      esac
       case " ${L1_CONFINED_ENGINES:-} " in
         *" $engine "*)
           # An engine that keeps state it must write (omp) gets a throwaway one inside the stage: the
