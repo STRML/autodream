@@ -1,0 +1,29 @@
+name: comment-ratchet
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: comment-ratchet-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ratchet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shfmt
+        run: |
+          sudo apt-get install -y --no-install-recommends shfmt
+          shfmt --version
+
+      - name: comment ratchet
+        run: bash tests/comment-ratchet.sh
