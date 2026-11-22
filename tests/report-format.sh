@@ -128,6 +128,8 @@ assert_eq "$(report_incomplete_cause "$D/cprosebl")" "no open-questions marker, 
 assert_eq "$(report_incomplete_cause "$D/cplain")" "no open-questions marker and no AUTODREAM_QUESTIONS_BEGIN/END block" "no marker and no question is the plain case"
 assert_eq "$(report_incomplete_cause "$D/cmarkonly")" "an open-questions marker but no AUTODREAM_QUESTIONS_BEGIN/END block" "a marker without the block is named too"
 assert_eq "$(report_incomplete_cause "$D/fdate")" "" "a report with the block has no cause to name"
+fx cprosers '# R\n\nbody\n\nShould we clean up?\n<!-- autodream:remote-short=studio -->\n'
+assert_eq "$(report_incomplete_cause "$D/cprosers")" "no open-questions marker, and the report ends in a question written as prose outside an AUTODREAM_QUESTIONS_BEGIN/END block" "a trailing remote-short record does not hide the prose question"
 
 echo "# the body: everything before the LAST sentinel"
 same report_body old_body

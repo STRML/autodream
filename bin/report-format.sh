@@ -63,7 +63,7 @@ report_incomplete_cause(){
     printf 'an open-questions marker but no AUTODREAM_QUESTIONS_BEGIN/END block\n'
     return 0
   fi
-  last=$(awk 'NF { line = $0 } END { print line }' "$report" 2>/dev/null | sed 's/[[:space:]]*$//')
+  last=$(awk 'NF && $0 !~ /^<!-- autodream:remote-short=.* -->$/ { line = $0 } END { print line }' "$report" 2>/dev/null | sed 's/[[:space:]]*$//')
   case "$last" in
     *'?') printf 'no open-questions marker, and the report ends in a question written as prose outside an AUTODREAM_QUESTIONS_BEGIN/END block\n' ;;
     *)    printf 'no open-questions marker and no AUTODREAM_QUESTIONS_BEGIN/END block\n' ;;
