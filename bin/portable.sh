@@ -75,7 +75,11 @@ tmo() {
   { exec 3<&0; } 2>/dev/null || exec 3</dev/null
   "$@" <&3 & pid=$!
   exec 3<&-
-  ( sleep "$s"; pkill -P "$pid" 2>/dev/null; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 & wd=$!
+  # The watchdog traps TERM and kills its own sleep, so a command that finishes in time leaves no
+  # sleep running until the timeout.
+  ( trap 'kill "${sp:-}" 2>/dev/null; exit 0' TERM
+    sleep "$s" & sp=$!; wait "$sp" || exit 0
+    pkill -P "$pid" 2>/dev/null; kill "$pid" 2>/dev/null ) >/dev/null 2>&1 & wd=$!
   wait "$pid"; rc=$?
   kill "$wd" 2>/dev/null
   wait "$wd" 2>/dev/null

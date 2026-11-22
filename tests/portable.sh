@@ -78,7 +78,21 @@ eq "$closed_out" "rc=0" "tmo without a timeout binary still runs when the caller
 fallback_err=$(PATH="$nt" /bin/bash -c '. "$1"; tmo 5 /bin/bash -c '\''echo child-error >&2; exit 7'\''; rc=$?; echo caller-error >&2; exit "$rc"' _ "$REPO/bin/portable.sh" 2>&1) && fallback_rc=0 || fallback_rc=$?
 eq "$fallback_rc" 7 "fallback preserves a failing command status"
 eq "$fallback_err" "$(printf 'child-error\ncaller-error')" "fallback preserves child and caller stderr"
-rm -rf "$nt"
+# The watchdog's sleep must end with the command, not run on for the whole bound.
+# A sleep shim that records its pid and then becomes the real sleep, so the test can ask kill -0
+# about it instead of reading a process table (pgrep and ps are denied in some sandboxes).
+sp_dir=$(mktemp -d "${TMPDIR:-/tmp}/tmo-sp.XXXXXX")
+real_sleep=$(command -v sleep)
+printf '#!/bin/bash\necho $$ > "%s/pid"\nexec "%s" "$@"\n' "$sp_dir" "$real_sleep" > "$sp_dir/sleep"
+chmod +x "$sp_dir/sleep"
+for tool in kill pkill; do p=$(command -v "$tool") && ln -s "$p" "$sp_dir/$tool"; done
+PATH="$sp_dir" /bin/bash -c '. "$1"; tmo 137 "$2" 0.3' _ "$REPO/bin/portable.sh" "$real_sleep"
+sleep 0.5
+sp_pid=$(cat "$sp_dir/pid" 2>/dev/null)
+if [ -z "$sp_pid" ]; then eq "no pid" "a pid" "the watchdog's sleep was observed"
+elif kill -0 "$sp_pid" 2>/dev/null; then kill "$sp_pid" 2>/dev/null; eq orphan none "tmo leaves no sleep behind when the command finishes in time"
+else eq none none "tmo leaves no sleep behind when the command finishes in time"; fi
+rm -rf "$nt" "$sp_dir"
 g=$(mktemp -d "${TMPDIR:-/tmp}/portable.XXXXXX")
 git init -q "$g" 2>/dev/null
 eq "$(repo_slug "$g")" "" "no remote has no slug"

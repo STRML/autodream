@@ -4471,6 +4471,253 @@ if [ -z "$_list" ]; then
   echo "cc-autodream integration tests (mock claude)"
   echo
 fi
+# ---- Report scripts: allowlisted commands an operator note asked for, run before L2 ----
+# The seam under test is run.sh calling bin/report-scripts.sh and the result landing in the findings
+# dir under the names PROMPT.md reads. bin/report-scripts.sh's own matrix is tests/report-scripts.sh.
+test_report_scripts_land_in_the_findings_dir_and_a_failure_is_content(){
+  echo "# report scripts: a run writes report-<name>.md per entry; a failing one is content, the report still lands"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  mkdir -p "$root/rs"
+  printf '#!/bin/bash\necho "gate row 1"\n' > "$root/rs/good.sh"
+  printf '#!/bin/bash\necho "ledger unreadable" >&2\nexit 4\n' > "$root/rs/bad.sh"
+  chmod +x "$root/rs/good.sh" "$root/rs/bad.sh"
+  printf '# reports\ngood %s --since-hours 36\nbad %s\nghost %s\n' "$root/rs/good.sh" "$root/rs/bad.sh" "$root/rs/ghost.sh" \
+    > "$root/autodream/report-scripts.conf"
+  run_dream "$root"
+  local f; f=$(fdir "$root")
+  assert_file    "$root/dreams/$DATE.md"  "the report still lands with a failing report script"
+  assert_grep    "$f/report-good.md" '^gate row 1$' "a working entry's stdout is in report-good.md"
+  assert_grep    "$f/report-bad.md" 'FAILED: exited 4' "a failing entry writes its failure as the content"
+  assert_grep    "$f/report-bad.md" 'ledger unreadable' "and its stderr"
+  assert_grep    "$f/report-ghost.md" 'not found' "a missing script writes a file too"
+  assert_grep    "$f/report-index.txt" "$f/report-good.md" "the index names the exact path L2 reads"
+  rm -rf "$root"
+}
+test_report_scripts_no_conf_still_writes_the_index(){
+  echo "# report scripts: no conf is no reports, and the index says so (one shape for L2)"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  run_dream "$root"
+  assert_file "$root/dreams/$DATE.md" "the report lands"
+  assert_grep "$(fdir "$root")/report-index.txt" 'none configured' "index says none configured"
+  rm -rf "$root"
+}
+test_report_scripts_a_broken_or_missing_collector_never_aborts_the_run(){
+  echo "# report scripts: a collector that fails, or is not installed, costs a log line and nothing else"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  printf '#!/bin/bash\nexit 1\n' > "$root/collector.sh"; chmod +x "$root/collector.sh"
+  ln -s "$REPO/bin/portable.sh" "$root/portable.sh"
+  # A forced rerun keeps the findings dir: the earlier run's files must not survive a failed collect.
+  mkdir -p "$(fdir "$root")"; echo stale > "$(fdir "$root")/report-old.md"; echo stale > "$(fdir "$root")/report-index.txt"
+  AUTODREAM_REPORTS_BIN="$root/collector.sh" run_dream "$root"
+  assert_file "$root/dreams/$DATE.md" "the report lands when the collector exits 1"
+  assert_grep "$root/autodream/logs/run-$DATE.log" 'report-script collection failed' "the failure is logged"
+  assert_no_file "$(fdir "$root")/report-old.md" "a failed collect leaves no report file from an earlier run"
+  assert_grep "$(fdir "$root")/report-index.txt" 'unavailable' "and the index says unavailable, not an earlier run's rows"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" sess1
+  mkdir -p "$(fdir "$root")"; echo stale > "$(fdir "$root")/report-old.md"; echo stale > "$(fdir "$root")/report-index.txt"
+  AUTODREAM_REPORTS_BIN="$root/no-such-collector.sh" run_dream "$root"
+  assert_file "$root/dreams/$DATE.md" "the report lands when the collector is not installed"
+  assert_grep "$root/autodream/logs/run-$DATE.log" 'report-scripts.sh not found' "the missing helper is logged"
+  assert_no_file "$(fdir "$root")/report-old.md" "a missing collector leaves no report file from an earlier run"
+  assert_grep "$(fdir "$root")/report-index.txt" 'unavailable' "and the index says unavailable"
+  rm -rf "$root"
+}
+test_report_scripts_a_conf_rewritten_after_the_snapshot_runs_nothing_new(){
+  echo "# report scripts: the allowlist is snapshotted before L1, so a worker that rewrites the conf cannot add an entry"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  mkdir -p "$root/rs"
+  printf '#!/bin/bash\necho "good ran"\n' > "$root/rs/good.sh"
+  printf '#!/bin/bash\ntouch "%s/evil-ran"\n' "$root" > "$root/rs/evil.sh"
+  chmod +x "$root/rs/good.sh" "$root/rs/evil.sh"
+  printf 'good %s\n' "$root/rs/good.sh" > "$root/autodream/report-scripts.conf"
+  # Stands in for the L1 worker: rewrite the conf and the good script after the snapshot, before collect.
+  cat > "$root/tamper.sh" <<EOF
+#!/bin/bash
+if [ "\$1" = collect ]; then
+  printf 'good %s\nevil %s\n' "$root/rs/good.sh" "$root/rs/evil.sh" > "$root/autodream/report-scripts.conf"
+fi
+exec /bin/bash "$REPO/bin/report-scripts.sh" "\$@"
+EOF
+  chmod +x "$root/tamper.sh"
+  ln -s "$REPO/bin/portable.sh" "$root/portable.sh"
+  AUTODREAM_REPORTS_BIN="$root/tamper.sh" run_dream "$root"
+  local f; f=$(fdir "$root")
+  assert_file    "$root/dreams/$DATE.md" "the report lands"
+  assert_grep    "$f/report-good.md" 'good ran' "the snapshotted entry runs"
+  assert_no_file "$f/report-evil.md" "an entry added after the snapshot gets no file"
+  assert_no_file "$root/evil-ran" "and never runs"
+  rm -rf "$root"
+}
+rs_forge_setup(){ # $1=root -> a good.sh that sources dep.sh, and a conf that lists it; sets RS_CONF RS_SCRIPT RS_DEP
+  RS_CONF="$1/autodream/report-scripts.conf"; RS_SCRIPT="$1/rs/good.sh"; RS_DEP="$1/rs/dep.sh"
+  mkdir -p "$1/rs"
+  printf 'echo "dep ok"\n' > "$RS_DEP"
+  printf '#!/bin/bash\n. "%s"\necho "good ran"\n' "$RS_DEP" > "$RS_SCRIPT"; chmod +x "$RS_SCRIPT"
+  printf 'good %s\n' "$RS_SCRIPT" > "$RS_CONF"
+}
+test_report_scripts_run_before_any_worker_so_a_rewritten_script_or_dependency_cannot_change_tonights_output(){
+  echo "# report scripts: collected before L1, so a worker that rewrites a listed script or a file it sources changes nothing tonight"
+  local root; root=$(setup_env); mk_session "$root" sess1; rs_forge_setup "$root"
+  FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_PATHS="$RS_CONF $RS_SCRIPT $RS_DEP" MOCK_FORGE_PAYLOAD='echo FORGED-RAN' run_dream "$root"
+  assert_grep "$RS_DEP" 'FORGED-RAN' "unconfined, the worker did append code to the file the script sources"
+  assert_grep "$(fdir "$root")/report-good.md" 'dep ok' "tonight's report holds what the script printed before the worker started"
+  assert_nogrep "$(fdir "$root")/report-good.md" 'FORGED-RAN' "and none of the code the worker added"
+  assert_eq "$(awk -F'\t' '$1 == "good" { print $2 }' "$(fdir "$root")/report-index.txt")" "ok" "with status ok"
+  rm -rf "$root"
+}
+test_report_scripts_a_worker_that_rewrites_a_collected_report_file_is_replaced_by_unavailable(){
+  echo "# report scripts: the runner hashes the collected files before L1 and checks them before L2"
+  local f case_
+  for case_ in index report planted; do
+    local root; root=$(setup_env); mk_session "$root" sess1; rs_forge_setup "$root"
+    f=$(fdir "$root")
+    case "$case_" in
+      index)   FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_PATHS="$f/report-index.txt" run_dream "$root" ;;
+      report)  FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_PATHS="$f/report-good.md" run_dream "$root" ;;
+      planted) FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_PATHS="$f/report-planted.md" run_dream "$root" ;;
+    esac
+    assert_grep "$f/report-index.txt" '^# report-scripts: unavailable' "$case_: the index says unavailable"
+    assert_grep "$f/report-index.txt" 'changed after collection' "$case_: and why"
+    assert_no_file "$f/report-good.md" "$case_: the collected report file is gone"
+    assert_no_file "$f/report-planted.md" "$case_: and so is anything planted beside it"
+    assert_grep "$f/run-stats.txt" '^report_scripts: unavailable$' "$case_: run-stats says unavailable"
+    assert_file "$root/dreams/$DATE.md" "$case_: the report still lands"
+    rm -rf "$root"
+  done
+}
+test_report_scripts_a_file_that_cannot_be_hashed_after_l1_is_unavailable_not_unchanged(){
+  echo "# report scripts: a failed fingerprint is never read as unchanged, even when the rows it did print match"
+  local root f; root=$(setup_env); mk_session "$root" sess1; rs_forge_setup "$root"
+  f=$(fdir "$root")
+  # report-z.md sorts after the collected files, so the rows before it hash and match; shasum then fails on it.
+  FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_DIRS="$f/report-z.md" run_dream "$root"
+  assert_grep "$f/report-index.txt" '^# report-scripts: unavailable' "the index says unavailable"
+  assert_no_file "$f/report-good.md" "and the collected report file is gone"
+  assert_grep "$f/run-stats.txt" '^report_scripts: unavailable$' "run-stats says unavailable"
+  rm -rf "$root"
+}
+test_report_scripts_untouched_files_keep_their_rows_through_l1(){
+  echo "# report scripts: a worker that writes elsewhere in the findings dir leaves the collected files alone"
+  local root f; root=$(setup_env); mk_session "$root" sess1; rs_forge_setup "$root"
+  f=$(fdir "$root")
+  FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_PATHS="$f/not-a-report.txt" run_dream "$root"
+  assert_grep "$f/report-good.md" 'good ran' "the collected report is still there"
+  assert_eq "$(awk -F'\t' '$1 == "good" { print $2 }' "$f/report-index.txt")" "ok" "and its row still says ok"
+  assert_grep "$f/run-stats.txt" '^report_scripts: 1$' "run-stats counts the entry"
+  rm -rf "$root"
+}
+test_report_scripts_a_confined_worker_cannot_write_the_allowlist_or_a_listed_script(){
+  echo "# report scripts: a confined L1 worker also cannot rewrite the conf, a listed script or a file it sources on disk"
+  if ! l1_confine_real; then echo "  skip - no working sandbox on this host: the refusals below are untested here"; return 0; fi
+  local root; root=$(setup_env); mk_session "$root" sess1; rs_forge_setup "$root"
+  FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_PATHS="$RS_CONF $RS_SCRIPT $RS_DEP" MOCK_FORGE_PAYLOAD='echo FORGED-RAN' AUTODREAM_L1_CONFINE=1 run_dream "$root"
+  assert_eq "$(cat "$RS_CONF")" "good $RS_SCRIPT" "confined, the allowlist is byte for byte what the operator wrote"
+  assert_nogrep "$RS_SCRIPT" 'FORGED-RAN' "the script it lists is unchanged"
+  assert_nogrep "$RS_DEP" 'FORGED-RAN' "and so is the file that script sources"
+  assert_grep "$(fdir "$root")/report-good.md" 'good ran' "and the entry ran"
+  rm -rf "$root"
+}
+test_report_scripts_a_confined_omp_worker_cannot_write_the_allowlist_or_a_listed_script(){
+  echo "# report scripts: with omp's write profile an omp worker is confined too, and the residual on this host's engines is gone"
+  local root; root=$(setup_env); mk_omp_session "$root" aaaa >/dev/null; rs_forge_setup "$root"
+  FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_PATHS="$RS_CONF $RS_SCRIPT $RS_DEP" MOCK_FORGE_PAYLOAD='echo FORGED-RAN' AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+  assert_grep "$RS_CONF" 'FORGED-RAN' "unconfined, an omp worker rewrites the allowlist"
+  assert_grep "$RS_DEP" 'FORGED-RAN' "and a file a listed script sources"
+  rm -rf "$root"
+  if ! l1_confine_real; then echo "  skip - no working sandbox on this host: the omp refusals below are untested here"; return 0; fi
+  root=$(setup_env); mk_omp_session "$root" aaaa >/dev/null; rs_forge_setup "$root"
+  FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_PATHS="$RS_CONF $RS_SCRIPT $RS_DEP" MOCK_FORGE_PAYLOAD='echo FORGED-RAN' AUTODREAM_L1_CONFINE=1 AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined_omp: yes$' "run-stats reads omp confined"
+  assert_eq "$(cat "$RS_CONF")" "good $RS_SCRIPT" "confined, the allowlist is byte for byte what the operator wrote"
+  assert_nogrep "$RS_SCRIPT" 'FORGED-RAN' "the script it lists is unchanged"
+  assert_nogrep "$RS_DEP" 'FORGED-RAN' "and so is the file that script sources"
+  rm -rf "$root"
+}
+test_report_scripts_a_collector_changed_after_the_run_started_is_not_executed(){
+  echo "# report scripts: the collector is hashed before L1 and checked again, so a worker that rewrites it gets nothing run"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  ln -s "$REPO/bin/portable.sh" "$root/portable.sh"
+  # A stand-in collector that rewrites itself during `snapshot`, which run.sh calls after it has
+  # fingerprinted the file: what an L1 worker with Write could do before the collector starts.
+  cat > "$root/collector.sh" <<EOF
+#!/bin/bash
+case "\$1" in
+  snapshot) echo '#absent'; echo '# tampered' >> "\$0" ;;
+  collect) touch "$root/collector-ran" ;;
+esac
+EOF
+  chmod +x "$root/collector.sh"
+  AUTODREAM_REPORTS_BIN="$root/collector.sh" run_dream "$root"
+  assert_file    "$root/dreams/$DATE.md" "the report still lands"
+  assert_no_file "$root/collector-ran" "a collector that changed after the fingerprint is not executed"
+  assert_grep    "$(fdir "$root")/report-index.txt" 'changed since the run started' "and the index says why"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" sess1
+  printf '#!/bin/bash\n[ "$1" = collect ] && touch "%s/collector-ran"\nexit 0\n' "$root" > "$root/collector.sh"; chmod +x "$root/collector.sh"
+  AUTODREAM_REPORTS_BIN="$root/collector.sh" run_dream "$root"
+  assert_no_file "$root/collector-ran" "a collector with no portable.sh beside it cannot be fingerprinted, so it is not executed"
+  assert_grep    "$(fdir "$root")/report-index.txt" 'could not be hashed' "and the index says so"
+  rm -rf "$root"
+}
+test_report_scripts_earlier_files_that_cannot_be_cleared_stop_the_run(){
+  echo "# report scripts: stale files from an earlier run that cannot be removed stop the run instead of reaching L2"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  # A stale index that nothing can replace or remove: an rm and an mv that refuse it, so the collector
+  # cannot write the new index and the cleanup cannot clear the old one. (The cleanup uses rm -rf, so a
+  # planted directory with a report name no longer works as the unremovable thing, and a read-only
+  # findings dir would stop the run long before this seam.)
+  mkdir -p "$(fdir "$root")"
+  printf '# stale index\n' > "$(fdir "$root")/report-index.txt"
+  mkdir -p "$root/shim-rm"
+  printf '#!/bin/bash\nfor a in "$@"; do case "$a" in *report-index.txt) exit 1 ;; esac; done\nexec /bin/${0##*/} "$@"\n' > "$root/shim-rm/rm"
+  cp "$root/shim-rm/rm" "$root/shim-rm/mv"; chmod +x "$root/shim-rm/rm" "$root/shim-rm/mv"
+  PATH="$root/shim-rm:$PATH" run_dream "$root"
+  assert_grep    "$root/autodream/logs/run-$DATE.log" 'refusing to let L2 read them' "the log says why the run stopped"
+  assert_no_file "$root/dreams/$DATE.md" "no report is written over a stale index"
+  rm -rf "$root"
+}
+test_report_scripts_prompt_names_the_index_by_exact_path(){
+  echo "# report scripts: PROMPT.md reads report-index.txt by exact path and never globs the findings dir"
+  assert_grep "$REPO/prompts/PROMPT.md" '<findings-dir>/report-index.txt' "PROMPT.md names the index path"
+  assert_grep "$REPO/prompts/PROMPT.md" 'report-scripts.conf' "PROMPT.md names the allowlist file L2 points the operator at"
+  assert_nogrep "$REPO/prompts/PROMPT.md" 'Glob `report-' "PROMPT.md does not glob report files (a Glob stops at 200 entries)"
+}
+test_report_scripts_prompt_status_contract_matches_the_collector(){
+  echo "# report scripts: PROMPT.md names every non-ok status the collector emits, and what a - file column means"
+  local st
+  for st in failed timeout missing invalid changed write-failed; do
+    assert_grep "$REPO/prompts/PROMPT.md" "\`$st\`" "PROMPT.md names the $st status"
+  done
+  assert_grep "$REPO/prompts/PROMPT.md" 'nothing to Read' "PROMPT.md says a - file column has nothing to Read"
+  assert_grep "$REPO/prompts/PROMPT.md" 'report_scripts_not_ok' "the self-audit names the run-stats key listing entries that are not ok"
+}
+test_report_scripts_run_stats_name_every_entry_that_is_not_ok(){
+  echo "# report scripts: an entry that fails every night reaches run-stats, so the self-audit can name it"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  mkdir -p "$root/rs"
+  printf '#!/bin/bash\necho row\n' > "$root/rs/good.sh"
+  printf '#!/bin/bash\nexit 4\n' > "$root/rs/bad.sh"
+  chmod +x "$root/rs/good.sh" "$root/rs/bad.sh"
+  printf 'good %s\nbad %s\nghost %s\n' "$root/rs/good.sh" "$root/rs/bad.sh" "$root/rs/ghost.sh" > "$root/autodream/report-scripts.conf"
+  run_dream "$root"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
+  assert_grep "$stats" '^report_scripts: 3$' "the entry count is in run-stats"
+  assert_grep "$stats" '^report_scripts_not_ok: bad,ghost$' "every entry that is not ok is named, ok ones are not"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" sess1
+  run_dream "$root"
+  stats="$(fdir "$root")/run-stats.txt"
+  assert_grep "$stats" '^report_scripts: off$' "no conf reads as off"
+  assert_grep "$stats" '^report_scripts_not_ok: none$' "and names nothing"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" sess1
+  AUTODREAM_REPORTS_BIN="$root/no-such-collector.sh" run_dream "$root"
+  stats="$(fdir "$root")/run-stats.txt"
+  assert_grep "$stats" '^report_scripts: unavailable$' "a collector that could not run reads as unavailable, not off"
+  rm -rf "$root"
+}
+
 _run test_happy
 _run test_session_stats
 _run test_unreadable
@@ -8122,7 +8369,7 @@ if [ -z "$_list" ]; then
 fi
 # The suites that drive launchd need plutil and launchctl, so they run on macOS only (CI runs
 # them in launchd.yml, when a launchd file changes).
-_suites="portable rollup l1-confine lib-project preflight adapters adapter-claude adapter-omp adapter-contract threads-state slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux review-prompt notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt autodream-web shard ci-scope"
+_suites="portable report-scripts stop-check-counts rollup l1-confine lib-project preflight adapters adapter-claude adapter-omp adapter-contract threads-state slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux review-prompt notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt autodream-web shard ci-scope"
 [ "$(uname -s)" = Darwin ] && _suites="$_suites scheduler-label autodream-now install-review-agent install-web-agent install-dry-run install-dir install-skill"
 for _suite in $_suites; do
   _owns || continue
@@ -8142,7 +8389,15 @@ for _suite in $_suites; do
     # count one rather than letting a crash read as green.
     [ -n "$_f" ] && [ "$_f" -ne 0 ] || fail=$((fail + 1))
   else
-    printf '  ok   - unit suite %-18s (%s assertions)\n' "$_suite" "${_p:-0}"
+    # A suite whose totals carry `skipped: N` says how many checks could not run, and its skip lines
+    # follow, so a CI log shows ran against skipped. A suite that prints no such total is unchanged.
+    _sk=$(printf '%s\n' "$_out" | sed -n 's/^passed:.*skipped: *\([0-9][0-9]*\).*/\1/p' | tail -1)
+    if [ -n "$_sk" ]; then
+      printf '  ok   - unit suite %-18s (%s assertions, %s skipped)\n' "$_suite" "${_p:-0}" "$_sk"
+      printf '%s\n' "$_out" | grep '^ *skip -' | head -10
+    else
+      printf '  ok   - unit suite %-18s (%s assertions)\n' "$_suite" "${_p:-0}"
+    fi
   fi
 done
 
@@ -11860,6 +12115,21 @@ _run test_remote_sync_one_remote_failed_posts_no_banner
 _run test_remote_sync_missing_rsync_or_ssh_fails_cleanly
 _run test_remote_sync_not_run_once_the_report_is_done
 _run test_remote_sync_session_in_both_trees_is_enumerated_twice
+_run test_report_scripts_land_in_the_findings_dir_and_a_failure_is_content
+_run test_report_scripts_no_conf_still_writes_the_index
+_run test_report_scripts_a_broken_or_missing_collector_never_aborts_the_run
+_run test_report_scripts_a_conf_rewritten_after_the_snapshot_runs_nothing_new
+_run test_report_scripts_run_before_any_worker_so_a_rewritten_script_or_dependency_cannot_change_tonights_output
+_run test_report_scripts_a_worker_that_rewrites_a_collected_report_file_is_replaced_by_unavailable
+_run test_report_scripts_a_file_that_cannot_be_hashed_after_l1_is_unavailable_not_unchanged
+_run test_report_scripts_untouched_files_keep_their_rows_through_l1
+_run test_report_scripts_a_confined_worker_cannot_write_the_allowlist_or_a_listed_script
+_run test_report_scripts_a_confined_omp_worker_cannot_write_the_allowlist_or_a_listed_script
+_run test_report_scripts_a_collector_changed_after_the_run_started_is_not_executed
+_run test_report_scripts_earlier_files_that_cannot_be_cleared_stop_the_run
+_run test_report_scripts_prompt_names_the_index_by_exact_path
+_run test_report_scripts_prompt_status_contract_matches_the_collector
+_run test_report_scripts_run_stats_name_every_entry_that_is_not_ok
 
 [ -z "$_list" ] || exit 0
 echo
