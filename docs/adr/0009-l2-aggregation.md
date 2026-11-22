@@ -2,7 +2,7 @@
 
 Status: accepted · Governs: `bin/citation-check.sh`, `bin/dream-grounding.sh`, `bin/report-format.sh`, `bin/run.sh`
 
-This record holds 20 sections: one per decision, and a Background section for each narrative that used to live in CLAUDE.md.
+This record holds 21 sections: one per decision, and a Background section for each narrative that used to live in CLAUDE.md.
 
 - [Background: L2 is read-only: the report and the pins arrive on stdout (omp-autodream 2026-09-13, plan 2026-09-15)](#background-l2-is-read-only-the-report-and-the-pins-arrive-on-stdout-omp-autodream-2026-09-13-plan-2026-09-15)
 - [a citation is any standalone 12-hex token, so a stray token is a false alarm and never a false all-clear](#a-citation-is-any-standalone-12-hex-token-so-a-stray-token-is-a-false-alarm-and-never-a-false-all-clear)
@@ -10,6 +10,7 @@ This record holds 20 sections: one per decision, and a Background section for ea
 - [a cited 12-hex token with no findings file still resolves when it matches a triaged session path](#a-cited-12-hex-token-with-no-findings-file-still-resolves-when-it-matches-a-triaged-session-path)
 - [report claims are grounded by fixed, read-only checks in code, and a check that cannot run says unknown](#report-claims-are-grounded-by-fixed-read-only-checks-in-code-and-a-check-that-cannot-run-says-unknown)
 - [the installed-skill search follows symlinks and stops at depth 7](#the-installed-skill-search-follows-symlinks-and-stops-at-depth-7)
+- [report-format.sh reads a capture as bytes, and the retry log's last line stops at the report: trailer](#report-formatsh-reads-a-capture-as-bytes-and-the-retry-logs-last-line-stops-at-the-report-trailer)
 - [L2's report is everything before the LAST `AUTODREAM_REPORT_END`, and pins come only from a closed block after it](#l2s-report-is-everything-before-the-last-autodream_report_end-and-pins-come-only-from-a-closed-block-after-it)
 - [the open-questions count is read strictly, completeness loosely, and anything unrecognised is "unknown"](#the-open-questions-count-is-read-strictly-completeness-loosely-and-anything-unrecognised-is-unknown)
 - [the open-questions section is found by sentinel lines, with a fenced-heading fallback only for legacy dates](#the-open-questions-section-is-found-by-sentinel-lines-with-a-fenced-heading-fallback-only-for-legacy-dates)
@@ -355,3 +356,17 @@ When L2 was attempted and either delivery was not validated or `report_complete`
 
 ### Consequences
 Never make the guard accept a marker-less report. See `superseded-dream-copies-retired-outside-existence-test` for how partials are retired.
+
+## report-format.sh reads a capture as bytes, and the retry log's last line stops at the report: trailer
+
+Status: accepted · Date: 2026-11-22 · Code: `bin/report-format.sh` (every `awk`, `sed` and `grep`, `report_last_line`, `report_cut_chars`), `bin/run.sh` (the staging `awk`)
+
+### Context
+Under a UTF-8 locale on macOS, `sed` fails and `awk` aborts on an invalid byte, so one stray byte in an L2 capture emptied `report_marker_count`, `report_body`, `report_after_sentinel` and `report_pin_lines`, and the retry line lost the text it quotes. `cut -c1-80` split a multibyte character in the C locale. And with no sentinel the capture still ends with `report: <path>` and a 3-line summary, which hid a prose question from the cause.
+
+### Decision
+Every text tool in `report-format.sh` that reads a capture runs under `LC_ALL=C`, as does the `awk` that stages the report in `run.sh`. The excerpt is cut by `report_cut_chars`: a lead byte starts a character and takes up to its sequence length in continuation bytes, and a stray continuation byte counts as a character, so no byte sequence gets past the 80-character limit. The trailer is the last line shaped `report: /<path>` with at most four lines after it. L2 is told "the literal path from line 2", which the prompt layout no longer makes the report path, so the shape and the distance are matched and the path is not.
+
+### Consequences
+A new `awk`, `sed` or `grep` over capture text in that file needs the prefix. A body that quotes an absolute `report: /x` line within four lines of its end loses those last lines from the excerpt, which costs log text and nothing else.
+

@@ -141,7 +141,9 @@ UTF8_LOCALE=$(locale -a 2>/dev/null | grep -i -m1 -E '^(en_US|C)\.utf-?8$')
 fx cbad     '# R\n\nbody \377\376 and then\nShould we clean up?\n'
 fx cmb      "# R\n\n$(printf 'x%.0s' $(seq 1 79))$(printf '\303\251%.0s' 1 2 3 4 5)\n"
 fx ctrail   '# R\n\nbody\n\nShould we clean up?\nreport: /tmp/dreams/2020-01-02.md\nsummary one\nsummary two\nsummary three\n'
-fx csent    '# R\n\nbody\n\nShould we clean up?\nAUTODREAM_REPORT_END\nreport: /tmp/dreams/2020-01-02.md\nsummary one\n'
+fx cquoted  '# R\n\nreport: /tmp/dreams/x.md\nl1\nl2\nl3\nl4\nShould we clean up?\n'
+fx csent    '# R\n\nquoted:\nAUTODREAM_REPORT_END\nreport: quoted input\n\nShould we clean up?\n'
+fx cstray   "# R\n\nx$(printf '\\200%.0s' $(seq 1 1000))\n"
 if [ -n "$UTF8_LOCALE" ]; then
   assert_eq "$(LC_ALL=$UTF8_LOCALE report_last_line_excerpt "$D/cbad")" "Should we clean up?" "invalid UTF-8 earlier in the capture does not blank the last line"
   assert_eq "$(LC_ALL=$UTF8_LOCALE report_incomplete_cause "$D/cbad")" "no open-questions marker, and the report ends in a question written as prose outside an AUTODREAM_QUESTIONS_BEGIN/END block" "and the prose question is still named"
@@ -149,7 +151,9 @@ fi
 assert_eq "$(LC_ALL=C report_last_line_excerpt "$D/cmb")" "$(printf 'x%.0s' $(seq 1 79))$(printf '\303\251')" "the cut keeps a multibyte character whole, 80 characters in any locale"
 assert_eq "$(report_last_line_excerpt "$D/ctrail")" "Should we clean up?" "trailing report: and summary lines do not hide the last body line"
 assert_eq "$(report_incomplete_cause "$D/ctrail")" "no open-questions marker, and the report ends in a question written as prose outside an AUTODREAM_QUESTIONS_BEGIN/END block" "so the prose question is named when the sentinel is missing"
-assert_eq "$(report_last_line_excerpt "$D/csent")" "Should we clean up?" "a sentinel ends the body for the last line as well"
+assert_eq "$(report_last_line_excerpt "$D/csent")" "Should we clean up?" "a quoted sentinel or report: line in the body hides nothing after it"
+assert_eq "$(report_last_line_excerpt "$D/cquoted")" "Should we clean up?" "an absolute report: line quoted high in the body is not the trailer"
+assert_eq "$(LC_ALL=C report_last_line_excerpt "$D/cstray" | wc -c | tr -d ' ')" "81" "stray continuation bytes count as characters, so the excerpt stays at 80 (plus the newline)"
 
 fx cbadall  '# R\n\nbad \377\376 bytes\n## Open questions\n- one\n- two\nAUTODREAM_QUESTIONS_BEGIN\n1. **Q** a?\nAUTODREAM_QUESTIONS_END\n<!-- autodream:open-questions=2 -->\nAUTODREAM_REPORT_END\nAUTODREAM_PINS_BEGIN\n{"project":"p"}\nAUTODREAM_PINS_END\nreport: x\n'
 if [ -n "$UTF8_LOCALE" ]; then

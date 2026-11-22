@@ -59,10 +59,9 @@ report_finishes(){
 report_last_line(){
   LC_ALL=C awk '
     { l[NR] = $0 }
-    /^AUTODREAM_REPORT_END$/ { e = NR }
-    /^report: / { r = NR }
+    /^report: \/[^ ]+$/ { r = NR }
     END {
-      stop = e ? e : (r ? r : NR + 1)
+      stop = (r && NR - r <= 4) ? r : NR + 1
       for (i = stop - 1; i >= 1; i--)
         if (l[i] ~ /[^[:space:]]/ && l[i] !~ /^<!-- autodream:remote-short=.* -->$/) { print l[i]; exit }
     }' "$1" 2>/dev/null | LC_ALL=C sed 's/[[:space:]]*$//'
@@ -70,10 +69,13 @@ report_last_line(){
 
 report_cut_chars(){
   LC_ALL=C awk -v max="$1" '{
-    n = 0; out = ""
+    n = 0; out = ""; cont = 0
     for (i = 1; i <= length($0); i++) {
       c = substr($0, i, 1)
-      if (c < "\200" || c >= "\300") n++
+      if (c < "\200") { cont = 0; n++ }
+      else if (c >= "\300") { cont = (c >= "\360") ? 3 : (c >= "\340") ? 2 : 1; n++ }
+      else if (cont > 0) { cont-- }
+      else { n++ }
       if (n > max) break
       out = out c
     }

@@ -3750,7 +3750,7 @@ PY
     if report_has_sentinel "$L2_STDOUT"; then
       write_session_cwds "$FINDINGS_DIR" || log "WARNING: could not write session-cwds.tsv; Lately will fall back to project buckets"
       if report_body "$L2_STDOUT" > "$REPORT_PATH.body" \
-         && { awk '!/^<!-- autodream:remote-short=.* -->$/' "$REPORT_PATH.body" && remote_short_line; } > "$REPORT_PATH.tmp" \
+         && { LC_ALL=C awk '!/^<!-- autodream:remote-short=.* -->$/' "$REPORT_PATH.body" && remote_short_line; } > "$REPORT_PATH.tmp" \
          && mv "$REPORT_PATH.tmp" "$REPORT_PATH"; then
         L2_COMPLETE=1
       else
