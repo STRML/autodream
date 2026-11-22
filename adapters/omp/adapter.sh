@@ -213,7 +213,8 @@ case "$cmd" in
       done
       for f in agent.db models.db; do
         [ -e "$osrc/$f" ] || continue
-        python3 "$ADIR/seed-db.py" "$osrc/$f" "$odst/$f" $([ "$f" = agent.db ] && printf '%s' --drop-oauth) || err "could not snapshot $osrc/$f"
+        oauth_flag=""; [ "$f" = agent.db ] && oauth_flag="--drop-oauth"
+        python3 "$ADIR/seed-db.py" "$osrc/$f" "$odst/$f" ${oauth_flag:+"$oauth_flag"} || err "could not snapshot $osrc/$f"
       done
     fi
     [ -e "$HOME/Library" ] && ln -s "$HOME/Library" "$ohome/Library"
