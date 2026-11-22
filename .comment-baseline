@@ -2,7 +2,7 @@
 .review-gate/pretest	9
 adapters/_fixture/adapter.sh	40
 adapters/claude/adapter.sh	150
-adapters/omp/adapter.sh	52
+adapters/omp/adapter.sh	88
 adapters/omp/linearize.sh	53
 adapters/omp/skills-inventory.sh	73
 adapters/omp/stats.sh	105
@@ -21,6 +21,7 @@ bin/l1-confine.sh	49
 bin/l2-prompt.sh	11
 bin/lib-flock.sh	39
 bin/lib-install-dir.sh	25
+bin/lib-path-state.sh	8
 bin/lib-project.sh	68
 bin/make-notifier.sh	22
 bin/merge-chunks.sh	36
@@ -33,7 +34,7 @@ bin/preflight.sh	34
 bin/prune-self-sessions.sh	60
 bin/prune-worktrees.sh	116
 bin/remote-sync.sh	33
-bin/run.sh	2261
+bin/run.sh	2288
 docs/demo/demo-fetch.js	10
 docs/screenshots/fixture.py	7
 extensions/omp/autodream-focus.test.ts	4
@@ -41,7 +42,7 @@ extensions/omp/autodream-focus.ts	29
 extensions/omp/focus-core.ts	31
 tests/adapter-claude.sh	104
 tests/adapter-contract.sh	81
-tests/adapter-omp.sh	49
+tests/adapter-omp.sh	51
 tests/adapters.sh	37
 tests/apply-pins.sh	7
 tests/autodream-now.sh	23
@@ -54,10 +55,11 @@ tests/install-dry-run.sh	4
 tests/install-path.sh	14
 tests/install-review-agent.sh	5
 tests/install-skill.sh	5
-tests/l1-confine-real.sh	29
-tests/l1-confine.sh	19
+tests/l1-confine-real.sh	41
+tests/l1-confine.sh	23
 tests/l2-prompt.sh	14
 tests/lib-project.sh	61
+tests/lib-store-unchanged.sh	15
 tests/lib-tmp.sh	26
 tests/merge-chunks.sh	12
 tests/mock-claude.sh	158
@@ -73,7 +75,7 @@ tests/review-cmux.sh	107
 tests/review-prompt.sh	36
 tests/review-skip.sh	40
 tests/rollup.sh	38
-tests/run-all.sh	931
+tests/run-all.sh	935
 tests/run-parallel.sh	18
 tests/scheduler-label.sh	74
 tests/session-window.sh	39
