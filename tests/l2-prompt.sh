@@ -34,7 +34,7 @@ for tok in AUTODREAM_REPORT_END AUTODREAM_PINS_BEGIN AUTODREAM_PINS_END "line 1 
 done
 
 echo "# the file states the questions block, with a literal empty example the parser accepts"
-for tok in AUTODREAM_QUESTIONS_BEGIN AUTODREAM_QUESTIONS_END "autodream:open-questions=0" "even when there is no question"; do
+for tok in AUTODREAM_QUESTIONS_BEGIN AUTODREAM_QUESTIONS_END "autodream:open-questions=0" "even when there is no question" "immediately before the AUTODREAM_REPORT_END line"; do
   case "$WANT" in *"$tok"*) ok "L2_SYSTEM.txt names $tok" ;; *) no "L2_SYSTEM.txt does not name $tok" ;; esac
 done
 # shellcheck source=/dev/null
