@@ -17,6 +17,33 @@ EOF
 }
 
 COUNTER='
+function heredoc_scan(line,   i, n, ch, q, rest, tok, w) {
+  q = ""
+  n = length(line)
+  for (i = 1; i <= n; i++) {
+    ch = substr(line, i, 1)
+    if (q != "") {
+      if (ch == q) q = ""
+      else if (ch == "\\" && q == "\"") i++
+      continue
+    }
+    if (ch == "\\") { i++; continue }
+    if (ch == "\"" || ch == "\047") { q = ch; continue }
+    if (ch == "#" && (i == 1 || substr(line, i - 1, 1) ~ /[ \t;]/)) return
+    if (substr(line, i, 3) == "<<<") { i += 2; continue }
+    if (substr(line, i, 2) != "<<") continue
+    rest = substr(line, i)
+    if (!match(rest, /^<<-?[ \t]*["\047]?[A-Za-z_][A-Za-z0-9_]*["\047]?/)) continue
+    tok = substr(rest, 1, RLENGTH)
+    hd_dash = (substr(tok, 3, 1) == "-")
+    w = tok
+    sub(/^<<-?[ \t]*/, "", w)
+    gsub(/["\047]/, "", w)
+    hd_word = w
+    inhd = 1
+    i += RLENGTH - 1
+  }
+}
 BEGIN { inhd = 0; c = 0; inblk = 0 }
 {
   line = $0
@@ -30,15 +57,7 @@ BEGIN { inhd = 0; c = 0; inblk = 0 }
     if (NR == 1 && line ~ /^#!/) next
     if (line ~ /^[ \t]*#[ \t]*shellcheck[ \t]/) next
     if (line ~ /^[ \t]*#/) { c++; next }
-    s = line
-    while (match(s, /<<-?[ \t]*["\047]?[A-Za-z_][A-Za-z0-9_]*["\047]?/)) {
-      if (substr(s, RSTART + 2, 1) == "<") { s = substr(s, RSTART + 3); continue }
-      tok = substr(s, RSTART, RLENGTH)
-      hd_dash = (substr(tok, 3, 1) == "-")
-      w = tok; sub(/^<<-?[ \t]*/, "", w); gsub(/["\047]/, "", w)
-      hd_word = w; inhd = 1
-      s = substr(s, RSTART + RLENGTH)
-    }
+    heredoc_scan(line)
     next
   }
   if (lang == "py") {
