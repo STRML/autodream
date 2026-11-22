@@ -2245,15 +2245,27 @@ remote_short_scan() {
   remote_sync_stat "remote_short_scan_unreadable: $REMOTE_SHORT_UNREADABLE"
 }
 
+# Every moved-aside copy (<report>.stale-<epoch>) of this date's earlier reports, removed once a
+# report has been delivered in their place. They are copies this runner made; nothing else reads them.
+drop_stale_report_copies() {
+  local s
+  for s in "$REPORT_PATH".stale-*; do
+    [ -f "$s" ] || continue
+    rm -f "$s" || log "WARNING: could not remove the superseded report copy $s"
+  done
+}
+
 sync_remote_roots() {
   local prev f rec
   REMOTE_PREV_SHORT=""
-  # The report this run replaces: the one at the path. Only when there is none, because a rebuild
-  # that died in L2 moved it aside, the newest .stale-<epoch> copy that has a record. A copy is never
-  # consulted while a report stands at the path, even one with no record: an older copy that a later
-  # retry did not remove would otherwise bring back a label that retry had already read.
-  if [ -f "$REPORT_PATH" ]; then
-    if prev=$(cat "$REPORT_PATH" 2>/dev/null) && rec=$(remote_report_record "$prev"); then REMOTE_PREV_SHORT=$rec; fi
+  # The report this run replaces: the one at the path if it carries a record, else the newest
+  # moved-aside .stale-<epoch> copy that does. A rebuild that died in L2 moved the real report aside
+  # and may have left a capture with no record at the path, so a record-less file at the path is no
+  # reason to ignore the copy. Copies cannot resurface an old label: a delivered report (L2 or the
+  # stub) deletes every copy it supersedes, so a copy that still exists means no report has been
+  # delivered since it was made.
+  if [ -f "$REPORT_PATH" ] && prev=$(cat "$REPORT_PATH" 2>/dev/null) && rec=$(remote_report_record "$prev"); then
+    REMOTE_PREV_SHORT=$rec
   else
     for f in "$REPORT_PATH".stale-*; do
       [ -f "$f" ] && prev=$(cat "$f" 2>/dev/null) || continue
@@ -4322,7 +4334,7 @@ EOF
     # before the record line (or anywhere else) leaves the old report, never a half stub that
     # report_complete would accept without its record.
     if [ "$STUB_WRITTEN" = 0 ] && mv -f "$REPORT_PATH.tmp" "$REPORT_PATH"; then
-      :
+      drop_stale_report_copies
     else
       rm -f "$REPORT_PATH.tmp" "$REPORT_PATH.threads"
       # A run that could not publish its report has not done what it was asked, so it fails: the
@@ -5422,7 +5434,7 @@ PY
       # hosts a report did not read, and the scan takes the last record line it finds, so one in
       # the body could become a date's record when remote sync was off and the runner wrote none.
       if report_body "$L2_STDOUT" > "$REPORT_PATH.body" \
-         && { awk '!/^<!-- autodream:remote-short=.* -->$/' "$REPORT_PATH.body"; remote_short_line; } > "$REPORT_PATH.tmp" \
+         && { awk '!/^<!-- autodream:remote-short=.* -->$/' "$REPORT_PATH.body" && remote_short_line; } > "$REPORT_PATH.tmp" \
          && mv "$REPORT_PATH.tmp" "$REPORT_PATH"; then
         L2_COMPLETE=1
       else
@@ -5513,6 +5525,11 @@ PY
       log "this run produced no complete report; the previous one for $TARGET_DATE is still at $STALE_REPORT"
     fi
   fi
+  # A delivered report also supersedes the moved-aside copies of earlier failed rebuilds, which the
+  # block above never reaches (it only knows the copy this run made). The remote-short record is
+  # read from a copy only while no report has been delivered since, so leaving them would let a
+  # label a later retry read come back.
+  if [ "${L2_DELIVERED:-0}" = 1 ] && report_complete; then drop_stale_report_copies; fi
 
   # Partials are prefixes of a report that now exists in full, so a complete report
   # supersedes every one of them for this date — including partials from earlier nights,

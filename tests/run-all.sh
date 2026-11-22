@@ -11107,6 +11107,7 @@ test_remote_sync_an_older_moved_aside_copy_is_ignored_while_a_report_stands(){
   MOCK_MODE=l2_fail AUTODREAM_L2_ATTEMPTS=1 AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
   AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
   assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short= -->' "the retry read the host and records nothing missed"
+  assert_eq "$(ls "$root/dreams/" | grep -c '\.stale-')" "0" "and a delivered report clears the moved-aside copies it supersedes"
   AUTODREAM_FORCE=1 rs_run "$root"
   assert_eq "$(rs_record "$root" "$DATE")" "" "a rebuild with remote sync off writes no record, since there is nothing to keep"
   AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
@@ -11124,6 +11125,31 @@ test_remote_sync_a_stub_that_cannot_be_published_fails_the_run(){
   assert_eq "$(cat "$root/run.exit")" "1" "the run fails, so nothing reads it as a delivered rebuild"
   assert_grep "$root/run.out" 'could not publish the report for' "and says why"
   assert_nonempty "$root/dreams/$DATE.md" "the old report is still there"
+  rm -rf "$root"
+}
+
+test_remote_sync_a_degraded_capture_at_the_path_does_not_hide_the_moved_aside_record(){
+  echo "# remote sync: a record-less capture at the report path (a rebuild killed mid-L2) does not hide the moved-aside report's record"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  printf '255\n' > "$root/rsync.a.invalid.rc"; printf 'ssh: connect to host a.invalid port 22: No route to host\n' > "$root/rsync.a.invalid.err"
+  AUTODREAM_REMOTE_ROOTS="a=a.invalid:$root/studio b=b.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short=a -->' "host a was short"
+  mv "$root/dreams/$DATE.md" "$root/dreams/$DATE.md.stale-1700000000"        # the rebuild moved the old report aside
+  printf '# Autodream - partial\n\nL2 stdout cut off here\n' > "$root/dreams/$DATE.md"   # and was killed holding a capture with no record
+  rm -f "$root/rsync.a.invalid.rc" "$root/rsync.a.invalid.err"
+  AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="b=b.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short=a -->' "the retry keeps a, which it does not configure"
+  rm -rf "$root"
+}
+
+test_remote_sync_a_failed_body_filter_is_not_published(){
+  echo "# remote sync: when the filter that drops a model-written record line fails, the report is not published"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  printf '#!/bin/bash\ncase "$*" in *remote-short*) /usr/bin/awk "$@"; exit 1 ;; esac\nexec /usr/bin/awk "$@"\n' > "$root/rsshim/awk"
+  chmod +x "$root/rsshim/awk"
+  AUTODREAM_L2_ATTEMPTS=1 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_no_file "$root/dreams/$DATE.md" "a report whose filter failed midway is not at the path"
+  assert_grep "$root/run.out" 'could not stage the sentinel-stripped report' "and the run says it could not stage it"
   rm -rf "$root"
 }
 
@@ -11352,6 +11378,8 @@ _run test_remote_sync_rebuild_with_fewer_hosts_keeps_the_record_of_the_one_it_dr
 _run test_remote_sync_failed_rebuild_with_fewer_hosts_keeps_the_dropped_host_for_the_retry
 _run test_remote_sync_an_older_moved_aside_copy_is_ignored_while_a_report_stands
 _run test_remote_sync_a_stub_that_cannot_be_published_fails_the_run
+_run test_remote_sync_a_degraded_capture_at_the_path_does_not_hide_the_moved_aside_record
+_run test_remote_sync_a_failed_body_filter_is_not_published
 _run test_remote_sync_a_record_line_the_model_writes_is_dropped
 _run test_remote_sync_rebuild_with_remote_sync_off_keeps_the_record
 _run test_remote_sync_incomplete_enumeration_marks_every_host_short
