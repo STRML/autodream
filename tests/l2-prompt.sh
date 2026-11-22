@@ -40,12 +40,26 @@ mk_tree(){ # $1=name $2=with-prompt(1|0)
   printf '%s' "$r"
 }
 # the value after --append-system-prompt in an adapter's NUL-delimited argv
-sys_prompt_of(){ tr '\0' '\n' | awk '/^--append-system-prompt$/ { getline; print; exit }'; }
+sys_prompt_of(){ python3 -I -c 'import sys; a = sys.stdin.buffer.read().split(b"\0"); sys.stdout.buffer.write(a[a.index(b"--append-system-prompt") + 1])'; }
 
 echo "# the file states the grammar the report parser reads"
 for tok in AUTODREAM_REPORT_END AUTODREAM_PINS_BEGIN AUTODREAM_PINS_END "line 1 of the prompt" "line 2 of the prompt"; do
   case "$WANT" in *"$tok"*) ok "L2_SYSTEM.txt names $tok" ;; *) no "L2_SYSTEM.txt does not name $tok" ;; esac
 done
+
+echo "# the file states the questions block, with a literal empty example the parser accepts"
+for tok in AUTODREAM_QUESTIONS_BEGIN AUTODREAM_QUESTIONS_END "autodream:open-questions=0" "even when there is no question"; do
+  case "$WANT" in *"$tok"*) ok "L2_SYSTEM.txt names $tok" ;; *) no "L2_SYSTEM.txt does not name $tok" ;; esac
+done
+# shellcheck source=/dev/null
+. "$REPO/bin/report-format.sh"
+printf '%s\n' "$WANT" | awk '$0 == "AUTODREAM_QUESTIONS_BEGIN" { on = 1 } on { print } $0 == "AUTODREAM_QUESTIONS_END" { exit }' > "$T/example-block.txt"
+{ printf '# Autodream — 2026-11-19\n\nNo sessions of note.\n\n'; cat "$T/example-block.txt"; printf 'AUTODREAM_REPORT_END\n'; } > "$T/example-report.md"
+if report_has_questions_block "$T/example-report.md"; then ok "the example block is closed the way the parser reads it"; else no "the prompt holds no closed AUTODREAM_QUESTIONS_BEGIN/END example"; fi
+assert_eq "$(report_marker_count "$T/example-report.md")" "0" "and its count marker is zero"
+if report_finishes "$T/example-report.md" 2026-11-19; then ok "a report ending in the example finishes"; else no "a report ending in the example does not finish"; fi
+
+case "$(cat "$REPO/prompts/PROMPT.md")" in *"still ends with the whole block"*) ok "PROMPT.md requires the block on a night with nothing to ask" ;; *) no "PROMPT.md does not require the block on a night with nothing to ask" ;; esac
 
 echo "# the loader"
 # shellcheck source=/dev/null
