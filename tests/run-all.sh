@@ -3446,9 +3446,9 @@ test_run_lock_release_after_an_older_runner_held_the_directory_leaves_it_alone()
   sleep 120 & old=$!
   mk_lock "$root" "$old"
   lk=$(lock_dir "$root")
-  out=$(LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"; [ -s "$LK/pid" ] && echo kept || echo discarded')
+  out=$(LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?; printf "records=[%s]\n" "$LOCK_HOLDERS"; release_lock "$LK"; [ -s "$LK/pid" ] && echo kept || echo discarded')
   kill "$old" 2>/dev/null; wait "$old" 2>/dev/null
-  assert_eq "$(printf '%s' "$out" | tr '\n' ' ')" "rc=1 kept" "the older runner's directory is refused and survives a release"
+  assert_eq "$(printf '%s' "$out" | tr '\n' ' ')" "rc=1 records=[] kept" "the older runner's directory is refused, no record is left for it, and a release leaves it alone"
   rm -rf "$root"
 }
 
