@@ -1164,6 +1164,11 @@ acquire_lock() {
   return "$rc"
 }
 
+lock_held_without_dir() {
+  case "$LOCK_HOLDERS" in *"$1=n"*) return 0 ;; esac
+  return 1
+}
+
 lock_holder_name() {
   LOCK_HOLDER=$(cat "$1/pid" 2>/dev/null) || LOCK_HOLDER=""
   [ -n "$LOCK_HOLDER" ] || LOCK_HOLDER="unknown"
@@ -1237,7 +1242,12 @@ acquire_run_lock() {
   acquire_lock "$RUN_LOCK" 2 || rc=$?
   case "$rc" in
     0) return 0 ;;
-    3) log "WARNING: could not take the per-date lock in $(dirname "$RUN_LOCK") (read-only, or no python3); running without it"; return 0 ;;
+    3) if lock_held_without_dir "$RUN_LOCK"; then
+         log "WARNING: holding the per-date flock, but its directory $RUN_LOCK could not be written (read-only, or a stale directory this user cannot change); only the dashboard's report of this run is missing"
+       else
+         log "WARNING: could not take the per-date lock in $(dirname "$RUN_LOCK") (read-only, or no python3); running without it"
+       fi
+       return 0 ;;
     *) RUN_LOCK_HOLDER="$LOCK_HOLDER"; return 1 ;;
   esac
 }

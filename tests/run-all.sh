@@ -3339,11 +3339,20 @@ test_run_lock_a_stale_directory_that_cannot_be_written_is_left_as_found(){
   echo "# the run lock: metadata that cannot be written is cannot-lock, nothing in the stale directory changes and release leaves it (#242)"
   [ "$(id -u)" != 0 ] || { echo "  skip - root can write any file"; return 0; }
   local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
-  local lk="$root/autodream/locks/x.lock" dead out
+  local lk="$root/autodream/locks/x.lock" flk="$root/autodream/locks/x.flock" dead out top i=0
   true & dead=$!; wait "$dead" 2>/dev/null
   mkdir -p "$lk"; printf '%s\n' "$dead" > "$lk/pid"; printf 'Mon Jan  1 00:00:00 2018\n' > "$lk/start"; chmod 444 "$lk/pid"
-  out=$(LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"; cat "$LK/pid" "$LK/start"')
+  LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?; sleep 5; release_lock "$LK"; cat "$LK/pid" "$LK/start"' > "$root/acq.out" 2>&1 &
+  top=$!
+  while ! grep -q '^rc=' "$root/acq.out" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  flock_free "$flk" && no "the flock is held between acquire and release, only the directory report is missing" || ok "the flock is held between acquire and release, only the directory report is missing"
+  wait "$top" 2>/dev/null
+  flock_free "$flk" && ok "the flock is free after release" || no "the flock outlived release"
+  out=$(cat "$root/acq.out")
   assert_eq "$(printf '%s' "$out" | tr '\n' '|')" "rc=3|$dead|Mon Jan  1 00:00:00 2018" "cannot-lock, and neither file changed, even the writable one, and release kept both"
+  out=$(LK="$lk" lock_fn "$root/autodream" 'log(){ echo "log: $*"; }; RUN_LOCK="$LK"; acquire_run_lock; echo rc=$?; release_run_lock')
+  case "$out" in *"log: WARNING: holding the per-date flock, but its directory"*"rc=0"*) ok "the run says the flock is held and only the directory report is missing" ;; *) no "the log line for a held flock with no directory ($out)" ;; esac
+  case "$out" in *"running without it"*) no "the run claims to run without a lock it holds" ;; *) ok "and does not claim to run without it" ;; esac
   rm -rf "$root"
 }
 
