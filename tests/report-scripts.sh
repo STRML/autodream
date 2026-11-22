@@ -31,6 +31,20 @@ collect(){ # runs the collector the way run.sh does; sets RC
 row(){ awk -F'\t' -v n="$1" '$1 == n { print $2 }' "$F/report-index.txt"; }
 SESSION_SKIP="process table: pgrep cannot list sessions here (the sandbox); CI and launchd can"
 session_probe_usable(){ pgrep -s "$$" > /dev/null 2>&1; [ $? -le 1 ]; }
+if [ -n "${GITHUB_ACTIONS:-}" ]; then
+  perl -MPOSIX -e 'POSIX::setsid(); exec { $ARGV[0] } @ARGV; exit 127' sleep 20 & dbg_pid=$!
+  sleep 1
+  dbg_s=$(pgrep -s "$dbg_pid" 2>&1); dbg_src=$?
+  dbg_g=$(pgrep -g "$dbg_pid" 2>&1); dbg_grc=$?
+  dbg_ps=$(ps -o pid=,pgid=,sess=,command= -p "$dbg_pid" 2>&1)
+  kill "$dbg_pid" 2>/dev/null; wait "$dbg_pid" 2>/dev/null
+  sleep 0.3
+  dbg_after=$(pgrep -s "$dbg_pid" 2>&1); dbg_arc=$?
+  perl -MPOSIX -e 'POSIX::setsid(); exec { $ARGV[0] } @ARGV; exit 127' /usr/bin/true & dbg_t=$!
+  wait "$dbg_t"; dbg_trc=$?
+  dbg_tafter=$(pgrep -s "$dbg_t" 2>&1); dbg_tarc=$?
+  echo "::error::sessdbg uname=$(uname -s) pid=$dbg_pid live_s=[$(echo $dbg_s)] rc=$dbg_src live_g=[$(echo $dbg_g)] rc=$dbg_grc ps=[$dbg_ps] after_kill_s=[$(echo $dbg_after)] rc=$dbg_arc true_rc=$dbg_trc after_true_s=[$(echo $dbg_tafter)] rc=$dbg_tarc"
+fi
 if ! session_probe_usable && [ "${CI:-}" != true ]; then
   skip "$SESSION_SKIP: every entry would be failed, so the whole suite is skipped"
   echo "passed: 0   failed: 0   skipped: $skipped"
