@@ -13,7 +13,6 @@ FAIL=0
 . "$PORTABLE"
 AS_OF=$(pdate_shift "$(pdate_yesterday)" 1 d) || exit 1
 
-# Portable delete for test fixtures: /usr/bin/trash exists only on macOS, and CI runs Linux.
 remove_path() { python3 -c 'import os,shutil,sys
 p=sys.argv[1]
 if os.path.isdir(p) and not os.path.islink(p): shutil.rmtree(p)
@@ -63,7 +62,7 @@ test_threads_move_targets() {
   assert_eq "$(printf '%s' "$row" | jq -c '[.kind, .status, has("done_by"), has("kept_open")]')" '["idea","open",false,false]' "move idea stores an open idea"
   assert_eq "$(printf '%s' "$row" | jq -r '.sessions[0].kind')" work "move freezes a legacy session's provenance"
   assert_eq "$(listed_status "$dir" t-00000001)" open "an idea is never dropped"
-  AUTODREAM_DIR="$dir" "$THREADS" move t-00000001 done >/dev/null 2>&1
+  AUTODREAM_DIR="$dir" "$THREADS" move t-00000001 "done" >/dev/null 2>&1
   row=$(state_json "$dir" t-00000001)
   assert_eq "$(printf '%s' "$row" | jq -c '[.kind, .status, .done_by]')" '["idea","closed_by_sam","sam"]' "move done closes as Sam"
   AUTODREAM_DIR="$dir" "$THREADS" move t-00000001 open >/dev/null 2>&1
@@ -546,8 +545,6 @@ test_threads_fresh_old_lock_directory_blocks_during_upgrade() {
 }
 
 test_threads_status_write_sets_no_signal_trap() {
-  # With a kernel flock, process death releases the lock. A trap that released it and let bash
-  # continue would publish a stale copy after another writer took the lock.
   if grep -q 'trap ' "$THREADS"; then no "threads.sh installs no signal trap"; else ok "threads.sh installs no signal trap"; fi
 }
 

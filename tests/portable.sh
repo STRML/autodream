@@ -1,8 +1,4 @@
 #!/bin/bash
-# bin/portable.sh: the BSD and GNU branches must give the same answer. Expected values are
-# literals worked out by hand, not another `date` call, so a branch that drifts fails here
-# whichever OS runs the suite. CI runs it on Linux with every push and on macOS whenever
-# portable.sh changes, which is what exercises the other branch.
 set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -65,12 +61,8 @@ tmo 5 true; eq "$?" 0 "tmo passes a zero status through"
 tmo 5 sh -c 'exit 7'; eq "$?" 7 "tmo passes a nonzero status through"
 start=$SECONDS; tmo 1 sleep 5 && slow_rc=0 || slow_rc=$?
 [ "$slow_rc" -ne 0 ] && [ $((SECONDS - start)) -lt 4 ] && eq ok ok "tmo kills a command past its bound" || eq "rc=$slow_rc" ok "tmo kills a command past its bound"
-# With no timeout binary tmo backgrounds the command, and bash hands a background job /dev/null
-# as stdin unless it is redirected explicitly. A PATH holding only cat, sleep, kill and pkill
-# forces that fallback on any host, Linux CI included.
 nt=$(mktemp -d "${TMPDIR:-/tmp}/tmo-nt.XXXXXX")
 for tool in cat sleep kill pkill; do p=$(command -v "$tool") && ln -s "$p" "$nt/$tool"; done
-# A fresh bash: this shell has already hashed timeout's path, and command -v answers from that.
 fallback_out=$(printf 'piped\n' | PATH="$nt" /bin/bash -c '. "$1"; tmo 5 cat' _ "$REPO/bin/portable.sh")
 eq "$fallback_out" "piped" "tmo without a timeout binary keeps the caller's stdin"
 closed_out=$(PATH="$nt" /bin/bash -c '. "$1"; tmo 5 cat 0<&-; echo "rc=$?"' _ "$REPO/bin/portable.sh" 0<&-)
@@ -78,9 +70,6 @@ eq "$closed_out" "rc=0" "tmo without a timeout binary still runs when the caller
 fallback_err=$(PATH="$nt" /bin/bash -c '. "$1"; tmo 5 /bin/bash -c '\''echo child-error >&2; exit 7'\''; rc=$?; echo caller-error >&2; exit "$rc"' _ "$REPO/bin/portable.sh" 2>&1) && fallback_rc=0 || fallback_rc=$?
 eq "$fallback_rc" 7 "fallback preserves a failing command status"
 eq "$fallback_err" "$(printf 'child-error\ncaller-error')" "fallback preserves child and caller stderr"
-# The watchdog's sleep must end with the command, not run on for the whole bound.
-# A sleep shim that records its pid and then becomes the real sleep, so the test can ask kill -0
-# about it instead of reading a process table (pgrep and ps are denied in some sandboxes).
 sp_dir=$(mktemp -d "${TMPDIR:-/tmp}/tmo-sp.XXXXXX")
 real_sleep=$(command -v sleep)
 printf '#!/bin/bash\necho $$ > "%s/pid"\nexec "%s" "$@"\n' "$sp_dir" "$real_sleep" > "$sp_dir/sleep"

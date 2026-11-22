@@ -1,31 +1,4 @@
 #!/bin/bash
-# Tests for what bin/review.sh hands the triage session.
-#
-# The session's --append-system-prompt used to carry the ENTIRE report. On
-# 2026-10-27 that refused every launch: the 2026-10-26 report narrated a night
-# of Samsung TV work (sdb, root status, dlopen), and Opus 5.5's classifiers
-# answered "Opus 5.5's safeguards flagged this session ... [cyber]" before the
-# first reply — on the literal prompt "go". The report's questions section is
-# ~2KB of decision text and passes; the findings body does not.
-#
-# What review.sh inlines is report-format.sh's contract, not a markdown parse:
-# the text between AUTODREAM_QUESTIONS_BEGIN and AUTODREAM_QUESTIONS_END, with
-# the old heading-to-next-heading read kept only for reports written before that
-# block existed. So the assertions here are:
-#
-#   * block present  -> its content inlined verbatim, findings body absent
-#   * block content  -> markdown inside it is text, not structure: a fenced or
-#                       plain `## ` inside the block does not end anything
-#   * legacy report  -> the heading fallback still inlines the section
-#   * cap            -> all or nothing; an oversized block is not inlined at all
-#   * launch prompt  -> a real instruction, not a bare "go"
-#   * temp files     -> none survive the launch
-#
-# The mock claude dumps each argv element to $ARGV_DIR/argN so the assertions
-# read exactly what the session would receive. No network, no model calls.
-#
-# Usage:  tests/review-prompt.sh
-# Exit:   0 if every assertion passes, 1 otherwise.
 
 set -u
 
@@ -36,11 +9,8 @@ REPO=$(cd "$HERE/.." && pwd)
 REVIEW="$REPO/bin/review.sh"
 
 pass=0; fail=0
-ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
-no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
-assert_grep(){   grep -q -- "$2" "$1" 2>/dev/null && ok "$3" || no "$3 (no /$2/ in $1)"; }
-assert_nogrep(){ grep -q -- "$2" "$1" 2>/dev/null && no "$3 (/ $2 / unexpectedly in $1)" || ok "$3"; }
-assert_eq(){     [ "$1" = "$2" ] && ok "$3" || no "$3 (got [$1] want [$2])"; }
+# shellcheck source=/dev/null
+. "$HERE/lib-assert.sh"
 
 setup_env(){
   local root; root=$(mktemp -d "${TMPDIR:-/tmp}/ccrevprompt.XXXXXX")
@@ -74,8 +44,6 @@ run_review(){ # $1=root [args...]
 system_prompt(){ cat "$1/argv/arg4" 2>/dev/null; }
 launch_prompt(){ cat "$1/argv/arg5" 2>/dev/null; }
 
-# A report shaped the way PROMPT.md mandates now: findings body, then the
-# questions block. FINDINGS-SENTINEL only ever appears in the body.
 mk_report(){ # $1=root $2=date $3=questions-block-body
   local root="$1" date="$2" q="$3"
   {
@@ -97,8 +65,6 @@ Q_BLOCK='## Open questions for the user
 
 <!-- autodream:open-questions=1 -->'
 
-# --- tests -----------------------------------------------------------------
-
 test_block_content_is_inlined_findings_not(){
   local root; root=$(setup_env); mk_report "$root" 2020-01-02 "$Q_BLOCK"
   run_review "$root" --force 2020-01-02
@@ -113,8 +79,6 @@ test_block_content_is_inlined_findings_not(){
 
 test_markdown_inside_the_block_is_text(){
   local root; root=$(setup_env)
-  # Headings and fences inside the block are content. Under the old markdown
-  # parse these ended the section; under the block contract they cannot.
   {
     printf '# Autodream — 2020-01-02\n\n## Top patterns\n\nBODY-SENTINEL\n\n'
     printf 'AUTODREAM_QUESTIONS_BEGIN\n'
@@ -132,8 +96,6 @@ test_markdown_inside_the_block_is_text(){
 
 test_legacy_report_uses_the_heading_fallback(){
   local root; root=$(setup_env)
-  # No block: the report predates the contract. notify.sh's old heading read is
-  # the fallback, so the triage session still gets its questions.
   {
     printf '# Autodream — 2020-01-02\n\n## Top patterns\n\nLEGACY-BODY\n\n'
     printf '## Open questions for the user\n\n1. **Legacy question** — still works?\n\n'
@@ -210,8 +172,6 @@ test_unclosed_block_is_not_a_block(){
 
 test_oversized_legacy_report_points_at_the_heading(){
   local root; root=$(setup_env)
-  # No block, and too big to inline: the prompt must send the session to the
-  # heading section, not to sentinels this report does not contain.
   local big; big=$(head -c 13000 /dev/zero | tr '\0' 'q')
   {
     printf '# Autodream — 2020-01-02\n\n## Open questions for the user\n\n1. **Huge** — %s\n\n' "$big"

@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# The global /autodream skill: where install.sh links it, and when it leaves it alone.
-#
-# The install target is a sandbox directory (its first positional argument) and HOME is a
-# sandbox too, so nothing here touches ~/.claude. --no-schedule keeps launchd out of it.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,7 +21,6 @@ new_sandbox() {
   SANDBOX=$(cd "$SANDBOX" && pwd)
   mkdir -p "$SANDBOX/home" "$SANDBOX/target"
 }
-# install [env KEY=VALUE ...] -- <installer args>
 install() {
   local envs=()
   while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done

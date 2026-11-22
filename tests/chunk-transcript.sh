@@ -1,17 +1,4 @@
 #!/bin/bash
-# Unit tests for bin/chunk-transcript.sh: split a transcript into chunks an L1 worker can read,
-# cutting only at line boundaries.
-#
-# Why this exists. A day of a long session slims to far more than one worker can read, and eliding
-# the middle is how L1 came to see 2% of a conversation. The chunker keeps every line and the merge
-# step turns the per-chunk answers back into the one findings JSON per session that L2 reads. The
-# properties that matter are the ones a smoke test cannot see: no line is ever split, nothing is
-# lost or reordered when the cap is not hit, an over-the-cap session reports what it dropped, and a
-# cap or a size that cannot be honoured never turns into a read of the whole transcript.
-#
-# Contract: chunk-transcript.sh SRC OUTDIR CHUNK_BYTES MAX_CHUNKS
-#   stdout "COUNT ELIDED"   OUTDIR/chunk-01.jsonl ... COUNT files
-#   exit 0 ok, 1 empty source, 2 usage, unreadable source or a failure writing chunks
 
 set -u
 
@@ -22,9 +9,8 @@ REPO=$(cd "$HERE/.." && pwd)
 CH="$REPO/bin/chunk-transcript.sh"
 
 pass=0; fail=0
-ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
-no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
-assert_eq(){ [ "$1" = "$2" ] && ok "$3" || no "$3 (got [$1] want [$2])"; }
+# shellcheck source=/dev/null
+. "$HERE/lib-assert.sh"
 
 [ -x "$CH" ] || {
   printf '  FAIL - bin/chunk-transcript.sh missing or not executable\n'
@@ -36,7 +22,6 @@ command -v jq >/dev/null 2>&1 || {
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/chtest.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 
-# A line of exactly 100 bytes including its newline, tagged with its number.
 line(){ printf '{"n":%d,"pad":"%s"}\n' "$1" "$(printf 'x%.0s' $(seq 1 $((84 - ${#1}))))"; }
 mk(){ : > "$1"; local i; for i in $(seq 1 "$2"); do line "$i" >> "$1"; done; }
 count_files(){ ls "$1"/chunk-*.jsonl 2>/dev/null | wc -l | tr -d ' '; }
@@ -66,8 +51,6 @@ empty=0; for f in "$OUT"/chunk-*.jsonl; do [ -s "$f" ] || empty=1; done
 assert_eq "$empty" "0" "and no chunk is empty"
 
 echo "# chunk: a tool call and its result are never torn, only separated across a cut"
-# Two lines that belong together, forced across the boundary by the limit. Both stay whole, in
-# order, the call ending one chunk and the result opening the next.
 { line 1; printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_X","name":"Bash","input":{"command":"ls"}}]},"pad":"%s"}\n' "$(printf 'p%.0s' $(seq 1 40))"
   printf '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_X","content":"out"}]},"pad":"%s"}\n' "$(printf 'q%.0s' $(seq 1 40))"; line 4; } > "$TMP/pair.jsonl"
 OUT="$TMP/op"; mkdir -p "$OUT"
@@ -87,8 +70,6 @@ assert_eq "$(jq -r .n "$OUT/chunk-02.jsonl")" "2" "the oversize line sits alone 
 assert_eq "$(wc -l < "$OUT/chunk-02.jsonl" | tr -d ' ')" "1" "and is intact (one whole line)"
 
 echo "# chunk: the limit counts bytes, not characters"
-# 60 two-byte characters is 120 bytes. At a 130-byte limit two such lines (2 x 123) do not fit
-# together, so a character count (2 x 63) would have put both in one chunk.
 mb(){ printf '{"n":%d,"t":"%s"}\n' "$1" "$(printf 'é%.0s' $(seq 1 60))"; }
 { mb 1; mb 2; mb 3; } > "$TMP/mb.jsonl"
 OUT="$TMP/omb"; mkdir -p "$OUT"
@@ -160,8 +141,6 @@ echo "# chunk: failure modes"
 "$CH" "$TMP/small.jsonl" "$TMP/o6" abc 8 >/dev/null 2>&1; assert_eq "$?" "2" "a non-numeric chunk size exits 2 (usage)"
 "$CH" "$TMP/small.jsonl" "$TMP/o6" 1000 abc >/dev/null 2>&1; assert_eq "$?" "2" "a non-numeric cap exits 2 (usage)"
 "$CH" "$TMP/small.jsonl" >/dev/null 2>&1; assert_eq "$?" "2" "missing arguments exit 2 (usage)"
-# A directory that cannot be written: the failure must leave no half split behind for a caller
-# that ignores the status, and the status must say so.
 mkdir -p "$TMP/ro"; chmod 500 "$TMP/ro"
 "$CH" "$TMP/ten.jsonl" "$TMP/ro/out" 350 8 >/dev/null 2>&1; assert_eq "$?" "2" "an output directory that cannot be created exits 2"
 chmod 700 "$TMP/ro"

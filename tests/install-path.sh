@@ -1,14 +1,4 @@
 #!/usr/bin/env bash
-# What install.sh puts in the nightly plist's PATH, and which agents it provisions.
-#
-# HOME is a sandbox and launchctl is a shim that records its calls, so nothing here touches this
-# machine's launchd. Every tool is a fake executable; the installer only needs to find them.
-# The cases:
-#   - a PATH entry under a temp directory (a cmux shim, a per-session dir) never reaches a plist,
-#     and a CLAUDE_BIN taken from one is never pinned;
-#   - --no-review, and AUTODREAM_REVIEW_AGENT=0 in the environment or the config, provision no
-#     review agent and remove one that is there;
-#   - the CLI of every enabled adapter is reachable from the plist PATH, not only claude's.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,8 +20,6 @@ fake() { printf '#!/bin/bash\nexit 0\n' > "$1"; chmod +x "$1"; }
 new_sandbox() { # sets SANDBOX FAKE_HOME LA CALLS; fake launchctl, cmux and claude
   [ -n "$SANDBOX" ] && rm -rf "$SANDBOX"
   SANDBOX=$(mktemp -d "${TMPDIR:-/tmp}/ccad-ip.XXXXXX")
-  # macOS TMPDIR ends in a slash, so the path above holds a "//". The installer writes the
-  # directories it finds through cd and pwd, which collapse it; compare against the same form.
   SANDBOX=$(cd "$SANDBOX" && pwd)
   FAKE_HOME="$SANDBOX/home"; LA="$FAKE_HOME/Library/LaunchAgents"
   mkdir -p "$LA" "$SANDBOX/shim" "$SANDBOX/bin"
@@ -41,7 +29,6 @@ new_sandbox() { # sets SANDBOX FAKE_HOME LA CALLS; fake launchctl, cmux and clau
   chmod +x "$SANDBOX/shim/launchctl"
   fake "$SANDBOX/bin/cmux"; fake "$SANDBOX/bin/claude"
 }
-# run_install <PATH> [env KEY=VALUE ...] -- <installer args>
 run_install() {
   local p="$1"; shift
   local envs=()
@@ -52,7 +39,6 @@ run_install() {
 }
 nightly_plist() { local f; for f in "$LA"/*.plist; do case "$f" in *-review.plist|*-web.plist) ;; *) echo "$f"; return ;; esac; done; }
 review_plist()  { ls "$LA"/*-review.plist 2>/dev/null | head -1; }
-# The PATH string of a plist file, or of the first plist a dry run printed.
 plist_path()    { sed -n 's|.*<key>PATH</key><string>\(.*\)</string>.*|\1|p' "$1" | head -1; }
 has_dir()       { case ":$1:" in *":$2:"*) return 0 ;; *) return 1 ;; esac; }
 

@@ -1,11 +1,4 @@
 #!/usr/bin/env bash
-# The note surface has two halves in different scripts, and they have to agree on
-# one path. autodream-note.sh (writer) hardcoded $HOME/.claude/autodream while
-# vault-notes.sh (reader) resolves AUTODREAM_DIR, so under this port's install the
-# writer appended to a file the nightly never opened. Nothing errored: no missing
-# note, no warning, just an operator note that never reached the report.
-#
-# These rows assert the two halves land on the same file, per resolution path.
 
 set -uo pipefail
 
@@ -15,15 +8,9 @@ WRITER="$REPO/bin/autodream-note.sh"
 
 PASS=0
 FAIL=0
-# GitHub's macOS runners set TMPDIR with a trailing slash, and mktemp keeps the "//" it
-# makes. The reader resolves its own directory with cd && pwd, which collapses it, so the
-# seam row's string comparison failed in CI and passed locally. Strip the slash first.
 tmproot="${TMPDIR:-/tmp}"
 SANDBOX="$(mktemp -d "${tmproot%/}/notes-path.XXXXXX")"
 
-# vault-notes.sh defaults AUTODREAM_CONFIG to $AUTODREAM_DIR/config and sources it.
-# Every other suite pins this; without it a developer whose real config points
-# AUTODREAM_VAULT_DIR at a live Obsidian vault has these rows reaching into it.
 export AUTODREAM_CONFIG="$SANDBOX/nonexistent-config"
 trap 'rm -rf "$SANDBOX"' EXIT
 
@@ -32,13 +19,10 @@ nope() { FAIL=$((FAIL + 1)); printf '  FAIL %s\n     %s\n' "$1" "$2"; }
 
 printf 'notes-path\n'
 
-# --- AUTODREAM_DIR from the environment wins (the launchd nightly's case) ------
 INSTALL="$SANDBOX/install1/autodream"
 mkdir -p "$INSTALL"
 : > "$INSTALL/config"
 mkdir -p "$SANDBOX/fakehome"
-# HOME points at the sandbox so the legacy-path row below can fail: with the real HOME it would
-# be checking a directory nothing in this test could ever write to.
 HOME="$SANDBOX/fakehome" AUTODREAM_DIR="$INSTALL" bash "$WRITER" "env-routed note" >/dev/null 2>&1
 if [ -s "$INSTALL/notes.md" ] && grep -q "env-routed note" "$INSTALL/notes.md"; then
   ok "AUTODREAM_DIR from the environment routes the note there"
@@ -51,9 +35,6 @@ else
   ok "the legacy path is not written when AUTODREAM_DIR is set"
 fi
 
-# --- with no env, the writer resolves from its own installed location ---------
-# install.sh symlinks bin/*.sh into $TARGET, so the writer's own dir IS the
-# install dir. Reproduce that rather than trusting the repo layout.
 INSTALL2="$SANDBOX/install2/autodream"
 mkdir -p "$INSTALL2"
 : > "$INSTALL2/config"
@@ -65,11 +46,6 @@ else
   nope "an installed symlink routes the note to its own install dir" "not in $INSTALL2/notes.md"
 fi
 
-# --- the reader agrees with the writer, which is the whole point --------------
-# Behavioural, not a source-grep. Both scripts contain the string
-# "$AUTODREAM_DIR/notes.md", so matching that expression passes even when the two
-# resolve AUTODREAM_DIR to different directories - which is exactly the bug. Run
-# both from their installed location with no env and compare the actual file.
 INSTALL3="$SANDBOX/install3/autodream"
 mkdir -p "$INSTALL3"
 : > "$INSTALL3/config"
@@ -84,7 +60,6 @@ case "$READER_SAYS" in
   *) nope "the reader names the same file the writer wrote, with no env set" "reader said: ${READER_SAYS:-<no notes-file line>}" ;;
 esac
 
-# And the note itself has to be visible to the reader's file, not merely adjacent.
 if [ -s "$INSTALL3/notes.md" ] && grep -q "seam note" "$INSTALL3/notes.md"; then
   ok "the note landed in the install dir both halves resolve to"
 else

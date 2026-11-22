@@ -26,14 +26,8 @@ def main() -> int:
         try:
             os.execvp(sys.argv[1], sys.argv[1:])
         except OSError as err:
-            # In the child, stderr is the pty: say it plainly, not as a traceback, and use the
-            # shell's status for a command that cannot be run.
             print(f"with-pty: cannot run {sys.argv[1]}: {err.strerror}", file=sys.stderr)
             os._exit(127)
-    # Best effort, once the child has had time to exec: canonical mode, so the newline completes
-    # a line and ^D at the start of a line is end-of-file. A program that flushes its terminal
-    # input after this (readline does) discards them, and one that reads its terminal would then
-    # wait; the commands this runs do not.
     time.sleep(0.2)
     try:
         os.write(fd, b"\n\x04")
