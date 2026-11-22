@@ -38,6 +38,7 @@ if [ -f "$CONFIG_FILE" ]; then
   AUTODREAM_DIR=$THREADS_INSTALL_DIR
   unset THREADS_INSTALL_DIR
 fi
+: "${ADAPTERS_REJECT_LOG:=/dev/null}"
 
 STATE=${AUTODREAM_THREADS_STATE:-$AUTODREAM_DIR/threads.jsonl}
 IDEA_OFFERS="$AUTODREAM_DIR/threads-idea-offers.tsv"

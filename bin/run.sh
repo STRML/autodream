@@ -999,12 +999,6 @@ report_finishes_date() {
   [[ "$TARGET_DATE" < "${AUTODREAM_MARKER_EPOCH:-2026-08-19}" ]]
 }
 
-lock_held_by_live_run() {
-  local lock="$AUTODREAM_DIR/locks/run-$1.lock" pid
-  pid=$(cat "$lock/pid" 2>/dev/null) || return 1
-  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
-}
-
 sweep_stranded_pins() {
   local window="${AUTODREAM_UNASSEMBLED_WINDOW:-7}" root="$AUTODREAM_DIR/findings"
   local d label report res n
@@ -1017,7 +1011,7 @@ sweep_stranded_pins() {
     report="$DREAMS_DIR/$label.md"
     report_finishes "$report" "$label" || continue
     [ ! "$d/pins.jsonl" -nt "$report" ] || continue
-    if [ "$label" != "$TARGET_DATE" ] && lock_held_by_live_run "$label"; then
+    if [ "$label" != "$TARGET_DATE" ] && lock_is_held "$AUTODREAM_DIR/locks/run-$label.lock"; then
       log "pin sweep: $label has a run in flight; leaving its pins to that run"
       continue
     fi
@@ -1040,56 +1034,247 @@ sweep_stranded_pins() {
 
 RUN_LOCK="$AUTODREAM_DIR/locks/run-$TARGET_DATE.lock"
 LOCK_HOLDER=""
+LOCK_HOLDERS=""
 
 proc_start() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '; }
 
-lock_holder_state() { # $1=lock dir
-  local pid start
+LOCK_HOLD_PY='
+import fcntl, os, sys, time
+owner = os.getppid()
+path, res, wait = sys.argv[1], sys.argv[2], float(sys.argv[3])
+if owner == 1:
+    sys.exit(0)
+
+def say(word):
+    with open(res, "w") as out:
+        out.write(word + "\n")
+
+def owner_alive():
+    try:
+        os.kill(owner, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+try:
+    fd = os.open(path, os.O_RDONLY | os.O_CREAT, 0o644)
+except PermissionError:
+    say("held" if os.path.exists(path) else "error")
+    sys.exit(0)
+except OSError:
+    say("error")
+    sys.exit(0)
+try:
+    end = time.monotonic() + wait
+    while True:
+        if not owner_alive():
+            sys.exit(0)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.monotonic() >= end:
+                say("held")
+                sys.exit(0)
+            time.sleep(min(0.2, max(0.0, end - time.monotonic())))
+except SystemExit:
+    raise
+except BaseException:
+    say("error")
+    sys.exit(0)
+if not owner_alive():
+    sys.exit(0)
+say("ok %d" % owner)
+while owner_alive():
+    time.sleep(0.25)
+'
+
+lock_dir_young() { [ -n "$(find "$1" -maxdepth 0 -mmin -1 2>/dev/null)" ]; }
+
+lock_pid_alive() {
+  local rc=0
+  python3 -c 'import os, sys
+try:
+    os.kill(int(sys.argv[1]), 0)
+except ProcessLookupError:
+    sys.exit(91)
+except Exception:
+    pass' "$1" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 91 ]
+}
+
+lock_names_live_run() {
+  local pid start now
+  [ -d "$1" ] || return 1
   pid=$(cat "$1/pid" 2>/dev/null) || pid=""
-  [ -n "$pid" ] || return 2
-  kill -0 "$pid" 2>/dev/null || return 1
+  case "$pid" in ''|*[!0-9]*|0*) lock_dir_young "$1"; return ;; esac
+  lock_pid_alive "$pid" || return 1
   start=$(cat "$1/start" 2>/dev/null) || start=""
-  [ -z "$start" ] || [ "$(proc_start "$pid")" = "$start" ]
+  [ -n "$start" ] || return 0
+  now=$(proc_start "$pid")
+  [ -z "$now" ] || [ "$now" = "$start" ]
 }
 
-reclaim_lock() { # $1=lock dir $2=the pid judged stale ("" when none was ever written)
-  local dead="$1.stale.$$"
-  mv "$1" "$dead" 2>/dev/null || return 0
-  if [ "$(cat "$dead/pid" 2>/dev/null)" = "$2" ]; then
-    rm -rf "$dead"
-    return 0
-  fi
-  mv "$dead" "$1" 2>/dev/null || { log "WARNING: could not restore another run's lock from $dead"; return 0; }
-}
-
-acquire_lock() { # $1=lock dir
-  mkdir -p "$(dirname "$1")" 2>/dev/null || return 3
-  local tries=0 st pid
-  until mkdir "$1" 2>/dev/null; do
-    pid=$(cat "$1/pid" 2>/dev/null) || pid=""
-    lock_holder_state "$1"; st=$?
-    [ "$st" -ne 0 ] || { LOCK_HOLDER="$pid"; return 1; }
-    tries=$((tries + 1))
-    if [ "$st" -eq 2 ] && [ "$tries" -le 3 ]; then sleep 1; continue; fi
-    reclaim_lock "$1" "$pid"
-    [ "$tries" -lt 8 ] || { LOCK_HOLDER="${pid:-unknown}"; return 1; }
-  done
-  printf '%s\n' "$$" > "$1/pid"
-  proc_start "$$" > "$1/start"
+lock_stop_holder() {
+  kill "$1" 2>/dev/null || return 0
+  wait "$1" 2>/dev/null || true
   return 0
 }
 
-release_lock() { # $1=lock dir
-  [ "$(cat "$1/pid" 2>/dev/null)" = "$$" ] || return 0
-  rm -rf "$1"
+acquire_lock() {
+  local dir="$1" wait="${2:-0}" flk="${1%.lock}.flock" locks res holder verdict="" owner i=0 end rc
+  locks=$(dirname "$dir")
+  mkdir -p "$locks" 2>/dev/null || return 3
+  command -v python3 >/dev/null 2>&1 || return 3
+  find "$locks" -maxdepth 1 -name '.hold.*' -mmin +10 -exec rm -f {} + 2>/dev/null || true
+  res=$(mktemp "$locks/.hold.XXXXXX" 2>/dev/null) || return 3
+  python3 -c "$LOCK_HOLD_PY" "$flk" "$res" "$wait" </dev/null >/dev/null 2>&1 &
+  holder=$!
+  end=$((SECONDS + wait + 10))
+  until [ -s "$res" ]; do
+    kill -0 "$holder" 2>/dev/null || break
+    [ "$SECONDS" -lt "$end" ] || break
+    if [ "$i" -lt 40 ]; then sleep 0.05; else sleep 0.5; fi
+    i=$((i + 1))
+  done
+  verdict=$(head -n 1 "$res" 2>/dev/null) || verdict=""
+  rm -f "$res"
+  owner="${verdict#* }"
+  case "$verdict" in
+    "ok "[0-9]*) ;;
+    held)
+      wait "$holder" 2>/dev/null || true
+      lock_holder_name "$dir"
+      return 1 ;;
+    *) lock_stop_holder "$holder"; return 3 ;;
+  esac
+  rc=0
+  lock_take_dir "$dir" "$owner" || rc=$?
+  if [ "$rc" -eq 1 ]; then
+    lock_stop_holder "$holder"
+    return 1
+  fi
+  if [ "$rc" -eq 0 ] && [ "$LOCK_DIR_MADE" -eq 1 ]; then
+    LOCK_HOLDERS="$LOCK_HOLDERS$dir=$holder"$'\n'
+  elif [ "$rc" -eq 0 ]; then
+    LOCK_HOLDERS="$LOCK_HOLDERS$dir=t$holder"$'\n'
+  else
+    LOCK_HOLDERS="$LOCK_HOLDERS$dir=n$holder"$'\n'
+  fi
+  return "$rc"
+}
+
+lock_held_without_dir() {
+  case "$LOCK_HOLDERS" in *"$1=n"*) return 0 ;; esac
+  return 1
+}
+
+lock_holder_name() {
+  LOCK_HOLDER=$(cat "$1/pid" 2>/dev/null) || LOCK_HOLDER=""
+  [ -n "$LOCK_HOLDER" ] || LOCK_HOLDER="unknown"
+}
+
+LOCK_DIR_MADE=0
+
+lock_take_dir() {
+  local dir="$1" owner="$2"
+  LOCK_DIR_MADE=0
+  if lock_names_live_run "$dir"; then
+    lock_holder_name "$dir"
+    return 1
+  fi
+  if [ -L "$dir" ] || { [ -e "$dir" ] && [ ! -d "$dir" ]; }; then
+    return 3
+  fi
+  if [ ! -e "$dir" ]; then
+    if ! mkdir "$dir" 2>/dev/null; then
+      [ -d "$dir" ] || return 3
+      lock_holder_name "$dir"
+      return 1
+    fi
+    LOCK_DIR_MADE=1
+  fi
+  lock_meta_writable "$dir" || return 3
+  lock_write_meta "$dir" "$owner" || return 3
+  return 0
+}
+
+lock_meta_writable() {
+  local f
+  [ -d "$1" ] && [ ! -L "$1" ] && [ -w "$1" ] || return 1
+  for f in "$1/start" "$1/pid"; do
+    [ ! -L "$f" ] || return 1
+    [ ! -e "$f" ] || { [ -f "$f" ] && [ -w "$f" ]; } || return 1
+  done
+}
+
+lock_write_meta() {
+  local dir="$1" owner="$2" start oldstart="" oldpid="" hadstart=0 hadpid=0
+  start=$(proc_start "$owner")
+  if [ -e "$dir/start" ]; then hadstart=1; oldstart=$({ cat "$dir/start" && printf x; }) || return 1; fi
+  if [ -e "$dir/pid" ]; then hadpid=1; oldpid=$({ cat "$dir/pid" && printf x; }) || return 1; fi
+  if printf '%s\n' "$start" > "$dir/start" 2>/dev/null && printf '%s\n' "$owner" > "$dir/pid" 2>/dev/null; then
+    return 0
+  fi
+  if [ "$hadstart" -eq 1 ]; then printf '%s' "${oldstart%x}" > "$dir/start" 2>/dev/null; else rm -f "$dir/start"; fi
+  if [ "$hadpid" -eq 1 ]; then printf '%s' "${oldpid%x}" > "$dir/pid" 2>/dev/null; else rm -f "$dir/pid"; fi
+  return 1
+}
+
+release_lock() {
+  local dir="$1" holder="" rest="" line meta=1
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if [ "${line%=*}" = "$dir" ]; then holder="${line##*=}"; else rest="$rest$line"$'\n'; fi
+  done <<< "$LOCK_HOLDERS"
+  [ -n "$holder" ] || return 0
+  LOCK_HOLDERS="$rest"
+  case "$holder" in
+    n*) meta=0; holder="${holder#n}" ;;
+    t*) meta=0; holder="${holder#t}" ;;
+  esac
+  if [ "$meta" -eq 1 ]; then
+    rm -f "$dir/pid" "$dir/start"
+    rmdir "$dir" 2>/dev/null || true
+  fi
+  lock_stop_holder "$holder"
+  return 0
+}
+
+lock_is_held() {
+  local flk="${1%.lock}.flock" word
+  command -v python3 >/dev/null 2>&1 || return 0
+  word=$(python3 -c 'import fcntl, sys
+try:
+    f = open(sys.argv[1], "r")
+except FileNotFoundError:
+    print("absent")
+    sys.exit(0)
+except OSError:
+    print("held")
+    sys.exit(0)
+try:
+    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    print("free")
+except OSError:
+    print("held")' "$flk" 2>/dev/null) || word=""
+  case "$word" in absent|free) ;; *) return 0 ;; esac
+  lock_names_live_run "$1"
 }
 
 acquire_run_lock() {
   local rc=0
-  acquire_lock "$RUN_LOCK" || rc=$?
+  acquire_lock "$RUN_LOCK" 2 || rc=$?
   case "$rc" in
     0) return 0 ;;
-    3) log "WARNING: could not create $(dirname "$RUN_LOCK"); running without the per-date lock"; return 0 ;;
+    3) if lock_held_without_dir "$RUN_LOCK"; then
+         log "WARNING: holding the per-date flock, but its directory $RUN_LOCK could not be written (read-only, or a stale directory this user cannot change); only the dashboard's report of this run is missing"
+       else
+         log "WARNING: could not take the per-date lock in $(dirname "$RUN_LOCK") (read-only, or no python3); running without it"
+       fi
+       return 0 ;;
     *) RUN_LOCK_HOLDER="$LOCK_HOLDER"; return 1 ;;
   esac
 }
@@ -1121,28 +1306,15 @@ remote_sync_refuse() {
   [ -n "$REMOTE_SYNC_FIRST_ERR" ] || REMOTE_SYNC_FIRST_ERR="$2: invalid ($3)"
 }
 
-wait_for_lock_release() {
-  local waited=0
-  while [ -d "$1" ]; do
-    lock_holder_state "$1" || return 0
-    [ "$waited" -lt "$2" ] || return 1
-    sleep 1; waited=$((waited + 1))
-  done
-  return 0
-}
-
 remote_sync_locked() {
   local rc=0 wait="${AUTODREAM_REMOTE_LOCK_WAIT:-600}"
   case "$wait" in ''|*[!0-9]*) wait=600 ;; esac
-  acquire_lock "$4" || rc=$?
-  if [ "$rc" -eq 1 ] && wait_for_lock_release "$4" "$((10#$wait))"; then
-    rc=0; acquire_lock "$4" || rc=$?
-  fi
+  acquire_lock "$4" "$((10#$wait))" || rc=$?
   case "$rc" in
     0) bash "$REMOTE_SYNC_HELPER" "$1" "$2" "$3" 2>>"$RUN_LOG"
        release_lock "$4" ;;
     1) printf 'skipped_locked (pid %s still held %s after %ss)\n' "${LOCK_HOLDER:-unknown}" "$4" "$wait" ;;
-    *) printf 'failed (cannot create %s)\n' "$(dirname "$4")" ;;
+    *) printf 'failed (cannot take the lock %s: read-only locks directory or no python3)\n' "$4" ;;
   esac
 }
 
@@ -2902,6 +3074,14 @@ run_dream_triage() {
 }
 
 run() {
+  trap release_run_lock EXIT
+  run_body
+  local rc=$?
+  release_run_lock
+  return $rc
+}
+
+run_body() {
   log "===== autodream start: $(date) ====="
   log "runner: $RUNNER_COMMIT$([ "$RUNNER_DIRTY" = "yes" ] && echo " (dirty)")"
   log "target date: $TARGET_DATE"
@@ -3750,7 +3930,7 @@ PY
     if report_has_sentinel "$L2_STDOUT"; then
       write_session_cwds "$FINDINGS_DIR" || log "WARNING: could not write session-cwds.tsv; Lately will fall back to project buckets"
       if report_body "$L2_STDOUT" > "$REPORT_PATH.body" \
-         && { awk '!/^<!-- autodream:remote-short=.* -->$/' "$REPORT_PATH.body" && remote_short_line; } > "$REPORT_PATH.tmp" \
+         && { LC_ALL=C awk '!/^<!-- autodream:remote-short=.* -->$/' "$REPORT_PATH.body" && remote_short_line; } > "$REPORT_PATH.tmp" \
          && mv "$REPORT_PATH.tmp" "$REPORT_PATH"; then
         L2_COMPLETE=1
       else
@@ -3770,7 +3950,8 @@ PY
       if report_complete; then
         log "L2 attempt $attempt wrote a complete-looking report but no AUTODREAM_REPORT_END sentinel; not a validated delivery, retrying (exit $L2_RC)"
       else
-        log "L2 attempt $attempt left a report with no open-questions marker; treating it as truncated and retrying (exit $L2_RC)"
+        L2_INCOMPLETE_CAUSE=$(report_incomplete_cause "$REPORT_PATH")
+        log "L2 attempt $attempt left a report with ${L2_INCOMPLETE_CAUSE:-no open-questions marker}; its tail reads: \"$(report_last_line_excerpt "$REPORT_PATH")\"; treating it as truncated and retrying (exit $L2_RC)"
       fi
     else
       log "L2 attempt $attempt wrote no report (exit $L2_RC)"
@@ -3834,7 +4015,6 @@ PY
 }
 
 trap '' PIPE
-trap release_run_lock EXIT
 if [ -t 1 ]; then
   run 2>&1 | tee -a "$RUN_LOG"
   exit "${PIPESTATUS[0]}"
