@@ -38,7 +38,7 @@ P3 items, one line each:
 
 | State | Before | After |
 |---|---|---|
-| `$HOME` or the bucket path holds a quote | every session stubbed, `l1_confined: yes` | run stops before L1: `fatal:` in run-stats, banner, no report, date retried |
+| `$HOME` or an extra entry holds a quote | every session stubbed, `l1_confined: yes` | run stops before L1: `fatal:` in run-stats, banner, no report, date retried |
 | `AUTODREAM_L1_WRITES_EXTRA` entry is relative or has a quote | same | same fatal, names the entry |
 | protected dir holds `:` | protect list splits wrong, a path silently unprotected | fatal at setup |
 | claude confined, omp has no write profile | `l1_confined: yes` | `l1_confined: partial`, reason names omp |

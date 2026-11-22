@@ -150,6 +150,16 @@ assert_eq "$rc" "1" "the same through the prefix verb"
 ep L1_CONFINE_TOOL=bwrap bash "$H" prefix "$S" "$D/leaflink" >/dev/null 2>&1; rc=$?
 assert_eq "$rc" "1" "and under bwrap"
 printf '%s\n' "$D/state/dir" > "$WR"
+FB="$D/failing-adapter.sh"; printf '#!/bin/sh\necho "refused: a path holds a newline" >&2\nexit 3\n' > "$FB"; chmod +x "$FB"
+ep bash "$H" engine-prefix "$FB" "$S" >/dev/null 2>"$D/err"; rc=$?
+assert_eq "$rc" "1" "an adapter whose l1-writes fails gives no prefix"
+has "$(cat "$D/err")" "exit 3" "with its exit status"
+has "$(cat "$D/err")" "refused: a path holds a newline" "and its own words"
+mkdir -p "$D/with space"; printf '%s\n' "$D/with space" "$D/state/dir" > "$WR"
+txt=$(ep bash "$H" engine-prefix "$FA" "$S" | tr '\0' '\n')
+has "$txt" "(subpath \"$(cd "$D/with space" && pwd -P)\")" "a path with a space is one path"
+has "$txt" "(subpath \"$(cd "$D/state/dir" && pwd -P)\")" "and the line after it is the next"
+printf '%s\n' "$D/state/dir" > "$WR"
 ln -s "$S" "$D/stagelink"
 ep bash "$H" engine-prefix "$FA" "$D/stagelink" >/dev/null 2>"$D/err"; rc=$?
 assert_eq "$rc" "1" "a staging directory that is a symlink is refused"

@@ -53,6 +53,14 @@ classify_failure() {
   # Providers and models spell the same words with spaces, hyphens or underscores.
   sep='[[:space:]_-]'
 
+  # A login failure is retriable whatever else the output mentions: an expired login under the
+  # sandbox can sit beside a context-limit line, and the size rule below must not claim it.
+  if printf '%s\n' "$worker_text" \
+      | grep -Eiq "not${sep}+logged${sep}+in|please${sep}+run${sep}+/login|oauth${sep}+token${sep}+(has${sep}+)?expired"; then
+    printf '%s\n' provider
+    return 0
+  fi
+
   if printf '%s\n' "$worker_text" \
       | grep -Eiq "context${sep}*(length|limit|window|size)|too${sep}+(long|large)|tokens?${sep}+limit|max(imum)?${sep}+(input${sep}+)?(context|tokens?|length)|input${sep}+(length|tokens?)|exceed(s|ed)?${sep}+(the${sep}+)?(context|token)"; then
     printf '%s\n' size
@@ -64,7 +72,7 @@ classify_failure() {
   # "HTTP status code was 500"; otherwise the reason phrase has to say it.
   code='(429|401|403|5[0-9][0-9]|5xx)([^0-9]|$)'
   if printf '%s\n' "$worker_text" \
-      | grep -Eiq "(http(/[0-9.]+)?|status|code|error)([^0-9a-z]+(http|status|code|was|is|of|returned|with))*[^0-9a-z]{1,3}${code}|(^|[^0-9a-z])5xx([^0-9a-z]|$)|rate${sep}?limit|too${sep}+many${sep}+requests|overload|quota|unauthori[sz]ed|forbidden|service${sep}+unavailable|bad${sep}+gateway|gateway${sep}+time${sep}?out|internal${sep}+server${sep}+error|invalid${sep}+api${sep}+key|auth(entication|ori[sz]ation)?${sep}+(error|failed|failure)|token${sep}+expired|not${sep}+logged${sep}+in|please${sep}+run${sep}+/login|oauth${sep}+token${sep}+(has${sep}+)?expired"; then
+      | grep -Eiq "(http(/[0-9.]+)?|status|code|error)([^0-9a-z]+(http|status|code|was|is|of|returned|with))*[^0-9a-z]{1,3}${code}|(^|[^0-9a-z])5xx([^0-9a-z]|$)|rate${sep}?limit|too${sep}+many${sep}+requests|overload|quota|unauthori[sz]ed|forbidden|service${sep}+unavailable|bad${sep}+gateway|gateway${sep}+time${sep}?out|internal${sep}+server${sep}+error|invalid${sep}+api${sep}+key|auth(entication|ori[sz]ation)?${sep}+(error|failed|failure)|token${sep}+expired"; then
     printf '%s\n' provider
     return 0
   fi

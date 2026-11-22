@@ -207,12 +207,23 @@ cmd_prefix() { # $1=stage, rest: writable paths
 }
 
 cmd_engine_prefix() { # $1=adapter.sh, $2=stage
-  local adapter="$1" stage="$2" l out paths=()
-  if ! out=$("$adapter" l1-writes 2>/dev/null); then
-    printf 'l1-confine: %s declares no write profile\n' "$adapter" >&2; return 1
+  local adapter="$1" stage="$2" out err rc
+  err=$(mktemp "${TMPDIR:-/tmp}/l1-confine-writes.XXXXXX") || { printf 'l1-confine: could not make a temp file to read the write list\n' >&2; return 1; }
+  out=$("$adapter" l1-writes 2>"$err"); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 2 ]; then printf 'l1-confine: %s declares no write profile\n' "$adapter" >&2
+    else printf 'l1-confine: %s l1-writes failed (exit %s): %s\n' "$adapter" "$rc" "$(head -c 200 "$err" | tr '\n' ' ')" >&2; fi
+    rm -f "$err"; return 1
   fi
-  while IFS= read -r l; do [ -n "$l" ] && paths+=("$l"); done <<< "$out"
-  cmd_prefix "$stage" ${paths[@]+"${paths[@]}"}
+  rm -f "$err"
+  # One path per line, split by IFS alone (globbing is off for the whole script): no here-string and
+  # no loop, so no temp file whose failure could leave an empty list behind. An adapter refuses to
+  # print a path that holds a newline, since a line is the only separator there is.
+  local IFS=$'\n'
+  # shellcheck disable=SC2086
+  set -- $out
+  IFS=$' \t\n'
+  cmd_prefix "$stage" "$@"
 }
 
 case "${1:-}" in

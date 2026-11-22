@@ -284,10 +284,14 @@ case "$cmd" in
     # A host whose confined call fails without something else names it in AUTODREAM_L1_WRITES_EXTRA
     # (colon-separated, absolute, a trailing * is a prefix) and accepts that path's exposure; see docs/plans/
     # 2026-11-21-l1-confine-write-list.md for how to find the paths and what each one costs.
-    printf '%s\n' "$HOME/Library/Caches/claude-cli-nodejs" "$HOME/.cache/claude-cli-nodejs"
+    # One path per line, so a path that holds a newline would read as two. HOME or an extra entry that
+    # does is refused outright, not split: the second half could be a directory like /Users/you.
+    nl_refuse() { case "$1" in *"
+"*) printf 'l1-writes: refusing a path that holds a newline\n' >&2; exit 3 ;; esac; printf '%s\n' "$1"; }
+    nl_refuse "$HOME/Library/Caches/claude-cli-nodejs"; nl_refuse "$HOME/.cache/claude-cli-nodejs"
     # Globbing off: an entry such as ~/.claude.json* must stay a prefix, not expand to the files that exist.
     old_ifs=$IFS; IFS=:; set -f
-    for extra in ${AUTODREAM_L1_WRITES_EXTRA:-}; do [ -n "$extra" ] && printf '%s\n' "$extra"; done
+    for extra in ${AUTODREAM_L1_WRITES_EXTRA:-}; do [ -n "$extra" ] && nl_refuse "$extra"; done
     set +f; IFS=$old_ifs
     ;;
 

@@ -639,8 +639,9 @@ notify_fatal() { # $1=reason
 sweep_killed_leftovers() {
   local _f _n=0
   for _f in "$FINDINGS_DIR"/*.tmp.?????? "$FINDINGS_DIR"/*.pre.jsonl "$FINDINGS_DIR"/*.stage "$FINDINGS_DIR"/.chunks/*/*.stage; do
-    [ -f "$_f" ] || continue
-    rm -f "$_f" 2>/dev/null && _n=$((_n + 1))
+    # A symlink or a directory is what a worker leaves as its answer: -f would skip both.
+    { [ -e "$_f" ] || [ -L "$_f" ]; } || continue
+    rm -rf "$_f" 2>/dev/null && _n=$((_n + 1))
   done
   [ "$_n" -eq 0 ] || log "removed $_n temp file(s) left in $FINDINGS_DIR by a killed run"
 }
@@ -3060,7 +3061,7 @@ L1_CONFINE_PROTECT=""
 L1_CONFINED_STAT=no
 L1_CONFINE_FATAL=""
 l1_confine_setup() {
-  local probe verdict reason eng d p ok_engines="" no_engines="" all_engines err sstage
+  local probe verdict reason eng d p ok_engines="" no_engines="" all_engines err sstage wrc
   L1_CONFINED=no; L1_CONFINE_USING=none; L1_CONFINED_ENGINES=""; L1_CONFINE_STATS=""; L1_CONFINE_FATAL=""
   L1_STAGE_ROOT="$AUTODREAM_DIR/staging/run-$$"
   L1_CONFINE_PROTECT="$AUTODREAM_DIR:$FINDINGS_DIR:$DREAMS_DIR"
@@ -3102,7 +3103,10 @@ l1_confine_setup() {
     all_engines=$(printf '%s' "$AUTODREAM_L1_ENGINES" | awk -F'\t' 'NF >= 2 && $2 != "" && !seen[$2]++ { print $2 }')
     while IFS= read -r eng; do
       [ -n "$eng" ] || continue
-      if "$ADAPTERS_DIR/$eng/adapter.sh" l1-writes >/dev/null 2>&1; then
+      "$ADAPTERS_DIR/$eng/adapter.sh" l1-writes >/dev/null 2>&1; wrc=$?
+      # Exit 2 is "no write profile" (omp). Any other failure is a write list the adapter refused, which
+      # is a fatal below with its reason and never an engine that quietly runs unconfined.
+      if [ "$wrc" -ne 2 ]; then
         # The probe built a prefix with no paths. The real one carries this engine's write list, the
         # operator's additions and the protect list, and a character the profile cannot hold in any of
         # them fails every call: build it now, so a run that cannot confine stops here and not with a
@@ -4083,6 +4087,8 @@ run() {
   fi
   log "found $RAW session files; excluded $EXCLUDED autodream-own, skipped $SKIPPED_EMPTY empty; $COUNT to triage; $OUT_OF_WINDOW out of window (modified since the day began, nothing inside it)"
 
+  # Before the nothing-to-triage exit: a night with no sessions still owes the cleanup.
+  sweep_killed_leftovers
   if [ "$COUNT" -eq 0 ]; then
     log "no sessions to triage; writing stub report and exiting"
     THREAD_SOURCE_ROWS=$(thread_source_rows "$(pdate_shift "$TARGET_DATE" -13 d)" "$TARGET_DATE" 2>/dev/null) || THREAD_SOURCE_ROWS=""
@@ -4413,7 +4419,6 @@ EOF
     : > "$FINDINGS_DIR/l1-chunk-calls.txt"
   fi
 
-  sweep_killed_leftovers
   reconcile_findings_with_worklist
   drop_unacceptable_l1_cache
 

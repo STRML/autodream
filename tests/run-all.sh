@@ -1854,6 +1854,8 @@ EOF
     printf 'worker exit code: 1 after 4s\n--- worker stdout, last 40 lines ---\n%s\n' "$login" > "$dir/login.err"
     assert_eq "$(classify_failure "$dir/login.err")" "provider" "[$login] is provider"
   done
+  printf 'worker exit code: 1 after 4s\n--- worker stdout, last 40 lines ---\ncontext limit exceeded\nNot logged in; please run /login\n' > "$dir/both.err"
+  assert_eq "$(classify_failure "$dir/both.err")" "provider" "a login failure beside a context-limit line is still provider"
   for login in 'the sandbox for /tmp/quota-run/s.jsonl could not be built, and a confined run does not fall back to an unconfined worker' \
     'could not make the staging directory /tmp/quota-run/stage for /tmp/s.jsonl' \
     'no staging root is set, so there is nowhere to stage the answer for /tmp/quota-run/s.jsonl' \
@@ -3251,6 +3253,12 @@ test_l1_confine_names_the_engine_without_a_write_profile(){
   case "$out" in *"a.json.lock"*) no "and is not expanded to the files that match it" ;; *) ok "and is not expanded to the files that match it" ;; esac
   out=$(env -u CLAUDE_CONFIG_DIR AUTODREAM_WORK_BUCKET=/work/bucket bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1)
   case "$out" in *"/work/bucket"*) no "the work bucket is not on the write list, whatever the runner exports (got: $out)" ;; *) ok "the work bucket is not on the write list, whatever the runner exports" ;; esac
+  # One path per line: a path that holds a newline would read as two, and the second half can be a wide
+  # directory, so the adapter refuses it instead.
+  out=$(env -u CLAUDE_CONFIG_DIR HOME="$(printf '/h\n/tmp')" bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1); rc=$?
+  assert_eq "$rc" "3" "a HOME that holds a newline is refused, not split"
+  out=$(env -u CLAUDE_CONFIG_DIR AUTODREAM_L1_WRITES_EXTRA="$(printf '/ok\n/Users')" bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1); rc=$?
+  assert_eq "$rc" "3" "and so is an extra entry that does"
   bash "$REPO/adapters/omp/adapter.sh" l1-writes >/dev/null 2>&1; rc=$?
   assert_eq "$rc" "2" "the omp adapter declares no write profile, so its workers stay unconfined and run-stats says so"
 }
@@ -3267,12 +3275,12 @@ fake_sandbox(){ # $1=root -> dir to put on PATH
 test_l1_confine_setup_stops_before_l1_when_an_engine_prefix_cannot_be_built(){
   echo "# L1 confinement: a write list the profile cannot hold stops the run before any worker, with no stubs"
   local extra
-  for extra in '/x/bad"quote' 'relative/dir'; do
+  for extra in '/x/bad"quote' 'relative/dir' "$(printf '/ok\n/Users')"; do
     local root; root=$(setup_env); mk_session "$root" s1
     local h; h=$(hash_of "$root/projects/proj-a/s1.jsonl")
     fake_sandbox "$root"
     PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec AUTODREAM_L1_WRITES_EXTRA="$extra" run_dream "$root"
-    assert_no_file "$root/dreams/$DATE.md" "[$extra] no report is written"
+    assert_no_file "$root/dreams/$DATE.md" "[${extra//$'\n'/ }] no report is written"
     assert_no_file "$(fdir "$root")/$h.json" "[$extra] and no session gets a stub"
     assert_grep "$(fdir "$root")/run-stats.txt" '^fatal: .*claude' "[$extra] run-stats names the fatal and the engine"
     assert_grep "$root/run.out" 'FATAL:' "[$extra] and the log says so"
@@ -3308,9 +3316,17 @@ test_l1_answer_is_moved_aside_before_it_is_tested(){
   local h; h=$(hash_of "$root/projects/proj-a/s1.jsonl")
   mkdir -p "$(fdir "$root")/.chunks/abc"
   : > "$(fdir "$root")/stale.json.stage"; : > "$(fdir "$root")/.chunks/abc/01-x.chunkout.stage"
+  ln -s /nonexistent/target "$(fdir "$root")/dangling.json.stage"; mkdir "$(fdir "$root")/dir.json.stage"
   run_dream "$root"
   assert_no_file "$(fdir "$root")/stale.json.stage" "a .stage left by a killed run is swept"
   assert_no_file "$(fdir "$root")/.chunks/abc/01-x.chunkout.stage" "including one beside a chunk answer"
+  [ ! -L "$(fdir "$root")/dangling.json.stage" ] && ok "a dangling symlink a worker left is swept" || no "a dangling symlink a worker left is swept"
+  [ ! -d "$(fdir "$root")/dir.json.stage" ] && ok "and so is a directory" || no "and so is a directory"
+  rm -rf "$root"
+  root=$(setup_env)
+  mkdir -p "$(fdir "$root")"; : > "$(fdir "$root")/idle.json.stage"
+  run_dream "$root"
+  assert_no_file "$(fdir "$root")/idle.json.stage" "a night with no sessions still sweeps"
   rm -rf "$root"
   root=$(setup_env); mk_session "$root" s1
   h=$(hash_of "$root/projects/proj-a/s1.jsonl")
