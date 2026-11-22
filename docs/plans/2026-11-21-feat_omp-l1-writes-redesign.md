@@ -25,6 +25,9 @@ states the rule that rules it out, and says where the branch applies the rule. T
 | 5 | The memory check misses deleted files and symlinked directories below the root | C |
 | 5 | An overlay override bypasses the memory shutdown | H |
 | 5 | Cached work still depends on preparing an unused engine | I |
+| 6 | The overlay check read `backend: "off"` under any key | H |
+| 6 | A store that vanished during the call read as a SKIP | C |
+| 6 | With every finding cached, a findings file that vanished before dispatch could start an unprepared worker with no sandbox | I |
 
 ## The six mistakes and the rule for each
 
@@ -91,8 +94,9 @@ nothing and a deferral names nothing.
 `--measure` seeded state it never used. It no longer does.
 
 **H. Inherited configuration that bypasses a safeguard.** `NO_ADVISOR_CFG` replaces the overlay that turns
-the memory backend off. Rule: a replacement overlay is used only if it sets the backend off, and an argv verb
-fails (exit 2) rather than run without the safeguard. All four verbs (worker, linker, warmup, L2) go through
+the memory backend off. Rule: a replacement overlay is used only if `memory.backend` is off (read from the top-level `memory:`
+block, every backend line there off), and an argv verb fails (exit 2) rather than run without the
+safeguard. All four verbs (worker, linker, warmup, L2) go through
 one function, `overlay_cfg`.
 
 **I. Setup for an execution path that will not run.** Setup prepared every engine in the source map, so a

@@ -3110,7 +3110,10 @@ l1_confine_setup() {
     # Every session already has findings, so no worker starts and there is nothing to confine or prepare.
     L1_CONFINED_STAT="n/a"
     L1_CONFINE_REASON="no L1 work this run: every session already has findings"
-    log "L1 confinement not set up: $L1_CONFINE_REASON"
+    # Every engine is named as skipped, so a findings file that vanishes before dispatch fails the attempt
+    # (l1_attempt) and does not start an unprepared worker with no sandbox.
+    L1_SETUP_SKIPPED=$(printf '%s\n' "$AUTODREAM_L1_ENGINES" | awk -F'\t' 'NF >= 2 && $2 != "" && !seen[$2]++ { printf "%s ", $2 }')
+    log "L1 confinement not set up: $L1_CONFINE_REASON (engines that may not start this run: ${L1_SETUP_SKIPPED:-none})"
   elif [ "$L1_CONFINED" = yes ]; then
     # The protected directories are joined with a colon, so one that holds a colon would be split into
     # two paths and left unprotected; a relative one protects nothing.

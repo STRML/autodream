@@ -20,12 +20,26 @@ BIN=$(cd -P "$ADIR/../../bin" && pwd)
 . "$BIN/lib-path-state.sh"
 
 # The overlay every headless omp call passes to --config. NO_ADVISOR_CFG replaces it, and a replacement that
-# does not turn the memory backend off would put back the channel the default closes (omp retains and
+# does not turn the memory backend off (checked as memory.backend, not a text match) would put back the channel the default closes (omp retains and
 # consolidates memory into a store every later session recalls from), so it is used only if it says so.
 # An unusable one makes the argv verbs fail (exit 2) rather than run without the safeguard.
+# Does the overlay set memory.backend off? A `backend: "off"` under any other key (advisor, mnemopi) does not
+# count, and neither does a second memory.backend that says something else: the line must sit inside the
+# top-level `memory:` block, and every backend line there must be off.
+overlay_memory_off() {
+  awk '
+    /^memory:[[:space:]]*(#.*)?$/ { inmem = 1; next }
+    inmem && /^[^[:space:]#]/ { inmem = 0 }
+    inmem && /^[[:space:]]+backend:/ {
+      if ($0 ~ /^[[:space:]]+backend:[[:space:]]*"?off"?[[:space:]]*(#.*)?$/) ok = 1; else bad = 1
+    }
+    END { exit !(ok && !bad) }
+  ' "$1"
+}
+
 overlay_cfg() {
   if [ -z "${NO_ADVISOR_CFG:-}" ]; then printf '%s' "$ADIR/l1-no-advisor.yml"; return 0; fi
-  if [ -r "$NO_ADVISOR_CFG" ] && grep -Eq '^[[:space:]]*backend:[[:space:]]*"?off"?[[:space:]]*$' "$NO_ADVISOR_CFG" 2>/dev/null; then
+  if [ -r "$NO_ADVISOR_CFG" ] && overlay_memory_off "$NO_ADVISOR_CFG"; then
     printf '%s' "$NO_ADVISOR_CFG"; return 0
   fi
   printf 'omp adapter: NO_ADVISOR_CFG=%s does not set the memory backend off (a backend: "off" line), so it is not used\n' "$NO_ADVISOR_CFG" >&2

@@ -439,6 +439,19 @@ echo "# l1-argv reproduces omp-autodream's worker invocation"
 OLD_SYS="Headless triage worker. Read the session transcript and write exactly one findings JSON object, via the Write tool, to the literal output path given on line 2 of the prompt. Those paths are literal strings, not shell variables — never \$-expand them. Print only the literal word done and exit."
 printf '%s\0' /opt/test/omp --allow-home -p --approval-mode yolo --no-session --config "$ovl" \
   --model deepseek/deepseek-flash --tools=Read,Write --append-system-prompt "$OLD_SYS" > "$tmp/old-argv"
+# The line has to sit under memory:, and every backend there has to be off.
+printf 'advisor:\n  backend: "off"\nmemory:\n  backend: mnemopi\n' > "$tmp/wrong-key.yml"
+printf 'memory:\n  backend: "off"\n  scoping: global\n' > "$tmp/right-key.yml"
+printf 'memory:\n  backend: "off"\nmnemopi:\n  backend: mnemopi\n' > "$tmp/other-block.yml"
+printf 'memory:\n  backend: "off"\n  backend: mnemopi\n' > "$tmp/two-backends.yml"
+OMP_BIN=/opt/test/omp NO_ADVISOR_CFG="$tmp/wrong-key.yml" "$A" l1-argv m/x >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && ok "a backend: \"off\" under advisor, with memory.backend on, is refused" || no "an off line under the wrong key passed"
+OMP_BIN=/opt/test/omp NO_ADVISOR_CFG="$tmp/two-backends.yml" "$A" l1-argv m/x >/dev/null 2>&1; rc=$?
+[ "$rc" -ne 0 ] && ok "a second memory.backend that says something else is refused" || no "two backends passed"
+OMP_BIN=/opt/test/omp NO_ADVISOR_CFG="$tmp/right-key.yml" "$A" l1-argv m/x >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && ok "memory.backend off with other memory keys is accepted" || no "a correct override was refused"
+OMP_BIN=/opt/test/omp NO_ADVISOR_CFG="$tmp/other-block.yml" "$A" l1-argv m/x >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && ok "a later block with its own backend key does not count against memory" || no "another block's backend key was read as memory's"
 printf 'advisor:\n  enabled: false\n' > "$tmp/no-memory-line.yml"
 for verb in l1-argv threads-argv warmup-argv l2-argv; do
   OMP_BIN=/opt/test/omp NO_ADVISOR_CFG="$tmp/no-memory-line.yml" "$A" "$verb" deepseek/deepseek-flash >/dev/null 2>"$tmp/ovl-err"; rc=$?

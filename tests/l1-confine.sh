@@ -387,6 +387,20 @@ printf a > "$D/store/bank/mnemopi.db"; store_snapshot "$D/store" "$D/snap.b3" >/
 sleep 1; printf changed > "$D/store-target/linked.db"
 store_snapshot "$D/store" "$D/snap.link" >/dev/null; msg=$(store_unchanged "$D/snap.b3" "$D/snap.link"); rc=$?
 assert_eq "$rc" "1" "a file reached only through a symlinked directory below the root is watched"
+# The decision as the real check makes it.
+store_snapshot "$D/store" "$D/v.before" >/dev/null; vb=$?
+msg=$(store_verdict "$D/store" "$vb" "" "$D/v.before" "$D/v.after"); rc=$?
+assert_eq "$rc" "0" "verdict: an untouched store passes"
+mkdir -p "$D/vanish/bank"; printf a > "$D/vanish/bank/db"
+store_snapshot "$D/vanish" "$D/vv.before" >/dev/null; vb=$?
+/usr/bin/trash "$D/vanish"
+msg=$(store_verdict "$D/vanish" "$vb" "" "$D/vv.before" "$D/vv.after"); rc=$?
+assert_eq "$rc" "1" "verdict: a store that was there before the call and is gone after it fails, it does not skip"
+has "$msg" "could not be scanned after" "and says so"
+msg=$(store_verdict "$D/none-at-all" 2 "no store at x, nothing to compare" "$D/vn.before" "$D/vn.after"); rc=$?
+assert_eq "$rc" "2" "verdict: a store that was absent before the call skips"
+msg=$(store_verdict "$D/store" 1 "could not scan" "$D/vn.before" "$D/vn.after"); rc=$?
+assert_eq "$rc" "1" "verdict: a store that could not be scanned before the call fails"
 msg=$(store_snapshot "$D/no-such-store" "$D/snap.none"); rc=$?
 assert_eq "$rc" "2" "a store that does not exist is a skip, not a pass"
 has "$msg" "nothing to compare" "and says so"

@@ -62,3 +62,24 @@ store_unchanged() {
   printf 'the store changed: %s\n' "$(printf '%s\n' "$d" | grep '^[<>]' | head -5 | tr '\n' ' ')"
   return 1
 }
+
+# store_verdict <dir> <before-rc> <before-msg> <before-file> <after-file>: the whole decision of the real check, in
+# one place. A store that was absent before the call is a skip (2), one that could not be scanned before is a
+# failure (1), and one that was there before and is gone, unreadable or different after is a failure: a store
+# that disappears during the call is the loudest change there is, not a skip. Prints one line.
+store_verdict() {
+  local dir="$1" brc="$2" bmsg="$3" bfile="$4" afile="$5" msg arc
+  case "$brc" in
+    0) ;;
+    2) printf '%s\n' "$bmsg"; return 2 ;;
+    *) printf '%s\n' "$bmsg"; return 1 ;;
+  esac
+  msg=$(store_snapshot "$dir" "$afile"); arc=$?
+  if [ "$arc" -ne 0 ]; then
+    printf 'the store at %s was there before the call and could not be scanned after it (%s)\n' "$dir" "$msg"
+    return 1
+  fi
+  msg=$(store_unchanged "$bfile" "$afile") || { printf '%s\n' "$msg"; return 1; }
+  printf 'nothing under %s changed (no file added, removed or modified)\n' "$dir"
+  return 0
+}

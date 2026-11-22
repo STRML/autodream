@@ -3465,6 +3465,7 @@ test_l1_setup_prepares_only_engines_with_work_left(){
     assert_file "$root/dreams/$DATE.md" "an unreadable omp database does not stop L2 over findings that already exist"
     assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: n/a$' "and run-stats says no confinement was needed"
     assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_reason: no L1 work this run' "with the reason"
+    assert_grep "$root/run.out" 'engines that may not start this run: .*omp' "and the log names every engine as unable to start unconfined if a findings file vanishes before dispatch"
   else
     chmod 600 "$root/home/.omp/agent/agent.db"; echo "  skip - this user can read a mode 000 file"
   fi
