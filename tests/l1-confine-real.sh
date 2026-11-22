@@ -29,8 +29,12 @@ fail(){ printf 'FAIL  %s\n' "$1"; fails=$((fails + 1)); }
 
 measure=0
 writes_only=0
+no_bucket=0
 [ "${1:-}" = "--measure" ] && { measure=1; shift; }
 [ "${1:-}" = "--writes" ] && { writes_only=1; shift; }
+# The call runs from the same cwd as the nightly ($AUTODREAM_DIR/work), so its AI-title stub lands in the
+# work bucket; --no-bucket takes the bucket off the write list to see whether the call lives without it.
+[ "${1:-}" = "--no-bucket" ] && { no_bucket=1; shift; }
 
 # The nightly's own configuration: the same AUTODREAM_DIR and config file, so an AUTODREAM_L1_WRITES_EXTRA the
 # operator put there is the one this check runs under, and the same protected paths and work bucket run.sh uses.
@@ -71,14 +75,19 @@ model="${1:-$(jq -r .l1_model "$REPO/adapters/claude/manifest.json" 2>/dev/null)
 
 W=$(mktemp -d "${TMPDIR:-/tmp}/l1-real.XXXXXX")
 trap 'rm -rf "$W"' EXIT
-stage="$W/stage"; outside="$W/outside"; work="$W/work"
+stage="$W/stage"; outside="$W/outside"; work="$WORK_DIR"
 mkdir -p "$stage/tmp" "$outside" "$work"
 stage=$(cd "$stage" && pwd -P); outside=$(cd "$outside" && pwd -P)
 marker="$W/marker"; : > "$marker"
 sleep 1
 
 wpaths=()
-while IFS= read -r l; do [ -n "$l" ] && wpaths+=("$l"); done < <(bash "$ADAPTER" l1-writes)
+while IFS= read -r l; do
+  [ -n "$l" ] || continue
+  [ "$no_bucket" = 1 ] && [ "$l" = "$AUTODREAM_WORK_BUCKET" ] && continue
+  wpaths+=("$l")
+done < <(bash "$ADAPTER" l1-writes)
+[ "$no_bucket" != 1 ] || echo "# --no-bucket: the work bucket $AUTODREAM_WORK_BUCKET is NOT on the write list"
 if [ "$writes_only" = 1 ]; then
   # The write list the nightly would use under this configuration, and nothing else (no call, no sandbox).
   printf '%s\n' "${wpaths[@]}"

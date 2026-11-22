@@ -9,6 +9,8 @@ worker_text_of() {
       if (in_dump) next
       if (/^worker wrote output with no usable \.findings key/) { in_dump = 1; next }
       if (/^worker exceeded AUTODREAM_L1_TIMEOUT=/ || /^worker produced no findings JSON for /) next
+      # run.sh names the session path in its staging and sandbox lines too (#169).
+      if (/^the sandbox for .* could not be built/ || /^could not make the staging directory / || /^no staging root is set, / || /^the answer path was a symlink/) next
       print
       next
     }
@@ -50,6 +52,14 @@ classify_failure() {
 
   # Providers and models spell the same words with spaces, hyphens or underscores.
   sep='[[:space:]_-]'
+
+  # A login failure is retriable whatever else the output mentions: an expired login under the
+  # sandbox can sit beside a context-limit line, and the size rule below must not claim it.
+  if printf '%s\n' "$worker_text" \
+      | grep -Eiq "not${sep}+logged${sep}+in|please${sep}+run${sep}+/login|oauth${sep}+token${sep}+(has${sep}+)?expired"; then
+    printf '%s\n' provider
+    return 0
+  fi
 
   if printf '%s\n' "$worker_text" \
       | grep -Eiq "context${sep}*(length|limit|window|size)|too${sep}+(long|large)|tokens?${sep}+limit|max(imum)?${sep}+(input${sep}+)?(context|tokens?|length)|input${sep}+(length|tokens?)|exceed(s|ed)?${sep}+(the${sep}+)?(context|token)"; then

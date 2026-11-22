@@ -65,8 +65,6 @@ def derive_display_status(state, as_of_text):
         '--arg status_filter "" --arg kind_filter "" --arg repo_filter "" '
         '--arg query "" --arg json 1 -f "$4" "$5"'
     )
-    # A file, never stdin: with no timeout binary, tmo backgrounds jq, and a background job's
-    # stdin is /dev/null, so piped state would vanish and jq would exit 0 with no output.
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as state_file:
         json.dump(state, state_file, ensure_ascii=False)
         state_file.flush()

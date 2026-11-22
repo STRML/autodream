@@ -32,9 +32,6 @@ CSP = (
     "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 )
 COOKIE_NAME = "autodream_session"
-# /login is reached from the file:// handoff, a cross-site navigation. A 303 to /
-# stays in that navigation, so the browser withholds the SameSite=Strict cookie it
-# just set. This page starts a new, same-origin navigation that carries it.
 SAME_ORIGIN_HOP = '<!doctype html><meta http-equiv="refresh" content="0;url=/">'
 STATIC_ROUTES = {
     "/": ("index.html", "text/html; charset=utf-8"),
@@ -104,7 +101,6 @@ THREAD_ACTIONS = {
     "move-idea": lambda ident: ["move", ident, "idea"],
     "move-done": lambda ident: ["move", ident, "done"],
 }
-# A service started before web-port existed may still serve the old default.
 PRE_RECORD_PORT = 8765
 
 
@@ -303,8 +299,7 @@ class AutodreamHandler(BaseHTTPRequestHandler):
             else:
                 self.respond(404, "Not found\n")
                 return
-            self.respond(200, json.dumps(data, allow_nan=False),
-                         content_type="application/json; charset=utf-8")
+            self.respond_json(200, data)
         except ValueError:
             self.respond(400, "Invalid request\n")
         except FileNotFoundError:
@@ -376,9 +371,6 @@ class AutodreamHandler(BaseHTTPRequestHandler):
 
 
 class LoopbackServer(ThreadingHTTPServer):
-    # HTTPServer.server_bind calls socket.getfqdn(host), a reverse DNS lookup that can block
-    # for many seconds on a loopback address (the macOS CI runner, #223) before the server ever
-    # announces its port. Nothing here reads server_name.
     def server_bind(self):
         socketserver.TCPServer.server_bind(self)
         self.server_name, self.server_port = self.server_address[:2]

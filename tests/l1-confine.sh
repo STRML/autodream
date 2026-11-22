@@ -119,7 +119,68 @@ ro_line=$(printf '%s\n' "$txt" | grep -n "^$D/state/dir/inner\$" | head -1 | cut
 stage_line=$(printf '%s\n' "$txt" | grep -n "^$PS\$" | tail -1 | cut -d: -f1)
 [ -n "$bind_line" ] && [ -n "$ro_line" ] && [ -n "$stage_line" ] && [ "$bind_line" -lt "$ro_line" ] && [ "$ro_line" -lt "$stage_line" ] \
   && ok "the read-only bind comes after the state path and before the stage" || no "bwrap order bind=$bind_line ro=$ro_line stage=$stage_line"
+mkdir -p "$D/lk"; : > "$D/lk/a.json"; ln -s "$D/realdir" "$D/lk/a.json.lock"
+txt=$(prefix_text env L1_CONFINE_TOOL=bwrap bash "$H" prefix "$S" "$D/lk/a.json*")
+has "$txt" "$D/lk/a.json" "a prefix rule binds the regular file that matches it"
+lacks "$txt" "a.json.lock" "and skips a match that is a symlink: it would grant its target"
 printf '%s\n' "$(env PATH="$D/bare" L1_CONFINE_TOOL=none bash "$H" prefix "$S" 2>&1; echo "rc=$?")" | tail -1 | grep -q 'rc=1' && ok "an unknown L1_CONFINE_TOOL is refused" || no "an unknown L1_CONFINE_TOOL is refused"
+
+echo "# engine-prefix: one definition of an engine's prefix, built from the adapter's own write list"
+FA="$D/fake-adapter.sh"; WR="$D/writes.txt"
+printf '#!/bin/sh\n[ "$1" = l1-writes ] || exit 2\ncat "%s"\n' "$WR" > "$FA"; chmod +x "$FA"
+NA="$D/no-profile-adapter.sh"; printf '#!/bin/sh\nexit 2\n' > "$NA"; chmod +x "$NA"
+ep() { env PATH="$D/shim:$D/bare" "$@"; }
+mkdir -p "$D/state/dir"; printf '%s\n' "$D/state/dir" > "$WR"
+txt=$(ep bash "$H" engine-prefix "$FA" "$S" | tr '\0' '\n')
+has "$txt" "(subpath \"$(cd "$D/state/dir" && pwd -P)\")" "the adapter's write list is in the profile"
+has "$txt" "(allow file-write* (subpath \"$PS\"))" "beside the staging directory"
+ep bash "$H" engine-prefix "$NA" "$S" >/dev/null 2>"$D/err"; rc=$?
+assert_eq "$rc" "1" "an adapter with no write profile gives no prefix"
+has "$(cat "$D/err")" "no write profile" "and says why"
+printf 'relative/dir\n' > "$WR"
+ep bash "$H" engine-prefix "$FA" "$S" >/dev/null 2>"$D/err"; rc=$?
+assert_eq "$rc" "1" "a relative path in the write list is refused"
+has "$(cat "$D/err")" "relative/dir" "and named"
+has "$(cat "$D/err")" "absolute" "with the reason"
+printf '%s\n' "$D/state/\"quoted" > "$WR"
+ep bash "$H" engine-prefix "$FA" "$S" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "1" "a quote in a write-list path is refused"
+ln -s "$D/realdir" "$D/leaflink"; printf '%s\n' "$D/leaflink" > "$WR"
+ep bash "$H" engine-prefix "$FA" "$S" >/dev/null 2>"$D/err"; rc=$?
+assert_eq "$rc" "1" "a writable path whose last component is a symlink is refused: it would grant its target"
+has "$(cat "$D/err")" "symlink" "and the reason says so"
+ep bash "$H" prefix "$S" "$D/leaflink" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "1" "the same through the prefix verb"
+ep L1_CONFINE_TOOL=bwrap bash "$H" prefix "$S" "$D/leaflink" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "1" "and under bwrap"
+printf '%s\n' "$D/state/dir" > "$WR"
+FB="$D/failing-adapter.sh"; printf '#!/bin/sh\necho "refused: a path holds a newline" >&2\nexit 3\n' > "$FB"; chmod +x "$FB"
+ep bash "$H" engine-prefix "$FB" "$S" >/dev/null 2>"$D/err"; rc=$?
+assert_eq "$rc" "1" "an adapter whose l1-writes fails gives no prefix"
+has "$(cat "$D/err")" "exit 3" "with its exit status"
+has "$(cat "$D/err")" "refused: a path holds a newline" "and its own words"
+mkdir -p "$D/with space"; printf '%s\n' "$D/with space" "$D/state/dir" > "$WR"
+txt=$(ep bash "$H" engine-prefix "$FA" "$S" | tr '\0' '\n')
+has "$txt" "(subpath \"$(cd "$D/with space" && pwd -P)\")" "a path with a space is one path"
+has "$txt" "(subpath \"$(cd "$D/state/dir" && pwd -P)\")" "and the line after it is the next"
+printf '%s\n' "$D/state/dir" > "$WR"
+ln -s "$S" "$D/stagelink"
+ep bash "$H" engine-prefix "$FA" "$D/stagelink" >/dev/null 2>"$D/err"; rc=$?
+assert_eq "$rc" "1" "a staging directory that is a symlink is refused"
+has "$(cat "$D/err")" "symlink" "and the reason says so"
+mkdir -p "$D/stageroot/h.a"
+ep L1_STAGE_ROOT="$D/stageroot" bash "$H" engine-prefix "$FA" "$D/stageroot/h.a" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "0" "a stage under the staging root is accepted"
+ep L1_STAGE_ROOT="$D/stageroot" bash "$H" engine-prefix "$FA" "$S" >/dev/null 2>"$D/err"; rc=$?
+assert_eq "$rc" "1" "a stage that does not resolve under the staging root is refused"
+has "$(cat "$D/err")" "staging root" "and named"
+for tool in sandbox-exec bwrap; do
+  ep L1_CONFINE_TOOL=$tool L1_CONFINE_PROTECT="relative/protected" bash "$H" prefix "$S" >/dev/null 2>&1; rc=$?
+  assert_eq "$rc" "1" "[$tool] a relative protected path is refused"
+  mkdir -p "$D/globs/a1" "$D/globs/b2"
+  ep L1_CONFINE_TOOL=$tool L1_CONFINE_PROTECT="$D/globs/*" bash "$H" prefix "$S" >/dev/null 2>&1; rc=$?
+  assert_eq "$rc" "1" "[$tool] a glob in a protected path is refused, not expanded to what exists"
+done
 
 echo "# the manual real-call check reads the nightly's configuration, and the caller's environment wins as in run.sh"
 RC="$REPO/tests/l1-confine-real.sh"
