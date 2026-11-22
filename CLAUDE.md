@@ -640,7 +640,7 @@ The PATH is fixed when the plist is written, so enabling an adapter afterwards b
 ~/.claude/autodream/run.sh 2026-05-29        # process a date
 AUTODREAM_FORCE=1 ~/.claude/autodream/run.sh 2026-05-29   # rebuild despite an existing report
 ```
-To reprocess cleanly (e.g. after the corpus changed), delete that date's findings dir AND report first, then run; otherwise idempotency reuses old findings and the guard skips. Env knobs are documented in `run.sh`'s header and the README.
+To reprocess cleanly (e.g. after the corpus changed), delete that date's findings dir AND report first, then run; otherwise idempotency reuses old findings and the guard skips. Env knobs are documented in `docs/run-knobs.md` and the README.
 
 ### Running on-demand without the 10-min cap (`autodream-now.sh`)
 
