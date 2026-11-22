@@ -122,10 +122,12 @@ while IFS= read -r l; do [ -n "$l" ] && envs+=("$l"); done < <(bash "$ADAPTER" l
 # --measure is the unconfined call, which runs on the real state, so it seeds nothing and cannot be blocked by it.
 senv=()
 src=2
-[ "$measure" = 1 ] || { sout=$(bash "$ADAPTER" l1-stage-env "$stage" 2>"$W/stage-env.err"); src=$?; }
+[ "$measure" = 1 ] || { sout=$(bash "$ADAPTER" l1-stage-env "$stage" "$model" 2>"$W/stage-env.err"); src=$?; }
 if [ "$src" -eq 0 ]; then
   while IFS= read -r l; do [ -n "$l" ] && senv+=("$l"); done <<< "$sout"
   echo "# l1-stage-env: ${senv[*]} (the engine's state is under $stage, seeded from $HOME)"
+elif [ "$src" -eq 4 ]; then
+  fail "the model $model authenticates with OAuth only, so the nightly runs this engine unconfined and there is nothing to check here: $(head -c 300 "$W/stage-env.err")"; exit 1
 elif [ "$src" -ne 2 ]; then
   fail "l1-stage-env failed (exit $src): $(head -c 300 "$W/stage-env.err")"; exit 1
 fi

@@ -3304,8 +3304,9 @@ test_l1_worker_setup_failure_defers_the_date_and_follows_no_planted_link(){
   fake_sandbox "$root"
   cp -R "$REPO/adapters" "$root/adapters"; ln -s "$REPO/bin" "$root/bin"
   printf 'precious\n' > "$root/victim"
-  # A claude adapter with a state verb that plants a symlink at the old stderr path inside the stage, then fails.
-  sed 's|^  l2-argv) |  l1-stage-env) ln -sf "$VICTIM" "$1/stage-env.err" 2>/dev/null; echo "no state dir" >\&2; exit 1 ;;\n\n  l2-argv) |' \
+  # A claude adapter with a state verb that passes the setup dry run (a stage named .setup-*) and fails every
+  # attempt after it, planting a symlink at the old stderr path inside the stage first.
+  sed 's|^  l2-argv) |  l1-stage-env) case "$1" in *.setup-*) exit 0 ;; esac; ln -sf "$VICTIM" "$1/stage-env.err" 2>/dev/null; echo "no state dir" >\&2; exit 1 ;;\n\n  l2-argv) |' \
     "$REPO/adapters/claude/adapter.sh" > "$root/adapters/claude/adapter.sh"
   VICTIM="$root/victim" PATH="$root/shim-sb:$PATH" ADAPTERS_ROOT="$root/adapters" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec run_dream "$root"
   assert_eq "$(cat "$root/victim")" "precious" "the file the planted link pointed at is untouched across the retry"
@@ -3408,6 +3409,40 @@ test_l1_confined_omp_worker_runs_on_a_throwaway_home(){
   root=$(setup_env); mk_omp_session "$root" aaaa >/dev/null
   MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
   assert_nogrep "$root/cap/l1-home.txt" "omp-home" "an omp worker the sandbox does not cover keeps its HOME too: no seeding for nothing"
+  rm -rf "$root"
+}
+
+test_l1_omp_state_setup_is_checked_before_any_worker(){
+  echo "# L1 confinement: a state setup that cannot work stops the run, and an OAuth-only model leaves omp unconfined and says so"
+  local root h
+  root=$(setup_env); h=$(hash_of "$(mk_omp_session "$root" aaaa)")
+  mkdir -p "$root/home/.omp/agent"; : > "$root/home/.omp/agent/agent.db"; chmod 000 "$root/home/.omp/agent/agent.db"
+  if [ ! -r "$root/home/.omp/agent/agent.db" ]; then
+    fake_sandbox "$root"
+    PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+    chmod 600 "$root/home/.omp/agent/agent.db"
+    assert_no_file "$root/dreams/$DATE.md" "a database that cannot be snapshotted stops the run before L1: no report"
+    assert_no_file "$(fdir "$root")/$h.json" "and no stub"
+    assert_grep "$(fdir "$root")/run-stats.txt" '^fatal: .*state directory cannot be prepared' "and run-stats says why"
+  else
+    chmod 600 "$root/home/.omp/agent/agent.db"; echo "  skip - this user can read a mode 000 file"
+  fi
+  rm -rf "$root"
+  root=$(setup_env); mk_omp_session "$root" aaaa >/dev/null
+  mkdir -p "$root/home/.omp/agent"
+  python3 - "$root/home/.omp/agent" <<'PY'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1] + "/agent.db")
+c.execute("CREATE TABLE auth_credentials (id INTEGER PRIMARY KEY, provider TEXT, credential_type TEXT, data TEXT, disabled_cause TEXT)")
+c.execute("INSERT INTO auth_credentials (provider, credential_type, data) VALUES ('omp','oauth','r')")
+c.commit()
+PY
+  fake_sandbox "$root"
+  PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+  assert_file "$root/dreams/$DATE.md" "an OAuth-only model does not stop the night: the report is written"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined_omp: no$' "omp is reported unconfined"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined_omp_reason: .*OAuth only' "with the reason"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: no$' "and the top-level line says so"
   rm -rf "$root"
 }
 
@@ -6992,6 +7027,7 @@ _run test_omp_adapter_is_opt_in
 _run test_l1_precheck_probes_the_l1_provider
 _run test_l1_confined_stat_is_partial_when_an_engine_runs_unconfined
 _run test_l1_confined_omp_worker_runs_on_a_throwaway_home
+_run test_l1_omp_state_setup_is_checked_before_any_worker
 _run test_worker_failure_probe_names_the_l1_provider
 _run test_one_dead_provider_does_not_hold_back_the_others
 _run test_omp_session_is_linearized_for_the_worker

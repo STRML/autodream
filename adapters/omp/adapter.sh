@@ -173,7 +173,7 @@ case "$cmd" in
     set +f; IFS=$old_ifs
     ;;
 
-  l1-stage-env) # $1=stage dir -> KEY=VALUE lines for one confined worker, after seeding a state dir inside the stage
+  l1-stage-env) # $1=stage dir [$2=model] -> KEY=VALUE lines for one confined worker, after seeding a state dir inside the stage
     # A confined omp call cannot run on an empty write list (bun's SQLite close dies on its first database
     # write), and ~/.omp/agent holds the settings, extensions, rules and skills that a later interactive omp
     # loads, so it cannot be allowed either. The worker gets a throwaway HOME inside its stage instead:
@@ -193,9 +193,11 @@ case "$cmd" in
     err() { printf 'omp l1-stage-env: %s\n' "$1" >&2; exit 1; }
     [ -n "${1:-}" ] && [ -d "$1" ] || err "needs the stage directory"
     [ -z "${OMP_PROFILE:-}${PI_PROFILE:-}" ] || err "a named omp profile (OMP_PROFILE or PI_PROFILE) is not supported under confinement"
-    if [ "$(uname -s)" = Linux ] && [ -n "${XDG_DATA_HOME:-}${XDG_STATE_HOME:-}${XDG_CACHE_HOME:-}" ]; then
-      err "XDG_DATA_HOME, XDG_STATE_HOME or XDG_CACHE_HOME is set: omp would keep its state outside HOME"
-    fi
+    # omp redirects a directory category to $XDG_<CATEGORY>_HOME/omp on Linux and on macOS, but only when that
+    # directory exists, so the refusal is on the same condition and not on the variable alone.
+    for xv in "${XDG_DATA_HOME:-}" "${XDG_STATE_HOME:-}" "${XDG_CACHE_HOME:-}"; do
+      [ -z "$xv" ] || [ ! -e "$xv/omp" ] || err "$xv/omp exists, so omp keeps part of its state there instead of under HOME"
+    done
     cname="${PI_CONFIG_DIR:-.omp}"
     case "$cname" in ""|/*|*..*) err "PI_CONFIG_DIR must be a plain directory name under HOME: $cname" ;; esac
     osrc="${PI_CODING_AGENT_DIR:-${HOME:?}/$cname/agent}"
@@ -204,6 +206,11 @@ case "$cmd" in
 "*) err "a stage path that holds a newline is refused" ;; esac
     rm -rf "$ohome"
     mkdir -p "$odst" || err "could not make $odst"
+    # Absent is not the same as unreachable: a missing path under a directory this user cannot search tests
+    # as absent too. The nearest ancestor that does exist must be searchable for "absent" to be believed.
+    probe="$osrc"
+    while [ ! -e "$probe" ] && [ "$probe" != / ] && [ "$probe" != . ]; do probe=$(dirname "$probe"); done
+    { [ "$probe" = "$osrc" ] || { [ -d "$probe" ] && [ -x "$probe" ]; }; } || err "cannot search $probe, so $osrc cannot be told from absent"
     if [ -e "$osrc" ]; then
       { [ -d "$osrc" ] && [ -r "$osrc" ] && [ -x "$osrc" ]; } || err "cannot read the agent directory $osrc"
       command -v python3 >/dev/null 2>&1 || err "python3 is needed to snapshot omp's databases"
@@ -213,8 +220,17 @@ case "$cmd" in
       done
       for f in agent.db models.db; do
         [ -e "$osrc/$f" ] || continue
-        oauth_flag=""; [ "$f" = agent.db ] && oauth_flag="--drop-oauth"
-        python3 "$ADIR/seed-db.py" "$osrc/$f" "$odst/$f" ${oauth_flag:+"$oauth_flag"} || err "could not snapshot $osrc/$f"
+        if [ "$f" = agent.db ]; then
+          oprov=""; case "${2:-}" in */*) oprov="${2%%/*}" ;; esac
+          python3 "$ADIR/seed-db.py" "$osrc/$f" "$odst/$f" --drop-oauth ${oprov:+--provider "$oprov"}; orc=$?
+          case "$orc" in
+            0) ;;
+            4) printf 'omp l1-stage-env: the %s provider authenticates with OAuth only\n' "$oprov" >&2; exit 4 ;;
+            *) err "could not snapshot $osrc/$f" ;;
+          esac
+        else
+          python3 "$ADIR/seed-db.py" "$osrc/$f" "$odst/$f" || err "could not snapshot $osrc/$f"
+        fi
       done
     fi
     [ -e "$HOME/Library" ] && ln -s "$HOME/Library" "$ohome/Library"

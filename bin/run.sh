@@ -3114,8 +3114,24 @@ l1_confine_setup() {
         sstage="$L1_STAGE_ROOT/.setup-$eng"; err=""
         if ( umask 077; mkdir -p "$sstage" ) 2>/dev/null \
            && err=$(L1_STAGE_ROOT="$L1_STAGE_ROOT" L1_CONFINE_PROTECT="$L1_CONFINE_PROTECT" bash "$L1_CONFINER" engine-prefix "$ADAPTERS_DIR/$eng/adapter.sh" "$sstage" 2>&1 >/dev/null); then
-          ok_engines="${ok_engines:+$ok_engines }$eng"
-          L1_CONFINE_STATS="${L1_CONFINE_STATS}l1_confined_$(printf '%s' "$eng" | tr '-' '_'): yes"$'\n'
+          # The same for the state directory a worker of this engine runs on (omp), once with the model its
+          # sessions use: a setup that cannot work stops the run here, and a model that cannot run on a
+          # throwaway copy (OAuth only: a refresh in the copy would lose the rotated token) leaves this
+          # engine unconfined and says why, instead of failing every worker.
+          ssrc=$(printf '%s\n' "$AUTODREAM_L1_ENGINES" | awk -F'\t' -v e="$eng" '$2 == e { print $1; exit }')
+          smodel=$(printf '%s\n' "$AUTODREAM_L1_MODELS" | awk -F'\t' -v s="$ssrc" '$1 == s { print $2; exit }')
+          err=$("$ADAPTERS_DIR/$eng/adapter.sh" l1-stage-env "$sstage" "$smodel" 2>&1 >/dev/null); wrc=$?
+          case "$wrc" in
+            0|2)
+              ok_engines="${ok_engines:+$ok_engines }$eng"
+              L1_CONFINE_STATS="${L1_CONFINE_STATS}l1_confined_$(printf '%s' "$eng" | tr '-' '_'): yes"$'\n' ;;
+            4)
+              no_engines="${no_engines:+$no_engines }$eng"
+              L1_CONFINE_STATS="${L1_CONFINE_STATS}l1_confined_$(printf '%s' "$eng" | tr '-' '_'): no"$'\n'"l1_confined_$(printf '%s' "$eng" | tr '-' '_')_reason: the model $smodel authenticates with OAuth only, which a throwaway state directory cannot refresh without losing the rotated token"$'\n'
+              log "WARNING: the $eng engine runs unconfined: its model $smodel authenticates with OAuth only; use an API-key model to confine it" ;;
+            *)
+              [ -n "$L1_CONFINE_FATAL" ] || L1_CONFINE_FATAL="the $eng engine's state directory cannot be prepared: $(printf '%s' "${err:-no reason given}" | head -c 300 | tr '\n\t' '  ')" ;;
+          esac
         else
           [ -n "$L1_CONFINE_FATAL" ] || L1_CONFINE_FATAL="the $eng engine's sandbox cannot be built: $(printf '%s' "${err:-the staging directory could not be made}" | head -c 300 | tr '\n\t' '  ')"
         fi
@@ -3131,7 +3147,7 @@ l1_confine_setup() {
     if [ -n "$no_engines" ]; then
       L1_CONFINED_STAT=partial
       [ -n "$ok_engines" ] || L1_CONFINED_STAT=no
-      L1_CONFINE_REASON="engines with no write profile run unconfined: $no_engines"
+      L1_CONFINE_REASON="engines that run unconfined: $no_engines (no write profile, or a model a throwaway state cannot serve)"
     fi
     log "L1 workers confined with $L1_CONFINE_USING: writes only to their staging directory under $L1_STAGE_ROOT and the engine state paths"
   else
@@ -3458,7 +3474,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
           # outside the sandbox, and a worker that left a symlink at a path inside its own stage on an
           # earlier attempt would have this redirection truncate whatever the link points at.
           l1serr=$(mktemp "$L1_STAGE_ROOT/senv.XXXXXX") || { printf "could not make a temp file for the state setup of %s\n" "${l1_subject:-$session}" >> "$3"; l1_infra_fail "$@"; return 1; }
-          l1sout=$("$ADAPTERS_DIR/$engine/adapter.sh" l1-stage-env "$l1stage" 2>"$l1serr"); l1src=$?
+          l1sout=$("$ADAPTERS_DIR/$engine/adapter.sh" l1-stage-env "$l1stage" "$model" 2>"$l1serr"); l1src=$?
           if [ "$l1src" -ne 0 ] && [ "$l1src" -ne 2 ]; then
             printf "the state directory for %s could not be prepared in the stage: %s\n" "${l1_subject:-$session}" "$(head -c 200 "$l1serr" | tr "\n" " ")" >> "$3"
             rm -f "$l1serr"

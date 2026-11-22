@@ -212,7 +212,7 @@ python3 - "$RH/.omp/agent" <<'PY' &
 import sqlite3, sys, time
 d = sys.argv[1]
 c = sqlite3.connect(d + "/agent.db"); c.execute("PRAGMA journal_mode=WAL"); c.execute("PRAGMA wal_autocheckpoint=0")
-c.execute("CREATE TABLE auth_credentials (id INTEGER PRIMARY KEY, provider TEXT, credential_type TEXT, data TEXT)")
+c.execute("CREATE TABLE auth_credentials (id INTEGER PRIMARY KEY, provider TEXT, credential_type TEXT, data TEXT, disabled_cause TEXT DEFAULT NULL)")
 c.execute("INSERT INTO auth_credentials (provider, credential_type, data) VALUES ('neuralwatt','api_key','k1')")
 c.execute("INSERT INTO auth_credentials (provider, credential_type, data) VALUES ('openai-codex','oauth','refresh-1')")
 c.commit()
@@ -272,6 +272,39 @@ chmod 700 "$D/lockedhome/.omp/agent"
 mkdir -p "$D/freshhome"
 out=$(env HOME="$D/freshhome" bash "$OA" l1-stage-env "$D/ostage" 2>/dev/null); rc=$?
 assert_eq "$rc" "0" "a host with no omp state yet seeds nothing and succeeds"
+mkdir -p "$D/xdg/omp"
+env HOME="$RH" XDG_STATE_HOME="$D/xdg" bash "$OA" l1-stage-env "$D/ostage" >/dev/null 2>"$D/err"; rc=$?
+assert_eq "$rc" "1" "an XDG directory that holds an omp tree is refused, on macOS as on Linux: omp keeps part of its state there"
+has "$(cat "$D/err")" "$D/xdg/omp" "and named"
+mkdir -p "$D/xdg-empty"
+env HOME="$RH" XDG_STATE_HOME="$D/xdg-empty" bash "$OA" l1-stage-env "$D/ostage" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "0" "an XDG variable with no omp tree under it changes nothing, as in omp"
+mkdir -p "$D/blocked/home/.omp"; chmod 000 "$D/blocked"
+if [ ! -x "$D/blocked" ]; then
+  env HOME="$D/blocked/home" bash "$OA" l1-stage-env "$D/ostage" >/dev/null 2>"$D/err"; rc=$?
+  assert_eq "$rc" "1" "an agent dir under a directory this user cannot search is not read as absent"
+  has "$(cat "$D/err")" "cannot search" "with the reason"
+else
+  printf '  skip - this user can search a mode 000 directory\n'
+fi
+chmod 700 "$D/blocked"
+
+echo "# omp l1-stage-env: a model whose only credential is OAuth"
+python3 - "$RH/.omp/agent" <<'PY'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1] + "/agent.db")
+c.execute("INSERT INTO auth_credentials (provider, credential_type, data) VALUES ('oauth-only-prov','oauth','r')")
+c.commit()
+PY
+env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "oauth-only-prov/some-model" >/dev/null 2>"$D/err"; rc=$?
+assert_eq "$rc" "4" "an OAuth-only provider exits 4, so the runner leaves that engine unconfined and says why"
+has "$(cat "$D/err")" "OAuth only" "with the reason"
+env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/some-model" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "0" "a provider with an api key seeds"
+env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "no-rows-prov/some-model" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "0" "so does one with no rows at all (its key comes from the environment)"
+env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "0" "and a call with no model"
 
 echo "# real confinement (only where a sandbox works here)"
 real=$(env TMPDIR="$D" bash "$H" probe)
