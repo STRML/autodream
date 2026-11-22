@@ -921,7 +921,7 @@ l1_chunks_elided threads_linked threads_unassigned threads_unmeasured""".split()
         token = (self.install / "web-token").read_text().strip()
         self.assertEqual(opened.stdout.strip(), self.origin + "/login?t=" + token)
 
-    def test_web_open_falls_back_to_service_started_before_web_port(self):
+    def test_web_open_checks_only_the_configured_port(self):
         self.start_server()
         (self.install / "web-port").unlink()
         module = self.load_module()
@@ -929,13 +929,15 @@ l1_chunks_elided threads_linked threads_unassigned threads_unmeasured""".split()
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             closed = probe.getsockname()[1]
-        out = io.StringIO()
+        out, err = io.StringIO(), io.StringIO()
         with mock.patch.dict(os.environ, {"AUTODREAM_DIR": str(self.install),
                                           "AUTODREAM_WEB_PORT": str(closed)}), \
                 mock.patch.object(sys, "argv", ["autodream-web.py", "open", "--print"]), \
-                contextlib.redirect_stdout(out):
-            self.assertIsNone(module.main())
-        self.assertEqual(out.getvalue().strip(), self.origin + "/login?t=" + self.token)
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(module.main(), 1)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn(f"port {closed} is not this autodream-web", err.getvalue())
+        self.assertFalse(hasattr(self.load_module(), "PRE_RECORD_PORT"))
 
     def test_web_token_creation_is_exclusive_and_persistent(self):
         module = self.load_module()
