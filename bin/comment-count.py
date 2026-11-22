@@ -16,7 +16,6 @@ DATA_EXTENSIONS = {
 SHELL_EXTENSIONS = {".sh"}
 PYTHON_EXTENSIONS = {".py"}
 JS_EXTENSIONS = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}
-CODE_EXTENSIONS = SHELL_EXTENSIONS | PYTHON_EXTENSIONS | JS_EXTENSIONS
 
 SHELL_DIRECTIVE = re.compile(r"\s*shellcheck\s+(disable|source|shell)=")
 PYTHON_DIRECTIVE = re.compile(
@@ -172,14 +171,33 @@ def count_python(path, data):
     return len(lines)
 
 
+def block_end(lines, start):
+    if "*/" in lines[start][2:]:
+        return start
+    for j in range(start + 1, len(lines)):
+        if "*/" in lines[j]:
+            return j
+    return None
+
+
 def count_js(path, data):
+    lines = [raw.lstrip() for raw in decode(path, data).splitlines()]
     count = 0
-    for raw in decode(path, data).splitlines():
-        text = raw.lstrip()
+    i = 0
+    while i < len(lines):
+        text = lines[i]
         if text.startswith("//"):
             count += 0 if JS_DIRECTIVE.match(text[2:]) else 1
-        elif text.startswith(("/*", "*")):
+        elif text.startswith("/*"):
+            end = block_end(lines, i)
+            if end is None:
+                count += 1
+            else:
+                count += sum(1 for line in lines[i:end + 1] if line)
+                i = end
+        elif text.startswith("*"):
             count += 1
+        i += 1
     return count
 
 
@@ -218,7 +236,7 @@ def is_countable_entry(path):
     info = stat_or_none(path, False)
     if info is not None and stat.S_ISLNK(info.st_mode):
         info = stat_or_none(path, True)
-        if info is None and os.path.splitext(path)[1] in CODE_EXTENSIONS:
+        if info is None:
             raise CountError("%s: tracked symlink points at nothing, so it cannot be read" % path)
     return info is not None and stat.S_ISREG(info.st_mode)
 

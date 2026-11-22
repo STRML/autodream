@@ -109,10 +109,8 @@ assert_eq "$(printf '%s\n' "$shfmt_step" | grep -c 'apt-get install.* shfmt')" 1
 assert_eq "$(printf '%s\n' "$shfmt_step" | grep -c "scope == 'full' || matrix.shard == 0")" 1 "on every full shard and on shard 0 of a web run"
 assert_eq "$(grep -c 'brew install shfmt' "$LAUNCHD_YML")" 1 "launchd.yml's full suite installs shfmt too"
 
-for ext in sh py js jsx mjs cjs ts tsx mts cts; do
-  assert_eq "$(grep -c "^      - '\*\*\.$ext'\$" "$TESTS_YML")" 2 "tests.yml re-includes **.$ext after its docs and example exclusions, for push and pull_request"
-done
-assert_eq "$(awk '/^      - .!docs\/\*\*./ { seen = 1 } /^      - .\*\*\.py.$/ && seen { n++ } END { print n + 0 }' "$TESTS_YML")" 2 "and each re-include comes after the exclusion it undoes"
+assert_eq "$(grep -c "^      - '!\(docs\|example\)/" "$TESTS_YML")" 0 "tests.yml excludes no directory, so a script under docs/ or example/ (shebang or not) starts the tests"
+assert_eq "$(grep -c "^      - '!\*\*\.md'$" "$TESTS_YML")" 2 "tests.yml still skips markdown, in both lists"
 
 printf '\npassed: %s   failed: %s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

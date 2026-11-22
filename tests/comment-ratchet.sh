@@ -207,8 +207,10 @@ counter_fixtures() {
   eq "$(num "$d/phantom-a.ts") $(num "$d/phantom-b.ts")" "1 2" "a /* inside a template opens nothing: a real comment added after it still raises the count"
   printf '%s\n' '/**' ' * doc' ' */' 'const a = b' '  * c;' '// real comment' > "$d/block.ts"
   eq "$(num "$d/block.ts")" 5 "a line that starts with * is counted whether or not a block is open"
-  printf '%s\n' '/* a' 'plain body' '*/' > "$d/plain-block.ts"
-  eq "$(num "$d/plain-block.ts")" 2 "a block body line with no star is not counted, its opening and closing lines are"
+  printf '%s\n' '/*' '*/' > "$d/block-a.ts"
+  printf '%s\n' '/*' 'new comment' '*/' > "$d/block-b.ts"
+  printf '%s\n' '/*' '' '*/' > "$d/block-c.ts"
+  eq "$(num "$d/block-a.ts") $(num "$d/block-b.ts") $(num "$d/block-c.ts")" "2 3 2" "a line added inside a closed block raises the count, starred or not, and a blank one does not"
   printf '%s\n' '/* a */ const x = 1;' 'const y = 2; /* b' ' * c' ' */' > "$d/block-after-code.ts"
   eq "$(num "$d/block-after-code.ts")" 3 "a block that opens after code is not counted on its opening line, its starred lines are"
   printf '%s\n' 'const r = /[/*]/.test(v);' 'const o = {a: 1} / 2;' "const s = '// not a comment';" '// real comment' > "$d/midline.ts"
@@ -266,21 +268,20 @@ enumeration_fixtures() {
   fx=$(mkrepo) || { bad "make a fixture repo"; return; }
   printf '%s\n' '# one' > "$fx/notes.txt"
   ln -s notes.txt "$fx/script.sh"
-  ln -s nowhere "$fx/dead.txt"
   printf '%s\n' '# two' > "$fx/top.sh"
   track "$fx"
   bash "$COUNT" --repo "$fx" > "$fx/out" 2> "$fx/err"
   rc=$?
-  eq "$rc $(tr '\t\n' ' ;' < "$fx/out")" "0 1 script.sh;1 top.sh;" "a tracked symlink to a file is counted, a dangling one with a data extension is skipped"
+  eq "$rc $(tr '\t\n' ' ;' < "$fx/out")" "0 1 script.sh;1 top.sh;" "a tracked symlink to a file is counted"
   rm -rf "$fx"
 
   fx=$(mkrepo) || { bad "make a fixture repo"; return; }
   printf '%s\n' '# two' > "$fx/top.sh"
-  ln -s nowhere "$fx/dead.sh"
+  ln -s nowhere "$fx/dead"
   track "$fx"
   bash "$COUNT" --repo "$fx" > "$fx/out" 2> "$fx/err"
   rc=$?
-  eq "$rc $(grep -c 'dead.sh' "$fx/err") $(wc -c < "$fx/out" | tr -d ' ')" "1 1 0" "a tracked code symlink that points at nothing fails and names it"
+  eq "$rc $(grep -c 'dead' "$fx/err") $(wc -c < "$fx/out" | tr -d ' ')" "1 1 0" "a tracked symlink that points at nothing fails and names it, whatever its name"
   rm -rf "$fx"
 
   if not_root; then
