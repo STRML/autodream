@@ -9,8 +9,8 @@ REPO=$(cd "$HERE/.." && pwd)
 SCRIPT="$REPO/bin/cookie-cadence.sh"
 
 pass=0; fail=0
-ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
-no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
+# shellcheck source=/dev/null
+. "$HERE/lib-assert.sh"
 assert_out(){    grep -q -- "$2" "$1" 2>/dev/null && ok "$3" || no "$3 (no /$2/ in output)"; }
 assert_no_out(){ grep -q -- "$2" "$1" 2>/dev/null && no "$3 (found /$2/ in output)" || ok "$3"; }
 

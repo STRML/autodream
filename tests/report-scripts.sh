@@ -9,16 +9,11 @@ REPO=$(cd "$HERE/.." && pwd)
 BIN="$REPO/bin/report-scripts.sh"
 
 pass=0; fail=0
-ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
-no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
+# shellcheck source=/dev/null
+. "$HERE/lib-assert.sh"
 skipped=0
 skip(){ printf '  skip - %s\n' "$1"; skipped=$((skipped + 1)); }
 CHILDKILL_SKIP="child-kill: pgrep cannot read the process table here (the sandbox); CI and launchd can"
-assert_file(){     [ -f "$1" ] && ok "$2" || no "$2 (missing: $1)"; }
-assert_no_file(){  [ ! -e "$1" ] && ok "$2" || no "$2 (unexpected: $1)"; }
-assert_grep(){     grep -q -- "$2" "$1" 2>/dev/null && ok "$3" || no "$3 (no /$2/ in $1)"; }
-assert_nogrep(){   grep -q -- "$2" "$1" 2>/dev/null && no "$3 (/$2/ unexpectedly in $1)" || ok "$3"; }
-assert_eq(){       [ "$1" = "$2" ] && ok "$3" || no "$3 (got [$1] want [$2])"; }
 
 new_case(){ # $1=name -> sets C, F, CONF, SCRIPTS
   C="$SUITE_TMP/$1"

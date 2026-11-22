@@ -8,9 +8,8 @@ SM="$HERE/mock-shared-memory.sh"
 DATE=2020-01-02
 
 pass=0; fail=0
-ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
-no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
-assert_eq(){ [ "$1" = "$2" ] && ok "$3" || no "$3 (got [$1] want [$2])"; }
+# shellcheck source=/dev/null
+. "$HERE/lib-assert.sh"
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/appins.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT

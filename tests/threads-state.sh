@@ -62,7 +62,7 @@ test_threads_move_targets() {
   assert_eq "$(printf '%s' "$row" | jq -c '[.kind, .status, has("done_by"), has("kept_open")]')" '["idea","open",false,false]' "move idea stores an open idea"
   assert_eq "$(printf '%s' "$row" | jq -r '.sessions[0].kind')" work "move freezes a legacy session's provenance"
   assert_eq "$(listed_status "$dir" t-00000001)" open "an idea is never dropped"
-  AUTODREAM_DIR="$dir" "$THREADS" move t-00000001 done >/dev/null 2>&1
+  AUTODREAM_DIR="$dir" "$THREADS" move t-00000001 "done" >/dev/null 2>&1
   row=$(state_json "$dir" t-00000001)
   assert_eq "$(printf '%s' "$row" | jq -c '[.kind, .status, .done_by]')" '["idea","closed_by_sam","sam"]' "move done closes as Sam"
   AUTODREAM_DIR="$dir" "$THREADS" move t-00000001 open >/dev/null 2>&1

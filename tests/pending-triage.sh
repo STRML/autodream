@@ -11,9 +11,8 @@ REPO=$(cd "$HERE/.." && pwd)
 PENDING="$REPO/bin/pending-triage.sh"
 
 pass=0; fail=0
-ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
-no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
-assert_eq(){ if [ "$1" = "$2" ]; then ok "$3"; else no "$3 (got [$1] want [$2])"; fi; }
+# shellcheck source=/dev/null
+. "$HERE/lib-assert.sh"
 
 TODAY=$(date +%Y-%m-%d)
 ago(){ pdate_shift "$TODAY" "-$1" d; }

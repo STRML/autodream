@@ -46,15 +46,10 @@ _run(){
   "$@"
   _timed "$1" "$_t0"
 }
-ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
-no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
-assert_file(){     [ -f "$1" ] && ok "$2" || no "$2 (missing: $1)"; }
-assert_no_file(){  [ ! -e "$1" ] && ok "$2" || no "$2 (unexpected: $1)"; }
+# shellcheck source=/dev/null
+. "$HERE/lib-assert.sh"
 assert_nonempty(){ [ -s "$1" ] && ok "$2" || no "$2 (empty/missing: $1)"; }
-assert_grep(){     grep -q "$2" "$1" 2>/dev/null && ok "$3" || no "$3 (no /$2/ in $1)"; }
-assert_nogrep(){   grep -q "$2" "$1" 2>/dev/null && no "$3 (/$2/ unexpectedly in $1)" || ok "$3"; }
 assert_grep_str(){ printf '%s\n' "$1" | grep -q "$2" 2>/dev/null && ok "$3" || no "$3 (no /$2/ in output)"; }
-assert_eq(){       [ "$1" = "$2" ] && ok "$3" || no "$3 (got [$1] want [$2])"; }
 
 mk_report(){ # $1=path $2..=cited hashes
   local r="$1"; shift
@@ -658,21 +653,23 @@ test_focus_cli_usage_errors(){
   rm -rf "$root"
 }
 
-hold_flock(){ # $1=lock file -> a background process holds flock(2) on it until killed; its pid is HOLDER
-  python3 -c 'import fcntl, os, sys, time
-fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)
-fcntl.flock(fd, fcntl.LOCK_EX)
-open(sys.argv[2], "w").write("held")
-time.sleep(600)' "$1" "$1.held" &
-  HOLDER=$!
-  local i; for i in $(seq 1 100); do [ -f "$1.held" ] && break; sleep 0.1; done
+hold_flock(){ # $1=lock file -> a python process holds its flock; sets HOLD_PID once it does
+  local ready="$1.ready" i=0
+  rm -f "$ready"
+  python3 -c 'import fcntl, sys, time
+f = open(sys.argv[1], "a")
+fcntl.flock(f, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close()
+time.sleep(600)' "$1" "$ready" &
+  HOLD_PID=$!
+  while [ ! -e "$ready" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
 }
 
 test_focus_cli_a_killed_holder_leaves_no_stale_lock(){
   echo "# autodream-focus.sh: the lock is the kernel's, so a writer that dies leaves nothing to reclaim"
   local root; root=$(setup_env); local lock="$root/autodream/tags.jsonl.lock" out
   mkdir -p "$root/autodream"; hold_flock "$lock"
-  kill -9 "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null || true
+  kill -9 "$HOLD_PID" 2>/dev/null; wait "$HOLD_PID" 2>/dev/null || true
   out=$(focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1)
   assert_eq "$out" "tagged s1:r1" "a holder killed with SIGKILL frees the lock at once"
   assert_eq "$(jq -r .id "$root/autodream/tags.jsonl")" "s1:r1" "and the tag is written"
@@ -807,7 +804,7 @@ test_focus_cli_a_live_holder_is_never_pushed_aside(){
   assert_eq "$rc" "1" "a lock file with a years-old mtime and a live holder is still held, so the waiter gives up"
   assert_grep_str "$out" "nothing was changed" "and says nothing was changed"
   assert_no_file "$d/tags.jsonl" "and nothing was written"
-  kill -9 "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null || true
+  kill -9 "$HOLD_PID" 2>/dev/null; wait "$HOLD_PID" 2>/dev/null || true
   rm -rf "$root"
 }
 
@@ -1297,7 +1294,7 @@ test_self_audit_stats(){
   printf '{"type":"user","message":{"role":"user","content":"SESSION_PATH=/x/y.jsonl"}}\n{"type":"assistant"}\n' > "$sf"
   touch -t "$STAMP" "$sf"
   run_dream "$root"
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_file  "$stats" "run-stats.txt written"
   assert_grep  "$stats" 'self_sessions_excluded: 1' "stats record the excluded self-session"
   assert_grep  "$stats" 'sessions_triaged: 1'        "stats record the triaged count"
@@ -1316,7 +1313,7 @@ test_x_fetch_path_reaches_run_stats(){
   printf '#!/bin/bash\n[ "$1" = collect ] || exit 0\nprintf "fallback_graphql\\nagent-browser open failed: boom\\n" > "$2/x-bookmarks-fetch.txt"\nprintf "# x-bookmarks: no unread bookmarks\\n" > "$2/x-bookmarks.md"\n: > "$2/x-bookmarks-manifest.txt"\n' > "$root/fake-xbm.sh"
   chmod +x "$root/fake-xbm.sh"
   AUTODREAM_XBOOKMARKS_BIN="$root/fake-xbm.sh" run_dream "$root"
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep  "$stats" 'x_fetch_path: fallback_graphql'                          "the collector's path is copied into run-stats"
   assert_grep  "$stats" 'x_fetch_browser_cause: agent-browser open failed: boom'  "and so is the browser's cause"
   rm -rf "$root"
@@ -1336,7 +1333,7 @@ test_self_audit_stats_failure_denominator(){
   echo "# self-audit stats: dropped-after-failures is nonzero when a worker dies"
   local root; root=$(setup_env); mk_session "$root" sess1
   export MOCK_MODE=l1_incomplete; run_dream "$root"; unset MOCK_MODE
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_file  "$stats" "run-stats.txt written"
   assert_grep  "$stats" 'l1_findings_with_error: 1' "stats surface the failed session via the error key"
   rm -rf "$root"
@@ -1348,7 +1345,7 @@ test_self_audit_stats_precached_disambiguation(){
   local h; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
   mkdir -p "$(fdir "$root")"; printf '{"session_path":"CACHED","findings":[]}' > "$(fdir "$root")/$h.json"
   run_dream "$root"
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep  "$stats" 'l1_sessions_already_done_at_start: 1' "precached session counted as already done"
   assert_grep  "$stats" 'l1_sessions_freshly_processed: 0'     "no fresh work this run"
   rm -rf "$root"
@@ -1503,7 +1500,7 @@ test_worker_failure_records_exit_code_and_stdout(){
   export MOCK_MODE=l1_noisy_fail
   TEST_CURL_SHIMMED=1   PATH="$shim:$PATH" AUTODREAM_L1_ROUNDS=1 run_dream "$root"
   unset MOCK_MODE
-  local err="$(fdir "$root")/$h.json.err"
+  local err; err="$(fdir "$root")/$h.json.err"
   assert_grep    "$err" 'worker exit code: 7'          ".err records the worker's exit code"
   assert_grep    "$err" 'rate_limit_exceeded'          ".err carries the stdout that explains the failure"
   assert_nogrep  "$err" 'no route to api'              "a reachable host is not reported as an outage"
@@ -1648,7 +1645,7 @@ test_oversized_gate_context_overflow(){
   export AUTODREAM_SLIM_BYTES=100 MOCK_MODE=l1_context_overflow AUTODREAM_L1_ROUNDS=1
   run_dream "$root"
   unset AUTODREAM_SLIM_BYTES MOCK_MODE AUTODREAM_L1_ROUNDS
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'oversized_errored: 1' "the context overflow is still an oversized error"
   assert_grep "$stats" 'oversized_errored_provider: 0' "a size signature overrides the provider wording"
   assert_grep "$stats" 'oversized_errored_unclassified: 0' "the captured context overflow is classified"
@@ -1663,7 +1660,7 @@ test_oversized_gate_errored_noisy(){
   export AUTODREAM_SLIM_BYTES=100 MOCK_MODE=l1_noisy_fail AUTODREAM_L1_ROUNDS=1
   run_dream "$root"
   unset AUTODREAM_SLIM_BYTES MOCK_MODE AUTODREAM_L1_ROUNDS
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'oversized_errored: 1'        "the noisy failure is still an oversized error"
   assert_grep "$stats" 'oversized_errored_provider: 1' "the 429 is classified as an oversized provider failure"
   assert_grep "$stats" 'l1_errored_provider: 1'        "the all-session classifier also counts the provider failure"
@@ -1676,7 +1673,7 @@ test_oversized_gate_errored_silent(){
   export AUTODREAM_SLIM_BYTES=100 MOCK_MODE=l1_silent AUTODREAM_L1_ROUNDS=1
   run_dream "$root"
   unset AUTODREAM_SLIM_BYTES MOCK_MODE AUTODREAM_L1_ROUNDS
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'oversized_errored: 1'        "the silent death still leaves an error stub"
   assert_grep "$stats" 'oversized_errored_silent: 1' "and is counted as silent, apart from size failures"
   assert_grep "$stats" 'l1_errored_silent: 1'         "the all-session classifier also counts the silent death"
@@ -1814,7 +1811,7 @@ test_a_nested_error_key_is_not_a_failed_triage(){
   echo "# only a top-level error key marks a failed triage, not any text that contains one"
   local root; root=$(setup_env); mk_session "$root" sess1
   export MOCK_MODE=l1_nested_error AUTODREAM_SLIM_BYTES=10; run_dream "$root"; unset MOCK_MODE AUTODREAM_SLIM_BYTES
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'l1_findings_with_error: 0'  "a successful file with a nested error key is not counted as errored"
   assert_grep "$stats" 'oversized_errored: 0'       "nor as an oversized failure"
   assert_grep "$stats" 'oversized_total: 1'         "precondition: the session really was oversized"
@@ -1969,7 +1966,7 @@ test_a_deterministic_failure_trips_the_breaker(){
   export MOCK_MODE=l1_incomplete
   AUTODREAM_L1_ROUNDS=5 run_dream "$root"
   unset MOCK_MODE
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep   "$root/run.out" 'L1 circuit breaker'      "the breaker announces itself"
   assert_grep   "$stats" 'l1_breaker_fired: yes'          "run-stats records that the budget was cut"
   assert_grep   "$root/run.out" 'L1 triage round 2/5'     "round 2 still runs (one bad round proves nothing)"
@@ -2124,7 +2121,7 @@ test_route_lost_after_the_precheck_still_defers(){
   export MOCK_MODE=l1_incomplete
   TEST_CURL_SHIMMED=1   PATH="$shim:$PATH" AUTODREAM_NETCHECK=0 AUTODREAM_SLIM_BYTES=10 AUTODREAM_L1_ROUNDS=1 run_dream "$root"
   unset MOCK_MODE
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_no_file "$(fdir "$root")/$h.json"   "no findings stub is written for a network-down failure"
   assert_no_file "$root/dreams/$DATE.md"     "no report is published on an outage-short corpus"
   assert_eq      "$(cat "$root/run.exit")" "1" "the run exits non-zero"
@@ -2197,7 +2194,7 @@ test_provider_refusal_defers_without_a_stub(){
   export MOCK_MODE=l1_provider_refusal
   TEST_CURL_SHIMMED=1   PATH="$shim:$PATH" AUTODREAM_NETCHECK=0 AUTODREAM_SLIM_BYTES=10 AUTODREAM_L1_ROUNDS=1 run_dream "$root"
   unset MOCK_MODE
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_no_file "$(fdir "$root")/$h.json"   "no findings stub is written for a provider refusal"
   assert_no_file "$root/dreams/$DATE.md"     "no report is published on a corpus the provider refused"
   assert_eq      "$(cat "$root/run.exit")" "1" "the run exits non-zero"
@@ -2269,7 +2266,7 @@ test_changelog(){
   run_dream "$root"
   unset AUTODREAM_CHANGELOG CHANGELOG_REMOTE CLAUDE_CODE_REPO
 
-  local cw="$(fdir "$root")/changelog-window.md"
+  local cw; cw="$(fdir "$root")/changelog-window.md"
   assert_file   "$cw" "changelog-window.md written"
   assert_grep   "$cw" '2.1.999'              "captures the in-window release"
   assert_grep   "$cw" 'In-window mock'       "captures the in-window bullet"
@@ -2301,7 +2298,7 @@ test_changelog_multi_source(){
   run_dream "$root"
   unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES
 
-  local cw="$(fdir "$root")/changelog-window.md"
+  local cw; cw="$(fdir "$root")/changelog-window.md"
   assert_file   "$cw" "changelog-window.md written"
   assert_grep   "$cw" '^## Alpha'            "the first harness gets its own section"
   assert_grep   "$cw" '^## Beta'             "the second harness gets its own section"
@@ -2337,7 +2334,7 @@ test_changelog_refuses_foreign_cache_dir(){
   run_dream "$root"
   unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES AUTODREAM_CHANGELOG_MAX_LINES
 
-  local cw="$(fdir "$root")/changelog-window.md"
+  local cw; cw="$(fdir "$root")/changelog-window.md"
   assert_file "$precious/notes.txt"          "the non-git directory and its contents survive"
   assert_file "$sneaky/notes.txt"            "a path that climbs out of the cache with .. is not treated as the cache"
   assert_file "$linked/old-repo/notes.txt"   "a path through a symlink inside the cache is not treated as the cache"
@@ -2370,7 +2367,7 @@ test_changelog_single_remote_suppresses_defaults(){
   run_dream "$root"
   unset AUTODREAM_CHANGELOG CHANGELOG_REMOTE CLAUDE_CODE_REPO
 
-  local cw="$(fdir "$root")/changelog-window.md"
+  local cw; cw="$(fdir "$root")/changelog-window.md"
   assert_grep   "$cw" 'Solo in-window' "the named remote is read"
   assert_nogrep "$cw" '^## Codex'      "the Codex default is suppressed"
   assert_nogrep "$cw" '^## OMP'        "the OMP default is suppressed"
@@ -2395,7 +2392,7 @@ test_changelog_dedupe_is_scoped_to_the_release(){
   export AUTODREAM_CHANGELOG=1 CHANGELOG_REMOTE="$up" CLAUDE_CODE_REPO="$root/cache/cc"
   run_dream "$root"
   unset AUTODREAM_CHANGELOG CHANGELOG_REMOTE CLAUDE_CODE_REPO
-  local cw="$(fdir "$root")/changelog-window.md"
+  local cw; cw="$(fdir "$root")/changelog-window.md"
   assert_eq "$(grep -c '^## \[2.0.0\]' "$cw")" "1" "a release re-inserted by later commits is listed once"
   assert_eq "$(grep -c '^- Fixed a crash$' "$cw")" "2" "the same bullet under two different releases is kept under both"
   assert_eq "$(grep -c '^### Fixed$' "$cw")" "2" "the same sub-heading under two different releases is kept under both"
@@ -2422,7 +2419,7 @@ test_changelog_survives_a_force_pushed_remote(){
     git branch -q -M "$br" )
   AUTODREAM_FORCE=1 run_dream "$root"
   unset AUTODREAM_CHANGELOG CHANGELOG_REMOTE CLAUDE_CODE_REPO
-  local cw="$(fdir "$root")/changelog-window.md"
+  local cw; cw="$(fdir "$root")/changelog-window.md"
   assert_grep   "$cw" 'Rewritten history' "the second run reads the rewritten history"
   assert_nogrep "$cw" 'pull failed'       "and does not report a failed pull"
   rm -rf "$root"
@@ -2457,7 +2454,8 @@ test_changelog_failure_quotes_git_stderr(){
   PATH="$root/gitshim:$PATH" run_dream "$root"
   unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES
 
-  local cw="$(fdir "$root")/changelog-window.md" line
+  local cw; cw="$(fdir "$root")/changelog-window.md"
+  local line
   line=$(grep 'Git clone failed' "$cw")
   case "$line" in
     "Git clone failed (fatal: unable to access 'https://x/': (b)boom(/b) xxx"*) ok "the section quotes the cause line, not the hint, warning or advice" ;;
@@ -2501,7 +2499,7 @@ test_changelog_log_failure_is_not_a_quiet_night(){
   export AUTODREAM_CHANGELOG_SOURCES="Lazy|$up|CHANGELOG.md|$root/autodream/cache/lazy"
   PATH="$root/gitshim:$PATH" run_dream "$root"
   unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES
-  local cw="$(fdir "$root")/changelog-window.md"
+  local cw; cw="$(fdir "$root")/changelog-window.md"
   assert_grep   "$cw" 'Git log failed (fatal: could not fetch 1234abcd from promisor remote)' "the section says the diff could not be read, and why"
   assert_nogrep "$cw" 'No changelog commits in this window' "it does not read as a quiet night"
   assert_grep   "$root/notify-args.txt" '^--warning ' "a failed log counts toward every source failing"
@@ -2518,7 +2516,8 @@ test_changelog_all_sources_failed_notifies(){
   run_dream "$root"
   unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES
 
-  local cw="$(fdir "$root")/changelog-window.md" args="$root/notify-args.txt"
+  local cw; cw="$(fdir "$root")/changelog-window.md"
+  local args="$root/notify-args.txt"
   assert_grep "$cw" "Git clone failed (fatal: repository '.*ghost-a.git' does not exist)" "the first source's section quotes git"
   assert_grep "$cw" "Git clone failed (fatal: repository '.*ghost-b.git' does not exist)" "the second source's section quotes git"
   assert_eq "$(grep -c '^--warning ' "$args" 2>/dev/null)" "1" "exactly one changelog warning is posted"
@@ -2544,7 +2543,7 @@ test_changelog_partial_failure_does_not_notify(){
   export AUTODREAM_CHANGELOG_SOURCES="Alpha|$a|CHANGELOG.md|$root/autodream/cache/a;Ghost|$root/nope.git|CHANGELOG.md|$root/autodream/cache/ghost"
   run_dream "$root"
   unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES
-  local cw="$(fdir "$root")/changelog-window.md"
+  local cw; cw="$(fdir "$root")/changelog-window.md"
   assert_grep   "$cw" 'Alpha in-window'  "the working source is read"
   assert_grep   "$cw" 'Git clone failed' "the dead source reports its failure"
   assert_nogrep "$root/notify-args.txt" '^--warning' "a partial failure posts no warning"
@@ -2566,7 +2565,7 @@ test_changelog_owned_cache_ignores_global_insteadof(){
   export AUTODREAM_CHANGELOG=1
   export AUTODREAM_CHANGELOG_SOURCES="Owned|file://$up|CHANGELOG.md|$root/autodream/cache/own;Foreign|file://$up|CHANGELOG.md|$root/elsewhere/foreign"
   HOME="$root/home" run_dream "$root"
-  local cw="$(fdir "$root")/changelog-window.md"
+  local cw; cw="$(fdir "$root")/changelog-window.md"
   assert_grep "$cw" 'First in-window' "the owned cache clones despite the global rewrite"
   assert_grep "$cw" 'nonexistent-autodream-bogus' "a repo outside the cache still honours the user's git config"
 
@@ -2603,7 +2602,7 @@ test_changelog_nested_cache_path_is_owned_on_first_clone(){
   export AUTODREAM_CHANGELOG_SOURCES="Nested|file://$up|CHANGELOG.md|$ad/cache/nested/deeper/source;Escape|file://$up|CHANGELOG.md|$ad/cache/link/missing/source"
   HOME="$root/home" run_dream "$root"
   unset AUTODREAM_CHANGELOG AUTODREAM_CHANGELOG_SOURCES
-  local cw="$(fdir "$root")/changelog-window.md"
+  local cw; cw="$(fdir "$root")/changelog-window.md"
   assert_grep   "$cw" 'Nested in-window' "a nested owned cache clones anonymously on its first run"
   assert_file   "$ad/cache/nested/deeper/source/CHANGELOG.md" "the nested clone landed inside the cache"
   assert_grep   "$cw" 'nonexistent-autodream-bogus' "a missing path behind a symlink out of the cache keeps the user's git config"
@@ -3156,7 +3155,7 @@ test_normalize_project(){
   local root; root=$(setup_env); mk_session "$root" sess1
   export MOCK_MODE=l1_badproject; run_dream "$root"; unset MOCK_MODE
   local h; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
-  local fj="$(fdir "$root")/$h.json"
+  local fj; fj="$(fdir "$root")/$h.json"
   assert_file   "$fj" "findings JSON written"
   assert_nogrep "$fj" 'WRONG-PROJECT'     "model's wrong project value was overwritten"
   assert_grep   "$fj" '"project": "proj-a"' "project normalized to the session dir basename"
@@ -3244,7 +3243,7 @@ test_noise_gate_stats(){
   mkdir -p "$(fdir "$root")"
   printf '{"session_path":"CACHED","findings":[]}' > "$(fdir "$root")/$hc.json"
   run_dream "$root"
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'gated: 1'                        "gated count recorded"
   assert_grep "$stats" 'sessions_triaged: 3'              "all three sessions counted as triaged"
   assert_grep "$stats" 'l1_sessions_already_done_at_start: 1' "precache count unaffected by gating (only cached1 was precached)"
@@ -3269,7 +3268,7 @@ test_oversized_gate_zero(){
   echo "# oversized gate (#12 measurement): both keys present at 0 on a normal run"
   local root; root=$(setup_env); mk_session "$root" sess1
   run_dream "$root"
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'oversized_total: 0'   "no oversized sessions under the default threshold"
   assert_grep "$stats" 'oversized_errored: 0' "no oversized-errored sessions under the default threshold"
   rm -rf "$root"
@@ -3281,7 +3280,7 @@ test_oversized_gate_total(){
   export AUTODREAM_SLIM_BYTES=100
   run_dream "$root"
   unset AUTODREAM_SLIM_BYTES
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'oversized_total: 1'   "one session counted as oversized"
   assert_grep "$stats" 'oversized_errored: 0' "the oversized session still triaged cleanly (no error key)"
   rm -rf "$root"
@@ -3293,7 +3292,7 @@ test_oversized_gate_errored(){
   export AUTODREAM_SLIM_BYTES=100 MOCK_MODE=l1_incomplete AUTODREAM_L1_ROUNDS=1
   run_dream "$root"
   unset AUTODREAM_SLIM_BYTES MOCK_MODE AUTODREAM_L1_ROUNDS
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'oversized_total: 1'   "the incomplete session still counted as oversized"
   assert_grep "$stats" 'oversized_errored: 1' "its final-round error stub is paired and counted"
   rm -rf "$root"
@@ -3303,7 +3302,7 @@ test_stats_sidecar_ok(){
   echo "# sidecar health (#27): a normal run reports zero unparseable sidecars"
   local root; root=$(setup_env); mk_session "$root" sess1
   run_dream "$root"
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'stats_sidecars_unparseable: 0' "healthy sidecars report a real zero"
   rm -rf "$root"
 }
@@ -3316,7 +3315,7 @@ test_stats_sidecar_missing_counted(){
   export AUTODREAM_STATS_BIN="$root/does-not-exist.sh"
   run_dream "$root"
   unset AUTODREAM_STATS_BIN
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'stats_sidecars_unparseable: 2' "both missing sidecars counted"
   rm -rf "$root"
 }
@@ -3327,7 +3326,7 @@ test_stats_sidecar_missing_keeps_oversized_count(){
   export AUTODREAM_SLIM_BYTES=100 AUTODREAM_STATS_BIN="$root/does-not-exist.sh"
   run_dream "$root"
   unset AUTODREAM_SLIM_BYTES AUTODREAM_STATS_BIN
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'oversized_total: 1'            "oversized session still counted via the live-size fallback"
   assert_grep "$stats" 'stats_sidecars_unparseable: 1' "and the sidecar failure is recorded alongside it"
   rm -rf "$root"
@@ -3342,7 +3341,7 @@ test_stats_sidecar_malformed_counted(){
   export AUTODREAM_SLIM_BYTES=100 AUTODREAM_STATS_BIN="$stub"
   run_dream "$root"
   unset AUTODREAM_SLIM_BYTES AUTODREAM_STATS_BIN
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'stats_sidecars_unparseable: 1' "missing transcript_bytes counts as unparseable"
   assert_grep "$stats" 'oversized_total: 1'            "oversized session still counted via the live-size fallback"
   rm -rf "$root"
@@ -3357,7 +3356,7 @@ test_stats_sidecar_non_numeric_counted(){
   chmod +x "$stub"
   run_dream "$root"
   unset AUTODREAM_STATS_BIN
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'stats_sidecars_unparseable: 1' "a string transcript_bytes is not a measurement"
   rm -rf "$root"
 }
@@ -3366,7 +3365,7 @@ test_runner_provenance(){
   echo "# runner provenance (#29): run-stats.txt records which code produced it"
   local root; root=$(setup_env); mk_session "$root" sess1
   run_dream "$root"
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   local head; head=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null)
   assert_grep "$stats" "runner_commit: $head" "stamps the commit the runner was checked out at"
   assert_grep "$stats" 'runner_dirty: \(yes\|no\)' "records whether the tree had uncommitted changes"
@@ -3383,7 +3382,7 @@ test_runner_provenance_no_git(){
   AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=2 \
   PROJECTS_DIR="$root/projects" AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
   bash "$bin/run.sh" "$DATE" > "$root/run.out" 2>&1
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'runner_commit: unknown' "no git history degrades to unknown"
   assert_grep "$stats" 'runner_dirty: no'       "dirty is not claimed when the commit is unknown"
   assert_file "$root/dreams/$DATE.md"           "the run still produced a report"
@@ -3400,7 +3399,7 @@ test_runner_provenance_through_symlink(){
   PROJECTS_DIR="$root/projects" AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
   /bin/bash "$root/autodream/run.sh" "$DATE" > "$root/run.out" 2>&1
   local head; head=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null)
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" "runner_commit: $head" "a symlinked runner reports the checkout it points at"
   assert_file "$root/dreams/$DATE.md"          "the run still produced a report"
   rm -rf "$root"
@@ -3441,7 +3440,7 @@ test_runner_provenance_unresolvable_chain(){
   AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=2 \
   PROJECTS_DIR="$root/projects" AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
   /bin/bash "$root/autodream/run.sh" "$DATE" > "$root/run.out" 2>&1
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'runner_commit: unknown' "an unresolved chain degrades instead of guessing"
   assert_grep "$stats" 'runner_dirty: no'       "dirty is not claimed when the commit is unknown"
   assert_file "$root/dreams/$DATE.md"           "the run still produced a report"
@@ -3741,7 +3740,7 @@ test_runner_dirty_ignores_untracked(){
   AUTODREAM_NETCHECK=0 AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS=2 \
   PROJECTS_DIR="$root/projects" AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" \
   bash "$repo/bin/run.sh" "$DATE" > "$root/run.out" 2>&1
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'runner_dirty: no' "an untracked file alone does not mark the runner dirty"
 
   printf '\n# tracked edit\n' >> "$repo/bin/session-stats.sh"
@@ -3760,7 +3759,7 @@ test_overlap_pair(){
   mk_timed_session "$root" sessA "2020-01-02T12:00:00Z" "2020-01-02T12:20:00Z"
   mk_timed_session "$root" sessB "2020-01-02T12:05:00Z" "2020-01-02T12:25:00Z"
   run_dream "$root"
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'overlap_measured: yes'     "a real overlap measurement happened"
   assert_grep "$stats" 'overlap_events: 1'         "exactly one distinct pair counted"
   assert_grep "$stats" 'sessions_with_overlap: 2'  "both sessions counted as involved"
@@ -3774,7 +3773,7 @@ test_overlap_triple(){
   mk_timed_session "$root" sessB "2020-01-02T12:10:00Z"
   mk_timed_session "$root" sessC "2020-01-02T12:20:00Z"
   run_dream "$root"
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'overlap_measured: yes'     "a real overlap measurement happened"
   assert_grep "$stats" 'overlap_events: 3'         "all three pairs counted"
   assert_grep "$stats" 'sessions_with_overlap: 3'  "all three sessions counted as involved"
@@ -3836,7 +3835,7 @@ test_fanout_stats(){
   local root; root=$(setup_env)
   mk_fanout_fixture "$root"
   run_dream "$root"
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'sessions_top_level: 2'  "the two ungated top-level sessions"
   assert_grep "$stats" 'sessions_nested: 5'     "three workers under a parent, at both nesting depths, and two under a missing one"
   assert_grep "$stats" 'fanout_parents: 2'      "the workers belong to two parents, one of them gone"
@@ -3924,7 +3923,7 @@ test_overlap_none(){
   mk_timed_session "$root" sessA "2020-01-02T12:00:00Z"
   mk_timed_session "$root" sessB "2020-01-02T13:00:00Z"
   run_dream "$root"
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'overlap_measured: yes'     "genuine zero overlap is still a real measurement"
   assert_grep "$stats" 'overlap_events: 0'         "no pairs when sessions are far apart"
   assert_grep "$stats" 'sessions_with_overlap: 0'  "no sessions involved when sessions are far apart"
@@ -3937,7 +3936,7 @@ test_overlap_not_measured_missing_bin(){
   mk_timed_session "$root" sessA "2020-01-02T12:00:00Z"
   mk_timed_session "$root" sessB "2020-01-02T12:05:00Z"
   export AUTODREAM_OVERLAP_BIN="$root/does-not-exist.sh"; run_dream "$root"; unset AUTODREAM_OVERLAP_BIN
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'overlap_measured: no'      "missing overlap-stats.sh binary is not a measurement"
   assert_grep "$stats" 'overlap_events: 0'          "count key still present at 0"
   assert_grep "$stats" 'sessions_with_overlap: 0'   "count key still present at 0"
@@ -3953,7 +3952,7 @@ test_overlap_not_measured_empty_output(){
   printf '#!/bin/bash\nexit 0\n' > "$stub"
   chmod +x "$stub"
   export AUTODREAM_OVERLAP_BIN="$stub"; run_dream "$root"; unset AUTODREAM_OVERLAP_BIN
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'overlap_measured: no'      "empty overlap-stats.sh output is not a measurement"
   assert_grep "$stats" 'overlap_events: 0'          "count key still present at 0"
   assert_grep "$stats" 'sessions_with_overlap: 0'   "count key still present at 0"
@@ -3969,7 +3968,7 @@ test_overlap_not_measured_malformed_output(){
   printf '#!/bin/bash\necho "not json at all"\n' > "$stub"
   chmod +x "$stub"
   export AUTODREAM_OVERLAP_BIN="$stub"; run_dream "$root"; unset AUTODREAM_OVERLAP_BIN
-  local stats="$(fdir "$root")/run-stats.txt"
+  local stats; stats="$(fdir "$root")/run-stats.txt"
   assert_grep "$stats" 'overlap_measured: no'      "malformed overlap-stats.sh output is not a measurement"
   assert_grep "$stats" 'overlap_events: 0'          "count key still present at 0"
   assert_grep "$stats" 'sessions_with_overlap: 0'   "count key still present at 0"
@@ -5078,7 +5077,7 @@ test_the_runs_reviewer_reviews_every_source_by_default(){
   local root o h fd trip; root=$(setup_env); mk_session "$root" sess1
   o=$(mk_omp_session "$root" rrrr); h=$(hash_of "$o"); trip=$(mk_omp_tripwire "$root")
   export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_ENGINE_OMP=
-  TEST_OMP_BIN="$trip" TEST_OMP_L1_MODEL= run_dream_omp "$root"
+  TEST_OMP_BIN="$trip" TEST_OMP_L1_MODEL='' run_dream_omp "$root"
   unset FANOUT MOCK_CAPTURE_DIR AUTODREAM_L1_ENGINE_OMP
   fd=$(fdir "$root")
   assert_grep    "$fd/run-stats.txt" '^l2_engine: claude$' "claude, the first enabled adapter, is the run's reviewer"
@@ -5090,8 +5089,8 @@ test_the_runs_reviewer_reviews_every_source_by_default(){
   echo "# AUTODREAM_L2_ENGINE picks the reviewer for both passes, whatever the adapter order"
   root=$(setup_env); mk_session "$root" sess1
   o=$(mk_omp_session "$root" ssss); h=$(hash_of "$o"); trip=$(mk_omp_tripwire "$root")
-  export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_ENGINE_OMP= AUTODREAM_ADAPTERS=omp,claude AUTODREAM_L2_ENGINE=claude
-  TEST_OMP_BIN="$trip" TEST_OMP_L1_MODEL= run_dream_omp "$root"
+  export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_ENGINE_OMP='' AUTODREAM_ADAPTERS=omp,claude AUTODREAM_L2_ENGINE=claude
+  TEST_OMP_BIN="$trip" TEST_OMP_L1_MODEL='' run_dream_omp "$root"
   unset FANOUT MOCK_CAPTURE_DIR AUTODREAM_L1_ENGINE_OMP AUTODREAM_ADAPTERS AUTODREAM_L2_ENGINE
   fd=$(fdir "$root")
   assert_grep    "$fd/run-stats.txt" '^l1_engine_omp: claude$' "omp, though enabled first, is reviewed by the L2 engine"
@@ -5100,8 +5099,8 @@ test_the_runs_reviewer_reviews_every_source_by_default(){
   echo "# AUTODREAM_L1_ENGINE picks one L1 engine for every source, claude sessions included"
   local c hc; root=$(setup_env); mk_session "$root" sess1; c="$root/projects/proj-a/sess1.jsonl"; hc=$(hash_of "$c")
   o=$(mk_omp_session "$root" tttt); h=$(hash_of "$o")
-  export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_ENGINE_OMP= AUTODREAM_L1_ENGINE=omp
-  TEST_OMP_L1_MODEL= AUTODREAM_L1_MODEL=omp/test-model run_dream_omp "$root"
+  export FANOUT=1 MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_ENGINE_OMP='' AUTODREAM_L1_ENGINE=omp
+  TEST_OMP_L1_MODEL='' AUTODREAM_L1_MODEL=omp/test-model run_dream_omp "$root"
   unset FANOUT MOCK_CAPTURE_DIR AUTODREAM_L1_ENGINE_OMP AUTODREAM_L1_ENGINE
   fd=$(fdir "$root")
   assert_grep "$fd/run-stats.txt" '^l1_engine_claude: omp$' "the claude sessions are reviewed by omp"
@@ -5705,7 +5704,7 @@ test_skill_fields_dropped_without_a_sidecar(){
   run_dream "$root"
   unset AUTODREAM_STATS_BIN
   local h; h=$(hash_of "$root/projects/proj-a/sess1.jsonl")
-  local fj="$(fdir "$root")/$h.json"
+  local fj; fj="$(fdir "$root")/$h.json"
   assert_eq "$(jq -r 'has("skills_invoked") or has("skills_invoked_count") or has("skills_invoked_counts") or has("skills_authored")' "$fj")" "false" \
     "the unmeasured skill fields are removed rather than believed"
   assert_eq "$(jq -r '.findings | type' "$fj")" "array" "the rest of the findings JSON survives"
@@ -6247,7 +6246,7 @@ test_pins_applied_before_notify(){
   local d; d=$(fdir "$root")
   printf '#!/bin/bash\n[ -s "%s/pins-applied.tsv" ] && touch "%s/notify-saw-pins"\nexit 0\n' "$d" "$root" > "$root/autodream/notify.sh"
   chmod +x "$root/autodream/notify.sh"
-  export MOCK_MODE=pins MOCK_PIN_PROJECT="$(encode_project "$cwd")"; pins_run "$root"; unset MOCK_MODE MOCK_PIN_PROJECT
+  MOCK_PIN_PROJECT=$(encode_project "$cwd"); export MOCK_MODE=pins MOCK_PIN_PROJECT; pins_run "$root"; unset MOCK_MODE MOCK_PIN_PROJECT
   assert_eq "$(sm_calls "$root")" "1" "one remember call"
   assert_file "$root/notify-saw-pins" "the pin was already stored when notify.sh ran"
   rm -rf "$root"
@@ -6262,7 +6261,7 @@ test_streak_update_runs_before_steps_that_can_hang(){
   printf '#!/bin/bash\necho notify >> "%s/order.log"\n' "$root" > "$root/autodream/notify.sh"
   printf '#!/bin/bash\necho pins >> "%s/order.log"\nexec bash "%s/mock-shared-memory.sh" "$@"\n' "$root" "$HERE" > "$root/sm.sh"
   chmod +x "$root/autodream/question-streaks.sh" "$root/autodream/notify.sh" "$root/sm.sh"
-  export MOCK_MODE=pins MOCK_PIN_PROJECT="$(encode_project "$cwd")"
+  MOCK_PIN_PROJECT=$(encode_project "$cwd"); export MOCK_MODE=pins MOCK_PIN_PROJECT
   SHARED_MEMORY_BIN="$root/sm.sh" MOCK_SM_LOG="$root/sm-calls.jsonl" run_dream "$root"
   unset MOCK_MODE MOCK_PIN_PROJECT
   assert_eq "$(sed -n 1p "$root/order.log" 2>/dev/null)" "streaks" "the streak update ran first"
@@ -7537,17 +7536,6 @@ done
 
 streak_rows(){ awk '!/^#/ && NF' "$1" 2>/dev/null | wc -l | tr -d ' '; }
 
-hold_flock(){ # $1=lock file -> a python process holds its flock; sets HOLD_PID once it does
-  local ready="$1.ready" i=0
-  rm -f "$ready"
-  python3 -c 'import fcntl, sys, time
-f = open(sys.argv[1], "a")
-fcntl.flock(f, fcntl.LOCK_EX)
-open(sys.argv[2], "w").close()
-time.sleep(600)' "$1" "$ready" &
-  HOLD_PID=$!
-  while [ ! -e "$ready" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
-}
 flock_free(){ # $1=lock file: 0 when a non-blocking flock on it succeeds
   python3 -c 'import fcntl, sys
 f = open(sys.argv[1], "a")
@@ -8569,7 +8557,7 @@ test_threads_later_work_can_complete_idea(){
     assert_grep "$root/update.out" '^threads_rejected: 0$' "$case_row accepts work-to-idea assignment"
     AUTODREAM_DIR="$root/autodream" /bin/bash "$REPO/bin/threads.sh" report 2020-01-03 > "$root/tonight.md"
     AUTODREAM_DIR="$root/autodream" /bin/bash "$REPO/bin/threads.sh" report 2020-01-20 > "$root/later.md"
-    if [ "$expected" = done ]; then
+    if [ "$expected" = "done" ]; then
       assert_eq "$(jq -sr '.[0].done_by' "$(thread_state "$root")")" linker "$case_row attributes completion"
       assert_grep "$root/tonight.md" "$idea_id" "$case_row appears under closed tonight"
       assert_nogrep "$root/later.md" "$idea_id" "$case_row leaves dropped report"
@@ -8582,7 +8570,7 @@ test_threads_later_work_can_complete_idea(){
       : > "$root/rows.jsonl"
       thread_review_row "$root" 222222222222 "finish cache" fully_achieved '[]' 2020-01-03
       mode=finished_existing
-      expected=done
+      expected="done"
     fi
     THREADS_REFRESH_KEYS=$(printf '%s\t%s' 2020-01-03 222222222222) MOCK_THREADS_CLOSE_ID="$idea_id" thread_review_update "$root" "$mode"
     assert_eq "$(jq -sr '.[0].status' "$(thread_state "$root")")" "$expected" "$case_row refreshed work can complete the idea"
@@ -8754,7 +8742,7 @@ test_threads_originating_work_cannot_complete_idea(){
       idea_id=$(jq -sr '.[0].id' "$(thread_state "$root")")
       original=$(jq -sc '.[0].sessions[0]' "$(thread_state "$root")")
       assert_eq "$(jq -sr '[.[].kind] | join(",")' "$(thread_state "$root")")" idea "$outcome indexes deferral while work remains pending"
-      if [ "$expected" = done ]; then
+      if [ "$expected" = "done" ]; then
         : > "$root/rows.jsonl"
         thread_review_row "$root" "$source_hash" "implement cache" "$outcome" '[]' "$source_date"
       fi
@@ -8797,7 +8785,7 @@ test_threads_completed_work_leaves_deferred_idea_open(){
     AUTODREAM_DIR="$root/autodream" /bin/bash "$REPO/bin/threads.sh" reopen "$work_id" >/dev/null
     thread_review_row "$root" 333333333333 "service completed" "$outcome" '[]' 2020-01-04
     MOCK_THREADS_CLOSE_ID="$work_id" thread_review_update "$root" finished_existing
-    assert_eq "$(jq -sr --arg id "$work_id" '.[] | select(.id == $id) | .status' "$(thread_state "$root")")" done "$outcome later work still closes its work thread"
+    assert_eq "$(jq -sr --arg id "$work_id" '.[] | select(.id == $id) | .status' "$(thread_state "$root")")" "done" "$outcome later work still closes its work thread"
     thread_cleanup "$root"
   done
 }
@@ -9093,7 +9081,7 @@ test_threads_report_ranking_and_limit(){
   local root state report ids first new_id idea_rows recommendation_rows i id
   root=$(setup_env)
   state=$(thread_state "$root"); : > "$state"
-  new_id=t-10000009
+  new_id="t-10000009"
   seed_thread_report_record "$root" "$new_id" work 2019-12-25 open partially_achieved /gone/new.jsonl
   for i in 2 3 4 5; do
     id=$(printf 't-1000000%s' "$i")
@@ -9686,7 +9674,7 @@ test_threads_backfill_reads_unterminated_manifest_root(){
 
 test_threads_backfill_budget_uses_grown_index_request(){
   echo "# threads: backfill enforces max-calls after earlier dates grow the index"
-  local root repo_base repo_a repo_b repo_link_a repo_link_b large output calls actual
+  local root repo_base repo_a repo_b large output calls actual
   root=$(setup_env); repo_base=$(mktemp -d "$REPO/.threads-budget.XXXXXX") || return 1
   repo_a="$repo_base/a"; repo_b="$repo_base/b"
   mkdir -p "$repo_a" "$repo_b"
@@ -10125,7 +10113,7 @@ test_threads_launcher_is_private_and_removes_only_itself(){
 
 test_threads_explore_resolves_claude_from_path_and_checks_before_open(){
   echo "# threads: explore resolves Claude from PATH and checks all launch tools before opening"
-  local root open_bin cmux_bin path_claude opened marker rc
+  local root open_bin cmux_bin path_claude rc
   root=$(setup_env); mkdir -p "$root/path-bin"
   ln -s "$REPO/bin/threads.sh" "$root/autodream/threads.sh"
   open_bin="$root/open"; cmux_bin="$root/cmux"; path_claude="$root/path-bin/claude"

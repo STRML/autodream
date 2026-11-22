@@ -72,7 +72,8 @@ fi
 FINDINGS_DIR="${FINDINGS_DIR:-$AUTODREAM_DIR/findings}"
 DREAMS_DIR="${DREAMS_DIR:-$HOME/.claude/dreams}"
 WORK_DIR="$AUTODREAM_DIR/work"
-export AUTODREAM_WORK_BUCKET="${PROJECTS_DIR:-$HOME/.claude/projects}/$(printf '%s' "$WORK_DIR" | sed 's#[/.]#-#g')"
+AUTODREAM_WORK_BUCKET="${PROJECTS_DIR:-$HOME/.claude/projects}/$(printf '%s' "$WORK_DIR" | sed 's#[/.]#-#g')"
+export AUTODREAM_WORK_BUCKET
 mkdir -p "$AUTODREAM_WORK_BUCKET" 2>/dev/null
 protect="$AUTODREAM_DIR:$FINDINGS_DIR:$DREAMS_DIR"
 

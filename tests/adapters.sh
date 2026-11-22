@@ -7,9 +7,8 @@ REPO=$(cd "$HERE/.." && pwd)
 . "$HERE/lib-tmp.sh"; suite_tmp adapters
 
 pass=0; fail=0
-ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
-no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
-assert_eq(){ [ "$1" = "$2" ] && ok "$3" || no "$3 (got [$1] want [$2])"; }
+# shellcheck source=/dev/null
+. "$HERE/lib-assert.sh"
 has(){ case "$2" in *"$1"*) ok "$3" ;; *) no "$3 (got: [$2])" ;; esac; }
 
 [ -f "$REPO/bin/adapters.sh" ] || {
@@ -136,7 +135,7 @@ l1counts=$(mktemp "${TMPDIR:-/tmp}/l1model.XXXXXX")
   AUTODREAM_L1_MODEL_OMP=neuralwatt/glm-5.3-flash
   assert_eq "$(adapter_l1_model omp)" "neuralwatt/glm-5.3-flash" "the per-adapter override beats the generic one"
   assert_eq "$(adapter_l1_model claude)" "generic/model" "and leaves the other adapter on the generic one"
-  assert_eq "$(AUTODREAM_L1_MODEL= AUTODREAM_L1_MODEL_OMP= adapter_l1_model omp)" "deepseek/deepseek-flash" "an empty override is not an override"
+  assert_eq "$(AUTODREAM_L1_MODEL='' AUTODREAM_L1_MODEL_OMP='' adapter_l1_model omp)" "deepseek/deepseek-flash" "an empty override is not an override"
   adapter_l1_model ../evil >/dev/null 2>&1; assert_eq "$?" "1" "an unsafe name resolves nothing"
   unset AUTODREAM_L1_MODEL AUTODREAM_L1_MODEL_OMP
   adapter_l1_model nonesuch >/dev/null 2>&1; assert_eq "$?" "1" "an adapter with no manifest and no override resolves nothing"
@@ -145,7 +144,7 @@ l1counts=$(mktemp "${TMPDIR:-/tmp}/l1model.XXXXXX")
   assert_eq "$(adapter_l1_model omp claude)" "claude-haiku-5-5" "and the default model is the reviewer's, not the source's"
   assert_eq "$(AUTODREAM_L1_ENGINE=omp adapter_l1_engine claude claude)" "omp" "AUTODREAM_L1_ENGINE replaces the reviewer for every source"
   assert_eq "$(AUTODREAM_L1_ENGINE=omp AUTODREAM_L1_ENGINE_CLAUDE=claude adapter_l1_engine claude omp)" "claude" "and the per-source form beats it"
-  assert_eq "$(AUTODREAM_L1_ENGINE= adapter_l1_engine omp claude)" "claude" "an empty AUTODREAM_L1_ENGINE is not a choice"
+  assert_eq "$(AUTODREAM_L1_ENGINE='' adapter_l1_engine omp claude)" "claude" "an empty AUTODREAM_L1_ENGINE is not a choice"
   adapter_l1_engine omp nonesuch >/dev/null 2>&1; assert_eq "$?" "1" "a reviewer that is not an accepted adapter resolves nothing"
   AUTODREAM_L1_ENGINE_OMP=claude
   assert_eq "$(adapter_l1_engine omp)" "claude" "the per-source engine choice moves it"

@@ -9,10 +9,8 @@ REPO_ROOT=$(cd "$HERE/.." && pwd)
 BIN="$REPO_ROOT/bin/prune-worktrees.sh"
 
 pass=0; fail=0
-ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
-no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
-assert_grep(){   grep -q "$2" "$1" 2>/dev/null && ok "$3" || no "$3 (no /$2/ in $1)"; }
-assert_nogrep(){ grep -q "$2" "$1" 2>/dev/null && no "$3 (/$2/ unexpectedly in $1)" || ok "$3"; }
+# shellcheck source=/dev/null
+. "$HERE/lib-assert.sh"
 
 T=$SUITE_TMP
 export AUTODREAM_PRUNE_LEDGER="$T/ledger-default.tsv"
@@ -181,7 +179,7 @@ for n in sq dirty unpushed openpr newer moved closedold closednew develop stagin
 age "$T/elsewhere/outside"; age "$(wt detached)"
 rm -rf "$(wt gone)"
 
-SQ_TIP=$(tip sq); MOVED_TIP=$(tip moved); SQ_PATH=$(cd -P "$(wt sq)" && pwd -P)
+SQ_TIP=$(tip sq); SQ_PATH=$(cd -P "$(wt sq)" && pwd -P)
 RACE_BRANCH=racy FAKE_RACE_DIR="$T/other-racy" run_prune
 echo "== pass 1: every state"
 expect_removed sq "squash-merged PR at the branch tip (with an ignored build file)"

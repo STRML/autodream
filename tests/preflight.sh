@@ -8,9 +8,8 @@ REPO=$(cd "$HERE/.." && pwd)
 PF="$REPO/bin/preflight.sh"
 
 pass=0; fail=0
-ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
-no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
-assert_eq(){ [ "$1" = "$2" ] && ok "$3" || no "$3 (got [$1] want [$2])"; }
+# shellcheck source=/dev/null
+. "$HERE/lib-assert.sh"
 has(){ case "$2" in *"$1"*) ok "$3" ;; *) no "$3 (got: $2)" ;; esac; }
 
 [ -x "$PF" ] || { printf '  FAIL - bin/preflight.sh missing or not executable\n\npassed: 0   failed: 1\n'; exit 1; }

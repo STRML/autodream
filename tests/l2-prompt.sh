@@ -9,9 +9,8 @@ REPO=$(cd "$HERE/.." && pwd)
 . "$HERE/lib-tmp.sh"; suite_tmp ccl2p
 
 pass=0; fail=0
-ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
-no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
-assert_eq(){ if [ "$1" = "$2" ]; then ok "$3"; else no "$3 (got [$1] want [$2])"; fi; }
+# shellcheck source=/dev/null
+. "$HERE/lib-assert.sh"
 
 PROMPT_FILE="$REPO/prompts/L2_SYSTEM.txt"
 WANT=$(cat "$PROMPT_FILE" 2>/dev/null)

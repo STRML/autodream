@@ -7,9 +7,8 @@ A="$REPO/adapters/omp/adapter.sh"
 LIN="$REPO/adapters/omp/linearize.sh"
 
 pass=0; fail=0
-ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
-no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
-assert_eq(){ [ "$1" = "$2" ] && ok "$3" || no "$3 (got [$1] want [$2])"; }
+# shellcheck source=/dev/null
+. "$HERE/lib-assert.sh"
 assert_rc(){ # $1=got $2=want $3=label
   [ "$1" = "$2" ] && ok "$3" || no "$3 (exit $1, want $2)"
 }
@@ -344,7 +343,7 @@ SPU="$tmp/skill-by-file-nocwd.jsonl"
   RS 7 r6 write '/Users/x/.claude/skills/tsai/SKILL.md'; RB 7 s7 write '/Users/x/.claude/skills/tsai/SKILL.md'
   RD 8 b7 'https://raw.githubusercontent.com/o/skills/main/skills/tsai/SKILL.md'
 } > "$SPU"
-HOME= "$A" stats "$SPU" "$tmp/stspu.json" >/dev/null 2>&1
+HOME='' "$A" stats "$SPU" "$tmp/stspu.json" >/dev/null 2>&1
 assert_eq "$(jq -r '"\(.skills_invoked|join(",")) \(.skills_invoked_count)"' "$tmp/stspu.json")" "bar 1" "an unresolvable path falls back to the skill-name match; resolvable ones compare as files"
 SPW="$tmp/skill-url-reads.jsonl"
 { echo "$HDR_TITLE"; hdr_session 41 /tmp; umsg u1 null a

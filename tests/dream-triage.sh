@@ -10,13 +10,8 @@ TRIAGE="$REPO/bin/triage-dream.sh"
 MOCK="$HERE/mock-claude.sh"
 
 pass=0; fail=0
-ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
-no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
-assert_eq(){ [ "$1" = "$2" ] && ok "$3" || no "$3 (got [$1] want [$2])"; }
-assert_grep(){ grep -q -- "$2" "$1" 2>/dev/null && ok "$3" || no "$3 (no /$2/ in $1)"; }
-assert_nogrep(){ grep -q -- "$2" "$1" 2>/dev/null && no "$3 (/$2/ unexpectedly in $1)" || ok "$3"; }
-assert_file(){ [ -f "$1" ] && ok "$2" || no "$2 (missing: $1)"; }
-assert_no_file(){ [ ! -e "$1" ] && ok "$2" || no "$2 (unexpected: $1)"; }
+# shellcheck source=/dev/null
+. "$HERE/lib-assert.sh"
 status_of(){ jq -r --arg c "$2" '.claims[] | select(.claim == $c) | .status' "$1"; }
 
 mk_root(){

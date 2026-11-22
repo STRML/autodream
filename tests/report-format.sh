@@ -10,9 +10,8 @@ REPO=$(cd "$HERE/.." && pwd)
 . "$REPO/bin/report-format.sh"
 
 pass=0; fail=0
-ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
-no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
-assert_eq(){ if [ "$1" = "$2" ]; then ok "$3"; else no "$3 (got [$1] want [$2])"; fi; }
+# shellcheck source=/dev/null
+. "$HERE/lib-assert.sh"
 
 old_marker(){ sed -n 's/.*<!-- *autodream:open-questions=\([0-9][0-9]*\) *-->.*/\1/p' "$1" 2>/dev/null | head -1; }
 old_has_marker(){ grep -q 'autodream:open-questions=' "$1" 2>/dev/null; }

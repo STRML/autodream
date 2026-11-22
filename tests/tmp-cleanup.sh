@@ -4,8 +4,8 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 
 pass=0; fail=0
-ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
-no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
+# shellcheck source=/dev/null
+. "$HERE/lib-assert.sh"
 
 # shellcheck source=/dev/null
 . "$HERE/lib-tmp.sh"; suite_tmp tmpclean

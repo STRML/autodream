@@ -25,7 +25,7 @@ l1_reply() {
     jq -cn --arg m "${MOCK_SERVED_MODEL:-$req_model}" \
       '{type: "result", subtype: "success", is_error: false, result: "done", modelUsage: {($m): {costUSD: 0.0125}}, total_cost_usd: 0.0125}'
   else
-    echo done
+    echo "done"
   fi
 }
 
@@ -76,7 +76,7 @@ if [ "$line1" = "AUTODREAM_THREADS_LINKER" ]; then
       exit 0
       ;;
     ideas_during_call)
-      MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR= /bin/bash "$MOCK_THREADS_CLI" update \
+      MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR='' /bin/bash "$MOCK_THREADS_CLI" update \
         "$(jq -r '.date' <<< "$threads_request")" < "$MOCK_THREADS_SOURCE_ROWS" >/dev/null 2>&1 || exit 1
       threads_good
       exit 0
