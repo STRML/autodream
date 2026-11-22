@@ -110,6 +110,18 @@ jobs:
           ln -sf "$(command -v timeout)" "$HOME/.local/bin/gtimeout"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      # L1 workers run under bubblewrap on Linux (bin/l1-confine.sh). Without it the probe says "no
+      # sandbox tool" and the whole bwrap branch, the real-confinement cases in tests/l1-confine.sh and
+      # the confined run-level tests, would skip here and run nowhere. Ubuntu 24.04 limits unprivileged
+      # user namespaces through AppArmor; lifting that is allowed to fail, and a runner where bwrap
+      # still cannot start is a runner where the probe says no and those cases skip.
+      - name: bubblewrap
+        if: steps.scope.outputs.scope == 'full'
+        run: |
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --version
+
       - name: run-all, shard ${{ matrix.shard }} of 8
         if: steps.scope.outputs.scope == 'full'
         env:

@@ -371,13 +371,13 @@ class DataTests(unittest.TestCase):
         self.assertTrue(any('111111111111.json' in notice for notice in broken['notices']))
 
     def test_web_legacy_measurements_are_not_zero(self):
-        for date, goal, outcome in [('2026-07-16', None, None),
+        for night, goal, outcome in [('2026-07-16', None, None),
                                     ('2026-07-19', None, 'partially_achieved'),
                                     ('2026-11-14', None, 'partially_achieved')]:
-            day = self.root / 'findings' / date
+            day = self.root / 'findings' / night
             self.finding(day=day, underlying_goal=None, notable_initiatives=[],
                          stats={'tool_call_count': None})
-            session = self.sessions(self.cache.summary(date))[0]
+            session = self.sessions(self.cache.summary(night))[0]
             self.assertIs(session['goal'], goal)
             self.assertEqual(session['outcome'], outcome)
             self.assertIsNone(session['tool_calls'])

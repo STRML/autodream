@@ -15,3 +15,13 @@ disabledProviders:
 # sessions that failed every round succeeded once this was off. Workers need no memory.
 mnemopi:
   autoRecall: false
+# No headless call this repo makes needs a memory backend, and one that runs is a channel: a worker
+# reads untrusted transcripts, and omp retains and consolidates memory at the end of a session into a
+# store every later session recalls from, through a server or daemon that is not the worker. The
+# 2026-11-21 confined run saw the real mnemopi banks change during a confined call. memory.backend off
+# is "no memory subsystem runs"; autoRecall above stays false for the same reason it was set.
+memory:
+  backend: "off"
+# omp's own worker warm-up overlay (thread/worker-warm-up.ts) turns autolearn off with the memory backend.
+autolearn:
+  enabled: false

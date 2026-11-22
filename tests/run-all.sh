@@ -286,7 +286,7 @@ run_dream(){ # $1=root ; inherits MOCK_MODE/MOCK_CAPTURE_DIR/FANOUT + changelog 
   AUTODREAM_CONFIG="${AUTODREAM_CONFIG:-$1/autodream/config}" \
   AUTODREAM_CONSUME_DATE="${AUTODREAM_CONSUME_DATE:-$DATE}" \
   AUTODREAM_NETCHECK="${AUTODREAM_NETCHECK:-0}" AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS="${AUTODREAM_L1_ROUNDS:-2}" \
-  PROJECTS_DIR="$1/projects" AUTODREAM_DIR="$1/autodream" DREAMS_DIR="$1/dreams" \
+  PROJECTS_DIR="$1/projects" AUTODREAM_DIR="${TEST_AUTODREAM_DIR:-$1/autodream}" DREAMS_DIR="$1/dreams" \
   /bin/bash "$RUN" "$DATE" > "$1/run.out" 2>&1
   # The run's own exit code, captured while $? still holds it: an unattended run has no other
   # signal for "delivered nothing", so the exit code is part of the contract.
@@ -1155,12 +1155,13 @@ test_run_outcome_is_written_only_for_a_delivered_or_untouched_report(){
   root=$(setup_env); o="$root/autodream/logs/run-$DATE.outcome"
   AUTODREAM_RUN_TOKEN=tok.5 vault_run "$root"
   assert_eq "$(cat "$o" 2>/dev/null)" "tok.5 delivered" "the no-sessions stub counts as delivered"
-  # a forced rebuild whose stub cannot be written leaves the old report, which is complete: it is not this run's delivery
-  chmod 444 "$root/dreams/$DATE.md"
+  # a forced rebuild whose stub cannot be staged leaves the old report, which is complete: it is not this run's delivery.
+  # (The stub is written to <report>.tmp and renamed over the report, so a read-only old report is replaced; a
+  # directory at the staging path is what makes the write fail.)
+  mkdir -p "$root/dreams/$DATE.md.tmp"
   AUTODREAM_FORCE=1 AUTODREAM_RUN_TOKEN=tok.6 vault_run "$root"
-  chmod 644 "$root/dreams/$DATE.md"
-  assert_eq "$(grep -c 'tok.6' "$o" || true)" "0" "a stub that could not be written over the old report is not reported as delivered"
-  assert_grep "$root/run.out" "could not be written" "and the run says so"
+  assert_eq "$(grep -c 'tok.6' "$o" || true)" "0" "a stub that could not be staged over the old report is not reported as delivered"
+  assert_grep "$root/run.out" "could not publish the report" "and the run says so"
   rm -rf "$root"
 }
 
@@ -1846,6 +1847,23 @@ EOF
   # run.sh's own network note can follow the stdout section directly when no omp log was touched.
   printf 'worker exit code: 1 after 9s\n--- worker stdout, last 40 lines ---\ndone\nno route to api.anthropic.com when this worker failed (curl http_code=503)\n' > "$dir/netnote.err"
   assert_eq "$(classify_failure "$dir/netnote.err")" "size" "run.sh's network note after the stdout section is not worker output"
+  # A login failure inside the sandbox is a provider failure the next round can retry, and the lines
+  # run.sh writes about staging and the sandbox are not the worker's output, so a path in them
+  # cannot make a failure provider.
+  local login
+  for login in 'Not logged in · Please run /login' 'OAuth token has expired' 'Invalid API key · Please run /login'; do
+    printf 'worker exit code: 1 after 4s\n--- worker stdout, last 40 lines ---\n%s\n' "$login" > "$dir/login.err"
+    assert_eq "$(classify_failure "$dir/login.err")" "provider" "[$login] is provider"
+  done
+  printf 'worker exit code: 1 after 4s\n--- worker stdout, last 40 lines ---\ncontext limit exceeded\nNot logged in; please run /login\n' > "$dir/both.err"
+  assert_eq "$(classify_failure "$dir/both.err")" "provider" "a login failure beside a context-limit line is still provider"
+  for login in 'the sandbox for /tmp/quota-run/s.jsonl could not be built, and a confined run does not fall back to an unconfined worker' \
+    'could not make the staging directory /tmp/quota-run/stage for /tmp/s.jsonl' \
+    'no staging root is set, so there is nowhere to stage the answer for /tmp/quota-run/s.jsonl' \
+    'the answer path was a symlink; it was not read'; do
+    printf '%s\nworker exit code: 1 after 4s\n--- worker stdout, last 40 lines ---\ndone\n' "$login" > "$dir/runner.err"
+    assert_eq "$(classify_failure "$dir/runner.err")" "size" "[$login] is run.sh's line, not worker output"
+  done
   rm -rf "$dir"
 }
 
@@ -3102,7 +3120,6 @@ test_l1_answers_are_staged_then_copied(){
   assert_nogrep "$root/cap/l1-stdin-$h.txt" "Write your findings JSON to this literal absolute path: .*/findings/" "and never the findings dir"
   assert_file "$(fdir "$root")/$h.json" "the runner copied the answer into the findings dir"
   assert_eq "$(jq -r '.outcome' "$(fdir "$root")/$h.json")" "fully_achieved" "and it is the worker's answer"
-  assert_eq "$(cat "$root/cap/l1-bucket-$h.txt" 2>/dev/null)" "yes" "the work bucket exists when the worker starts, so bwrap can bind it"
   assert_file "$(fdir "$root")/$h.json.served" "with its served verdict beside it"
   assert_no_file "$(fdir "$root")/$h.json.stage" "and no half-copied temp file"
   assert_eq "$(ls -A "$root/autodream/staging/run-$$" 2>/dev/null | wc -l | tr -d ' ')" "1" "a live run's staging root is left alone"
@@ -3216,12 +3233,14 @@ test_l1_staging_failure_is_a_worker_failure_with_evidence(){
   AUTODREAM_L1_ROUNDS=1 run_dream "$root"
   chmod 700 "$root/autodream/staging" 2>/dev/null
   assert_grep "$(fdir "$root")/$h.json.err" 'could not make the staging directory' "the .err says the staging directory could not be made"
-  assert_grep "$(fdir "$root")/$h.json" 'worker exited without findings JSON after 1 rounds' "and the session is stubbed like any failed worker"
+  assert_no_file "$(fdir "$root")/$h.json" "and the session is not stubbed: a stub would fill its slot and let a report publish over work never done"
+  assert_no_file "$root/dreams/$DATE.md" "so the date is deferred, not reported"
+  assert_grep "$(fdir "$root")/l1-netdown.txt" " staging\$" "and the ledger says the runner could not set the worker up"
   rm -rf "$root"
 }
 
 test_l1_confine_names_the_engine_without_a_write_profile(){
-  echo "# L1 confinement: an engine whose adapter declares no write profile is reported unconfined"
+  echo "# L1 confinement: the write lists of the claude and omp adapters, and an unknown verb exits 2"
   local out
   # CLAUDE_CONFIG_DIR and the extras are the caller's, so the list is read with both unset.
   out=$(env -u CLAUDE_CONFIG_DIR -u AUTODREAM_L1_WRITES_EXTRA -u AUTODREAM_WORK_BUCKET bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1); local rc=$?
@@ -3236,9 +3255,222 @@ test_l1_confine_names_the_engine_without_a_write_profile(){
   case "$out" in *"$SUITE_TMP/globx/a.json*"*) ok "an extra entry that matches files on disk stays a prefix" ;; *) no "an extra entry that matches files on disk stays a prefix (got: $out)" ;; esac
   case "$out" in *"a.json.lock"*) no "and is not expanded to the files that match it" ;; *) ok "and is not expanded to the files that match it" ;; esac
   out=$(env -u CLAUDE_CONFIG_DIR AUTODREAM_WORK_BUCKET=/work/bucket bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1)
-  case "$out" in *"/work/bucket"*) ok "the work bucket is writable when the runner names it" ;; *) no "the work bucket is writable when the runner names it (got: $out)" ;; esac
-  bash "$REPO/adapters/omp/adapter.sh" l1-writes >/dev/null 2>&1; rc=$?
-  assert_eq "$rc" "2" "the omp adapter declares no write profile, so its workers stay unconfined and run-stats says so"
+  case "$out" in *"/work/bucket"*) no "the work bucket is not on the write list, whatever the runner exports (got: $out)" ;; *) ok "the work bucket is not on the write list, whatever the runner exports" ;; esac
+  # One path per line: a path that holds a newline would read as two, and the second half can be a wide
+  # directory, so the adapter refuses it instead.
+  out=$(env -u CLAUDE_CONFIG_DIR HOME="$(printf '/h\n/tmp')" bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1); rc=$?
+  assert_eq "$rc" "3" "a HOME that holds a newline is refused, not split"
+  out=$(env -u CLAUDE_CONFIG_DIR AUTODREAM_L1_WRITES_EXTRA="$(printf '/ok\n/Users')" bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1); rc=$?
+  assert_eq "$rc" "3" "and so is an extra entry that does"
+  out=$(env -u AUTODREAM_L1_WRITES_EXTRA bash "$REPO/adapters/omp/adapter.sh" l1-writes 2>&1); rc=$?
+  assert_eq "$rc" "0" "the omp adapter answers l1-writes"
+  assert_eq "$out" "" "and its default is deny: nothing beyond the staging directory until a measurement says otherwise"
+  out=$(AUTODREAM_L1_WRITES_EXTRA="/extra/one:/extra/two*" bash "$REPO/adapters/omp/adapter.sh" l1-writes 2>&1)
+  case "$out" in *"/extra/one"*"/extra/two*"*) ok "an operator's AUTODREAM_L1_WRITES_EXTRA entries reach it, a trailing * kept" ;; *) no "omp AUTODREAM_L1_WRITES_EXTRA entries (got: $out)" ;; esac
+  out=$(AUTODREAM_L1_WRITES_EXTRA="$(printf '/ok\n/Users')" bash "$REPO/adapters/omp/adapter.sh" l1-writes 2>&1); rc=$?
+  assert_eq "$rc" "3" "an extra entry that holds a newline is refused, not split"
+  bash "$REPO/adapters/omp/adapter.sh" no-such-verb >/dev/null 2>&1; rc=$?
+  assert_eq "$rc" "2" "a verb an adapter does not have exits 2, which is what run.sh reads as no write profile"
+}
+
+# A sandbox-exec stand-in that passes the probe and confines nothing else: it makes the probe's
+# "outside" directory (the probe's last argument) read-only, then runs the command. The run-level
+# tests below need a host whose probe says yes, and this lets them run inside another sandbox.
+fake_sandbox(){ # $1=root -> dir to put on PATH
+  mkdir -p "$1/shim-sb"
+  printf '#!/bin/sh\nshift 2\nfor last; do :; done\n[ -d "$last" ] && chmod a-w "$last"\nexec "$@"\n' > "$1/shim-sb/sandbox-exec"
+  chmod +x "$1/shim-sb/sandbox-exec"
+}
+
+test_l1_confine_setup_stops_before_l1_when_an_engine_prefix_cannot_be_built(){
+  echo "# L1 confinement: a write list the profile cannot hold stops the run before any worker, with no stubs"
+  local extra
+  for extra in '/x/bad"quote' 'relative/dir' "$(printf '/ok\n/Users')"; do
+    local root; root=$(setup_env); mk_session "$root" s1
+    local h; h=$(hash_of "$root/projects/proj-a/s1.jsonl")
+    fake_sandbox "$root"
+    PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec AUTODREAM_L1_WRITES_EXTRA="$extra" run_dream "$root"
+    assert_no_file "$root/dreams/$DATE.md" "[${extra//$'\n'/ }] no report is written"
+    assert_no_file "$(fdir "$root")/$h.json" "[$extra] and no session gets a stub"
+    assert_grep "$(fdir "$root")/run-stats.txt" '^fatal: .*claude' "[$extra] run-stats names the fatal and the engine"
+    assert_grep "$root/run.out" 'FATAL:' "[$extra] and the log says so"
+    rm -rf "$root"
+  done
+}
+
+test_l1_worker_setup_failure_defers_the_date_and_follows_no_planted_link(){
+  echo "# L1 confinement: a state setup that fails every attempt defers the date, and a symlink the worker left is never followed"
+  local root; root=$(setup_env); mk_session "$root" s1
+  local h; h=$(hash_of "$root/projects/proj-a/s1.jsonl")
+  fake_sandbox "$root"
+  cp -R "$REPO/adapters" "$root/adapters"; ln -s "$REPO/bin" "$root/bin"
+  printf 'precious\n' > "$root/victim"
+  # A claude adapter with a state verb that passes the setup dry run (a stage named .setup-*) and fails every
+  # attempt after it, planting a symlink at the old stderr path inside the stage first.
+  sed 's|^  l2-argv) |  l1-stage-env) case "$1" in *.setup-*) exit 0 ;; esac; ln -sf "$VICTIM" "$1/stage-env.err" 2>/dev/null; echo "no state dir" >\&2; exit 1 ;;\n\n  l2-argv) |' \
+    "$REPO/adapters/claude/adapter.sh" > "$root/adapters/claude/adapter.sh"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/notify.log"\n' "$root" > "$root/autodream/notify.sh"; chmod +x "$root/autodream/notify.sh"
+  VICTIM="$root/victim" PATH="$root/shim-sb:$PATH" ADAPTERS_ROOT="$root/adapters" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec run_dream "$root"
+  assert_eq "$(cat "$root/victim")" "precious" "the file the planted link pointed at is untouched across the retry"
+  assert_no_file "$(fdir "$root")/$h.json" "the session is not stubbed"
+  assert_no_file "$root/dreams/$DATE.md" "and no report is written over it"
+  assert_grep "$(fdir "$root")/l1-netdown.txt" " staging\$" "the ledger names the failure"
+  assert_grep "$(fdir "$root")/$h.json.err" 'could not be prepared in the stage' "the .err names what failed"
+  assert_grep "$root/run.out" 'FAIL [(]runner setup failed; no stub' "the worker's FAIL line parses and names the cause (the cause text once sat in a case inside a command substitution, which bash 3.2 rejects)"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^fatal: .*could not set up L1 workers' "run-stats carries the cause: a setup failure heals nothing by waiting, so it is a fatal and not an outage deferral"
+  assert_grep "$root/notify.log" 'could not set up L1 workers' "a banner is posted, because with no findings JSON unassembled_dates would never name the date"
+  [ "$(cat "$root/run.exit")" != 0 ] && ok "the run exits non-zero, so the date is retried" || no "the run exited 0"
+  rm -rf "$root"
+}
+
+test_l1_confine_setup_stops_when_a_protected_directory_cannot_be_listed(){
+  echo "# L1 confinement: a protected directory whose path holds a colon would be split in two and left unprotected"
+  local root; root=$(setup_env); mk_session "$root" s1
+  local h ad; h=$(hash_of "$root/projects/proj-a/s1.jsonl")
+  # Only AUTODREAM_DIR carries the colon: a colon in the session root would be read as two roots.
+  mv "$root/autodream" "$root/auto:dream"; ad="$root/auto:dream"
+  fake_sandbox "$root"
+  TEST_AUTODREAM_DIR="$ad" PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec run_dream "$root"
+  assert_no_file "$root/dreams/$DATE.md" "no report is written"
+  assert_no_file "$ad/findings/$DATE/$h.json" "and no session gets a stub"
+  assert_grep "$ad/findings/$DATE/run-stats.txt" '^fatal: .*holds a colon' "run-stats names the colon"
+  assert_grep "$ad/logs/run-$DATE.log" 'FATAL:.*holds a colon' "and the log says so"
+  rm -rf "$root"
+}
+
+test_l1_confined_stat_is_partial_when_an_engine_runs_unconfined(){
+  echo "# L1 confinement: l1_confined is yes only when every engine with sessions is confined"
+  local root; root=$(setup_env); mk_session "$root" s1
+  fake_sandbox "$root"
+  PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec run_dream "$root"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: yes$' "claude alone, confined: yes"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined_claude: yes$' "the per-engine line agrees"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" s1; mk_omp_session "$root" aaaa >/dev/null
+  fake_sandbox "$root"
+  PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec run_dream_omp "$root"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: yes$' "claude and omp both have a write profile: yes"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined_omp: yes$' "the per-engine line names omp"
+  rm -rf "$root"
+  # An engine whose adapter has no l1-writes verb is the case the stat exists for: a copy of the adapters
+  # with omp's verb renamed away, handed to the runner through ADAPTERS_ROOT.
+  root=$(setup_env); mk_session "$root" s1; mk_omp_session "$root" aaaa >/dev/null
+  fake_sandbox "$root"
+  cp -R "$REPO/adapters" "$root/adapters"; ln -s "$REPO/bin" "$root/bin"
+  sed 's/^  l1-writes)/  l1-writes-renamed)/' "$REPO/adapters/omp/adapter.sh" > "$root/adapters/omp/adapter.sh"
+  PATH="$root/shim-sb:$PATH" ADAPTERS_ROOT="$root/adapters" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec run_dream_omp "$root"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: partial$' "claude confined and omp not: partial"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined_omp: no$' "the per-engine line names omp"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_reason: .*omp' "and the reason names the engine"
+  rm -rf "$root"
+  root=$(setup_env); mk_omp_session "$root" aaaa >/dev/null
+  fake_sandbox "$root"
+  cp -R "$REPO/adapters" "$root/adapters"; ln -s "$REPO/bin" "$root/bin"
+  sed 's/^  l1-writes)/  l1-writes-renamed)/' "$REPO/adapters/omp/adapter.sh" > "$root/adapters/omp/adapter.sh"
+  PATH="$root/shim-sb:$PATH" ADAPTERS_ROOT="$root/adapters" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: no$' "omp alone with no profile: no, although the sandbox works"
+  rm -rf "$root"
+}
+
+test_l1_answer_is_moved_aside_before_it_is_tested(){
+  echo "# L1 confinement: a leftover .stage beside an answer is swept, and a symlink answer is moved, not followed"
+  local root; root=$(setup_env); mk_session "$root" s1
+  local h; h=$(hash_of "$root/projects/proj-a/s1.jsonl")
+  mkdir -p "$(fdir "$root")/.chunks/abc"
+  : > "$(fdir "$root")/stale.json.stage"; : > "$(fdir "$root")/.chunks/abc/01-x.chunkout.stage"
+  ln -s /nonexistent/target "$(fdir "$root")/dangling.json.stage"; mkdir "$(fdir "$root")/dir.json.stage"
+  run_dream "$root"
+  assert_no_file "$(fdir "$root")/stale.json.stage" "a .stage left by a killed run is swept"
+  assert_no_file "$(fdir "$root")/.chunks/abc/01-x.chunkout.stage" "including one beside a chunk answer"
+  [ ! -L "$(fdir "$root")/dangling.json.stage" ] && ok "a dangling symlink a worker left is swept" || no "a dangling symlink a worker left is swept"
+  [ ! -d "$(fdir "$root")/dir.json.stage" ] && ok "and so is a directory" || no "and so is a directory"
+  rm -rf "$root"
+  root=$(setup_env)
+  mkdir -p "$(fdir "$root")"; : > "$(fdir "$root")/idle.json.stage"
+  run_dream "$root"
+  assert_no_file "$(fdir "$root")/idle.json.stage" "a night with no sessions still sweeps"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" s1
+  h=$(hash_of "$root/projects/proj-a/s1.jsonl")
+  printf '{"session_path":"SECRET","findings":[]}\n' > "$root/secret.json"
+  MOCK_MODE=l1_symlink_answer MOCK_SYMLINK_TARGET="$root/secret.json" AUTODREAM_L1_ROUNDS=1 run_dream "$root"
+  assert_no_file "$(fdir "$root")/$h.json.stage" "the rejected symlink is not left in the findings dir"
+  assert_eq "$(cat "$root/secret.json")" '{"session_path":"SECRET","findings":[]}' "and its target is untouched"
+  rm -rf "$root"
+}
+
+test_l1_confined_omp_worker_runs_on_a_throwaway_home(){
+  echo "# L1 confinement: a confined omp worker gets a HOME inside its stage; a claude worker keeps its own"
+  local root; root=$(setup_env); mk_omp_session "$root" aaaa >/dev/null
+  mkdir -p "$root/home/.omp/agent"; printf 'k: v\n' > "$root/home/.omp/agent/config.yml"
+  fake_sandbox "$root"
+  PATH="$root/shim-sb:$PATH" MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+  assert_grep "$root/cap/l1-home.txt" "/autodream/staging/run-[0-9]*/.*/omp-home\$" "the omp worker's HOME is inside its staging directory"
+  assert_nogrep "$root/cap/l1-home.txt" "^$root/home\$" "and not the real one"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" s1
+  PATH="$root/shim-sb:$PATH" MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_CONFINE=0 run_dream "$root"
+  assert_nogrep "$root/cap/l1-home.txt" "omp-home" "an unconfined run does not move HOME"
+  rm -rf "$root"
+  root=$(setup_env); mk_omp_session "$root" aaaa >/dev/null
+  MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+  assert_nogrep "$root/cap/l1-home.txt" "omp-home" "an omp worker the sandbox does not cover keeps its HOME too: no seeding for nothing"
+  rm -rf "$root"
+}
+
+test_l1_omp_state_setup_is_checked_before_any_worker(){
+  echo "# L1 confinement: a state setup that cannot work stops the run, and an OAuth-only model leaves omp unconfined and says so"
+  local root h
+  root=$(setup_env); h=$(hash_of "$(mk_omp_session "$root" aaaa)")
+  mkdir -p "$root/home/.omp/agent"; : > "$root/home/.omp/agent/agent.db"; chmod 000 "$root/home/.omp/agent/agent.db"
+  if [ ! -r "$root/home/.omp/agent/agent.db" ]; then
+    fake_sandbox "$root"
+    PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+    chmod 600 "$root/home/.omp/agent/agent.db"
+    assert_no_file "$root/dreams/$DATE.md" "a database that cannot be snapshotted stops the run before L1: no report"
+    assert_no_file "$(fdir "$root")/$h.json" "and no stub"
+    assert_grep "$(fdir "$root")/run-stats.txt" '^fatal: .*state directory cannot be prepared' "and run-stats says why"
+  else
+    chmod 600 "$root/home/.omp/agent/agent.db"; echo "  skip - this user can read a mode 000 file"
+  fi
+  rm -rf "$root"
+  root=$(setup_env); mk_omp_session "$root" aaaa >/dev/null
+  mkdir -p "$root/home/.omp/agent"
+  python3 - "$root/home/.omp/agent" <<'PY'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1] + "/agent.db")
+c.execute("CREATE TABLE auth_credentials (id INTEGER PRIMARY KEY, provider TEXT, credential_type TEXT, data TEXT, disabled_cause TEXT)")
+c.execute("INSERT INTO auth_credentials (provider, credential_type, data) VALUES ('omp','oauth','r')")
+c.commit()
+PY
+  fake_sandbox "$root"
+  PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+  assert_file "$root/dreams/$DATE.md" "an OAuth-only model does not stop the night: the report is written"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined_omp: no$' "omp is reported unconfined"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined_omp_reason: .*OAuth only' "with the reason"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: no$' "and the top-level line says so"
+  rm -rf "$root"
+}
+
+test_l1_setup_prepares_only_engines_with_work_left(){
+  echo "# L1 confinement: a retry whose findings are all cached does not prepare an engine nothing will run"
+  local root h o
+  root=$(setup_env); o=$(mk_omp_session "$root" aaaa); h=$(hash_of "$o")
+  mkdir -p "$root/home/.omp/agent"; : > "$root/home/.omp/agent/agent.db"; chmod 000 "$root/home/.omp/agent/agent.db"
+  mkdir -p "$(fdir "$root")"
+  printf '{"session_path":"x","findings":[]}\n' > "$(fdir "$root")/$h.json"; printf 'runner\n' > "$(fdir "$root")/$h.json.served"
+  if [ ! -r "$root/home/.omp/agent/agent.db" ]; then
+    fake_sandbox "$root"
+    PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+    chmod 600 "$root/home/.omp/agent/agent.db"
+    assert_file "$root/dreams/$DATE.md" "an unreadable omp database does not stop L2 over findings that already exist"
+    assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: n/a$' "and run-stats says no confinement was needed"
+    assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_reason: no L1 work this run' "with the reason"
+    assert_grep "$root/run.out" 'engines that may not start this run: .*omp' "and the log names every engine as unable to start unconfined if a findings file vanishes before dispatch"
+  else
+    chmod 600 "$root/home/.omp/agent/agent.db"; echo "  skip - this user can read a mode 000 file"
+  fi
+  rm -rf "$root"
 }
 
 test_run_lock_is_per_date_and_live_holders_win(){
@@ -4555,6 +4787,10 @@ _run test_l1_symlink_answer_is_not_read
 _run test_l1_work_bucket_is_wiped_before_l2
 _run test_l1_staging_failure_is_a_worker_failure_with_evidence
 _run test_l1_confine_names_the_engine_without_a_write_profile
+_run test_l1_confine_setup_stops_before_l1_when_an_engine_prefix_cannot_be_built
+_run test_l1_answer_is_moved_aside_before_it_is_tested
+_run test_l1_confine_setup_stops_when_a_protected_directory_cannot_be_listed
+_run test_l1_worker_setup_failure_defers_the_date_and_follows_no_planted_link
 _run test_run_lock_is_reclaimed_from_a_dead_holder
 _run test_killed_run_temps_are_swept_at_the_start_of_the_next_run
 _run test_self_audit_stats
@@ -7047,6 +7283,10 @@ _run test_skill_fields_are_enforced_from_the_sidecar
 _run test_builtin_slash_commands_are_not_skill_invocations
 _run test_omp_adapter_is_opt_in
 _run test_l1_precheck_probes_the_l1_provider
+_run test_l1_confined_stat_is_partial_when_an_engine_runs_unconfined
+_run test_l1_confined_omp_worker_runs_on_a_throwaway_home
+_run test_l1_omp_state_setup_is_checked_before_any_worker
+_run test_l1_setup_prepares_only_engines_with_work_left
 _run test_worker_failure_probe_names_the_l1_provider
 _run test_one_dead_provider_does_not_hold_back_the_others
 _run test_omp_session_is_linearized_for_the_worker
@@ -11008,6 +11248,9 @@ printf '%s\n' "$*" >> "$R/rsync.log"
 n=$#; src=${@:$((n - 1)):1}; dst=${!n}
 host=${src%%:*}; src=${src#*:}
 rc=$(cat "$R/rsync.$host.rc" 2>/dev/null || cat "$R/rsync.rc" 2>/dev/null || echo 0)
+printf '%s start %s\n' "$host" "$(date +%s)" >> "$R/rsync.times"
+[ ! -f "$R/rsync.$host.kill" ] || kill -9 "$PPID"
+[ ! -f "$R/rsync.$host.delay" ] || sleep "$(cat "$R/rsync.$host.delay")"
 if [ "$rc" = 0 ] || [ "$rc" = 24 ]; then
   ( cd "$src" 2>/dev/null && find . -type f -name '*.jsonl' ) | while IFS= read -r f; do
     mkdir -p "$dst/$(dirname "$f")" && cp -p "$src/$f" "$dst/$f"
@@ -11019,6 +11262,7 @@ if [ -f "$R/rsync.strand" ]; then
   touch -t 202001021200 "$dst/proj-r/.r2.jsonl.Xy12Zw"
 fi
 if [ -f "$R/rsync.$host.err" ]; then cat "$R/rsync.$host.err" >&2; elif [ -f "$R/rsync.err" ]; then cat "$R/rsync.err" >&2; fi
+printf '%s end %s\n' "$host" "$(date +%s)" >> "$R/rsync.times"
 exit "$rc"
 RSYNC_SHIM
   printf '#!/bin/bash\nprintf "%%s\\n" "$*" >> "%s/ssh.log"\necho "ssh shim: no real host" >&2\nexit 255\n' "$r" > "$r/rsshim/ssh"
@@ -11343,6 +11587,497 @@ test_remote_sync_session_in_both_trees_is_enumerated_twice(){
   rm -rf "$root"
 }
 
+rs_lineno(){ grep -n "$2" "$1" 2>/dev/null | head -n 1 | cut -d: -f1; }   # $1=file $2=pattern -> first line number
+rs_epoch(){ awk -v h="$2" -v k="$3" '$1==h && $2==k {print $3; exit}' "$1"; }   # $1=times $2=host $3=start|end
+rs_seed_report(){ # $1=root $2=date [$3=record]: an earlier night's report; with $3 (even empty) it carries a record line
+  local f="$1/dreams/$2.md"; mkdir -p "$1/dreams"; printf '# Autodream - %s\n\nbody\n' "$2" > "$f"
+  [ "$#" -lt 3 ] || printf '<!-- autodream:remote-short=%s -->\n' "$3" >> "$f"
+}
+rs_record(){ grep '^<!-- autodream:remote-short=' "$1/dreams/$2.md" 2>/dev/null | tail -n 1; }   # $1=root $2=date -> its record line
+
+# ---- #230: a date whose host failed is named by the next run that syncs it ----
+test_remote_sync_short_dates_lists_earlier_dates_the_host_missed(){
+  echo "# remote sync: a host that syncs again lists the trailing week's dates whose report did not read it, oldest first"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  rs_seed_report "$root" 2020-01-01 studio2
+  rs_seed_report "$root" 2019-12-31 other,studio2
+  rs_seed_report "$root" 2019-12-30 studio2
+  rs_seed_report "$root" 2019-12-29 ''                # read everything
+  rs_seed_report "$root" 2019-12-28 studio2
+  rs_seed_report "$root" 2019-12-27                   # no record line: written with remote sync off
+  rs_seed_report "$root" 2019-12-26 studio2
+  rs_seed_report "$root" 2019-12-25 studio2           # eight days back
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_sync_studio2: ok$' "the host synced tonight"
+  assert_grep "$rs" '^remote_short_dates_studio2: 2019-12-26 2019-12-28 2019-12-30 2019-12-31 2020-01-01$' "dates whose record names the label are listed inside seven days, oldest first; a clean record, a record-less report and an eighth day are not"
+  assert_grep "$rs" '^remote_short_scan_unreadable: 0$' "every night in the window that ran had a readable report"
+  rm -rf "$root"
+}
+
+test_remote_sync_short_dates_none_when_every_earlier_date_was_read(){
+  echo "# remote sync: no short date reads none, and a night with no findings dir does not count as unreadable"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  rs_seed_report "$root" 2020-01-01 ''
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_short_dates_studio2: none$' "nothing is short"
+  assert_grep "$rs" '^remote_short_scan_unreadable: 0$' "nights with no findings dir and no report are nights that did not run"
+  rm -rf "$root"
+}
+
+test_remote_sync_short_dates_not_scanned_while_the_host_is_still_down(){
+  echo "# remote sync: a host that fails tonight lists nothing (the failure line and banner already cover it)"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  rs_seed_report "$root" 2020-01-01 studio2
+  printf '255\n' > "$root/rsync.rc"; printf 'ssh: connect to host studio2.invalid port 22: No route to host\n' > "$root/rsync.err"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_sync_studio2: failed$' "the host is down"
+  assert_nogrep "$rs" '^remote_short_dates_' "no short dates are listed"
+  rm -rf "$root"
+}
+
+test_remote_sync_short_dates_counts_a_night_it_cannot_read(){
+  echo "# remote sync: a night with no report, or a report that will not read, is counted and never read as clean"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  mkdir -p "$root/autodream/findings/2020-01-01"       # a night that ran and left no report
+  rs_seed_report "$root" 2019-12-31 studio2
+  chmod 000 "$root/dreams/2019-12-31.md"                # unreadable
+  rs_seed_report "$root" 2019-12-30 studio2
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  local rs want=2 dates="2019-12-30"; rs=$(rs_stats "$root")
+  [ "$(id -u)" != 0 ] || { want=1; dates="2019-12-30 2019-12-31"; }   # root reads a mode-000 file
+  assert_grep "$rs" "^remote_short_scan_unreadable: $want\$" "the missing and the unreadable report are counted"
+  assert_grep "$rs" "^remote_short_dates_studio2: $dates\$" "only a readable record is listed"
+  assert_eq "$(cat "$root/run.exit")" "0" "and the run still succeeds"
+  chmod 600 "$root/dreams/2019-12-31.md" 2>/dev/null
+  rm -rf "$root"
+}
+
+test_remote_sync_short_dates_only_for_labels_in_the_config(){
+  echo "# remote sync: dates short for a label that was renamed or removed are not listed under another"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  rs_seed_report "$root" 2020-01-01 oldhost,studio2
+  AUTODREAM_REMOTE_ROOTS="studio3=studio3.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_short_dates_studio3: none$' "a new label starts with no short dates"
+  assert_nogrep "$rs" 'remote_short_dates_oldhost' "a label no longer configured is not reported"
+  assert_nogrep "$rs" 'remote_short_dates_studio2' "nor is the label it replaced"
+  rm -rf "$root"
+}
+
+test_remote_sync_short_date_is_named_until_it_is_rebuilt(){
+  echo "# remote sync: Mon failed, Tue syncs and names Mon (stub report too), a --force rebuild of Mon clears it"
+  local root DATE=2020-01-02; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  printf '255\n' > "$root/rsync.rc"; printf 'ssh: connect to host studio2.invalid port 22: Operation timed out\n' > "$root/rsync.err"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_grep "$(rs_stats "$root")" '^remote_sync_studio2: failed$' "the first night's host was down"
+  assert_no_file "$root/autodream/remote/studio2/projects/proj-r/r1.jsonl" "so the Studio session was not read"
+  assert_eq "$(rs_record "$root" 2020-01-02)" '<!-- autodream:remote-short=studio2 -->' "the report itself records the host it did not read"
+  rm -f "$root/rsync.rc" "$root/rsync.err"
+  DATE=2020-01-03
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_grep "$(rs_stats "$root")" '^remote_sync_studio2: ok$' "the next night the host is back"
+  assert_grep "$(rs_stats "$root")" '^remote_short_dates_studio2: 2020-01-02$' "and the first night is named"
+  assert_grep "$root/dreams/2020-01-03.md" 'autodream-now.sh 2020-01-02 --force' "a night with nothing to triage still gives the rebuild command"
+  assert_grep "$root/dreams/2020-01-03.md" 'Rebuild the report dates missing studio2 sessions' "as the per-label question"
+  assert_grep "$root/dreams/2020-01-03.md" 'open-questions=1 -->' "which the marker counts, so the streak store sees it"
+  assert_grep "$root/dreams/2020-01-03.md" 'replaces that date.s report, including any .## Triage decisions' "and which warns that a rebuild replaces the triage decisions"
+  DATE=2020-01-02
+  AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_grep "$(rs_stats "$root")" '^remote_sync_studio2: ok$' "the rebuild reads the host"
+  assert_file "$(fdir "$root")/$(hash_of "$(rs_mirror "$root" studio2)/proj-r/r1.jsonl").json" "and now triages the session the first night missed"
+  assert_eq "$(rs_record "$root" 2020-01-02)" '<!-- autodream:remote-short= -->' "and its report records that nothing was missed"
+  DATE=2020-01-04
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_grep "$(rs_stats "$root")" '^remote_short_dates_studio2: none$' "the rebuilt date is no longer listed"
+  assert_nogrep "$root/dreams/2020-01-04.md" 'autodream-now.sh' "and the report stops asking for it"
+  rm -rf "$root"
+}
+
+test_remote_sync_failed_rebuild_is_retried_by_the_next_trigger_and_its_record_follows_the_report(){
+  echo "# remote sync: a rebuild that dies in L2 leaves no report, the next trigger rebuilds it, and the record is the new report's"
+  local root DATE=2020-01-02; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  printf '255\n' > "$root/rsync.rc"; printf 'ssh: connect to host studio2.invalid port 22: No route to host\n' > "$root/rsync.err"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" 2020-01-02)" '<!-- autodream:remote-short=studio2 -->' "the first night's report records the host it did not read"
+  rm -f "$root/rsync.rc" "$root/rsync.err"
+  MOCK_MODE=l2_fail AUTODREAM_L2_ATTEMPTS=1 AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_no_file "$root/dreams/2020-01-02.md" "the failed rebuild left no report at the path"
+  DATE=2020-01-03
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_grep "$(rs_stats "$root")" '^remote_short_scan_unreadable: 1$' "the next night counts that date as one it could not judge"
+  assert_nogrep "$(rs_stats "$root")" '^remote_short_dates_studio2: 2020-01-02' "and does not list it, since a trigger will rebuild it"
+  DATE=2020-01-02
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" 2020-01-02)" '<!-- autodream:remote-short= -->' "the trigger rebuilds it with the host read, and the record follows the new report"
+  rm -rf "$root"
+}
+
+test_remote_sync_rebuild_with_fewer_hosts_keeps_the_record_of_the_one_it_dropped(){
+  echo "# remote sync: a rebuild configured without a host that was short keeps that host in the record"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  printf '255\n' > "$root/rsync.a.invalid.rc"; printf '255\n' > "$root/rsync.b.invalid.rc"
+  printf 'ssh: connect to host a.invalid port 22: No route to host\n' > "$root/rsync.a.invalid.err"
+  printf 'ssh: connect to host b.invalid port 22: No route to host\n' > "$root/rsync.b.invalid.err"
+  AUTODREAM_REMOTE_ROOTS="a=a.invalid:$root/studio b=b.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short=a,b -->' "both hosts were short"
+  rm -f "$root/rsync.b.invalid.rc" "$root/rsync.b.invalid.err"
+  AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="b=b.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short=a -->' "b was read and is cleared, a was not configured and is kept"
+  rm -rf "$root"
+}
+
+test_remote_sync_failed_rebuild_with_fewer_hosts_keeps_the_dropped_host_for_the_retry(){
+  echo "# remote sync: when a rebuild with fewer hosts dies in L2, the trigger that retries it still keeps the dropped host"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  printf '255\n' > "$root/rsync.a.invalid.rc"; printf '255\n' > "$root/rsync.b.invalid.rc"
+  printf 'ssh: connect to host a.invalid port 22: No route to host\n' > "$root/rsync.a.invalid.err"
+  printf 'ssh: connect to host b.invalid port 22: No route to host\n' > "$root/rsync.b.invalid.err"
+  AUTODREAM_REMOTE_ROOTS="a=a.invalid:$root/studio b=b.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short=a,b -->' "both hosts were short"
+  rm -f "$root/rsync.b.invalid.rc" "$root/rsync.b.invalid.err"
+  MOCK_MODE=l2_fail AUTODREAM_L2_ATTEMPTS=1 AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="b=b.invalid:$root/studio" rs_run "$root"
+  assert_no_file "$root/dreams/$DATE.md" "the rebuild died in L2 and left no report at the path"
+  AUTODREAM_REMOTE_ROOTS="b=b.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short=a -->' "the retry reads the moved-aside report's record, so a is kept and b is cleared"
+  rm -rf "$root"
+}
+
+test_remote_sync_an_older_moved_aside_copy_is_ignored_while_a_report_stands(){
+  echo "# remote sync: a moved-aside copy that a later retry did not remove never brings back a label that retry read"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  printf '255\n' > "$root/rsync.rc"; printf 'ssh: connect to host studio2.invalid port 22: No route to host\n' > "$root/rsync.err"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short=studio2 -->' "the first report records the host"
+  rm -f "$root/rsync.rc" "$root/rsync.err"
+  MOCK_MODE=l2_fail AUTODREAM_L2_ATTEMPTS=1 AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short= -->' "the retry read the host and records nothing missed"
+  assert_eq "$(ls "$root/dreams/" | grep -c '\.stale-')" "0" "and a delivered report clears the moved-aside copies it supersedes"
+  AUTODREAM_FORCE=1 rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" "" "a rebuild with remote sync off writes no record, since there is nothing to keep"
+  AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short= -->' "and the next rebuild does not read the old moved-aside copy and bring the host back"
+  rm -rf "$root"
+}
+
+test_remote_sync_a_stub_that_cannot_be_published_fails_the_run(){
+  echo "# remote sync: an empty-night rebuild whose stub cannot be staged exits non-zero and leaves the old report"
+  local root; root=$(setup_env); rs_env "$root"; remove_path "$root/studio/proj-r/r1.jsonl"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_nonempty "$root/dreams/$DATE.md" "the first run wrote a stub report"
+  mkdir -p "$root/dreams/$DATE.md.tmp"                                    # a directory where the stub is staged
+  AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(cat "$root/run.exit")" "1" "the run fails, so nothing reads it as a delivered rebuild"
+  assert_grep "$root/run.out" 'could not publish the report for' "and says why"
+  assert_nonempty "$root/dreams/$DATE.md" "the old report is still there"
+  rm -rf "$root"
+}
+
+test_remote_sync_a_degraded_capture_at_the_path_does_not_hide_the_moved_aside_record(){
+  echo "# remote sync: a record-less capture at the report path (a rebuild killed mid-L2) does not hide the moved-aside report's record"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  printf '255\n' > "$root/rsync.a.invalid.rc"; printf 'ssh: connect to host a.invalid port 22: No route to host\n' > "$root/rsync.a.invalid.err"
+  AUTODREAM_REMOTE_ROOTS="a=a.invalid:$root/studio b=b.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short=a -->' "host a was short"
+  mv "$root/dreams/$DATE.md" "$root/dreams/$DATE.md.stale-1700000000"        # the rebuild moved the old report aside
+  printf '# Autodream - partial\n\nL2 stdout cut off here\n' > "$root/dreams/$DATE.md"   # and was killed holding a capture with no record
+  rm -f "$root/rsync.a.invalid.rc" "$root/rsync.a.invalid.err"
+  AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="b=b.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short=a -->' "the retry keeps a, which it does not configure"
+  rm -rf "$root"
+}
+
+test_remote_sync_a_delivered_report_keeps_a_moved_aside_copy_that_holds_triage_decisions(){
+  echo "# remote sync: a delivered report renames a moved-aside copy with Triage decisions out of the .stale glob and deletes the rest"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  printf '255\n' > "$root/rsync.rc"; printf 'ssh: connect to host studio2.invalid port 22: No route to host\n' > "$root/rsync.err"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short=studio2 -->' "the first report records the host"
+  printf '\n## Triage decisions\n\n- Sam wrote this\n' >> "$root/dreams/$DATE.md"
+  printf '# an older report with no decisions\n' > "$root/dreams/$DATE.md.stale-1600000000"
+  rm -f "$root/rsync.rc" "$root/rsync.err"
+  MOCK_MODE=l2_fail AUTODREAM_L2_ATTEMPTS=1 AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short= -->' "the retry delivered a report that read the host"
+  assert_eq "$(ls "$root/dreams/" | grep -c '\.stale-')" "0" "no copy is left in the .stale glob"
+  assert_eq "$(ls "$root/dreams/" | grep -c '\.triaged-')" "1" "the copy holding Triage decisions was kept, and the plain one deleted"
+  assert_grep "$(ls "$root/dreams/$DATE.md".triaged-*)" '^- Sam wrote this$' "and it still holds what Sam wrote"
+  AUTODREAM_FORCE=1 rs_run "$root"
+  AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="b=b.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short= -->' "a kept copy is not read by the next lookup, so studio2 does not come back"
+  assert_eq "$(ls "$root/dreams/" | grep -c '\.triaged-')" "1" "and it is still kept"
+  rm -rf "$root"
+}
+
+test_remote_sync_an_interrupted_rebuild_of_a_triaged_report_still_keeps_the_dropped_host(){
+  echo "# remote sync: a triaged report moved aside by a rebuild killed mid-L2 is still read for its record, then kept"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  printf '255\n' > "$root/rsync.a.invalid.rc"; printf 'ssh: connect to host a.invalid port 22: No route to host\n' > "$root/rsync.a.invalid.err"
+  AUTODREAM_REMOTE_ROOTS="a=a.invalid:$root/studio b=b.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short=a -->' "host a was short"
+  printf '\n## Triage decisions\n\n- Sam wrote this\n' >> "$root/dreams/$DATE.md"
+  mv "$root/dreams/$DATE.md" "$root/dreams/$DATE.md.stale-1700000000"
+  printf '# Autodream - partial\n\nL2 stdout cut off here\n' > "$root/dreams/$DATE.md"
+  rm -f "$root/rsync.a.invalid.rc" "$root/rsync.a.invalid.err"
+  AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="b=b.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short=a -->' "the retry reads the triaged copy and keeps a"
+  assert_eq "$(ls "$root/dreams/" | grep -c '\.stale-')" "0" "the copy left the .stale glob once a report was delivered"
+  assert_grep "$(ls "$root/dreams/$DATE.md".triaged-*)" '^- Sam wrote this$' "and it is kept with Sam's writing"
+  rm -rf "$root"
+}
+
+test_remote_sync_a_failed_body_filter_is_not_published(){
+  echo "# remote sync: when the filter that drops a model-written record line fails, the report is not published"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  printf '#!/bin/bash\ncase "$*" in *remote-short*) /usr/bin/awk "$@"; exit 1 ;; esac\nexec /usr/bin/awk "$@"\n' > "$root/rsshim/awk"
+  chmod +x "$root/rsshim/awk"
+  AUTODREAM_L2_ATTEMPTS=1 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_no_file "$root/dreams/$DATE.md" "a report whose filter failed midway is not at the path"
+  assert_grep "$root/run.out" 'could not stage the sentinel-stripped report' "and the run says it could not stage it"
+  rm -rf "$root"
+}
+
+test_remote_sync_a_record_line_the_model_writes_is_dropped(){
+  echo "# remote sync: a record line the model writes into its own report body never becomes the date's record"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  MOCK_MODE=l2_record_in_body rs_run "$root"
+  assert_nogrep "$root/dreams/$DATE.md" 'remote-short=forged' "with remote sync off the forged line is gone"
+  assert_eq "$(grep -c '^<!-- autodream:remote-short=' "$root/dreams/$DATE.md")" "0" "and the runner wrote none, since there was nothing to record"
+  MOCK_MODE=l2_record_in_body AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_nogrep "$root/dreams/$DATE.md" 'remote-short=forged' "with remote sync on the forged line is gone too"
+  assert_eq "$(grep -c '^<!-- autodream:remote-short=' "$root/dreams/$DATE.md")" "1" "and exactly one record line stands, the runner's"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short= -->' "which says every host was read"
+  assert_no_file "$root/dreams/$DATE.md.body" "and the staging file is gone"
+  rm -rf "$root"
+}
+
+test_remote_sync_rebuild_with_remote_sync_off_keeps_the_record(){
+  echo "# remote sync: a rebuild with remote sync off keeps the record of the report it replaces"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  printf '255\n' > "$root/rsync.rc"; printf 'ssh: connect to host studio2.invalid port 22: No route to host\n' > "$root/rsync.err"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  AUTODREAM_FORCE=1 rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short=studio2 -->' "the rebuilt report still names the host"
+  rm -rf "$root"
+}
+
+test_remote_sync_incomplete_enumeration_marks_every_host_short(){
+  echo "# remote sync: a root the run could not read makes every configured host short, even one whose sync was ok"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  SESSION_ROOTS="$root/projects:$root/no-such-root" AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_grep "$(rs_stats "$root")" '^remote_sync_studio2: ok$' "the sync was ok"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short=studio2 -->' "but the report is not trusted to have read it"
+  rm -rf "$root"
+}
+
+test_remote_sync_prompt_names_short_dates_and_the_rebuild_command(){
+  echo "# remote sync: the self-audit and the Open questions rules in PROMPT.md name the dates and the command"
+  local p="$REPO/prompts/PROMPT.md"
+  assert_grep "$p" 'remote_short_dates_<label>' "the self-audit reads the per-label key"
+  assert_grep "$p" 'remote_short_scan_unreadable' "and says when the scan could not read a night"
+  assert_grep "$p" 'autodream-now.sh <date> --force' "the rebuild command is spelled out"
+  assert_grep "$p" 'Rebuild the report dates missing <label> sessions' "the open question has one stable title per label"
+}
+
+# ---- #229: hosts sync in parallel ----
+test_remote_sync_hosts_run_in_parallel_and_keep_config_order(){
+  echo "# remote sync: two slow hosts overlap instead of queueing, and run-stats keep config order with a refused entry between"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  printf '3\n' > "$root/rsync.a.invalid.delay"; printf '3\n' > "$root/rsync.b.invalid.delay"
+  AUTODREAM_REMOTE_ROOTS="a=a.invalid:$root/studio bad/label=x.invalid:/p b=b.invalid:$root/studio" rs_run "$root"
+  local t="$root/rsync.times" rs; rs=$(rs_stats "$root")
+  local as ae bs be; as=$(rs_epoch "$t" a.invalid start); ae=$(rs_epoch "$t" a.invalid end)
+  bs=$(rs_epoch "$t" b.invalid start); be=$(rs_epoch "$t" b.invalid end)
+  [ -n "$as" ] && [ -n "$bs" ] && [ "$bs" -lt "$ae" ] && [ "$as" -lt "$be" ] && ok "the two syncs overlap (a $as-$ae, b $bs-$be)" || no "the two syncs overlap (a ${as:-?}-${ae:-?}, b ${bs:-?}-${be:-?})"
+  assert_grep "$rs" '^remote_sync_a: ok$' "a synced"
+  assert_grep "$rs" '^remote_sync_b: ok$' "b synced"
+  local la lb li
+  la=$(rs_lineno "$rs" '^remote_sync_a:'); li=$(rs_lineno "$rs" '^remote_sync_invalid:'); lb=$(rs_lineno "$rs" '^remote_sync_b:')
+  [ -n "$la" ] && [ -n "$li" ] && [ -n "$lb" ] && [ "$la" -lt "$li" ] && [ "$li" -lt "$lb" ] && ok "run-stats lists a, the refused entry, then b" || no "run-stats order (a=$la invalid=$li b=$lb)"
+  assert_grep "$rs" "^session_roots_list: $root/projects:$(rs_mirror "$root" a):$(rs_mirror "$root" b)\$" "the mirrors join the roots in config order"
+  rm -rf "$root"
+}
+
+test_remote_sync_parallel_a_slow_failure_does_not_reorder_or_hide_the_fast_host(){
+  echo "# remote sync: a failing first host that finishes last still reads failed, and the second host's result is its own"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"; stub_notify "$root"
+  printf '2\n' > "$root/rsync.a.invalid.delay"; printf '255\n' > "$root/rsync.a.invalid.rc"
+  printf 'ssh: connect to host a.invalid port 22: Operation timed out\n' > "$root/rsync.a.invalid.err"
+  AUTODREAM_REMOTE_ROOTS="a=a.invalid:$root/studio b=b.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_sync_a: failed$' "a is failed"
+  assert_grep "$rs" '^remote_sync_a_cause: ssh: connect to host a.invalid port 22: Operation timed out$' "with its own cause"
+  assert_grep "$rs" '^remote_sync_b: ok$' "b is ok"
+  assert_nogrep "$rs" '^remote_sync_b_cause: ssh' "and does not inherit a's cause"
+  assert_nogrep "$root/notify-args.txt" '^--warning' "one of two failing posts no banner"
+  rm -rf "$root"
+}
+
+test_remote_sync_parallel_a_killed_helper_reads_failed(){
+  echo "# remote sync: a helper killed mid-sync prints nothing and reads failed, and the other host is unaffected"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  : > "$root/rsync.a.invalid.kill"
+  AUTODREAM_REMOTE_ROOTS="a=a.invalid:$root/studio b=b.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_sync_a: failed$' "the killed helper reads failed"
+  assert_grep "$rs" '^remote_sync_a_cause: remote-sync.sh printed nothing$' "and says it printed nothing"
+  assert_grep "$rs" '^remote_sync_b: ok$' "the other host syncs"
+  assert_no_file "$root/autodream/locks/remote-a.lock" "the killed host's lock is released"
+  rm -rf "$root"
+}
+
+# ---- #228: the mirror is an archive; its size is measured every night ----
+test_remote_sync_mirror_size_is_recorded_every_night(){
+  echo "# remote sync: run-stats carry the mirror's transcript count and bytes, archive files included"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"; rs_seed_mirror "$root" studio2
+  local m; m=$(rs_mirror "$root" studio2)
+  printf '{"half\n' > "$m/proj-r/.r2.jsonl.Xy12Zw"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  local rs bytes; rs=$(rs_stats "$root")
+  bytes=$(( $(wc -c < "$m/proj-r/r0.jsonl") + $(wc -c < "$m/proj-r/r1.jsonl") ))
+  assert_grep "$rs" '^remote_mirror_files_studio2: 2$' "the kept transcript and the new one are counted, a stranded temp is not"
+  assert_grep "$rs" "^remote_mirror_bytes_studio2: $bytes\$" "the bytes are the sum of the transcripts"
+  rm -rf "$root"
+}
+
+test_remote_sync_mirror_size_is_zero_before_the_first_good_sync(){
+  echo "# remote sync: a host that never synced has no mirror and records 0 and 0, and a refused entry records none"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  printf '255\n' > "$root/rsync.rc"; printf 'ssh: connect to host studio2.invalid port 22: No route to host\n' > "$root/rsync.err"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio bad/label=x.invalid:/p" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_mirror_files_studio2: 0$' "no files"
+  assert_grep "$rs" '^remote_mirror_bytes_studio2: 0$' "no bytes"
+  assert_nogrep "$rs" '^remote_mirror_.*_invalid' "a refused entry has no mirror to measure"
+  rm -rf "$root"
+}
+
+test_remote_sync_no_job_dir_fails_each_host_and_says_why(){
+  echo "# remote sync: when the per-run job dir cannot be made no job starts, and the cause says so"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"; stub_notify "$root"
+  : > "$root/autodream/remote-jobs"                                    # a file where the job dir's parent must be
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_sync_studio2: failed$' "the host reads failed"
+  assert_grep "$rs" '^remote_sync_studio2_cause: cannot make a job dir for the sync jobs$' "the cause names the job dir, not the helper"
+  assert_no_file "$root/rsync.log" "no sync was started"
+  assert_grep "$root/run.out" 'WARNING: remote sync: cannot make a job dir' "the run log warns once"
+  assert_grep "$root/notify-args.txt" '^--warning .*cannot make a job dir' "every host failing still posts the banner, with the real cause"
+  assert_eq "$(cat "$root/run.exit")" "0" "and the run still succeeds"
+  rm -rf "$root"
+}
+
+test_remote_sync_dead_runs_job_dirs_are_removed_and_live_ones_kept(){
+  echo "# remote sync: a run killed mid-wait leaves its job dir, and the next run removes it (never a live run's)"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  local jobs="$root/autodream/remote-jobs" dead; mkdir -p "$jobs"
+  /bin/sh -c 'exit 0' & dead=$!; wait "$dead"
+  mkdir -p "$jobs/$dead" "$jobs/$$" "$jobs/not-a-pid"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_no_file "$jobs/$dead" "the dir of a dead pid is removed"
+  [ -d "$jobs/$$" ] && ok "the dir of a live pid is kept" || no "the dir of a live pid is kept"
+  [ -d "$jobs/not-a-pid" ] && ok "a name that is not a pid is left alone" || no "a name that is not a pid is left alone"
+  assert_eq "$(find "$jobs" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" "2" "and this run's own dir is gone after the run"
+  rm -rf "$root"
+}
+
+test_remote_sync_reserved_labels_are_refused(){
+  echo "# remote sync: invalid and names ending in _cause or _last_ok are refused before ssh and never join the record"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  AUTODREAM_REMOTE_ROOTS="invalid=studio.invalid:$root/studio x_cause=studio.invalid:$root/studio y_last_ok=studio.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_eq "$(grep -c '^remote_sync_invalid: invalid$' "$rs")" "3" "each reserved entry reads invalid under the key invalid"
+  assert_grep "$rs" '^remote_sync_invalid_cause: label invalid is reserved' "the cause names the label and why"
+  assert_grep "$rs" '^remote_sync_invalid_cause: label x_cause is reserved' "a name ending in _cause is reserved"
+  assert_grep "$rs" '^remote_sync_invalid_cause: label y_last_ok is reserved' "a name ending in _last_ok is reserved"
+  assert_nogrep "$rs" '^remote_sync_x_cause' "no reserved label gets a key of its own"
+  assert_no_file "$root/rsync.log" "nothing is synced"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short= -->' "the delivered report's record names no reserved label"
+  rm -rf "$root"
+}
+
+test_remote_sync_reserved_label_is_refused_before_the_adapter_check(){
+  echo "# remote sync: with the claude adapter off a reserved label is still refused under the key invalid, not its own"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  AUTODREAM_ADAPTERS=omp AUTODREAM_REMOTE_ROOTS="x_cause=studio.invalid:$root/studio studio2=studio.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_sync_invalid_cause: label x_cause is reserved' "the reserved label is named in a refusal under invalid"
+  assert_nogrep "$rs" '^remote_sync_x_cause' "and has no key of its own"
+  assert_grep "$rs" '^remote_sync_studio2: invalid$' "a real label is still refused for the adapter"
+  rm -rf "$root"
+}
+
+test_remote_sync_empty_night_stub_asks_the_question_and_counts_it(){
+  echo "# remote sync: on a night with nothing to triage the missed dates are a counted question inside the questions block"
+  local root; root=$(setup_env); rs_env "$root"; remove_path "$root/studio/proj-r/r1.jsonl"
+  rs_seed_report "$root" 2020-01-01 studio2
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  local block; block=$(awk '/^AUTODREAM_QUESTIONS_BEGIN$/{f=1;next} /^AUTODREAM_QUESTIONS_END$/{f=0} f' "$root/dreams/$DATE.md")
+  assert_grep_str "$block" '^1\. \*\*Rebuild the report dates missing studio2 sessions?\*\*$' "the question is inside the sentinels with its stable title"
+  assert_grep_str "$block" 'autodream-now.sh 2020-01-01 --force' "with the command"
+  assert_grep_str "$block" 'open-questions=1 -->' "and the marker counts it"
+  assert_nogrep "$root/dreams/$DATE.md" 'None; no sessions were triaged' "the stub does not also say there is nothing to ask"
+  rm -rf "$root"
+}
+
+test_remote_sync_empty_night_stub_says_the_scan_could_not_read_a_night(){
+  echo "# remote sync: a night with nothing to triage still says when an earlier night could not be checked"
+  local root; root=$(setup_env); rs_env "$root"; remove_path "$root/studio/proj-r/r1.jsonl"
+  mkdir -p "$root/autodream/findings/2020-01-01"                       # a night that ran and left no report
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_grep "$(rs_stats "$root")" '^remote_short_scan_unreadable: 1$' "the scan counted it"
+  assert_grep "$root/dreams/$DATE.md" 'could not be checked' "and the stub report says so"
+  rm -rf "$root"
+}
+
+test_remote_sync_mirror_size_failure_is_unknown_not_zero(){
+  echo "# remote sync: a mirror the size walk cannot fully read is recorded as unknown, not as a measured total"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"; rs_seed_mirror "$root" studio2
+  local m; m=$(rs_mirror "$root" studio2)
+  if [ "$(id -u)" = 0 ]; then ok "skipped as root (a mode-000 directory reads)"; rm -rf "$root"; return 0; fi
+  mkdir -p "$m/locked"; chmod 000 "$m/locked"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  local rs; rs=$(rs_stats "$root")
+  assert_grep "$rs" '^remote_mirror_files_studio2: unknown$' "the file count says unknown"
+  assert_grep "$rs" '^remote_mirror_bytes_studio2: unknown$' "and so do the bytes"
+  chmod 755 "$m/locked"
+  rm -rf "$root"
+}
+
+_run test_remote_sync_no_job_dir_fails_each_host_and_says_why
+_run test_remote_sync_dead_runs_job_dirs_are_removed_and_live_ones_kept
+_run test_remote_sync_reserved_labels_are_refused
+_run test_remote_sync_reserved_label_is_refused_before_the_adapter_check
+_run test_remote_sync_empty_night_stub_asks_the_question_and_counts_it
+_run test_remote_sync_empty_night_stub_says_the_scan_could_not_read_a_night
+_run test_remote_sync_mirror_size_failure_is_unknown_not_zero
+_run test_remote_sync_short_dates_lists_earlier_dates_the_host_missed
+_run test_remote_sync_short_dates_none_when_every_earlier_date_was_read
+_run test_remote_sync_short_dates_not_scanned_while_the_host_is_still_down
+_run test_remote_sync_short_dates_counts_a_night_it_cannot_read
+_run test_remote_sync_short_dates_only_for_labels_in_the_config
+_run test_remote_sync_short_date_is_named_until_it_is_rebuilt
+_run test_remote_sync_failed_rebuild_is_retried_by_the_next_trigger_and_its_record_follows_the_report
+_run test_remote_sync_rebuild_with_fewer_hosts_keeps_the_record_of_the_one_it_dropped
+_run test_remote_sync_failed_rebuild_with_fewer_hosts_keeps_the_dropped_host_for_the_retry
+_run test_remote_sync_an_older_moved_aside_copy_is_ignored_while_a_report_stands
+_run test_remote_sync_a_stub_that_cannot_be_published_fails_the_run
+_run test_remote_sync_a_degraded_capture_at_the_path_does_not_hide_the_moved_aside_record
+_run test_remote_sync_a_delivered_report_keeps_a_moved_aside_copy_that_holds_triage_decisions
+_run test_remote_sync_an_interrupted_rebuild_of_a_triaged_report_still_keeps_the_dropped_host
+_run test_remote_sync_a_failed_body_filter_is_not_published
+_run test_remote_sync_a_record_line_the_model_writes_is_dropped
+_run test_remote_sync_rebuild_with_remote_sync_off_keeps_the_record
+_run test_remote_sync_incomplete_enumeration_marks_every_host_short
+_run test_remote_sync_prompt_names_short_dates_and_the_rebuild_command
+_run test_remote_sync_hosts_run_in_parallel_and_keep_config_order
+_run test_remote_sync_parallel_a_slow_failure_does_not_reorder_or_hide_the_fast_host
+_run test_remote_sync_parallel_a_killed_helper_reads_failed
+_run test_remote_sync_mirror_size_is_recorded_every_night
+_run test_remote_sync_mirror_size_is_zero_before_the_first_good_sync
 _run test_remote_sync_off_changes_nothing
 _run test_remote_sync_invalid_entries_are_refused
 _run test_remote_sync_unreachable_host_keeps_and_scans_the_mirror

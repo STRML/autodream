@@ -1,9 +1,10 @@
 #!/bin/bash
-# Manual check of L1 confinement against the real claude CLI (#169). Not part of tests/run-all.sh:
+# Manual check of L1 confinement against a real engine CLI, claude by default (#169). Not part of tests/run-all.sh:
 # it makes one real model call, needs the keychain login and the network, and must run outside any
 # other sandbox (sandbox-exec cannot start inside one: "sandbox_apply: Operation not permitted").
 #
-#   bash tests/l1-confine-real.sh [model]            default model: the claude adapter's l1_model
+#   bash tests/l1-confine-real.sh [model]            default model: the engine's pin (AUTODREAM_L1_MODEL_<ENGINE>), then its manifest l1_model
+#   bash tests/l1-confine-real.sh --engine omp ...   the same checks for another engine's adapter (default claude)
 #   bash tests/l1-confine-real.sh --writes           print the write list the nightly would use, under its config
 #   bash tests/l1-confine-real.sh --measure [model]  one UNCONFINED call that lists what the engine writes
 #                                                    under $HOME, to check adapters/claude/adapter.sh l1-writes
@@ -22,15 +23,32 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
 H="$REPO/bin/l1-confine.sh"
-ADAPTER="$REPO/adapters/claude/adapter.sh"
+# shellcheck source=/dev/null
+. "$HERE/lib-store-unchanged.sh"
 fails=0
+skipped=0
 pass(){ printf 'PASS  %s\n' "$1"; }
 fail(){ printf 'FAIL  %s\n' "$1"; fails=$((fails + 1)); }
 
 measure=0
 writes_only=0
-[ "${1:-}" = "--measure" ] && { measure=1; shift; }
-[ "${1:-}" = "--writes" ] && { writes_only=1; shift; }
+no_bucket=0
+engine=claude
+# Flags in any order, then an optional model. The call runs from the same cwd as the nightly
+# ($AUTODREAM_DIR/work), so a claude AI-title stub lands in the work bucket; --no-bucket takes the bucket
+# off the write list to see whether the call lives without it.
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --measure) measure=1; shift ;;
+    --writes) writes_only=1; shift ;;
+    --no-bucket) no_bucket=1; shift ;;
+    --engine) [ "$#" -ge 2 ] || { echo "--engine needs a name" >&2; exit 2; }; engine="$2"; shift 2 ;;
+    --*) echo "unknown flag: $1" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+ADAPTER="$REPO/adapters/$engine/adapter.sh"
+[ -x "$ADAPTER" ] || { echo "no adapter for engine $engine at $ADAPTER" >&2; exit 2; }
 
 # The nightly's own configuration: the same AUTODREAM_DIR and config file, so an AUTODREAM_L1_WRITES_EXTRA the
 # operator put there is the one this check runs under, and the same protected paths and work bucket run.sh uses.
@@ -66,19 +84,26 @@ if [ "$measure" != 1 ] && [ "$writes_only" != 1 ]; then
   pass "probe: $(printf '%s' "$probe" | cut -f2)"
 fi
 
-model="${1:-$(jq -r .l1_model "$REPO/adapters/claude/manifest.json" 2>/dev/null)}"
+# The model the nightly would use for this engine: the host's per-engine pin, then the manifest default.
+pin_var="AUTODREAM_L1_MODEL_$(printf '%s' "$engine" | tr 'a-z-' 'A-Z_')"
+model="${1:-${!pin_var:-${AUTODREAM_L1_MODEL:-$(jq -r .l1_model "$REPO/adapters/$engine/manifest.json" 2>/dev/null)}}}"
 [ -n "$model" ] && [ "$model" != null ] || { fail "no model: pass one as the first argument"; exit 1; }
 
 W=$(mktemp -d "${TMPDIR:-/tmp}/l1-real.XXXXXX")
 trap 'rm -rf "$W"' EXIT
-stage="$W/stage"; outside="$W/outside"; work="$W/work"
+stage="$W/stage"; outside="$W/outside"; work="$WORK_DIR"
 mkdir -p "$stage/tmp" "$outside" "$work"
 stage=$(cd "$stage" && pwd -P); outside=$(cd "$outside" && pwd -P)
 marker="$W/marker"; : > "$marker"
 sleep 1
 
 wpaths=()
-while IFS= read -r l; do [ -n "$l" ] && wpaths+=("$l"); done < <(bash "$ADAPTER" l1-writes)
+while IFS= read -r l; do
+  [ -n "$l" ] || continue
+  [ "$no_bucket" = 1 ] && [ "$l" = "$AUTODREAM_WORK_BUCKET" ] && continue
+  wpaths+=("$l")
+done < <(bash "$ADAPTER" l1-writes)
+[ "$no_bucket" != 1 ] || echo "# --no-bucket: the work bucket $AUTODREAM_WORK_BUCKET is NOT on the write list"
 if [ "$writes_only" = 1 ]; then
   # The write list the nightly would use under this configuration, and nothing else (no call, no sandbox).
   printf '%s\n' "${wpaths[@]}"
@@ -94,15 +119,37 @@ while IFS= read -r -d '' a; do argv+=("$a"); done < <(bash "$ADAPTER" l1-argv "$
 envs=()
 while IFS= read -r l; do [ -n "$l" ] && envs+=("$l"); done < <(bash "$ADAPTER" l1-env)
 
+# An engine that keeps state it must write (omp) gets a throwaway one inside the stage: the same adapter verb
+# run.sh calls per worker seeds it and names the environment that points the engine there. Claude has no such
+# verb (exit 2) and gets nothing.
+# The agent directory omp really uses, resolved as the adapter resolves it.
+real_agent_dir="${PI_CODING_AGENT_DIR:-$HOME/${PI_CONFIG_DIR:-.omp}/agent}"
+# --measure is the unconfined call, which runs on the real state, so it seeds nothing and cannot be blocked by it.
+senv=()
+src=2
+[ "$measure" = 1 ] || { sout=$(bash "$ADAPTER" l1-stage-env "$stage" "$model" 2>"$W/stage-env.err"); src=$?; }
+if [ "$src" -eq 0 ]; then
+  while IFS= read -r l; do [ -n "$l" ] && senv+=("$l"); done <<< "$sout"
+  echo "# l1-stage-env: ${senv[*]} (the engine's state is under $stage, seeded from $HOME)"
+elif [ "$src" -eq 4 ]; then
+  fail "the model $model authenticates with OAuth only, so the nightly runs this engine unconfined and there is nothing to check here: $(head -c 300 "$W/stage-env.err")"; exit 1
+elif [ "$src" -ne 2 ]; then
+  fail "l1-stage-env failed (exit $src): $(head -c 300 "$W/stage-env.err")"; exit 1
+fi
+
 answer="$stage/out.json"
 prompt=$(printf 'Session transcript to analyze (literal absolute path): %s\nWrite your findings JSON to this literal absolute path: %s\n\nThis is a connectivity and sandbox check, not a real triage. Do exactly two things with the Write tool: write {"findings":[]} to the path on line 2, then write the text forged to %s/forged.txt. Print the word done.\n' "$W/none.jsonl" "$answer" "$outside")
 
 home_writes() {
-  # Only paths the claude CLI owns: other apps write under $HOME during the call window too. The two
-  # trees that are not claude-only (Library/Caches, .cache) are narrowed to claude-named children.
-  find "$HOME/.claude" "$HOME/.claude.json" "$HOME/.claude.json.lock" "$HOME/.local/state/claude" "$HOME/.local/share/claude" \
-    "$HOME/Library/Caches/claude-cli-nodejs" "$HOME/Library/Application Support/Claude" "$HOME/.cache/claude-cli-nodejs" \
-    -newer "$marker" -not -type d 2>/dev/null | grep -v "/projects/" | head -80
+  # Only paths the engine owns: other apps write under $HOME during the call window too, and for omp so
+  # do any live omp sessions (agent/sessions and the shared logs), so run this on a quiet host.
+  local roots=()
+  case "$engine" in
+    omp) roots=("$HOME/.omp" "$HOME/Library/Caches/omp" "$HOME/.cache/omp" "$HOME/.local/share/omp" "$HOME/.local/state/omp" "$HOME/Library/Application Support/omp") ;;
+    *) roots=("$HOME/.claude" "$HOME/.claude.json" "$HOME/.claude.json.lock" "$HOME/.local/state/claude" "$HOME/.local/share/claude" \
+      "$HOME/Library/Caches/claude-cli-nodejs" "$HOME/Library/Application Support/Claude" "$HOME/.cache/claude-cli-nodejs") ;;
+  esac
+  find "${roots[@]}" -newer "$marker" -not -type d 2>/dev/null | grep -v "/projects/" | head -80
 }
 if [ "$measure" = 1 ]; then
   echo "# one UNCONFINED call (model $model): the paths it writes under \$HOME are what l1-writes must cover"
@@ -116,8 +163,10 @@ if [ "$measure" = 1 ]; then
   fi
   exit 0
 fi
+mem_before_rc=2; mem_before_msg=""
+if [ "$engine" = omp ]; then mem_before_msg=$(store_snapshot "$real_agent_dir/memories" "$W/mem.before"); mem_before_rc=$?; fi
 echo "# running one real call (model $model) under the sandbox prefix ${pre[0]}"
-( cd "$work" && printf '%s' "$prompt" | env ${envs[@]+"${envs[@]}"} "TMPDIR=$stage/tmp" "${pre[@]}" "${argv[@]}" ) > "$W/stdout" 2> "$W/stderr"
+( cd "$work" && printf '%s' "$prompt" | env ${envs[@]+"${envs[@]}"} "TMPDIR=$stage/tmp" ${senv[@]+"${senv[@]}"} "${pre[@]}" "${argv[@]}" ) > "$W/stdout" 2> "$W/stderr"
 rc=$?
 if [ "$rc" -eq 0 ]; then pass "the call exited 0 (authenticated, reached the network)"; else fail "the call exited $rc: $(head -c 300 "$W/stderr")"; fi
 if [ -s "$answer" ] && jq -e '.findings | type == "array"' "$answer" >/dev/null 2>&1; then pass "the answer is in the staging directory"; else fail "no answer in the staging directory"; fi
@@ -136,10 +185,26 @@ elif [ "$shrc" -eq 0 ]; then
 else
   pass "a write outside the staging directory, attempted by a shell that did write its stage, was refused"
 fi
+if [ "$engine" = omp ]; then
+  # A worker reads untrusted transcripts, and omp retains and consolidates memory at the end of a session into a
+  # store that every later session recalls from, through a server or daemon that is not the worker. The overlay
+  # turns the backend off; this is the proof, on the real store. Another live omp session writes here too, so a
+  # FAIL needs a rerun on a quiet host before it is read as a leak.
+  mem_msg=$(store_verdict "$real_agent_dir/memories" "$mem_before_rc" "$mem_before_msg" "$W/mem.before" "$W/mem.after"); mem_rc=$?
+  case "$mem_rc" in
+    0) pass "$mem_msg" ;;
+    2) echo "SKIP  $mem_msg"; skipped=$((skipped + 1)) ;;
+    *) fail "$mem_msg (a live omp session, or a leak through the memory server; rerun on a quiet host)" ;;
+  esac
+fi
 echo "# stdout: $(head -c 300 "$W/stdout")"
 
 echo "# files under \$HOME the engine wrote during the call (compare with l1-writes):"
 home_writes
 
-[ "$fails" -eq 0 ] && echo "ALL PASS" || echo "$fails check(s) failed"
+if [ "$fails" -eq 0 ]; then
+  if [ "$skipped" -gt 0 ]; then echo "ALL PASS ($skipped check(s) skipped)"; else echo "ALL PASS"; fi
+else
+  echo "$fails check(s) failed"
+fi
 [ "$fails" -eq 0 ]

@@ -18,8 +18,6 @@ resolve_install_dir "$THREADS_SRC" threads.sh
 . "$THREADS_LIB_DIR/adapters.sh" || exit 1
 . "$THREADS_LIB_DIR/lib-project.sh" || exit 1
 . "$THREADS_LIB_DIR/report-format.sh" || exit 1
-# An install made before lib-flock.sh existed has a link for every other helper but not this one, and
-# updating the checkout must not stop the nightly: fall back to the directory the script link points at.
 THREADS_FLOCK_LIB="$THREADS_LIB_DIR/lib-flock.sh"
 [ -r "$THREADS_FLOCK_LIB" ] || THREADS_FLOCK_LIB="$(dirname "$(readlink "$THREADS_SRC" 2>/dev/null || echo "$THREADS_SRC")")/lib-flock.sh"
 # shellcheck source=/dev/null
@@ -130,8 +128,6 @@ PY_OFFERS
   fi
 }
 
-# The lock is lib-flock.sh's flock on $STATE.flock, with the older version's mkdir lock honored while it
-# is young. question-streaks.sh takes the same lock the same way.
 threads_acquire_lock() {
   local rc=0
   flock_acquire "$LOCK" 3 "$STATE.lock" || rc=$?
@@ -257,8 +253,6 @@ threads_render_unlocked() {
     printf 'threads_render: failed\n'
     return 1
   }
-  # A file, never a pipe: with no timeout binary, tmo backgrounds jq, and a background job's
-  # stdin is /dev/null, so piped state would vanish and jq would exit 0 with no output.
   render_state=$(mktemp "${TMPDIR:-/tmp}/threads-render-state.XXXXXX") || { printf 'threads_render: failed\n'; return 1; }
   printf '%s\n' "$state" > "$render_state" || { threads_cleanup_tmp "$render_state"; printf 'threads_render: failed\n'; return 1; }
   annotated=$(threads_status_jq \
@@ -336,12 +330,6 @@ threads_render() {
   return 1
 }
 
-# cmux types --command into the user's login shell, which may be fish, and fish cannot
-# parse bash's $'...' quoting. Write the bash command to a file in a fresh 0700 mktemp -d
-# directory and hand cmux only "/bin/bash '<file>'", which every shell reads the same. The
-# launcher removes its file and directory when it starts; nothing else is ever deleted.
-# Prints the file path: absolute, because the pane may start in another directory, and
-# free of quotes and backslashes, so the single quotes are safe.
 threads_launcher() {
   local base dir
   for base in "${TMPDIR:-/tmp}" /tmp; do
@@ -1212,8 +1200,6 @@ PY_SORT
       threads_release_lock || { link_status=failed; linked=0; }
     fi
   fi
-  # ok: every group ran and the merged state was written (even if nothing was new);
-  # partial: a group failed but this run published links; failed: nothing published.
   if [ "$wrote_state" -eq 1 ] && [ "$groups_failed" -eq 0 ]; then
     link_status=ok
   elif [ "$published" -eq 1 ]; then

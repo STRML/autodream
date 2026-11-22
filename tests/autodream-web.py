@@ -24,7 +24,6 @@ import time
 import subprocess
 import sys
 import tempfile
-import threading
 import unittest
 from unittest import mock
 import urllib.error
@@ -35,7 +34,7 @@ import plistlib
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from loopback_http import ThreadingLoopbackHTTPServer
+from loopback_http import ThreadingLoopbackHTTPServer  # noqa: E402
 COMMAND = REPO / "bin/autodream-web"
 SERVER = REPO / "bin/autodream-web.py"
 EXPECTED_CSP = (
@@ -131,8 +130,6 @@ class WebTests(unittest.TestCase):
                 entries.append((str(path.relative_to(root)), "dir", None))
         return sorted(entries)
 
-    # Drives install.sh's launchd path, which needs macOS tools. Linux CI skips it; the macOS
-    # launchd workflow runs it, and tests/install-web-agent.sh covers the same rules there.
     @unittest.skipUnless(sys.platform == "darwin", "install.sh's launchd path runs on macOS only")
     def test_install_web_agent_ownership_and_options(self):
         result, _, launch_agents, calls, tools = self.run_install(str(self.root / "target"))
@@ -924,21 +921,23 @@ l1_chunks_elided threads_linked threads_unassigned threads_unmeasured""".split()
         token = (self.install / "web-token").read_text().strip()
         self.assertEqual(opened.stdout.strip(), self.origin + "/login?t=" + token)
 
-    def test_web_open_falls_back_to_service_started_before_web_port(self):
-        self.start_server()
-        (self.install / "web-port").unlink()
+    def test_web_open_checks_only_the_configured_port(self):
         module = self.load_module()
-        module.PRE_RECORD_PORT = self.port
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             closed = probe.getsockname()[1]
-        out = io.StringIO()
+        probed = []
+        out, err = io.StringIO(), io.StringIO()
         with mock.patch.dict(os.environ, {"AUTODREAM_DIR": str(self.install),
                                           "AUTODREAM_WEB_PORT": str(closed)}), \
                 mock.patch.object(sys, "argv", ["autodream-web.py", "open", "--print"]), \
-                contextlib.redirect_stdout(out):
-            self.assertIsNone(module.main())
-        self.assertEqual(out.getvalue().strip(), self.origin + "/login?t=" + self.token)
+                mock.patch.object(module, "verify_service",
+                                  side_effect=lambda port, token: probed.append(port) or False), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(module.main(), 1)
+        self.assertEqual(probed, [closed])
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn(f"port {closed} is not this autodream-web", err.getvalue())
 
     def test_web_token_creation_is_exclusive_and_persistent(self):
         module = self.load_module()
@@ -977,8 +976,8 @@ l1_chunks_elided threads_linked threads_unassigned threads_unmeasured""".split()
         self.assertIn("# Dream", dream["markdown"])
         old = json.loads(self.request("GET", "/api/dreams/2026-11-13", cookie=cookie).text)
         self.assertIsNone(old["open_questions"])
-        for date in ("2026-02-30", "../web-token", "%2e%2e%2fweb-token", "2026-11-14.md"):
-            self.assertEqual(self.request("GET", "/api/dreams/" + date, cookie=cookie).status, 400)
+        for bad in ("2026-02-30", "../web-token", "%2e%2e%2fweb-token", "2026-11-14.md"):
+            self.assertEqual(self.request("GET", "/api/dreams/" + bad, cookie=cookie).status, 400)
         self.assertEqual(self.request("GET", "/api/dreams/2026-11-12", cookie=cookie).status, 404)
         command = subprocess.run(["/bin/bash", str(REPO / "bin/report-format.sh"),
                                   "open-questions", str(dreams / "2026-11-14.md")],

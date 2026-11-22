@@ -649,9 +649,10 @@ notify_fatal() { # $1=reason
 # run is not a partial result anyone should read.
 sweep_killed_leftovers() {
   local _f _n=0
-  for _f in "$FINDINGS_DIR"/*.tmp.?????? "$FINDINGS_DIR"/*.pre.jsonl; do
-    [ -f "$_f" ] || continue
-    rm -f "$_f" 2>/dev/null && _n=$((_n + 1))
+  for _f in "$FINDINGS_DIR"/*.tmp.?????? "$FINDINGS_DIR"/*.pre.jsonl "$FINDINGS_DIR"/*.stage "$FINDINGS_DIR"/.chunks/*/*.stage; do
+    # A symlink or a directory is what a worker leaves as its answer: -f would skip both.
+    { [ -e "$_f" ] || [ -L "$_f" ]; } || continue
+    rm -rf "$_f" 2>/dev/null && _n=$((_n + 1))
   done
   [ "$_n" -eq 0 ] || log "removed $_n temp file(s) left in $FINDINGS_DIR by a killed run"
 }
@@ -2040,15 +2041,26 @@ REMOTE_SYNC_BAD=0      # entries that did not sync this run: failed or invalid
 REMOTE_SYNC_SHORT=0    # entries whose mirror may be short tonight: BAD plus partial and skipped_locked
 REMOTE_SYNC_FIRST_ERR=""
 REMOTE_SYNC_HELPER=""
+REMOTE_SYNCED_LABELS=" "   # labels whose sync was ok or partial this run, space-delimited
+REMOTE_SHORT_LABELS=" "    # real labels this run did not fully read (not ok): the next scan lists this date for them
+REMOTE_SHORT_QUESTIONS=""  # Open-questions items naming earlier dates a host missed (#230), for the stub report
+REMOTE_SHORT_QCOUNT=0      # how many items that is
+REMOTE_SHORT_UNREADABLE=0  # earlier nights the scan could not judge
+REMOTE_SYNC_NOTMP=0        # 1 when the per-run job dir could not be made, so no job was started
+REMOTE_MIRROR_UNKNOWN=0    # mirrors whose size could not be measured tonight
 remote_sync_stat() { REMOTE_SYNC_LINES="${REMOTE_SYNC_LINES}$1"$'\n'; }
 
-# $1=entry $2=key $3=why: an entry refused before any ssh.
+# $1=entry $2=key $3=why $4=real: an entry refused before any ssh. $4=real when the key is a real
+# label (an adapter that is off); a malformed, repeated or reserved entry has no label of its own
+# and takes the synthetic key `invalid`, so it never joins the short list. No label may be called
+# `invalid` or end in `_cause` or `_last_ok`, so those keys cannot be mistaken for a host.
 remote_sync_refuse() {
   log "WARNING: AUTODREAM_REMOTE_ROOTS entry '$1' refused ($3); it is not synced"
   remote_sync_stat "remote_sync_$2: invalid"
   remote_sync_stat "remote_sync_$2_cause: $3"
   REMOTE_SYNC_BAD=$((REMOTE_SYNC_BAD + 1))
   REMOTE_SYNC_SHORT=$((REMOTE_SYNC_SHORT + 1))
+  [ "${4:-}" != real ] || REMOTE_SHORT_LABELS="$REMOTE_SHORT_LABELS$2 "
   [ -n "$REMOTE_SYNC_FIRST_ERR" ] || REMOTE_SYNC_FIRST_ERR="$2: invalid ($3)"
 }
 
@@ -2082,22 +2094,59 @@ remote_sync_locked() {
   esac
 }
 
-# $1=label $2=target: sync one host under its lock, record its keys, add its mirror to the roots.
-remote_sync_one() {
-  local label="$1" spec="$2" dir="$AUTODREAM_DIR/remote/$1" lock="$AUTODREAM_DIR/locks/remote-$1.lock"
-  local mirror="$AUTODREAM_DIR/remote/$1/projects" status="" word cause="" last t0=$SECONDS
-  # remote_sync_locked runs inside $(...). $$ is still this run's pid there, so the lock it takes
-  # and releases is this run's.
+# $1=mirror -> "<files> <bytes>" of the *.jsonl transcripts in it. The mirror is an archive that is
+# never pruned (#228), so its size is measured every night and the growth shows in run-stats. wc -c
+# prints a "total" line per batch, which a transcript cannot match because its name ends in .jsonl.
+# A walk or a count that fails (an unreadable subdirectory, a file gone mid-count) prints
+# "unknown unknown": totals from whatever did get counted would read as a measured size.
+remote_mirror_size() {
+  [ -d "$1" ] || { echo "0 0"; return 0; }
+  local out
+  # A newline in a path would split wc's line for it into two records.
+  [ -z "$(find "$1" -name $'*\n*' -print -quit 2>/dev/null)" ] || { echo "unknown unknown"; return 0; }
+  out=$(set -o pipefail; find "$1" -type f -name '*.jsonl' -exec wc -c {} + 2>/dev/null \
+    | awk '$2 == "total" && NF == 2 { next } { f++; b += $1 } END { print f + 0, b + 0 }') \
+    || { echo "unknown unknown"; return 0; }
+  echo "$out"
+}
+
+# $1=label $2=target $3=file prefix: one host's sync, run as a background job (#229). It leaves its
+# answers in files because a job cannot set the parent's variables: <prefix>.status (the helper's
+# line), .secs and .mirror (the mirror's size). Each label has its own lock and mirror, so the jobs
+# share nothing. $$ is still this run's pid inside the job, so the lock it takes is this run's.
+remote_sync_job() {
+  local label="$1" mirror="$AUTODREAM_DIR/remote/$1/projects" t0=$SECONDS status=""
   if [ -z "$REMOTE_SYNC_HELPER" ]; then
     status="failed (remote-sync.sh not found)"
   else
-    status=$(remote_sync_locked "$label" "$spec" "$mirror" "$lock")
+    status=$(remote_sync_locked "$label" "$2" "$mirror" "$AUTODREAM_DIR/locks/remote-$label.lock")
   fi
-  [ -n "$status" ] || status="failed (remote-sync.sh printed nothing)"
+  { printf '%s\n' "$status" > "$3.status"
+    printf '%s\n' "$((SECONDS - t0))" > "$3.secs"
+    remote_mirror_size "$mirror" > "$3.mirror"; } 2>/dev/null
+}
+
+# $1=label $2=file prefix, empty when no job was started: read a finished job, record its keys, add
+# its mirror to the roots. An empty prefix reads nothing, so a failed job-dir allocation never turns
+# into a read of /0.status.
+remote_sync_finish() {
+  local label="$1" p="$2" dir="$AUTODREAM_DIR/remote/$1" status="" word cause="" last secs="" size=""
+  local mirror="$AUTODREAM_DIR/remote/$1/projects"
+  if [ -n "$p" ]; then
+    status=$(head -n 1 "$p.status" 2>/dev/null) || status=""
+    secs=$(head -n 1 "$p.secs" 2>/dev/null) || secs=""
+    size=$(cat "$p.mirror" 2>/dev/null) || size=""
+  fi
+  [ -n "$size" ] || size=$(remote_mirror_size "$mirror")
+  if [ -z "$status" ]; then
+    status="failed (remote-sync.sh printed nothing)"
+    [ "$REMOTE_SYNC_NOTMP" != 1 ] || status="failed (cannot make a job dir for the sync jobs)"
+  fi
   word=${status%% *}
   case "$status" in *" ("*")") cause=${status#* (}; cause=${cause%)} ;; esac
   case "$word" in
     ok|partial)
+      REMOTE_SYNCED_LABELS="$REMOTE_SYNCED_LABELS$label "
       if ! { mkdir -p "$dir" && printf '%s\n' "$(date +%Y-%m-%d)" > "$dir/last-ok.tmp.$$" \
              && mv -f "$dir/last-ok.tmp.$$" "$dir/last-ok"; } 2>/dev/null; then
         log "WARNING: remote sync $label: could not stamp $dir/last-ok"
@@ -2106,20 +2155,150 @@ remote_sync_one() {
     invalid) REMOTE_SYNC_BAD=$((REMOTE_SYNC_BAD + 1)) ;;
     *) word=failed; REMOTE_SYNC_BAD=$((REMOTE_SYNC_BAD + 1)) ;;
   esac
-  [ "$word" = ok ] || REMOTE_SYNC_SHORT=$((REMOTE_SYNC_SHORT + 1))
+  [ "$word" = ok ] || { REMOTE_SYNC_SHORT=$((REMOTE_SYNC_SHORT + 1)); REMOTE_SHORT_LABELS="$REMOTE_SHORT_LABELS$label "; }
   case "$word" in failed|invalid) [ -n "$REMOTE_SYNC_FIRST_ERR" ] || REMOTE_SYNC_FIRST_ERR="$label: ${cause:-$word}" ;; esac
   last=$(head -n 1 "$dir/last-ok" 2>/dev/null) || last=""
   remote_sync_stat "remote_sync_$label: $word"
   remote_sync_stat "remote_sync_${label}_cause: $cause"
   remote_sync_stat "remote_sync_${label}_last_ok: ${last:-never}"
-  log "remote sync $label: $status in $((SECONDS - t0))s"
+  case "$size" in unknown*) REMOTE_MIRROR_UNKNOWN=$((REMOTE_MIRROR_UNKNOWN + 1)) ;; esac
+  remote_sync_stat "remote_mirror_files_$label: ${size% *}"
+  remote_sync_stat "remote_mirror_bytes_$label: ${size#* }"
+  log "remote sync $label: $status in ${secs:-?}s"
   [ ! -d "$mirror" ] || SESSION_ROOTS="${SESSION_ROOTS:+$SESSION_ROOTS:}$mirror"
 }
 
+# A finished report stops every later trigger at the guard, and the next night's mtime lower bound
+# skips a transcript last written on the failed day, so a date whose host was down is never
+# retried (#230). Rebuilding it replaces a report the user may have triaged, so nothing rebuilds on
+# its own. Instead, a run whose sync worked looks back over the trailing week of reports and names
+# every date whose report did not fully read the same label, with the rebuild command.
+#
+# The record is a line inside the report, `<!-- autodream:remote-short=a,b -->`: the labels that
+# report did not fully read, empty when none. It is written in the same atomic write as the report
+# body (remote_short_line, called by the L2 writer and the stub), so the record and the report are
+# one file and cannot disagree. A run killed before it publishes, a rebuild that defers, and a
+# write that fails all leave the old report with its old record. An earlier design kept the record
+# in a second file and spent four review rounds on the orders in which the two could diverge.
+# A report with no such line was written with remote sync off (or before the record existed) and is
+# skipped. A night with a findings dir and no report (a rebuild that failed in L2 moved the old one
+# aside, and the next trigger rebuilds it) or a report that will not read is counted in
+# remote_short_scan_unreadable. Only labels configured tonight are listed.
+#
+# What a report did not fully read: every configured label whose sync was not ok (partial counts:
+# rsync 23 can leave a file uncopied, which the next sync copies with an old mtime that the next
+# day's lower bound skips); every configured label when the enumeration was incomplete, because the
+# roots that failed cannot be told apart from a mirror; and every label the report it replaces
+# listed that this run does not configure, so a rebuild with fewer hosts cannot erase them.
+REMOTE_SHORT_SCAN_DAYS=7
+REMOTE_PREV_SHORT=""   # the record of the report this run replaces, comma-separated
+
+# $1=report text -> its record, comma-separated and possibly empty; exit 1 when it has no record line.
+remote_report_record() {
+  local line
+  line=$(printf '%s\n' "$1" | grep '^<!-- autodream:remote-short=.* -->$') || return 1
+  line=${line##*$'\n'}
+  line=${line#'<!-- autodream:remote-short='}
+  printf '%s' "${line% -->}"
+}
+
+# The labels the report being written did not fully read, comma-separated.
+remote_short_labels() {
+  local l all="$REMOTE_SHORT_LABELS" out="" configured="$REMOTE_SYNCED_LABELS $REMOTE_SHORT_LABELS"
+  if [ $(( ${ROOTS_FAILED:-0} + ${ROOTS_UNAVAILABLE:-0} + ${PARTIAL_ROOTS:-0} )) -gt 0 ]; then all="$configured"; fi
+  for l in ${REMOTE_PREV_SHORT//,/ }; do
+    case " $configured " in *" $l "*) ;; *) all="$all $l" ;; esac
+  done
+  for l in $all; do
+    case ",$out," in *",$l,"*) ;; *) out="${out:+$out,}$l" ;; esac
+  done
+  printf '%s' "$out"
+}
+
+# The record line, or nothing when remote sync is off and the report it replaces has none to keep.
+remote_short_line() {
+  { [ -n "${AUTODREAM_REMOTE_ROOTS:-}" ] || [ -n "$REMOTE_PREV_SHORT" ]; } || return 0
+  printf '<!-- autodream:remote-short=%s -->\n' "$(remote_short_labels)"
+}
+
+remote_short_scan() {
+  local i k n=0 d report body rec label dates
+  local dnames=() drecs=()
+  REMOTE_SHORT_QUESTIONS=""; REMOTE_SHORT_QCOUNT=0; REMOTE_SHORT_UNREADABLE=0
+  i=$REMOTE_SHORT_SCAN_DAYS
+  while [ "$i" -ge 1 ]; do
+    d=$(pdate_shift "$TARGET_DATE" "-$i" d) || { REMOTE_SHORT_UNREADABLE=$((REMOTE_SHORT_UNREADABLE + 1)); i=$((i - 1)); continue; }
+    i=$((i - 1))
+    report="$DREAMS_DIR/$d.md"
+    if [ ! -e "$report" ]; then
+      [ ! -d "$AUTODREAM_DIR/findings/$d" ] || REMOTE_SHORT_UNREADABLE=$((REMOTE_SHORT_UNREADABLE + 1))
+      continue
+    fi
+    if ! body=$(cat "$report" 2>/dev/null); then
+      REMOTE_SHORT_UNREADABLE=$((REMOTE_SHORT_UNREADABLE + 1)); continue
+    fi
+    if rec=$(remote_report_record "$body"); then dnames[n]=$d; drecs[n]=$rec; n=$((n + 1)); fi
+  done
+  for label in $REMOTE_SYNCED_LABELS; do
+    dates=""; k=0
+    while [ "$k" -lt "$n" ]; do
+      case ",${drecs[k]}," in *",$label,"*) dates="${dates:+$dates }${dnames[k]}" ;; esac
+      k=$((k + 1))
+    done
+    remote_sync_stat "remote_short_dates_$label: ${dates:-none}"
+    [ -n "$dates" ] || continue
+    log "remote sync $label: earlier dates missing its sessions: $dates"
+    REMOTE_SHORT_QCOUNT=$((REMOTE_SHORT_QCOUNT + 1))
+    REMOTE_SHORT_QUESTIONS="${REMOTE_SHORT_QUESTIONS}${REMOTE_SHORT_QCOUNT}. **Rebuild the report dates missing $label sessions?**"$'\n'
+    REMOTE_SHORT_QUESTIONS="${REMOTE_SHORT_QUESTIONS}   - $label was not fully read on these dates and is syncing again, so those reports are missing its sessions. Nothing retries them."$'\n'
+    for d in $dates; do
+      REMOTE_SHORT_QUESTIONS="${REMOTE_SHORT_QUESTIONS}   - \`autodream-now.sh $d --force\`"$'\n'
+    done
+    REMOTE_SHORT_QUESTIONS="${REMOTE_SHORT_QUESTIONS}   - A rebuild replaces that date's report, including any \`## Triage decisions\` already written into it. Leave a date you have already triaged."$'\n'
+  done
+  remote_sync_stat "remote_short_scan_unreadable: $REMOTE_SHORT_UNREADABLE"
+}
+
+# Every moved-aside copy (<report>.stale-<epoch>) of this date's earlier reports, taken out of the
+# .stale-* glob once a report has been delivered in their place. A copy with a "## Triage decisions"
+# heading holds the user's own writing, so it is renamed to <report>.triaged-<epoch>, which the record
+# lookup never reads; every other copy is deleted. A copy that cannot be read is kept, not deleted.
+drop_stale_report_copies() {
+  local s rc keep
+  for s in "$REPORT_PATH".stale-*; do
+    [ -f "$s" ] || continue
+    grep -q '^## Triage decisions' "$s" 2>/dev/null && rc=0 || rc=$?
+    if [ "$rc" = 1 ]; then
+      rm -f "$s" || log "WARNING: could not remove the superseded report copy $s"
+      continue
+    fi
+    keep="$REPORT_PATH.triaged-${s##*.stale-}"
+    [ -e "$keep" ] && keep="$keep.$$"
+    mv "$s" "$keep" || log "WARNING: could not set aside the report copy $s that holds triage decisions"
+  done
+}
+
 sync_remote_roots() {
+  local prev f rec
+  REMOTE_PREV_SHORT=""
+  # The report this run replaces: the one at the path if it carries a record, else the newest
+  # moved-aside .stale-<epoch> copy that does. A rebuild that died in L2 moved the real report aside
+  # and may have left a capture with no record at the path, so a record-less file at the path is no
+  # reason to ignore the copy. Copies cannot resurface an old label: a delivered report (L2 or the
+  # stub) deletes every copy it supersedes, or renames one holding triage decisions to .triaged-*,
+  # so a copy still in the .stale-* glob means no report has been delivered since it was made.
+  if [ -f "$REPORT_PATH" ] && prev=$(cat "$REPORT_PATH" 2>/dev/null) && rec=$(remote_report_record "$prev"); then
+    REMOTE_PREV_SHORT=$rec
+  else
+    for f in "$REPORT_PATH".stale-*; do
+      [ -f "$f" ] && prev=$(cat "$f" 2>/dev/null) || continue
+      if rec=$(remote_report_record "$prev"); then REMOTE_PREV_SHORT=$rec; fi
+    done
+  fi
   if [ -z "${AUTODREAM_REMOTE_ROOTS:-}" ]; then remote_sync_stat "remote_sync: off"; return 0; fi
   remote_sync_stat "remote_sync: on"
-  local entries=() entry label seen=" "
+  local entries=() entry label seen=" " sdir="" n i
+  local kinds=() keys=() whys=() entrys=() pids=()
   REMOTE_SYNC_FIRST_ERR=""
   REMOTE_SYNC_HELPER=$(find_lib remote-sync.sh) || REMOTE_SYNC_HELPER=""
   # The mirrors are claude roots. With the claude adapter not enabled nothing would scan them, and
@@ -2127,21 +2306,62 @@ sync_remote_roots() {
   local claude_on=1
   resolve_enabled_adapters
   case " $ENABLED_ADAPTERS " in *" claude "*) ;; *) claude_on=0 ;; esac
+  # The job dir lives under the install, keyed by this run's pid, rather than in $TMPDIR: a run
+  # killed while it waits skips every cleanup, so the next run removes the dirs of dead pids here.
+  # A name is only ever this run's pid or an earlier run's, so a live run's dir is never touched.
+  local jobs="$AUTODREAM_DIR/remote-jobs" jd jp
+  if mkdir -p "$jobs" 2>/dev/null; then
+    for jd in "$jobs"/*; do
+      [ -d "$jd" ] || continue
+      jp=${jd##*/}
+      case "$jp" in ''|*[!0-9]*) continue ;; esac
+      kill -0 "$jp" 2>/dev/null || rm -rf "$jd"
+    done
+    rm -rf "${jobs:?}/$$"
+    mkdir "$jobs/$$" 2>/dev/null && sdir="$jobs/$$"
+  fi
+  [ -n "$sdir" ] || { REMOTE_SYNC_NOTMP=1; log "WARNING: remote sync: cannot make a job dir under $jobs, so no host is synced"; }
   read -r -a entries <<< "$AUTODREAM_REMOTE_ROOTS"
+  # Pass 1 validates and starts every sync at once. A host that is asleep costs ConnectTimeout and a
+  # stalled copy costs rsync's --timeout, so with several hosts down the waits overlap (#229).
   for entry in ${entries[@]+"${entries[@]}"}; do
     REMOTE_SYNC_TOTAL=$((REMOTE_SYNC_TOTAL + 1))
-    case "$entry" in *=*) label=${entry%%=*} ;; *) remote_sync_refuse "$entry" invalid "no label=target"; continue ;; esac
+    n=${#kinds[@]}; entrys[n]=$entry
+    case "$entry" in *=*) label=${entry%%=*} ;; *) kinds[n]=refuse; keys[n]=invalid; whys[n]="no label=target"; continue ;; esac
     case "$label" in
-      ''|.|..|*[!A-Za-z0-9._-]*) remote_sync_refuse "$entry" invalid "label must match [A-Za-z0-9._-]+"; continue ;;
+      ''|.|..|*[!A-Za-z0-9._-]*) kinds[n]=refuse; keys[n]=invalid; whys[n]="label must match [A-Za-z0-9._-]+"; continue ;;
+      # These names would print like another run-stats line (the refusal key, or the cause or
+      # last_ok line of a label), so no reader could tell the two apart. Refused here, ahead of the
+      # adapter check, so a reserved label never gets a key of its own.
+      invalid|*_cause|*_last_ok) kinds[n]=refuse; keys[n]=invalid; whys[n]="label $label is reserved (invalid, or ending in _cause or _last_ok)"; continue ;;
     esac
-    case "$seen" in *" $label "*) remote_sync_refuse "$entry" invalid "label $label is used twice"; continue ;; esac
+    case "$seen" in *" $label "*) kinds[n]=refuse; keys[n]=invalid; whys[n]="label $label is used twice"; continue ;; esac
     seen="$seen$label "
     if [ "$claude_on" = 0 ]; then
-      remote_sync_refuse "$entry" "$label" "the claude adapter is not enabled (AUTODREAM_ADAPTERS), so no mirror would be scanned"
+      kinds[n]=refuse-real; keys[n]=$label; whys[n]="the claude adapter is not enabled (AUTODREAM_ADAPTERS), so no mirror would be scanned"
       continue
     fi
-    remote_sync_one "$label" "${entry#*=}"
+    kinds[n]=sync; keys[n]=$label; pids[n]=""
+    if [ -n "$sdir" ]; then
+      remote_sync_job "$label" "${entry#*=}" "$sdir/$n" &
+      pids[n]=$!
+    fi
   done
+  # Pass 2 reads the results in config order, so run-stats and SESSION_ROOTS do not depend on which
+  # host answered first.
+  i=0
+  while [ "$i" -lt "${#kinds[@]}" ]; do
+    case "${kinds[i]}" in
+      refuse) remote_sync_refuse "${entrys[i]}" "${keys[i]}" "${whys[i]}" ;;
+      refuse-real) remote_sync_refuse "${entrys[i]}" "${keys[i]}" "${whys[i]}" real ;;
+      *)
+        [ -z "${pids[i]}" ] || wait "${pids[i]}" 2>/dev/null
+        remote_sync_finish "${keys[i]}" "${sdir:+$sdir/$i}" ;;
+    esac
+    i=$((i + 1))
+  done
+  [ -z "$sdir" ] || rm -rf "$sdir"
+  remote_short_scan
   log "session roots with remote mirrors: ${SESSION_ROOTS//:/, }"
   # Every host failing is a broken path (lost key, renamed host, no route), and the per-host lines
   # sit in run-stats.txt until the report, so it gets a banner of its own group. One failing does
@@ -2642,6 +2862,22 @@ l1_missing_count() { # count sessions in $SESSIONS_LIST that still have no findi
   printf '%s' "$m"
 }
 
+# Which engines still have a session with no valid findings JSON, one per line. Setup prepares only these:
+# preparing an engine nothing will run fatals a night whose findings are already complete (a retry after L2
+# failed) over a database that no worker needs.
+l1_missing_engines() {
+  local s h src e out=""
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    h=$(session_hash "$s") || continue
+    jq -s -e "$L1_FINDINGS_OK" "$FINDINGS_DIR/$h.json" >/dev/null 2>&1 && continue
+    src=$(printf '%s\n' "$AUTODREAM_SOURCE_MAP" | awk -F'\t' -v h="$h" '$1 == h { print $2; exit }')
+    e=$(printf '%s\n' "$AUTODREAM_L1_ENGINES" | awk -F'\t' -v s="$src" '$1 == s { print $2; exit }')
+    [ -n "$e" ] && out="$out$e"$'\n'
+  done < "$SESSIONS_LIST"
+  printf '%s' "$out" | sort -u
+}
+
 # What chunked triage cost tonight, from the two ledgers: "sessions chunks elided calls". Sessions
 # and chunks count what the chunker planned (the last plan per session, since a retry plans again),
 # elided the chunks it dropped from the middle, calls the engine calls actually made. A night with
@@ -3068,9 +3304,11 @@ L1_CONFINED_ENGINES=""
 L1_CONFINE_STATS=""
 L1_STAGE_ROOT=""
 L1_CONFINE_PROTECT=""
+L1_CONFINED_STAT=no
+L1_CONFINE_FATAL=""
 l1_confine_setup() {
-  local probe verdict reason eng d p ok_engines="" all_engines
-  L1_CONFINED=no; L1_CONFINE_USING=none; L1_CONFINED_ENGINES=""; L1_CONFINE_STATS=""
+  local probe verdict reason eng d p ok_engines="" no_engines="" all_engines err sstage wrc swhy needed
+  L1_CONFINED=no; L1_CONFINE_USING=none; L1_CONFINED_ENGINES=""; L1_CONFINE_STATS=""; L1_CONFINE_FATAL=""; L1_SETUP_SKIPPED=""
   L1_STAGE_ROOT="$AUTODREAM_DIR/staging/run-$$"
   L1_CONFINE_PROTECT="$AUTODREAM_DIR:$FINDINGS_DIR:$DREAMS_DIR"
   # A run killed mid-flight leaves its staging root behind. Only roots whose run is gone are removed:
@@ -3092,37 +3330,98 @@ l1_confine_setup() {
     reason=$(printf '%s' "$probe" | cut -f2-)
     if [ "$verdict" != yes ]; then
       L1_CONFINE_REASON="${reason:-the probe printed nothing}"
-    elif ! L1_CONFINE_PROTECT="$L1_CONFINE_PROTECT" bash "$L1_CONFINER" prefix "$AUTODREAM_DIR" >/dev/null 2>&1; then
-      L1_CONFINE_REASON="a path under $AUTODREAM_DIR cannot be written into a sandbox profile"
     else
       L1_CONFINED=yes
       L1_CONFINE_USING="$reason"
       L1_CONFINE_REASON="ok"
     fi
   fi
-  if [ "$L1_CONFINED" = yes ]; then
+  if [ -z "$(l1_missing_engines)" ] && [ "$L1_CONFINED" = yes ]; then
+    # Every session already has findings, so no worker starts and there is nothing to confine or prepare.
+    L1_CONFINED_STAT="n/a"
+    L1_CONFINE_REASON="no L1 work this run: every session already has findings"
+    # Every engine is named as skipped, so a findings file that vanishes before dispatch fails the attempt
+    # (l1_attempt) and does not start an unprepared worker with no sandbox.
+    L1_SETUP_SKIPPED=$(printf '%s\n' "$AUTODREAM_L1_ENGINES" | awk -F'\t' 'NF >= 2 && $2 != "" && !seen[$2]++ { printf "%s ", $2 }')
+    log "L1 confinement not set up: $L1_CONFINE_REASON (engines that may not start this run: ${L1_SETUP_SKIPPED:-none})"
+  elif [ "$L1_CONFINED" = yes ]; then
+    # The protected directories are joined with a colon, so one that holds a colon would be split into
+    # two paths and left unprotected; a relative one protects nothing.
+    for p in "$AUTODREAM_DIR" "$FINDINGS_DIR" "$DREAMS_DIR"; do
+      case "$p" in
+        *:*) L1_CONFINE_FATAL="a protected directory path holds a colon, so the protect list would split it: $p"; break ;;
+        /*) ;;
+        *) L1_CONFINE_FATAL="a protected directory path is not absolute: $p"; break ;;
+      esac
+    done
     all_engines=$(printf '%s' "$AUTODREAM_L1_ENGINES" | awk -F'\t' 'NF >= 2 && $2 != "" && !seen[$2]++ { print $2 }')
+    # Only engines with work left are prepared. The others are named, so a worker that reaches one anyway fails
+    # its attempt (l1_attempt) and is never run unconfined by default.
+    needed=$(l1_missing_engines)
+    all_engines=$(printf '%s\n' "$all_engines" | grep -Fx -f <(printf '%s\n' "$needed") 2>/dev/null || true)
+    L1_SETUP_SKIPPED=$(printf '%s\n' "$AUTODREAM_L1_ENGINES" | awk -F'\t' -v need="$(printf '%s' "$needed" | tr '\n' ' ')" 'BEGIN { n = split(need, a, " "); for (i = 1; i <= n; i++) want[a[i]] = 1 } NF >= 2 && $2 != "" && !($2 in want) && !seen[$2]++ { printf "%s ", $2 }')
     while IFS= read -r eng; do
       [ -n "$eng" ] || continue
-      if "$ADAPTERS_DIR/$eng/adapter.sh" l1-writes >/dev/null 2>&1; then
-        ok_engines="${ok_engines:+$ok_engines }$eng"
-        L1_CONFINE_STATS="${L1_CONFINE_STATS}l1_confined_$(printf '%s' "$eng" | tr '-' '_'): yes"$'\n'
+      "$ADAPTERS_DIR/$eng/adapter.sh" l1-writes >/dev/null 2>&1; wrc=$?
+      # Exit 2 is "no write profile" (omp). Any other failure is a write list the adapter refused, which
+      # is a fatal below with its reason and never an engine that quietly runs unconfined.
+      if [ "$wrc" -ne 2 ]; then
+        # The probe built a prefix with no paths. The real one carries this engine's write list, the
+        # operator's additions and the protect list, and a character the profile cannot hold in any of
+        # them fails every call: build it now, so a run that cannot confine stops here and not with a
+        # stub for every session.
+        sstage="$L1_STAGE_ROOT/.setup-$eng"; err=""
+        if ( umask 077; mkdir -p "$sstage" ) 2>/dev/null \
+           && err=$(L1_STAGE_ROOT="$L1_STAGE_ROOT" L1_CONFINE_PROTECT="$L1_CONFINE_PROTECT" bash "$L1_CONFINER" engine-prefix "$ADAPTERS_DIR/$eng/adapter.sh" "$sstage" 2>&1 >/dev/null); then
+          # The same for the state directory a worker of this engine runs on (omp), once with the model its
+          # sessions use: a setup that cannot work stops the run here, and a model that cannot run on a
+          # throwaway copy (OAuth only: a refresh in the copy would lose the rotated token) leaves this
+          # engine unconfined and says why, instead of failing every worker.
+          ssrc=$(printf '%s\n' "$AUTODREAM_L1_ENGINES" | awk -F'\t' -v e="$eng" '$2 == e { print $1; exit }')
+          smodel=$(printf '%s\n' "$AUTODREAM_L1_MODELS" | awk -F'\t' -v s="$ssrc" '$1 == s { print $2; exit }')
+          err=$("$ADAPTERS_DIR/$eng/adapter.sh" l1-stage-env "$sstage" "$smodel" 2>&1 >/dev/null); wrc=$?
+          case "$wrc" in
+            0|2)
+              ok_engines="${ok_engines:+$ok_engines }$eng"
+              L1_CONFINE_STATS="${L1_CONFINE_STATS}l1_confined_$(printf '%s' "$eng" | tr '-' '_'): yes"$'\n' ;;
+            4)
+              no_engines="${no_engines:+$no_engines }$eng"
+              swhy=$(printf '%s' "${err:-no reason given}" | head -c 300 | tr '\n\t' '  ')
+              L1_CONFINE_STATS="${L1_CONFINE_STATS}l1_confined_$(printf '%s' "$eng" | tr '-' '_'): no"$'\n'"l1_confined_$(printf '%s' "$eng" | tr '-' '_')_reason: model ${smodel:-none}: $swhy"$'\n'
+              log "WARNING: the $eng engine runs unconfined (model ${smodel:-none}): $swhy; use an API-key model to confine it" ;;
+            *)
+              [ -n "$L1_CONFINE_FATAL" ] || L1_CONFINE_FATAL="the $eng engine's state directory cannot be prepared: $(printf '%s' "${err:-no reason given}" | head -c 300 | tr '\n\t' '  ')" ;;
+          esac
+        else
+          [ -n "$L1_CONFINE_FATAL" ] || L1_CONFINE_FATAL="the $eng engine's sandbox cannot be built: $(printf '%s' "${err:-the staging directory could not be made}" | head -c 300 | tr '\n\t' '  ')"
+        fi
+        rm -rf "$sstage"
       else
+        no_engines="${no_engines:+$no_engines }$eng"
         L1_CONFINE_STATS="${L1_CONFINE_STATS}l1_confined_$(printf '%s' "$eng" | tr '-' '_'): no"$'\n'"l1_confined_$(printf '%s' "$eng" | tr '-' '_')_reason: the $eng adapter declares no write profile (l1-writes)"$'\n'
         log "WARNING: the $eng engine runs unconfined: its adapter declares no write profile (l1-writes)"
       fi
     done <<< "$all_engines"
     L1_CONFINED_ENGINES="$ok_engines"
+    L1_CONFINED_STAT=yes
+    if [ -n "$no_engines" ]; then
+      L1_CONFINED_STAT=partial
+      [ -n "$ok_engines" ] || L1_CONFINED_STAT=no
+      L1_CONFINE_REASON="engines that run unconfined: $no_engines (no write profile, or a model a throwaway state cannot serve)"
+    fi
     log "L1 workers confined with $L1_CONFINE_USING: writes only to their staging directory under $L1_STAGE_ROOT and the engine state paths"
-  elif [ "${AUTODREAM_L1_CONFINE:-1}" != 0 ]; then
-    log "WARNING: L1 workers run unconfined (l1_confined: no): $L1_CONFINE_REASON"
+  else
+    L1_CONFINED_STAT=no
+    [ "${AUTODREAM_L1_CONFINE:-1}" = 0 ] || log "WARNING: L1 workers run unconfined (l1_confined: no): $L1_CONFINE_REASON"
   fi
-  export L1_CONFINER L1_CONFINED L1_CONFINED_ENGINES L1_STAGE_ROOT L1_CONFINE_PROTECT DREAMS_DIR
+  export L1_CONFINER L1_CONFINED L1_CONFINED_ENGINES L1_SETUP_SKIPPED L1_STAGE_ROOT L1_CONFINE_PROTECT DREAMS_DIR
+  # Where a worker launched from $WORK_DIR may leave an AI-title stub. It is not on the write list, so a
+  # confined worker cannot write it; an unconfined one still can, which is why run.sh wipes it.
   export AUTODREAM_WORK_BUCKET="$WORK_BUCKET"
 }
 # What run-stats says about it, in every block that reports l1 stats.
 l1_confine_stat_lines() {
-  printf 'l1_confined: %s\n' "$L1_CONFINED"
+  printf 'l1_confined: %s\n' "$L1_CONFINED_STAT"
   printf 'l1_confine_tool: %s\n' "$L1_CONFINE_USING"
   printf 'l1_confine_reason: %s\n' "$L1_CONFINE_REASON"
   # What an operator added to the claude write list (AUTODREAM_L1_WRITES_EXTRA), so a widened sandbox does not read like the default one.
@@ -3397,6 +3696,16 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
     # error key) rather than by a findings array alone. l1_subject names what failed in the
     # diagnostic line: the session, or a chunk of it. That line is skipped by failure-class.sh on
     # its prefix, so naming a chunk there costs the classifier nothing.
+    # A failure of the runner own setup before the engine starts (no staging root, no stage, no state
+    # directory, no sandbox) says nothing about the session. It is ledgered as staging and writes no stub, so
+    # the slot stays empty (the decision point after the rounds turns it into a fatal): the final-round stub would fill it, satisfy the missing-work check
+    # and let a report publish over sessions that were never triaged.
+    l1_infra_fail() {
+      netdown=staging
+      printf "%s %s %s\n" "$hash" "${AUTODREAM_CURRENT_ROUND:-1}" staging >> "$FINDINGS_DIR/l1-netdown.txt"
+      printf "the runner could not set this worker up; no stub, the session is left for a later run\n" >> "$3"
+      return 1
+    }
     l1_attempt() {
       # The answer is written in a staging directory of its own, one per answer file and reused by the
       # retries of this run, and copied to $2 once the engine has exited (#169). The engine can then be
@@ -3404,25 +3713,49 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       # left at that path is this attempt answer.
       if [ -z "${L1_STAGE_ROOT:-}" ]; then
         printf "no staging root is set, so there is nowhere to stage the answer for %s\n" "${l1_subject:-$session}" >> "$3"
-        return 1
+        l1_infra_fail "$@"; return 1
       fi
       l1ans_name=$(basename "$2")
       l1stage="$L1_STAGE_ROOT/$hash.$l1ans_name"
-      if ! { ( umask 077; mkdir -p "$l1stage/tmp" ) 2>/dev/null && l1stage=$(cd "$l1stage" && pwd -P); }; then
+      # A worker can leave a symlink where the private tmp goes. Unlinking it follows nothing, so it is removed
+      # and the directory made again, and one hostile worker cannot turn a retry into a failed night.
+      [ ! -L "$l1stage/tmp" ] || rm -f "$l1stage/tmp"
+      if ! { [ ! -L "$l1stage" ] && ( umask 077; mkdir -p "$l1stage/tmp" ) 2>/dev/null && [ ! -L "$l1stage/tmp" ] && l1stage=$(cd "$l1stage" && pwd -P); }; then
         printf "could not make the staging directory %s for %s\n" "$l1stage" "${l1_subject:-$session}" >> "$3"
-        return 1
+        l1_infra_fail "$@"; return 1
       fi
       l1ans="$l1stage/$l1ans_name"
       rm -f "$l1ans" "$2"
       l1pre=()
+      l1senv=()
+      case " ${L1_SETUP_SKIPPED:-} " in
+        *" $engine "*)
+          printf "the %s engine was not prepared at setup (it had no work then) and is not run unconfined now\n" "$engine" >> "$3"
+          l1_infra_fail "$@"; return 1 ;;
+      esac
       case " ${L1_CONFINED_ENGINES:-} " in
         *" $engine "*)
-          l1wpaths=()
-          while IFS= read -r l1wl; do [ -n "$l1wl" ] && l1wpaths+=("$l1wl"); done < <("$ADAPTERS_DIR/$engine/adapter.sh" l1-writes 2>/dev/null)
-          while IFS= read -r -d "" l1wa; do l1pre+=("$l1wa"); done < <(bash "$L1_CONFINER" prefix "$l1stage" ${l1wpaths[@]+"${l1wpaths[@]}"} 2>>"$3")
+          # An engine that keeps state it must write (omp) gets a throwaway one inside the stage: the
+          # adapter seeds it and names the environment that points the engine there. Exit 2 is no such
+          # verb (claude); any other failure is an attempt that cannot start safely.
+          # Its stderr goes to a file in the staging root, beside the stages and not in one: this runs
+          # outside the sandbox, and a worker that left a symlink at a path inside its own stage on an
+          # earlier attempt would have this redirection truncate whatever the link points at.
+          l1serr=$(mktemp "$L1_STAGE_ROOT/senv.XXXXXX") || { printf "could not make a temp file for the state setup of %s\n" "${l1_subject:-$session}" >> "$3"; l1_infra_fail "$@"; return 1; }
+          l1sout=$("$ADAPTERS_DIR/$engine/adapter.sh" l1-stage-env "$l1stage" 2>"$l1serr"); l1src=$?
+          if [ "$l1src" -ne 0 ] && [ "$l1src" -ne 2 ]; then
+            printf "the state directory for %s could not be prepared in the stage: %s\n" "${l1_subject:-$session}" "$(head -c 200 "$l1serr" | tr "\n" " ")" >> "$3"
+            rm -f "$l1serr"
+            l1_infra_fail "$@"; return 1
+          fi
+          rm -f "$l1serr"
+          if [ "$l1src" -eq 0 ]; then
+            while IFS= read -r l1e; do [ -n "$l1e" ] && l1senv+=("$l1e"); done <<< "$l1sout"
+          fi
+          while IFS= read -r -d "" l1wa; do l1pre+=("$l1wa"); done < <(bash "$L1_CONFINER" engine-prefix "$ADAPTERS_DIR/$engine/adapter.sh" "$l1stage" 2>>"$3")
           if [ "${#l1pre[@]}" -eq 0 ]; then
             printf "the sandbox for %s could not be built, and a confined run does not fall back to an unconfined worker\n" "${l1_subject:-$session}" >> "$3"
-            return 1
+            l1_infra_fail "$@"; return 1
           fi
           ;;
       esac
@@ -3455,16 +3788,22 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
           cat "$FINDINGS_DIR/$hash.stats.json"
           printf "\n\`\`\`\n"
         fi
-      } | ${l1wrap[@]+"${l1wrap[@]}"} ${l1pre[@]+"${l1pre[@]}"} env ${envs[@]+"${envs[@]}"} "TMPDIR=$l1stage/tmp" "${argv[@]}" > "$4" 2> "$3"
+      } | ${l1wrap[@]+"${l1wrap[@]}"} ${l1pre[@]+"${l1pre[@]}"} env ${envs[@]+"${envs[@]}"} "TMPDIR=$l1stage/tmp" ${l1senv[@]+"${l1senv[@]}"} "${argv[@]}" > "$4" 2> "$3"
       # Index 1 is the engine side of the pipe; index 0 is the brace group.
       l1rc="${PIPESTATUS[1]}"
       l1elapsed=$(($(date +%s) - l1start))
       # The engine has exited, so the runner is the only writer here. Only a regular file is taken: a
       # symlink left at the answer path would have the runner read whatever it points at.
-      if [ -f "$l1ans" ] && [ ! -L "$l1ans" ] && [ -s "$l1ans" ]; then
-        cp "$l1ans" "$2.stage" 2>/dev/null && mv -f "$2.stage" "$2" || rm -f "$2.stage" "$2"
-      elif [ -L "$l1ans" ]; then
-        printf "the answer path was a symlink; it was not read\n" >> "$3"
+      # The answer is renamed to the findings side first, and only then tested: a rename does not follow
+      # a symlink, so what is tested is the thing that was moved and nothing can be swapped in between.
+      rm -rf "$2.stage"
+      if mv -f "$l1ans" "$2.stage" 2>/dev/null; then
+        if [ -f "$2.stage" ] && [ ! -L "$2.stage" ] && [ -s "$2.stage" ]; then
+          mv -f "$2.stage" "$2" || rm -rf "$2.stage" "$2"
+        else
+          [ ! -L "$2.stage" ] || printf "the answer path was a symlink; it was not read\n" >> "$3"
+          rm -rf "$2.stage"
+        fi
       fi
       # 124 is timeout reporting that it fired; 137 is 128+SIGKILL, which is what the -k grace
       # period escalates to. Elapsed is the positive evidence that the deadline actually fired: GNU
@@ -3648,7 +3987,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
           else
             cfail=1
             [ -n "$cfirst" ] || cfirst="$cerr"
-            if [ "$netdown" = "true" ] || [ "$netdown" = "provider" ]; then break; fi
+            if [ "$netdown" = "true" ] || [ "$netdown" = "provider" ] || [ "$netdown" = "staging" ]; then break; fi
           fi
           l1_subject=""
         fi
@@ -3719,8 +4058,11 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       # next run skips the session because its slot is filled. Leaving the slot empty is what
       # makes the retry work; the run defers instead, so the silent-failure concern is
       # answered by the deferral, not the stub.
-      if [ "$netdown" = "true" ] || [ "$netdown" = "provider" ]; then
-        echo "FAIL ($([ "$netdown" = "true" ] && echo "network down" || echo "provider refusal"); no stub, left for a later run): $session ($hash) [$(($(date +%s) - t0))s] — see $errlog" >&2
+      if [ "$netdown" = "true" ] || [ "$netdown" = "provider" ] || [ "$netdown" = "staging" ]; then
+        failwhy="provider refusal"
+        [ "$netdown" != "true" ] || failwhy="network down"
+        [ "$netdown" != "staging" ] || failwhy="runner setup failed"
+        echo "FAIL ($failwhy; no stub, left for a later run): $session ($hash) [$(($(date +%s) - t0))s] — see $errlog" >&2
       elif [ "${AUTODREAM_CURRENT_ROUND:-1}" -ge "${AUTODREAM_L1_ROUNDS:-5}" ]; then
         sz=$(wc -c < "$session" 2>/dev/null | tr -d " ")
         lines=$(wc -l < "$session" 2>/dev/null | tr -d " ")
@@ -4127,6 +4469,8 @@ run() {
   fi
   log "found $RAW session files; excluded $EXCLUDED autodream-own, skipped $SKIPPED_EMPTY empty; $COUNT to triage; $OUT_OF_WINDOW out of window (modified since the day began, nothing inside it)"
 
+  # Before the nothing-to-triage exit: a night with no sessions still owes the cleanup.
+  sweep_killed_leftovers
   if [ "$COUNT" -eq 0 ]; then
     # No L2 runs on this path, so no model reads a report file tonight: report scripts are not
     # collected here, as operator notes and bookmarks are not.
@@ -4241,7 +4585,7 @@ run() {
       printf 'unassembled_dates: %s\n' "${UNASSEMBLED:-}"
     } > "$FINDINGS_DIR/run-stats.txt" 2>/dev/null || true
     printf '%s\n' "$THREADS_SUMMARY" >> "$FINDINGS_DIR/run-stats.txt" 2>/dev/null || true
-    cat > "$REPORT_PATH" <<EOF
+    cat > "$REPORT_PATH.tmp" <<EOF
 # Autodream — $TARGET_DATE
 
 No sessions were triaged on this date.
@@ -4281,20 +4625,36 @@ $( if [ "${ROOTS_FAILED:-0}" -gt 0 ] || [ "${ROOTS_UNAVAILABLE:-0}" -gt 0 ]; the
        "$RAW" "$EXCLUDED" "$SKIPPED_EMPTY" "$REJECTED_PATHS" "$HASH_COLLISIONS"
    fi )
 
+$( if [ "$REMOTE_SHORT_UNREADABLE" -gt 0 ]; then
+     # A night with nothing to triage skips L2, so this stub is the only place a failure of the
+     # historical scan itself (#230) can be said.
+     printf '%s earlier night(s) had no readable report, so whether a remote host missed them could not be checked. See remote_short_scan_unreadable in run-stats.txt.\n\n' "$REMOTE_SHORT_UNREADABLE"
+   fi
+   if [ "$REMOTE_MIRROR_UNKNOWN" -gt 0 ]; then
+     printf '%s remote mirror(s) could not be measured tonight (unknown in remote_mirror_files_* and remote_mirror_bytes_*), so the walk of them may have been incomplete.' "$REMOTE_MIRROR_UNKNOWN"
+   fi )
+
 (Generated $(date -u +%Y-%m-%dT%H:%M:%SZ))
 
 AUTODREAM_QUESTIONS_BEGIN
 ## Open questions for the user
 
-None; no sessions were triaged on this date.
+$( if [ "$REMOTE_SHORT_QCOUNT" -gt 0 ]; then
+     # The dates a remote host missed (#230) are a question here too, inside the block and counted,
+     # so the streak store sees it and escalates it instead of reading the night as question-free.
+     printf '%s' "$REMOTE_SHORT_QUESTIONS"
+   else
+     printf 'None; no sessions were triaged on this date.\n'
+   fi )
 
-<!-- autodream:open-questions=0 -->
+<!-- autodream:open-questions=$REMOTE_SHORT_QCOUNT -->
 AUTODREAM_QUESTIONS_END
+$(remote_short_line)
 EOF
-    # The status of the write above, kept for the outcome below: a stub that could not be opened for
-    # writing leaves the previous report in place, and that old file is complete, so report_complete
-    # alone would call it this run's delivery.
-    STUB_RC=$?
+    # The status of the write above, kept for the publish step and the outcome below: a stub that
+    # could not be opened for writing leaves the previous report in place, and that old file is
+    # complete, so report_complete alone would call it this run's delivery.
+    STUB_WRITTEN=$?
     if [ -s "$FINDINGS_DIR/dropped-threads.md" ]; then
       awk -v section="$FINDINGS_DIR/dropped-threads.md" '
         $0 == "AUTODREAM_QUESTIONS_BEGIN" {
@@ -4303,7 +4663,21 @@ EOF
           print ""
         }
         { print }
-      ' "$REPORT_PATH" > "$REPORT_PATH.threads" && mv "$REPORT_PATH.threads" "$REPORT_PATH"
+      ' "$REPORT_PATH.tmp" > "$REPORT_PATH.threads" && mv "$REPORT_PATH.threads" "$REPORT_PATH.tmp"
+    fi
+    # Published in one rename, like the L2 report: a write stopped after the questions block but
+    # before the record line (or anywhere else) leaves the old report, never a half stub that
+    # report_complete would accept without its record.
+    if [ "$STUB_WRITTEN" = 0 ] && mv -f "$REPORT_PATH.tmp" "$REPORT_PATH"; then
+      drop_stale_report_copies
+    else
+      rm -f "$REPORT_PATH.tmp" "$REPORT_PATH.threads"
+      # A run that could not publish its report has not done what it was asked, so it fails: the
+      # exit code is what the launchd job and a forced rebuild's caller see, and a report that was
+      # already at the path stays the old one.
+      log_fatal "could not publish the report for $TARGET_DATE (no sessions were triaged, and the stub could not be staged or renamed into place)"
+      fatal_exit
+      return 1
     fi
     # A question-free report still counts as a report. Without this the streak
     # store would keep yesterday's questions alive across an empty night, and a
@@ -4314,10 +4688,10 @@ EOF
       env AUTODREAM_DIR="$AUTODREAM_DIR" "$AUTODREAM_DIR/question-streaks.sh" update "$REPORT_PATH" "$FINDINGS_DIR" \
         || log "question-streaks returned non-zero (continuing)"
     fi
-    if [ "$STUB_RC" -eq 0 ] && report_complete; then
+    if [ "$STUB_WRITTEN" -eq 0 ] && report_complete; then
       write_run_outcome delivered
     else
-      log "WARNING: the stub report for $TARGET_DATE could not be written (exit $STUB_RC); not reporting it as delivered"
+      log "WARNING: the stub report for $TARGET_DATE could not be written (exit $STUB_WRITTEN); not reporting it as delivered"
     fi
     return 0
   fi
@@ -4503,14 +4877,17 @@ EOF
     : > "$FINDINGS_DIR/l1-chunk-calls.txt"
   fi
 
-  sweep_killed_leftovers
   reconcile_findings_with_worklist
   drop_unacceptable_l1_cache
 
   clean_work_bucket  # start clean: drop any stub left by a prior run's workers
   l1_confine_setup
-  # Under bwrap only a path that exists can be bound writable, and the bucket was just wiped.
-  mkdir -p "$WORK_BUCKET" 2>/dev/null
+  if [ -n "$L1_CONFINE_FATAL" ]; then
+    rm -rf "$L1_STAGE_ROOT" 2>/dev/null
+    log_fatal "L1 confinement cannot be set up, so no worker was started: $L1_CONFINE_FATAL"
+    fatal_exit
+    return 1
+  fi
 
   # Pre-L1 cache snapshot: how many sessions in the worklist already have a valid
   # findings JSON before any worker runs. Without this, a re-run after a partial
@@ -4582,6 +4959,7 @@ EOF
   # it. A report written from a dead-network or no-balance run looks complete, ships open
   # questions, and its own self-audit cannot tell the corpus is missing.
   NET_DEFERRED=no
+  NET_DEFERRED_CAUSE=none
   # Consecutive rounds that recovered nothing. A streak, not a comparison against the last
   # round's ending count: comparing end-to-end counts calls two rounds barren whenever the SECOND
   # one is, because round 1 having recovered sessions is invisible in its own ending number.
@@ -4595,6 +4973,7 @@ EOF
     # through its trigger, so round 1 is the round most likely to run at a host with no route.
     if ! wait_for_network "$(l1_probe_urls)"; then
       NET_DEFERRED=yes
+      NET_DEFERRED_CAUSE=network
       log "L1 round $round not dispatched: no route to the API. Deferring $TARGET_DATE for a later run."
       break
     fi
@@ -4651,12 +5030,26 @@ EOF
   # conditions are required: sessions are still missing, AND the last round that dispatched
   # saw a no-route failure or a permanent provider refusal. A run that recovered is never
   # deferred, however bad round 1 was.
+  # A runner that cannot set its own workers up is not an outage: it heals nothing by waiting, and a
+  # deferral would leave no report, no banner and (with no findings JSON) no unassembled_dates entry,
+  # every night. It is a fatal, which posts the banner and leaves the marker the next run reads.
+  if [ "$MISSING" -gt 0 ] && [ "$LAST_ROUND_RUN" -gt 0 ] \
+     && [ -s "$FINDINGS_DIR/l1-netdown.txt" ] \
+     && awk -v r="$LAST_ROUND_RUN" '$2 == r && $3 == "staging" { found = 1 } END { exit !found }' "$FINDINGS_DIR/l1-netdown.txt"; then
+    rm -rf "$L1_STAGE_ROOT" 2>/dev/null
+    clean_work_bucket
+    log_fatal "the runner could not set up L1 workers for $MISSING session(s) in round $LAST_ROUND_RUN (stage directory, engine state or sandbox; the .err files in $FINDINGS_DIR name the cause); no stub was written, so $TARGET_DATE has no report and a later run retries it"
+    fatal_exit
+    return 1
+  fi
   if [ "$MISSING" -gt 0 ] && [ "$LAST_ROUND_RUN" -gt 0 ] \
      && [ -s "$FINDINGS_DIR/l1-netdown.txt" ] \
      && awk -v r="$LAST_ROUND_RUN" '$2 == r && ($3 == "true" || $3 == "provider") { found = 1 } END { exit !found }' \
           "$FINDINGS_DIR/l1-netdown.txt"; then
     NET_DEFERRED=yes
-    log "L1 finished with $MISSING session(s) missing and round $LAST_ROUND_RUN failing with no route or a provider refusal — deferring $TARGET_DATE for a later run"
+    NET_DEFERRED_CAUSE=network
+    awk -v r="$LAST_ROUND_RUN" '$2 == r && $3 == "provider" { found = 1 } END { exit !found }' "$FINDINGS_DIR/l1-netdown.txt" && NET_DEFERRED_CAUSE=provider
+    log "L1 finished with $MISSING session(s) missing and round $LAST_ROUND_RUN failing with no route or a provider refusal — deferring $TARGET_DATE for a later run ($NET_DEFERRED_CAUSE)"
   fi
   L1_ELAPSED=$(( $(date +%s) - L1_START ))
   # Whatever a failed worker left in staging was kept for the retries, and the rounds are over.
@@ -5109,6 +5502,7 @@ PY
     # appended after the aggregator loop as network_down_seconds_l2 / network_deferred_l2.
     printf 'network_down_seconds: %s\n' "$NET_DOWN_SECONDS"
     printf 'network_deferred: %s\n' "$NET_DEFERRED"
+    printf 'l1_deferred_cause: %s\n' "$NET_DEFERRED_CAUSE"
     # network_down_seconds is time the runner spent blocked BETWEEN rounds; the per-worker
     # ledger is one curl at the instant a worker failed. A flapping network makes the first
     # large and the second false for every worker, which is not a contradiction.
@@ -5461,11 +5855,17 @@ PY
     L2_COMPLETE=0
     if report_has_sentinel "$L2_STDOUT"; then
       write_session_cwds "$FINDINGS_DIR" || log "WARNING: could not write session-cwds.tsv; Lately will fall back to project buckets"
-      if report_body "$L2_STDOUT" > "$REPORT_PATH.tmp" && mv "$REPORT_PATH.tmp" "$REPORT_PATH"; then
+      # A record line the model wrote into its own body is dropped: only the runner states which
+      # hosts a report did not read, and the scan takes the last record line it finds, so one in
+      # the body could become a date's record when remote sync was off and the runner wrote none.
+      if report_body "$L2_STDOUT" > "$REPORT_PATH.body" \
+         && { awk '!/^<!-- autodream:remote-short=.* -->$/' "$REPORT_PATH.body" && remote_short_line; } > "$REPORT_PATH.tmp" \
+         && mv "$REPORT_PATH.tmp" "$REPORT_PATH"; then
         L2_COMPLETE=1
       else
         log "WARNING: could not stage the sentinel-stripped report at $REPORT_PATH"
       fi
+      rm -f "$REPORT_PATH.body"
     elif [ -s "$L2_STDOUT" ]; then
       log "WARNING: L2 stdout carried no AUTODREAM_REPORT_END sentinel; keeping the whole capture as a degraded report (incomplete, will retry)"
       cat "$L2_STDOUT" > "$REPORT_PATH.tmp" && mv "$REPORT_PATH.tmp" "$REPORT_PATH" 2>/dev/null || true
@@ -5550,6 +5950,11 @@ PY
       log "this run produced no complete report; the previous one for $TARGET_DATE is still at $STALE_REPORT"
     fi
   fi
+  # A delivered report also supersedes the moved-aside copies of earlier failed rebuilds, which the
+  # block above never reaches (it only knows the copy this run made). The remote-short record is
+  # read from a copy only while no report has been delivered since, so leaving them would let a
+  # label a later retry read come back.
+  if [ "${L2_DELIVERED:-0}" = 1 ] && report_complete; then drop_stale_report_copies; fi
 
   # Partials are prefixes of a report that now exists in full, so a complete report
   # supersedes every one of them for this date — including partials from earlier nights,

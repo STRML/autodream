@@ -67,8 +67,13 @@ A pull is read-only on the remote and needs only sshd there.
 - **Exit 23 is split.** rsync 24 (a file vanished) is partial. 23 is partial too, except that both
   GNU rsync (`change_dir "…" failed`) and openrsync (`(l)stat: No such file`) also return 23 when
   the remote root does not exist, and that is a host with nothing to read, so it is `failed`.
-- **Validation before ssh.** run.sh refuses a label outside `[A-Za-z0-9._-]+`, `.`, `..` and a
-  repeated label. The helper refuses a host or path that starts with `-` (ssh would read it as an
+- **Validation before ssh.** run.sh refuses a label outside `[A-Za-z0-9._-]+`, `.`, `..`, a
+  repeated label, and a reserved one: `invalid`, or any name ending in `_cause` or `_last_ok`.
+  Run-stats builds `remote_sync_<label>`, `remote_sync_<label>_cause`, `remote_sync_<label>_last_ok`
+  and the refusal key `remote_sync_invalid` by concatenation, so without that rule a host called
+  `studio_cause` prints like `studio`'s cause line and no reader can tell them apart (four review
+  rounds on the short-dates scan, 2026-11-21). A refused entry takes the key `invalid`, with the
+  label in its cause. The helper refuses a host or path that starts with `-` (ssh would read it as an
   option) or holds a character outside the set a projects path needs, because openrsync does not
   quote the path for the remote shell. The mirrors are claude roots, so with the claude adapter not
   enabled every entry is refused as `invalid` (and the all-failed banner fires) rather than synced
@@ -97,11 +102,84 @@ A pull is read-only on the remote and needs only sshd there.
   (a down Studio is not a down model provider) and never aborts the run. On a night with no
   sessions, any host that is not `ok` (failed, invalid, partial or skipped_locked) makes the stub
   report say the host was not fully synced instead of calling the night empty.
-- **What a failed host loses.** A finished report stops every later trigger at the guard, so
-  nothing syncs that date again, and the next night's mtime lower bound skips a transcript last
-  written on the failed day. Those sessions reach no report unless the date is rebuilt
-  (`autodream-now.sh <date> --force`), which the self-audit line tells the reader to do. Automatic
-  retry would need a sync above the guard, which the design rules out (#230).
+- **What a failed host loses, and how it is named later (#230).** A finished report stops every
+  later trigger at the guard, so nothing syncs that date again, and the next night's mtime lower
+  bound skips a transcript last written on the failed day. Those sessions reach no report unless the
+  date is rebuilt (`autodream-now.sh <date> --force`). Nothing rebuilds on its own: a rebuild
+  replaces the report, including any `## Triage decisions` the user wrote into it, and a sync above
+  the guard would rerun L2 on every trigger while a host stays down. What happens instead is
+  `remote_short_scan`, run at the end of `sync_remote_roots`. For each label whose sync was `ok` or
+  `partial` tonight it reads the seven days before the target date and writes
+  `remote_short_dates_<label>: <dates>` (oldest first, `none` when empty). PROMPT.md turns each into
+  a self-audit line and one open question titled `Rebuild the report dates missing <label>
+  sessions?` (a stable title per label, so the streak escalation applies). A night with nothing to
+  triage skips L2, so the stub report carries the same question inside its sentinels with the marker
+  counting it (a "None" and a zero would read to `question-streaks.sh` as the question resolved),
+  plus a line when the scan itself could not read a night, or a mirror could not be measured.
+  - **The record is a line inside the report**, `<!-- autodream:remote-short=a,b -->` (the labels the
+    report did not fully read, empty when none), written by `remote_short_line` inside the same
+    atomic write as the report body (the L2 writer's `tmp` plus `mv`, and the stub, which is written
+    to `<report>.tmp` and published with one `mv` after its status is checked). One
+    file, so the record and the report cannot disagree: a run killed before it publishes, a rebuild
+    that defers and a write that fails all leave the old report with its old record. This replaced a
+    `remote-short.txt` beside the report, which took four review rounds because two files have an
+    order of writes to get wrong (the same lesson as `question-streaks.sh`); the scan reads
+    `$DREAMS_DIR/<date>.md` and nothing under `findings/`.
+  - **What a report did not fully read** (`remote_short_labels`): every configured label whose sync
+    was not `ok` (`partial` included: rsync 23 can leave a file uncopied, and the next sync copies it
+    with an old mtime that the next day's lower bound skips); every configured label when the
+    enumeration was incomplete (`ROOTS_FAILED`, `ROOTS_UNAVAILABLE` or `PARTIAL_ROOTS` above zero),
+    because a failed root cannot be told apart from a mirror; and every label in the record of the
+    report this run replaces that this run does not configure (`REMOTE_PREV_SHORT`, read before
+    anything moves the old report: the report at the path if it carries a record, else the newest
+    moved-aside `.stale-<epoch>` copy that does, because a rebuild killed mid-L2 can leave a
+    record-less capture at the path. A copy cannot resurface an old label: a delivered report, L2 or
+    stub, takes every copy it supersedes out of the `.stale-*` glob (`drop_stale_report_copies`: a
+    copy holding a `## Triage decisions` heading is renamed to `<report>.triaged-<epoch>`, because it
+    holds the user's own writing, and every other copy is deleted), so a copy still in the glob
+    means nothing has been delivered since and a `.triaged-*` copy is never read by the lookup), so a rebuild with fewer
+    hosts cannot erase it, including across the retry of a failed rebuild. With remote sync
+    off the line is still written when the replaced report had one to keep.
+  - **No migration.** A report with no record line was written with remote sync off or before the
+    record existed, and the scan skips it. Nights since #227 shipped were already named by that
+    night's own self-audit line, so detection for them was not worth a fallback to run-stats, which
+    a rebuild rewrites before L2 runs.
+  - **Refusals and reserved labels**: a malformed, repeated or reserved entry has no label of its
+    own and takes the run-stats key `invalid`, so only real labels join the record (an entry refused
+    because the claude adapter is off does, under its own label).
+  - A label still failing tonight lists nothing (the host is down, and the banner covers it); only
+    labels configured tonight are listed, so a renamed or removed host lists nothing; a night with a
+    findings dir and no report (a rebuild that died in L2 moved the old report aside, and the next
+    trigger rebuilds it), a report that will not read, or a date that will not compute is counted in
+    `remote_short_scan_unreadable` (a night with no findings dir and no report did not run, and is
+    not counted). Each report is read once into memory, so a read error is counted and never reads as
+    "no match".
+- **Hosts sync in parallel (#229).** `sync_remote_roots` validates every entry first, starts one
+  `remote_sync_job` per valid label in the background, then reads the results in config order. Each
+  label has its own lock and mirror, so the jobs share nothing, and with several hosts down the
+  `ConnectTimeout` and `--timeout` waits overlap instead of adding up. A job cannot set the parent's
+  variables, so it leaves `<label>.status`, `.secs` and `.mirror` in a per-run job dir,
+  `$AUTODREAM_DIR/remote-jobs/<run pid>`, removed with `rm -rf` after the results are read. It is
+  under the install and not in `$TMPDIR` because a run killed while it waits skips every cleanup:
+  the next run removes the dirs of dead pids there and never a live one's. A job that dies before
+  writing reads `failed (remote-sync.sh printed nothing)`; if the job dir cannot be made, no job
+  starts and every valid entry reads `failed (cannot make a job dir for the sync jobs)`, and an
+  empty job-dir path is never joined to a result name, so nothing at `/0.status` can be read as a
+  result. Run-stats lines, `SESSION_ROOTS` and the refusal warnings are
+  written in the second pass, in the order of `AUTODREAM_REMOTE_ROOTS`, so a refused entry keeps its
+  place and the artifact does not depend on which host answered first. `bin/remote-sync.sh` is
+  unchanged.
+- **The mirror is an archive, and its size is measured (#228).** Nothing prunes a mirror.
+  `remote-sync.sh` never passes `--delete`, so a file pruned out of the mirror and still on the host
+  would be copied back the next night, and the mirror keeps transcripts the remote deleted on purpose.
+  Disk is the only cost: the nightly `find` drops old files by the mtime bound cheaply. Every run
+  writes `remote_mirror_files_<label>` and `remote_mirror_bytes_<label>` (the `*.jsonl` count and
+  byte sum, `0` and `0` before a first good sync, `unknown` and `unknown` when the walk or the count
+  failed (an unreadable subdirectory, a file gone mid-count, a newline in a path), so a partial total never reads as a
+  measured size, nothing for a refused entry), measured in the
+  background job, so the month of growth the retention question wanted accrues in the run-stats
+  files without anyone remembering to look. Revisit pruning only when those numbers say the disk
+  matters, and then a prune needs an rsync exclude for what it removed, not just a delete.
 - **A killed copy.** rsync writes each file to a dot-named temp (`.name.jsonl.XXXXXX`) and renames
   it, so a file is old or new, never torn by rsync, and a stranded temp is not `*.jsonl`. A file
   copied while the remote session was appending can end in a torn line; session-window and the
@@ -111,7 +189,9 @@ A pull is read-only on the remote and needs only sshd there.
   The day cut keeps only each copy's records inside the day, so on the day the session moved, the
   part written before the move is triaged twice. Deduping across trees is out of scope (#226).
 - **Tests.** The `test_remote_sync_*` cases in `tests/run-all.sh` put a fake `rsync` (logs argv,
-  copies `*.jsonl` with `cp -p`, exits with a per-host code and stderr) and a logging `ssh` that
+  copies `*.jsonl` with `cp -p`, exits with a per-host code and stderr, logs start and end epochs to
+  `rsync.times`, and sleeps (`rsync.<host>.delay`) or SIGKILLs its helper (`rsync.<host>.kill`) on request;
+  the parallel test asserts the two hosts' intervals overlap rather than timing the run) and a logging `ssh` that
   always fails first on PATH, and every target is a `*.invalid` host. The missing-tool case runs
   the helper with a PATH that holds no rsync, because run.sh appends `/usr/bin` to PATH.
   `install.sh` resolves `rsync` into the plist PATH beside claude, git and bash.
@@ -191,10 +271,10 @@ plus env `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REP
 - **The engine, then the model.** A source's L1 engine is `AUTODREAM_L1_ENGINE_<SOURCE>`, then `AUTODREAM_L1_ENGINE`, then the run's reviewer (the L2 engine) (`adapter_l1_engine`). The model is keyed by that engine, not by the source: `AUTODREAM_L1_MODEL_<ENGINE>`, then `AUTODREAM_L1_MODEL`, then the engine's manifest `l1_model` (`adapter_l1_model`). A model id belongs to one engine, so a source-keyed pin sent omp sessions to the claude CLI with `--model deepseek/...` once a claude reviewer read them (PR #165 review). The engine choice is per source and the model pin per engine, the same as `AUTODREAM_L2_MODEL_<NAME>`.
 - **What answered, and whether it counts.** Every L1 call's stdout goes through the engine adapter's `served` verb with the requested model: it returns the models that answered, the cost estimate and a verdict, `match` or `mismatch`, judged by the adapter because only it knows its CLI's naming (claude: `haiku` answers as `claude-haiku-5-5`). An engine with no `served` verb (omp) is `unmeasured`. The verdict is the sixth column of `l1-served.tsv` (run-stats `l1_served_mismatch`, `l1_served_unmeasured`) and is stored beside every accepted answer, findings JSON or chunk answer, as `<answer>.served`. With `AUTODREAM_L1_REQUIRE_SERVED=1` a call whose verdict is not `match` loses its answer, and before L1 `drop_unacceptable_l1_cache` holds the cache to the same rule: a findings JSON or chunk answer from an earlier run with no verdict or a non-`match` one is dropped and triaged again (`l1_cache_dropped`). A record the runner wrote with no model behind it (noise-gate skip, unreadable session, normalize failure, no-engine record, final-round stub) is kept, and the only thing that says so is its `.served` reading `runner`, which the dispatcher writes beside each one. Keys and shape prove nothing: a worker can write `error`, `skipped` or `no_engine` with `findings: []` as easily as the runner can, and that record would have skipped the verdict and left the session untriaged (#167). The empty findings array is kept as a second guard. A runner record from before the marker is triaged once more and comes back marked.
 - **No engine is an error for this run's config, not forever.** A session whose engine is not executable, resolves no model, names no accepted adapter or fails `AUTODREAM_REQUIRE_LOGIN` gets a findings record with `no_engine: true` and `error: no L1 engine for this session`, counted by `l1_findings_with_error` and skipped by the retry rounds, since retrying in the same run cannot change the answer, and the run still reports. Every one of those causes is config, which can change between runs, so `drop_unacceptable_l1_cache` drops the record in a later run (a catch-up or `AUTODREAM_FORCE=1`) once that run resolves an engine and a model for the session's source, read from `AUTODREAM_SOURCE_MAP` and never from the record. Records written before the marker are recognised by their error text. Either way the record must have `findings: []`. Its shape is enough to drop it, since a forged one only buys a retriage; keeping it under `AUTODREAM_L1_REQUIRE_SERVED=1` takes the runner marker above.
-- **A worker writes only its staging directory (#169).** An L1 engine holds the Write tool, so it used to be able to write any path the user can: another session's `<hash>.json` and `.served`, a chunk answer between the merge and the check, a new `*.json` L2 would read, `$AUTODREAM_DIR/config`. No marker in the findings dir can tell the runner's writes from a worker's, so the access changed instead. `l1_attempt` makes `$AUTODREAM_DIR/staging/run-<pid>/<hash>.<answer name>/` (0700, with a private `tmp/` that becomes the engine's `TMPDIR`), tells the worker to write its answer there, runs the engine under `bin/l1-confine.sh prefix` (a `sandbox-exec` profile on macOS, `bwrap` on Linux) and copies the answer to the findings path after the engine has exited, only if it is a regular file (a symlink is refused and named in the `.err`). Everything after that, the `served` verdict, the validity check, the `.served` marker, runs on the runner's copy as before. The stage is reused by the retries of one run (the mock's per-answer state files live in it) and removed on success; the staging root goes when the rounds end, and a root whose run is dead is swept at the next start.
-- **What the sandbox allows.** Writes are denied everywhere except the stage, the adapter's `l1-writes` list, and a few `/dev` nodes. The claude list is default deny: the isolated work bucket (wiped after L1 and again after L2, since L2 launches from it) and the CLI's own cache (`claude-cli-nodejs`), plus whatever the operator names in `AUTODREAM_L1_WRITES_EXTRA`. Not on it, each a way for an injected worker to run code as the user later: `~/.claude.json` and its backups (MCP servers, allowed tools), `session-env` (hook env files a live session sources), settings, hooks, skills, plugins and the CLI install. `$AUTODREAM_DIR`, the findings dir and the dreams dir are denied after the state paths (a default install keeps `$AUTODREAM_DIR` under `~/.claude`) and the stage allow comes last. Reads, the network and exec are unchanged. `docs/plans/2026-11-21-l1-confine-write-list.md` has the table, the measurement and what to do when a confined call fails without something.
-- **A host with no working sandbox says so.** `l1_confine_setup` runs `l1-confine.sh probe` once per run: it starts a confined shell, writes inside a stage and beside it, and trusts neither the tool's exit code nor its acceptance of the profile. `l1_confined: yes|no`, `l1_confine_tool` and `l1_confine_reason` go in run-stats, `l1_confined_<engine>` per engine, and a WARNING in the log when the answer is no without `AUTODREAM_L1_CONFINE=0`. A run whose probe said yes but whose per-call prefix cannot be built (a path the profile cannot hold) fails that attempt, never runs it unconfined. An engine whose adapter has no `l1-writes` verb (omp today: its state paths are not profiled) runs unconfined and reports `l1_confined_omp: no`. The suite exports `AUTODREAM_L1_CONFINE=0` because the mock engines write capture files anywhere; the confinement tests turn it on and skip where `sandbox-exec` cannot start (it cannot inside another sandbox).
-- **Not verified in CI:** the real `claude` call under the profile. `tests/l1-confine-real.sh` is the manual check (one real call, outside any other sandbox); `--measure` lists what an unconfined call writes under the claude-owned paths in `$HOME`, which is what `l1-writes` has to cover. Whether the default-deny list passes a real call is still to be run.
+- **A worker writes only its staging directory (#169).** An L1 engine holds the Write tool, so it used to be able to write any path the user can: another session's `<hash>.json` and `.served`, a chunk answer between the merge and the check, a new `*.json` L2 would read, `$AUTODREAM_DIR/config`. No marker in the findings dir can tell the runner's writes from a worker's, so the access changed instead. `l1_attempt` makes `$AUTODREAM_DIR/staging/run-<pid>/<hash>.<answer name>/` (0700, with a private `tmp/` that becomes the engine's `TMPDIR`), tells the worker to write its answer there, runs the engine under `bin/l1-confine.sh engine-prefix` (a `sandbox-exec` profile on macOS, `bwrap` on Linux) and, after the engine has exited, renames the answer to `<answer>.stage` beside the findings path and tests that file: a rename does not follow a symlink, so the thing tested is the thing moved, and only a regular file is kept (a symlink is refused and named in the `.err`). A `.stage` left by a killed run is swept at the next start, `.chunks/` included. Everything after that, the `served` verdict, the validity check, the `.served` marker, runs on the runner's copy as before. The stage is reused by the retries of one run (the mock's per-answer state files live in it) and removed on success; the staging root goes when the rounds end, and a root whose run is dead is swept at the next start.
+- **What the sandbox allows.** Writes are denied everywhere except the stage, the adapter's `l1-writes` list, and a few `/dev` nodes. The claude list is default deny: the CLI's own cache (`claude-cli-nodejs`) and whatever the operator names in `AUTODREAM_L1_WRITES_EXTRA` (absolute paths; one that is relative, holds a character a profile cannot hold, or is itself a symlink is refused). The isolated work bucket is not on it: it is the one directory every worker, the thread linker and a concurrent date's L2 share, and a confined call exits 0 with its AI-title write refused (`tests/l1-confine-real.sh --no-bucket`, 2026-11-21). `run.sh` still wipes it before L1, after L1 and after L2, because an unconfined engine can write it. Not on it, each a way for an injected worker to run code as the user later: `~/.claude.json` and its backups (MCP servers, allowed tools), `session-env` (hook env files a live session sources), settings, hooks, skills, plugins and the CLI install. `$AUTODREAM_DIR`, the findings dir and the dreams dir are denied after the state paths (a default install keeps `$AUTODREAM_DIR` under `~/.claude`) and the stage allow comes last. Reads, the network and exec are unchanged. `docs/plans/2026-11-21-l1-confine-write-list.md` has the table, the measurement and what to do when a confined call fails without something.
+- **A host with no working sandbox says so.** `l1_confine_setup` runs `l1-confine.sh probe` once per run: it starts a confined shell, writes inside a stage and beside it, and trusts neither the tool's exit code nor its acceptance of the profile. `l1_confined: yes|partial|no`, `l1_confine_tool`, `l1_confine_reason` and `l1_confine_extra` go in run-stats, `l1_confined_<engine>` per engine, and a WARNING in the log when the answer is no without `AUTODREAM_L1_CONFINE=0`. The top-level line is `yes` only when every engine with sessions is confined, `partial` when some are not and `no` when none is, so a night with omp sessions never reads like a fully confined one. The probe builds a prefix with no paths, so setup then builds each engine's real prefix (`l1-confine.sh engine-prefix`, the same call every worker makes) with its own write list, the operator's additions and the protect list; a failure there (or a protected directory holding a colon, or a relative one) is a fatal before any worker starts: no stubs, no report, a banner, and the date is retried. A prefix that cannot be built at call time still fails that attempt and never runs it unconfined. An engine whose adapter has no `l1-writes` verb runs unconfined and reports `l1_confined_<engine>: no`; the claude and omp adapters both have one. omp cannot run on an empty list, so its adapter also has `l1-stage-env`: each confined omp worker gets a `HOME` inside its stage (and `PI_CONFIG_DIR` and `PI_CODING_AGENT_DIR` pinned to it), seeded with the files it only reads and one SQLite backup-API snapshot of each database with the OAuth credential rows left out, so every omp write lands there and no refresh token is rotated in a copy that is thrown away. Setup runs that verb once with the engine's model: an unreadable database is a fatal before L1, and a model whose only credential is OAuth leaves omp unconfined (`l1_confined_omp: no`, with the reason) instead of failing every worker. A setup failure before the engine starts (the state verb, the stage, the sandbox) is ledgered as `staging`, writes no stub, and when it is what the last round left missing it is a fatal (banner, `fatal:` in run-stats, the marker the next run reads), not an outage deferral: it heals nothing by waiting, and with no findings JSON `unassembled_dates` would never name the date. A network or provider deferral carries `l1_deferred_cause` in run-stats. The L1 overlay turns omp's memory backend off (`memory.backend: off`) and `mcp.json` is not seeded, because a worker that retained or consolidated memory would write a store every later session recalls from (`docs/plans/2026-11-21-omp-l1-writes.md`). The suite exports `AUTODREAM_L1_CONFINE=0` because the mock engines write capture files anywhere; the confinement tests turn it on and skip where `sandbox-exec` cannot start (it cannot inside another sandbox).
+- **Verified by hand, not in CI:** the real `claude` call under the profile. `tests/l1-confine-real.sh` is the manual check (one real call, outside any other sandbox); `--measure` lists what an unconfined call writes under the claude-owned paths in `$HOME`, `--no-bucket` drops the work bucket from the list. Measured 2026-11-21 on the default-deny list: ALL PASS, with no `AUTODREAM_L1_WRITES_EXTRA` needed. An unconfined call writes only `~/.claude/plugins/{store,cache,known_marketplaces.json}` beyond that, and the confined call works without them. Unverified: a token refresh inside the sandbox. The serial warmup is unconfined and refreshes an expired token before any confined worker starts, so only a token that expires mid-run would hit it, and a login failure under confinement classifies as `provider` (retried), not as a stub for a size problem.
 
 ## Self-pollution (the eating-its-own-tail bug)
 

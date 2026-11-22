@@ -1,50 +1,53 @@
 #!/bin/bash
-# Dream triage: turn one finished report into a review-ready worklist. Opt-in, one extra model
-# call per night, and none unless AUTODREAM_TRIAGE=1 (run.sh) or this script is run by hand.
-#
-# What it does, in order:
-#   1. dream-grounding.sh runs a FIXED set of read-only checks (is the skill the report names
-#      installed, is the allowlist key it proposes in settings.json, does the commit it cites
-#      resolve) and writes findings/<date>/triage/grounding.json. No model, no shell for a model.
-#   2. The L2 engine (an adapter, the same seam as the report) is given Read and Glob over a
-#      staging directory holding report.md and grounding.json, and prints the worklist on
-#      stdout ending with the AUTODREAM_REPORT_END sentinel.
-#   3. The runner, not the model, writes dreams/<date>.triage.md from the text before the
-#      LAST sentinel. A capture with no sentinel writes nothing.
-#
-# It never creates tickets and never edits anything but its own two outputs. The model holds no
-# Write tool and no shell, so the report text it reads cannot make it do either.
-#
-# Usage:
-#   triage-dream.sh              # the newest dreams/YYYY-MM-DD.md
-#   triage-dream.sh 2026-07-14   # one date
-#
-# Environment (all optional):
-#   AUTODREAM_DIR          scripts, prompts and state          default: $HOME/.claude/autodream
-#   DREAMS_DIR             where reports live                  default: $HOME/.claude/dreams
-#   PROJECTS_DIR           the primary session root            default: $HOME/.claude/projects
-#   AUTODREAM_L2_ENGINE    adapter whose engine runs the pass  default: the first of AUTODREAM_ADAPTERS
-#   AUTODREAM_L2_MODEL / AUTODREAM_L2_MODEL_<NAME>   the model, resolved exactly as for L2
-#   AUTODREAM_TRIAGE_TIMEOUT  seconds before the call is killed   default: 900
-#                          (needs timeout or gtimeout on PATH; without one the pass is skipped, exit 1)
-#   AUTODREAM_FORCE        1 rebuilds an existing triage file   default: 0
-#   plus the dream-grounding.sh knobs (AUTODREAM_SKILL_DIRS, AUTODREAM_SETTINGS_FILES,
-#   AUTODREAM_TRIAGE_REPOS).
-#
-# Exit 0: wrote the file, or one already exists. 1: the pass produced nothing. 2: cannot run.
 
 set -u
 
+usage(){
+  cat <<'EOF'
+Dream triage: turn one finished report into a review-ready worklist. Opt-in, one extra model
+call per night, and none unless AUTODREAM_TRIAGE=1 (run.sh) or this script is run by hand.
+
+What it does, in order:
+  1. dream-grounding.sh runs a FIXED set of read-only checks (is the skill the report names
+     installed, is the allowlist key it proposes in settings.json, does the commit it cites
+     resolve) and writes findings/<date>/triage/grounding.json. No model, no shell for a model.
+  2. The L2 engine (an adapter, the same seam as the report) is given Read and Glob over a
+     staging directory holding report.md and grounding.json, and prints the worklist on
+     stdout ending with the AUTODREAM_REPORT_END sentinel.
+  3. The runner, not the model, writes dreams/<date>.triage.md from the text before the
+     LAST sentinel. A capture with no sentinel writes nothing.
+
+It never creates tickets and never edits anything but its own two outputs. The model holds no
+Write tool and no shell, so the report text it reads cannot make it do either.
+
+Usage:
+  triage-dream.sh              # the newest dreams/YYYY-MM-DD.md
+  triage-dream.sh 2026-07-14   # one date
+
+Environment (all optional):
+  AUTODREAM_DIR          scripts, prompts and state          default: $HOME/.claude/autodream
+  DREAMS_DIR             where reports live                  default: $HOME/.claude/dreams
+  PROJECTS_DIR           the primary session root            default: $HOME/.claude/projects
+  AUTODREAM_L2_ENGINE    adapter whose engine runs the pass  default: the first of AUTODREAM_ADAPTERS
+  AUTODREAM_L2_MODEL / AUTODREAM_L2_MODEL_<NAME>   the model, resolved exactly as for L2
+  AUTODREAM_TRIAGE_TIMEOUT  seconds before the call is killed   default: 900
+                         (needs timeout or gtimeout on PATH; without one the pass is skipped, exit 1)
+  AUTODREAM_FORCE        1 rebuilds an existing triage file   default: 0
+  plus the dream-grounding.sh knobs (AUTODREAM_SKILL_DIRS, AUTODREAM_SETTINGS_FILES,
+  AUTODREAM_TRIAGE_REPOS).
+
+Exit 0: wrote the file, or one already exists. 1: the pass produced nothing. 2: cannot run.
+EOF
+}
+
 log() { echo "[$(date '+%H:%M:%S')] triage: $*"; }
 
-# Where the libraries and the prompt live. The install symlinks each script into
-# $AUTODREAM_DIR, so this script's own directory may not hold them.
 SRC="${BASH_SOURCE[0]}"
 SCRIPT_DIR=$(cd "$(dirname "$SRC")" && pwd)
 REAL_DIR="$SCRIPT_DIR"
 [ -L "$SRC" ] && REAL_DIR=$(cd "$(dirname "$(readlink "$SRC")")" 2>/dev/null && pwd) || true
 AUTODREAM_DIR="${AUTODREAM_DIR:-$HOME/.claude/autodream}"
-find_file() { # $1=basename -> first readable copy
+find_file() {
   local d
   for d in "$SCRIPT_DIR" "$REAL_DIR" "$AUTODREAM_DIR" "$REAL_DIR/../prompts"; do
     [ -r "$d/$1" ] && { printf '%s' "$d/$1"; return 0; }
@@ -55,11 +58,8 @@ _rf=$(find_file report-format.sh) || { log "ERROR: report-format.sh not found be
 # shellcheck source=/dev/null
 . "$_rf"
 
-# The config, with the caller's environment winning over it (run.sh's rule).
 CONFIG_FILE="${AUTODREAM_CONFIG:-$AUTODREAM_DIR/config}"
 if [ -f "$CONFIG_FILE" ]; then
-  # Sourcing a user-edited file under nounset kills the shell with its error hidden, so probe
-  # in a subshell first, as run.sh does, and say what is wrong.
   # shellcheck disable=SC1090
   if _cfg_err=$( (set -a; set -u; . "$CONFIG_FILE") 2>&1 >/dev/null ); then
     _env=$(export -p)
@@ -77,6 +77,8 @@ DREAMS_DIR="${DREAMS_DIR:-$HOME/.claude/dreams}"
 PROJECTS_DIR="${PROJECTS_DIR:-$HOME/.claude/projects}"
 export PATH="$PATH:$HOME/.cargo/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin"
 
+case "${1:-}" in -h|--help) usage; exit 0 ;; esac
+
 if [ -n "${1:-}" ]; then
   TARGET_DATE="$1"
 else
@@ -90,8 +92,8 @@ FINDINGS_DIR="$AUTODREAM_DIR/findings/$TARGET_DATE"
 STAGE="$FINDINGS_DIR/triage"
 
 [ -s "$REPORT_PATH" ] || { log "ERROR: no report at $REPORT_PATH"; exit 2; }
-# Current means newer than the report it was made from: a rebuilt report leaves an older triage stale.
-if [ -s "$TRIAGE_PATH" ] && [ ! "$REPORT_PATH" -nt "$TRIAGE_PATH" ] && [ "${AUTODREAM_FORCE:-0}" != "1" ]; then
+triage_is_current(){ [ -s "$TRIAGE_PATH" ] && [ ! "$REPORT_PATH" -nt "$TRIAGE_PATH" ]; }
+if triage_is_current && [ "${AUTODREAM_FORCE:-0}" != "1" ]; then
   log "triage already exists for $TARGET_DATE; AUTODREAM_FORCE=1 rebuilds it"
   exit 0
 fi
@@ -102,7 +104,6 @@ ADAPTERS_LIB=$(find_file adapters.sh) || { log "ERROR: adapters.sh not found"; e
 # shellcheck source=/dev/null
 . "$ADAPTERS_LIB"
 
-# ---- The engine: an adapter, resolved as run.sh resolves L2's ----
 ACCEPTED=$(adapters_list 2>/dev/null)
 ENABLED=$(printf '%s' "${AUTODREAM_ADAPTERS:-claude}" | tr ',' ' ')
 [ "$ENABLED" = "all" ] && ENABLED=$(printf '%s' "$ACCEPTED" | tr '\n' ' ')
@@ -121,7 +122,6 @@ if [ "${#ARGV[@]}" -eq 0 ]; then
   exit 1
 fi
 
-# ---- Grounding: fixed checks, written as data ----
 mkdir -p "$STAGE" || { log "ERROR: cannot create $STAGE"; exit 2; }
 cp "$REPORT_PATH" "$STAGE/report.md" || { log "ERROR: cannot stage the report"; exit 2; }
 INV="$STAGE/skills-inventory.txt"
@@ -135,8 +135,6 @@ if ! AUTODREAM_SKILL_INVENTORY_FILE="$INV" bash "$GROUNDING" "$STAGE/report.md" 
 fi
 log "date $TARGET_DATE, engine $ENGINE, model ${MODEL:-<engine default>}; grounding: $(jq -r '[.claims[] | .status] | group_by(.) | map("\(.[0]) \(length)") | join(", ")' "$STAGE/grounding.json" 2>/dev/null)"
 
-# ---- The model pass: Read and Glob over the staging directory, output on stdout ----
-# The same isolated cwd as run.sh's workers, so an AI-title stub lands in a bucket we wipe.
 WORK_DIR="$AUTODREAM_DIR/work"
 WORK_BUCKET="$PROJECTS_DIR/$(printf '%s' "$WORK_DIR" | sed 's#[/.]#-#g')"
 mkdir -p "$WORK_DIR" 2>/dev/null
@@ -149,8 +147,6 @@ case "$TIMEOUT" in ''|*[!0-9]*|0) TIMEOUT=900 ;; esac
 for t in timeout gtimeout; do
   command -v "$t" >/dev/null 2>&1 && { TMO=("$t" -k 30 "$TIMEOUT"); break; }
 done
-# Unbounded, a wedged engine would hold the run (and its lock) at the end of the night, so
-# without a timeout binary the pass is skipped, as L1's warmup is.
 if [ "${#TMO[@]}" -eq 0 ]; then
   log "no timeout or gtimeout on PATH; skipping triage rather than run an unbounded model call"
   exit 1
@@ -169,7 +165,6 @@ rm -f "$STDOUT_FILE"
 RC=$?
 clean_work_bucket
 
-# ---- The runner writes the file, from the text before the last sentinel ----
 if ! report_has_sentinel "$STDOUT_FILE"; then
   log "no AUTODREAM_REPORT_END sentinel in the engine's output (exit $RC); wrote nothing"
   exit 1
