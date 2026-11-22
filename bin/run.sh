@@ -2851,6 +2851,22 @@ l1_missing_count() { # count sessions in $SESSIONS_LIST that still have no findi
   printf '%s' "$m"
 }
 
+# Which engines still have a session with no valid findings JSON, one per line. Setup prepares only these:
+# preparing an engine nothing will run fatals a night whose findings are already complete (a retry after L2
+# failed) over a database that no worker needs.
+l1_missing_engines() {
+  local s h src e out=""
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    h=$(session_hash "$s") || continue
+    jq -s -e "$L1_FINDINGS_OK" "$FINDINGS_DIR/$h.json" >/dev/null 2>&1 && continue
+    src=$(printf '%s\n' "$AUTODREAM_SOURCE_MAP" | awk -F'\t' -v h="$h" '$1 == h { print $2; exit }')
+    e=$(printf '%s\n' "$AUTODREAM_L1_ENGINES" | awk -F'\t' -v s="$src" '$1 == s { print $2; exit }')
+    [ -n "$e" ] && out="$out$e"$'\n'
+  done < "$SESSIONS_LIST"
+  printf '%s' "$out" | sort -u
+}
+
 # What chunked triage cost tonight, from the two ledgers: "sessions chunks elided calls". Sessions
 # and chunks count what the chunker planned (the last plan per session, since a retry plans again),
 # elided the chunks it dropped from the middle, calls the engine calls actually made. A night with
@@ -3280,8 +3296,8 @@ L1_CONFINE_PROTECT=""
 L1_CONFINED_STAT=no
 L1_CONFINE_FATAL=""
 l1_confine_setup() {
-  local probe verdict reason eng d p ok_engines="" no_engines="" all_engines err sstage wrc
-  L1_CONFINED=no; L1_CONFINE_USING=none; L1_CONFINED_ENGINES=""; L1_CONFINE_STATS=""; L1_CONFINE_FATAL=""
+  local probe verdict reason eng d p ok_engines="" no_engines="" all_engines err sstage wrc swhy needed
+  L1_CONFINED=no; L1_CONFINE_USING=none; L1_CONFINED_ENGINES=""; L1_CONFINE_STATS=""; L1_CONFINE_FATAL=""; L1_SETUP_SKIPPED=""
   L1_STAGE_ROOT="$AUTODREAM_DIR/staging/run-$$"
   L1_CONFINE_PROTECT="$AUTODREAM_DIR:$FINDINGS_DIR:$DREAMS_DIR"
   # A run killed mid-flight leaves its staging root behind. Only roots whose run is gone are removed:
@@ -3309,7 +3325,15 @@ l1_confine_setup() {
       L1_CONFINE_REASON="ok"
     fi
   fi
-  if [ "$L1_CONFINED" = yes ]; then
+  if [ -z "$(l1_missing_engines)" ] && [ "$L1_CONFINED" = yes ]; then
+    # Every session already has findings, so no worker starts and there is nothing to confine or prepare.
+    L1_CONFINED_STAT="n/a"
+    L1_CONFINE_REASON="no L1 work this run: every session already has findings"
+    # Every engine is named as skipped, so a findings file that vanishes before dispatch fails the attempt
+    # (l1_attempt) and does not start an unprepared worker with no sandbox.
+    L1_SETUP_SKIPPED=$(printf '%s\n' "$AUTODREAM_L1_ENGINES" | awk -F'\t' 'NF >= 2 && $2 != "" && !seen[$2]++ { printf "%s ", $2 }')
+    log "L1 confinement not set up: $L1_CONFINE_REASON (engines that may not start this run: ${L1_SETUP_SKIPPED:-none})"
+  elif [ "$L1_CONFINED" = yes ]; then
     # The protected directories are joined with a colon, so one that holds a colon would be split into
     # two paths and left unprotected; a relative one protects nothing.
     for p in "$AUTODREAM_DIR" "$FINDINGS_DIR" "$DREAMS_DIR"; do
@@ -3320,6 +3344,11 @@ l1_confine_setup() {
       esac
     done
     all_engines=$(printf '%s' "$AUTODREAM_L1_ENGINES" | awk -F'\t' 'NF >= 2 && $2 != "" && !seen[$2]++ { print $2 }')
+    # Only engines with work left are prepared. The others are named, so a worker that reaches one anyway fails
+    # its attempt (l1_attempt) and is never run unconfined by default.
+    needed=$(l1_missing_engines)
+    all_engines=$(printf '%s\n' "$all_engines" | grep -Fx -f <(printf '%s\n' "$needed") 2>/dev/null || true)
+    L1_SETUP_SKIPPED=$(printf '%s\n' "$AUTODREAM_L1_ENGINES" | awk -F'\t' -v need="$(printf '%s' "$needed" | tr '\n' ' ')" 'BEGIN { n = split(need, a, " "); for (i = 1; i <= n; i++) want[a[i]] = 1 } NF >= 2 && $2 != "" && !($2 in want) && !seen[$2]++ { printf "%s ", $2 }')
     while IFS= read -r eng; do
       [ -n "$eng" ] || continue
       "$ADAPTERS_DIR/$eng/adapter.sh" l1-writes >/dev/null 2>&1; wrc=$?
@@ -3333,8 +3362,25 @@ l1_confine_setup() {
         sstage="$L1_STAGE_ROOT/.setup-$eng"; err=""
         if ( umask 077; mkdir -p "$sstage" ) 2>/dev/null \
            && err=$(L1_STAGE_ROOT="$L1_STAGE_ROOT" L1_CONFINE_PROTECT="$L1_CONFINE_PROTECT" bash "$L1_CONFINER" engine-prefix "$ADAPTERS_DIR/$eng/adapter.sh" "$sstage" 2>&1 >/dev/null); then
-          ok_engines="${ok_engines:+$ok_engines }$eng"
-          L1_CONFINE_STATS="${L1_CONFINE_STATS}l1_confined_$(printf '%s' "$eng" | tr '-' '_'): yes"$'\n'
+          # The same for the state directory a worker of this engine runs on (omp), once with the model its
+          # sessions use: a setup that cannot work stops the run here, and a model that cannot run on a
+          # throwaway copy (OAuth only: a refresh in the copy would lose the rotated token) leaves this
+          # engine unconfined and says why, instead of failing every worker.
+          ssrc=$(printf '%s\n' "$AUTODREAM_L1_ENGINES" | awk -F'\t' -v e="$eng" '$2 == e { print $1; exit }')
+          smodel=$(printf '%s\n' "$AUTODREAM_L1_MODELS" | awk -F'\t' -v s="$ssrc" '$1 == s { print $2; exit }')
+          err=$("$ADAPTERS_DIR/$eng/adapter.sh" l1-stage-env "$sstage" "$smodel" 2>&1 >/dev/null); wrc=$?
+          case "$wrc" in
+            0|2)
+              ok_engines="${ok_engines:+$ok_engines }$eng"
+              L1_CONFINE_STATS="${L1_CONFINE_STATS}l1_confined_$(printf '%s' "$eng" | tr '-' '_'): yes"$'\n' ;;
+            4)
+              no_engines="${no_engines:+$no_engines }$eng"
+              swhy=$(printf '%s' "${err:-no reason given}" | head -c 300 | tr '\n\t' '  ')
+              L1_CONFINE_STATS="${L1_CONFINE_STATS}l1_confined_$(printf '%s' "$eng" | tr '-' '_'): no"$'\n'"l1_confined_$(printf '%s' "$eng" | tr '-' '_')_reason: model ${smodel:-none}: $swhy"$'\n'
+              log "WARNING: the $eng engine runs unconfined (model ${smodel:-none}): $swhy; use an API-key model to confine it" ;;
+            *)
+              [ -n "$L1_CONFINE_FATAL" ] || L1_CONFINE_FATAL="the $eng engine's state directory cannot be prepared: $(printf '%s' "${err:-no reason given}" | head -c 300 | tr '\n\t' '  ')" ;;
+          esac
         else
           [ -n "$L1_CONFINE_FATAL" ] || L1_CONFINE_FATAL="the $eng engine's sandbox cannot be built: $(printf '%s' "${err:-the staging directory could not be made}" | head -c 300 | tr '\n\t' '  ')"
         fi
@@ -3350,14 +3396,14 @@ l1_confine_setup() {
     if [ -n "$no_engines" ]; then
       L1_CONFINED_STAT=partial
       [ -n "$ok_engines" ] || L1_CONFINED_STAT=no
-      L1_CONFINE_REASON="engines with no write profile run unconfined: $no_engines"
+      L1_CONFINE_REASON="engines that run unconfined: $no_engines (no write profile, or a model a throwaway state cannot serve)"
     fi
     log "L1 workers confined with $L1_CONFINE_USING: writes only to their staging directory under $L1_STAGE_ROOT and the engine state paths"
   else
     L1_CONFINED_STAT=no
     [ "${AUTODREAM_L1_CONFINE:-1}" = 0 ] || log "WARNING: L1 workers run unconfined (l1_confined: no): $L1_CONFINE_REASON"
   fi
-  export L1_CONFINER L1_CONFINED L1_CONFINED_ENGINES L1_STAGE_ROOT L1_CONFINE_PROTECT DREAMS_DIR
+  export L1_CONFINER L1_CONFINED L1_CONFINED_ENGINES L1_SETUP_SKIPPED L1_STAGE_ROOT L1_CONFINE_PROTECT DREAMS_DIR
   # Where a worker launched from $WORK_DIR may leave an AI-title stub. It is not on the write list, so a
   # confined worker cannot write it; an unconfined one still can, which is why run.sh wipes it.
   export AUTODREAM_WORK_BUCKET="$WORK_BUCKET"
@@ -3639,6 +3685,16 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
     # error key) rather than by a findings array alone. l1_subject names what failed in the
     # diagnostic line: the session, or a chunk of it. That line is skipped by failure-class.sh on
     # its prefix, so naming a chunk there costs the classifier nothing.
+    # A failure of the runner own setup before the engine starts (no staging root, no stage, no state
+    # directory, no sandbox) says nothing about the session. It is ledgered as staging and writes no stub, so
+    # the slot stays empty (the decision point after the rounds turns it into a fatal): the final-round stub would fill it, satisfy the missing-work check
+    # and let a report publish over sessions that were never triaged.
+    l1_infra_fail() {
+      netdown=staging
+      printf "%s %s %s\n" "$hash" "${AUTODREAM_CURRENT_ROUND:-1}" staging >> "$FINDINGS_DIR/l1-netdown.txt"
+      printf "the runner could not set this worker up; no stub, the session is left for a later run\n" >> "$3"
+      return 1
+    }
     l1_attempt() {
       # The answer is written in a staging directory of its own, one per answer file and reused by the
       # retries of this run, and copied to $2 once the engine has exited (#169). The engine can then be
@@ -3646,23 +3702,49 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       # left at that path is this attempt answer.
       if [ -z "${L1_STAGE_ROOT:-}" ]; then
         printf "no staging root is set, so there is nowhere to stage the answer for %s\n" "${l1_subject:-$session}" >> "$3"
-        return 1
+        l1_infra_fail "$@"; return 1
       fi
       l1ans_name=$(basename "$2")
       l1stage="$L1_STAGE_ROOT/$hash.$l1ans_name"
-      if ! { [ ! -L "$l1stage" ] && ( umask 077; mkdir -p "$l1stage/tmp" ) 2>/dev/null && l1stage=$(cd "$l1stage" && pwd -P); }; then
+      # A worker can leave a symlink where the private tmp goes. Unlinking it follows nothing, so it is removed
+      # and the directory made again, and one hostile worker cannot turn a retry into a failed night.
+      [ ! -L "$l1stage/tmp" ] || rm -f "$l1stage/tmp"
+      if ! { [ ! -L "$l1stage" ] && ( umask 077; mkdir -p "$l1stage/tmp" ) 2>/dev/null && [ ! -L "$l1stage/tmp" ] && l1stage=$(cd "$l1stage" && pwd -P); }; then
         printf "could not make the staging directory %s for %s\n" "$l1stage" "${l1_subject:-$session}" >> "$3"
-        return 1
+        l1_infra_fail "$@"; return 1
       fi
       l1ans="$l1stage/$l1ans_name"
       rm -f "$l1ans" "$2"
       l1pre=()
+      l1senv=()
+      case " ${L1_SETUP_SKIPPED:-} " in
+        *" $engine "*)
+          printf "the %s engine was not prepared at setup (it had no work then) and is not run unconfined now\n" "$engine" >> "$3"
+          l1_infra_fail "$@"; return 1 ;;
+      esac
       case " ${L1_CONFINED_ENGINES:-} " in
         *" $engine "*)
+          # An engine that keeps state it must write (omp) gets a throwaway one inside the stage: the
+          # adapter seeds it and names the environment that points the engine there. Exit 2 is no such
+          # verb (claude); any other failure is an attempt that cannot start safely.
+          # Its stderr goes to a file in the staging root, beside the stages and not in one: this runs
+          # outside the sandbox, and a worker that left a symlink at a path inside its own stage on an
+          # earlier attempt would have this redirection truncate whatever the link points at.
+          l1serr=$(mktemp "$L1_STAGE_ROOT/senv.XXXXXX") || { printf "could not make a temp file for the state setup of %s\n" "${l1_subject:-$session}" >> "$3"; l1_infra_fail "$@"; return 1; }
+          l1sout=$("$ADAPTERS_DIR/$engine/adapter.sh" l1-stage-env "$l1stage" 2>"$l1serr"); l1src=$?
+          if [ "$l1src" -ne 0 ] && [ "$l1src" -ne 2 ]; then
+            printf "the state directory for %s could not be prepared in the stage: %s\n" "${l1_subject:-$session}" "$(head -c 200 "$l1serr" | tr "\n" " ")" >> "$3"
+            rm -f "$l1serr"
+            l1_infra_fail "$@"; return 1
+          fi
+          rm -f "$l1serr"
+          if [ "$l1src" -eq 0 ]; then
+            while IFS= read -r l1e; do [ -n "$l1e" ] && l1senv+=("$l1e"); done <<< "$l1sout"
+          fi
           while IFS= read -r -d "" l1wa; do l1pre+=("$l1wa"); done < <(bash "$L1_CONFINER" engine-prefix "$ADAPTERS_DIR/$engine/adapter.sh" "$l1stage" 2>>"$3")
           if [ "${#l1pre[@]}" -eq 0 ]; then
             printf "the sandbox for %s could not be built, and a confined run does not fall back to an unconfined worker\n" "${l1_subject:-$session}" >> "$3"
-            return 1
+            l1_infra_fail "$@"; return 1
           fi
           ;;
       esac
@@ -3695,7 +3777,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
           cat "$FINDINGS_DIR/$hash.stats.json"
           printf "\n\`\`\`\n"
         fi
-      } | ${l1wrap[@]+"${l1wrap[@]}"} ${l1pre[@]+"${l1pre[@]}"} env ${envs[@]+"${envs[@]}"} "TMPDIR=$l1stage/tmp" "${argv[@]}" > "$4" 2> "$3"
+      } | ${l1wrap[@]+"${l1wrap[@]}"} ${l1pre[@]+"${l1pre[@]}"} env ${envs[@]+"${envs[@]}"} "TMPDIR=$l1stage/tmp" ${l1senv[@]+"${l1senv[@]}"} "${argv[@]}" > "$4" 2> "$3"
       # Index 1 is the engine side of the pipe; index 0 is the brace group.
       l1rc="${PIPESTATUS[1]}"
       l1elapsed=$(($(date +%s) - l1start))
@@ -3894,7 +3976,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
           else
             cfail=1
             [ -n "$cfirst" ] || cfirst="$cerr"
-            if [ "$netdown" = "true" ] || [ "$netdown" = "provider" ]; then break; fi
+            if [ "$netdown" = "true" ] || [ "$netdown" = "provider" ] || [ "$netdown" = "staging" ]; then break; fi
           fi
           l1_subject=""
         fi
@@ -3965,8 +4047,11 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       # next run skips the session because its slot is filled. Leaving the slot empty is what
       # makes the retry work; the run defers instead, so the silent-failure concern is
       # answered by the deferral, not the stub.
-      if [ "$netdown" = "true" ] || [ "$netdown" = "provider" ]; then
-        echo "FAIL ($([ "$netdown" = "true" ] && echo "network down" || echo "provider refusal"); no stub, left for a later run): $session ($hash) [$(($(date +%s) - t0))s] — see $errlog" >&2
+      if [ "$netdown" = "true" ] || [ "$netdown" = "provider" ] || [ "$netdown" = "staging" ]; then
+        failwhy="provider refusal"
+        [ "$netdown" != "true" ] || failwhy="network down"
+        [ "$netdown" != "staging" ] || failwhy="runner setup failed"
+        echo "FAIL ($failwhy; no stub, left for a later run): $session ($hash) [$(($(date +%s) - t0))s] — see $errlog" >&2
       elif [ "${AUTODREAM_CURRENT_ROUND:-1}" -ge "${AUTODREAM_L1_ROUNDS:-5}" ]; then
         sz=$(wc -c < "$session" 2>/dev/null | tr -d " ")
         lines=$(wc -l < "$session" 2>/dev/null | tr -d " ")
@@ -4750,6 +4835,7 @@ EOF
   # it. A report written from a dead-network or no-balance run looks complete, ships open
   # questions, and its own self-audit cannot tell the corpus is missing.
   NET_DEFERRED=no
+  NET_DEFERRED_CAUSE=none
   # Consecutive rounds that recovered nothing. A streak, not a comparison against the last
   # round's ending count: comparing end-to-end counts calls two rounds barren whenever the SECOND
   # one is, because round 1 having recovered sessions is invisible in its own ending number.
@@ -4763,6 +4849,7 @@ EOF
     # through its trigger, so round 1 is the round most likely to run at a host with no route.
     if ! wait_for_network "$(l1_probe_urls)"; then
       NET_DEFERRED=yes
+      NET_DEFERRED_CAUSE=network
       log "L1 round $round not dispatched: no route to the API. Deferring $TARGET_DATE for a later run."
       break
     fi
@@ -4819,12 +4906,26 @@ EOF
   # conditions are required: sessions are still missing, AND the last round that dispatched
   # saw a no-route failure or a permanent provider refusal. A run that recovered is never
   # deferred, however bad round 1 was.
+  # A runner that cannot set its own workers up is not an outage: it heals nothing by waiting, and a
+  # deferral would leave no report, no banner and (with no findings JSON) no unassembled_dates entry,
+  # every night. It is a fatal, which posts the banner and leaves the marker the next run reads.
+  if [ "$MISSING" -gt 0 ] && [ "$LAST_ROUND_RUN" -gt 0 ] \
+     && [ -s "$FINDINGS_DIR/l1-netdown.txt" ] \
+     && awk -v r="$LAST_ROUND_RUN" '$2 == r && $3 == "staging" { found = 1 } END { exit !found }' "$FINDINGS_DIR/l1-netdown.txt"; then
+    rm -rf "$L1_STAGE_ROOT" 2>/dev/null
+    clean_work_bucket
+    log_fatal "the runner could not set up L1 workers for $MISSING session(s) in round $LAST_ROUND_RUN (stage directory, engine state or sandbox; the .err files in $FINDINGS_DIR name the cause); no stub was written, so $TARGET_DATE has no report and a later run retries it"
+    fatal_exit
+    return 1
+  fi
   if [ "$MISSING" -gt 0 ] && [ "$LAST_ROUND_RUN" -gt 0 ] \
      && [ -s "$FINDINGS_DIR/l1-netdown.txt" ] \
      && awk -v r="$LAST_ROUND_RUN" '$2 == r && ($3 == "true" || $3 == "provider") { found = 1 } END { exit !found }' \
           "$FINDINGS_DIR/l1-netdown.txt"; then
     NET_DEFERRED=yes
-    log "L1 finished with $MISSING session(s) missing and round $LAST_ROUND_RUN failing with no route or a provider refusal — deferring $TARGET_DATE for a later run"
+    NET_DEFERRED_CAUSE=network
+    awk -v r="$LAST_ROUND_RUN" '$2 == r && $3 == "provider" { found = 1 } END { exit !found }' "$FINDINGS_DIR/l1-netdown.txt" && NET_DEFERRED_CAUSE=provider
+    log "L1 finished with $MISSING session(s) missing and round $LAST_ROUND_RUN failing with no route or a provider refusal — deferring $TARGET_DATE for a later run ($NET_DEFERRED_CAUSE)"
   fi
   L1_ELAPSED=$(( $(date +%s) - L1_START ))
   # Whatever a failed worker left in staging was kept for the retries, and the rounds are over.
@@ -5277,6 +5378,7 @@ PY
     # appended after the aggregator loop as network_down_seconds_l2 / network_deferred_l2.
     printf 'network_down_seconds: %s\n' "$NET_DOWN_SECONDS"
     printf 'network_deferred: %s\n' "$NET_DEFERRED"
+    printf 'l1_deferred_cause: %s\n' "$NET_DEFERRED_CAUSE"
     # network_down_seconds is time the runner spent blocked BETWEEN rounds; the per-worker
     # ledger is one curl at the instant a worker failed. A flapping network makes the first
     # large and the second false for every worker, which is not a contradiction.
