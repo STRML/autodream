@@ -16,7 +16,7 @@ round 4  █      1                 grammar (C3) for .jsx
 | A. The counter tries to be a JavaScript validator | r1: `const a: number = 1;` in `.js` accepted, and a `<!--` legacy script rejected. r2: the same two, plus `.jsx` accepted. r3: `const x = 1; const x = 2;` accepted, and the legacy retry rewrote a regex literal. r4: the duplicate declaration accepted in `.jsx`. | The counter needs comment positions. Each fix reimplemented a piece of an engine so the counter could also say whether a file is valid: syntactic diagnostics from a one-file program, then `node --check` for three extensions, then a text rewrite for legacy comments. TypeScript, node and oxlint disagree on what is valid, and every fix left a shape that one of them judges differently. | One judge per question. The TypeScript parser finds comment positions, as before. oxlint says whether a file is valid, and it already runs in the `lint` workflow over every tracked JS and TS file. The counter fails closed on what TypeScript cannot read and does nothing else. `node --check`, the one-file program, the legacy retry and the `.jsx` gap all go. |
 | B. JSX comment lines found by reading text | r1: `{ /* c */ }` with a space. r2: `{ /* c */ let x = 1; }` in a plain block counted as JSX. r3: `{ /* c */ value }` not counted. | A line that starts with `{` was treated as JSX from its characters, then from "an expression with no expression". | A JSX comment line is a line whose first character starts a `JsxExpression` node and whose first token inside is a comment. Held at `48f5f4a`. |
 | C. Line and byte boundaries | r1: U+2028 and U+2029 joined two comment lines. r1 (P2): invalid UTF-8 replaced before counting. | Splitting on `\n` and decoding with replacement. | Split on every JavaScript line terminator and decode strictly. Held. |
-| D. The lint scope enumerates directories | r1: `bin/comment-count-js.mjs` sat outside the four directories. r2: the coverage fixture resolved `./package.json` from the caller's directory. | The directories were listed and the claim "oxlint lints the same files" was never checked. | `bin` joins the list. A fixture fails when a tracked JS or TS file is outside it, and reads the path from the repo root. Held. |
+| D. The lint scope enumerates directories | r1: `bin/comment-count-js.mjs` sat outside the four directories. r2: the coverage fixture resolved `./package.json` from the caller's directory. | The directories were listed and the claim "oxlint lints the same files" was never checked. | `bin` joins the list. A fixture compares every tracked JS and TS file with the list oxlint prints for the lint script (`--debug=files`), so a file outside the directories or inside an ignored one fails it. It reads the path from the repo root. Held. |
 
 ## Class A: the counter and oxlint each do one job
 
@@ -49,7 +49,7 @@ The coverage fixture (class D) makes oxlint a complete judge: a tracked JS or TS
 | JSX text that looks like a block comment (`<p>/* shown`) | text, counts 0 | accepts | yes, correctly |
 | a tracked `.d.ts` file | counts its comments | linted (the ignore pattern for `.d.ts` is gone) | by the same rules as any file |
 | a tracked file TypeScript cannot parse (`const x = ;`) | fails, names the file (the wrapper exits 1) | error | no |
-| a tracked JS or TS file outside the linted directories | counts it | not run | no: the coverage fixture fails |
+| a tracked JS or TS file outside the linted directories, or inside an ignored one | counts it | not run | no: the coverage fixture fails |
 | invalid UTF-8 | fails, names the file (the wrapper exits 1) | not run on it | no |
 | `typescript` module missing | fails, says `npm ci` (the wrapper exits 1) | n/a | no |
 | a comment added to a tracked file | count rises | n/a | no: over the baseline |
@@ -67,7 +67,7 @@ A `counsel` subagent read the plan against the code (the external `/debate:run t
 
 | Finding | Check | Disposition |
 |---|---|---|
-| `.oxlintrc.json` ignored `**/*.d.ts`, so two tracked declaration files were counted but never linted | `git ls-files '*.d.ts'` lists `mods/autodream-band/types/index.d.ts` and `mods/autodream-focus/types/index.d.ts`; a duplicate declaration in a probe `.d.ts` is now an error | Fixed: the ignore is gone and a fixture fails if the oxlint config ignores a JS or TS file by extension |
+| `.oxlintrc.json` ignored `**/*.d.ts`, so two tracked declaration files were counted but never linted | `git ls-files '*.d.ts'` lists `mods/autodream-band/types/index.d.ts` and `mods/autodream-focus/types/index.d.ts`; a duplicate declaration in a probe `.d.ts` is now an error | Fixed: the ignore is gone, and the coverage fixture compares the tracked files with oxlint's own list |
 | the grammar fixture treated any non-zero oxlint exit as a rejection, so an unused-variable warning would pass it | `oxlint --deny-warnings` on `const x = 1;` warns; with `-A all` it exits 0 and a duplicate declaration still exits 1 | Fixed: the fixture runs with `-A all` |
 | the plan named fixtures that do not exist, and called the failure exit 2 and 3 | the wrapper reports exit 1 | Fixed in this plan |
 | JSX text `<p>/* shown` then `as text */</p>` was counted as a comment | probe printed 1; after the fix, 0 | Fixed: no trailing-comment scan right before JSX text, with a fixture |
