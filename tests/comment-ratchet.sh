@@ -256,6 +256,19 @@ counter_fixtures() {
   eq "$(num "$d/jsx-text.tsx") $(num "$d/jsx-text-b.tsx")" "0 0" "JSX text that starts with // is text, not a comment"
   printf '%s\n' 'const x = ;' > "$d/syntax.ts"
   eq "$(fail_naming "$d/syntax.ts")" "1 1" "a JS or TS file that will not parse fails and names the file"
+  printf '%s\n' 'const el = (' '  <div>' '    { /* spaced */ }' '    {  // spaced line' '    }' '  </div>' ');' > "$d/jsx-space.tsx"
+  eq "$(num "$d/jsx-space.tsx")" 2 "a JSX comment with whitespace after the brace is a comment line"
+  printf 'const a = 1;\xe2\x80\xa8// first\xe2\x80\xa8// second\xe2\x80\xa8' > "$d/sep.ts"
+  printf 'const a = 1;\xe2\x80\xa9// first\xe2\x80\xa9' > "$d/sep2.ts"
+  eq "$(num "$d/sep.ts") $(num "$d/sep2.ts")" "2 1" "U+2028 and U+2029 end a line like a newline"
+  printf '%s\n' 'const a: number = 1;' > "$d/typed.js"
+  printf '%s\n' 'const a: number = 1;' > "$d/typed.ts"
+  eq "$(fail_naming "$d/typed.js") $(num "$d/typed.ts")" "1 1 0" "a .js file with TypeScript syntax fails, the same text in .ts counts"
+  printf '%s\n' 'import { a } from "./a.js";' '// real comment' 'export const b = a;' > "$d/esm.js"
+  eq "$(num "$d/esm.js")" 1 "a .js file written as an ES module is read"
+  printf '%s\n' 'const s = "\xff";' > "$d/bad-utf8.ts"
+  printf 'const s = "\xff";\n' > "$d/bad-utf8.ts"
+  eq "$(fail_naming "$d/bad-utf8.ts")" "1 1" "a file that is not valid UTF-8 fails and names the file"
   COMMENT_COUNT_NODE="$d/no-such-node" bash "$COUNT" "$d/types.d.ts" > "$d/out" 2> "$d/err"
   rc=$?
   eq "$rc $(grep -c node "$d/err") $(wc -c < "$d/out" | tr -d ' ')" "1 1 0" "a missing node fails with a message and counts nothing"
@@ -454,6 +467,22 @@ failing_tool_fixtures() {
   fi
 }
 
+lint_coverage_fixture() {
+  local dirs dir f covered missing=""
+  dirs=$(node -e 'const s = require("./package.json").scripts.lint.split(/\s+/); process.stdout.write(s.filter((w) => !w.startsWith("-") && w !== "oxlint" && w !== "npm").join("\n"))' 2>/dev/null) || { bad "read the lint script from package.json"; return; }
+  while IFS= read -r f; do
+    case "$f" in node_modules/*) continue ;; esac
+    covered=0
+    for dir in $dirs; do
+      case "$f" in "$dir"/*|"$dir") covered=1 ;; esac
+    done
+    [ "$covered" -eq 1 ] || missing="$missing $f"
+  done <<EOF
+$(git -C "$REPO" ls-files '*.js' '*.mjs' '*.cjs' '*.jsx' '*.ts' '*.mts' '*.cts' '*.tsx')
+EOF
+  eq "$missing" "" "every tracked JS and TS file is under a path the lint script covers"
+}
+
 counter_exit_fixtures() {
   local d
   d=$(mktemp -d)
@@ -504,6 +533,7 @@ ratchet() {
 
 if [ -z "${COMMENT_RATCHET_INNER:-}" ]; then
   counter_fixtures
+  lint_coverage_fixture
   enumeration_fixtures
   ratchet_fixtures
   failing_tool_fixtures

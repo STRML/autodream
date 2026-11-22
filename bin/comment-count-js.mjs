@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { extname } from "node:path";
 
@@ -24,7 +25,26 @@ const path = process.argv[2] || "";
 const kind = KINDS[extname(path)];
 if (!kind) fail(2, path + ": not a JS or TS extension");
 
-const text = readFileSync(0, "utf8").replace(/^﻿/, "");
+let text;
+try {
+  text = new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(0));
+} catch {
+  fail(2, path + ": not valid UTF-8");
+}
+
+const NODE_MODES = {
+  ".js": [[], ["--input-type=module"]],
+  ".mjs": [["--input-type=module"]],
+  ".cjs": [["--input-type=commonjs"]],
+};
+
+function nodeAccepts(args) {
+  return spawnSync(process.execPath, ["--check", ...args], { input: text, stdio: ["pipe", "ignore", "ignore"] }).status === 0;
+}
+
+const modes = NODE_MODES[extname(path)];
+if (modes && !modes.some(nodeAccepts)) fail(2, path + ": node --check rejects it as JavaScript");
+
 const file = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true, ts.ScriptKind[kind]);
 if (file.parseDiagnostics.length > 0) {
   const first = file.parseDiagnostics[0];
@@ -63,12 +83,14 @@ function inComment(index) {
 
 let count = 0;
 let offset = 0;
-for (const line of text.split(/\r\n|\n|\r/)) {
+for (const line of text.split(/\r\n|[\n\r\u2028\u2029]/)) {
   const first = line.search(/\S/);
   if (first !== -1) {
     const at = offset + first;
-    const jsx = line[first] === "{" && starts.has(at + 1);
-    const here = jsx ? comments.get(at + 1) : comments.get(at);
+    const afterBrace = line[first] === "{" ? line.slice(first + 1).search(/\S/) : -1;
+    const jsxAt = afterBrace === -1 ? -1 : at + 1 + afterBrace;
+    const jsx = jsxAt !== -1 && starts.has(jsxAt);
+    const here = jsx ? comments.get(jsxAt) : comments.get(at);
     const exempt = here && here.kind === ts.SyntaxKind.SingleLineCommentTrivia && DIRECTIVE.test(text.slice(here.pos + 2, here.end));
     if ((jsx || inComment(at)) && !exempt) count += 1;
   }
