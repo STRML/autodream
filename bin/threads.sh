@@ -16,7 +16,6 @@ resolve_install_dir "$THREADS_SRC" threads.sh
 # shellcheck source=/dev/null
 . "$THREADS_LIB_DIR/portable.sh" || exit 1
 . "$THREADS_LIB_DIR/adapters.sh" || exit 1
-: "${ADAPTERS_REJECT_LOG:=/dev/null}"
 . "$THREADS_LIB_DIR/lib-project.sh" || exit 1
 . "$THREADS_LIB_DIR/report-format.sh" || exit 1
 THREADS_FLOCK_LIB="$THREADS_LIB_DIR/lib-flock.sh"
@@ -39,6 +38,7 @@ if [ -f "$CONFIG_FILE" ]; then
   AUTODREAM_DIR=$THREADS_INSTALL_DIR
   unset THREADS_INSTALL_DIR
 fi
+: "${ADAPTERS_REJECT_LOG:=/dev/null}"
 
 STATE=${AUTODREAM_THREADS_STATE:-$AUTODREAM_DIR/threads.jsonl}
 IDEA_OFFERS="$AUTODREAM_DIR/threads-idea-offers.tsv"
