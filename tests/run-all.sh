@@ -3439,6 +3439,62 @@ test_run_lock_a_temp_that_cannot_be_removed_is_never_written_through(){
   rm -rf "$root"
 }
 
+test_run_lock_release_after_an_older_runner_held_the_directory_leaves_it_alone(){
+  echo "# the run lock: acquire drops its pending record when an older runner holds the directory, so release never discards that runner's directory (#273)"
+  local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
+  local old out lk
+  sleep 120 & old=$!
+  mk_lock "$root" "$old"
+  lk=$(lock_dir "$root")
+  out=$(LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?; printf "records=[%s]\n" "$LOCK_HOLDERS"; release_lock "$LK"; [ -s "$LK/pid" ] && echo kept || echo discarded')
+  kill "$old" 2>/dev/null; wait "$old" 2>/dev/null
+  assert_eq "$(printf '%s' "$out" | tr '\n' ' ')" "rc=1 records=[] kept" "the older runner's directory is refused, no record is left for it, and a release leaves it alone"
+  rm -rf "$root"
+}
+
+test_run_lock_a_pending_release_before_the_directory_is_validated_touches_nothing(){
+  echo "# the run lock: a TERM while the pending record stands but before the lock path is validated removes nothing, even when the path is a symlink (#273)"
+  local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
+  local lk="$root/autodream/locks/x.lock" out
+  mkdir -p "$root/elsewhere"; printf 'a\n' > "$root/elsewhere/start.tmp"; printf 'b\n' > "$root/elsewhere/pid.tmp"
+  ln -s "$root/elsewhere" "$lk"
+  out=$(LK="$lk" lock_fn "$root/autodream" 'sleep 60 & h=$!; LOCK_DIR_MADE=0; LOCK_HOLDERS="$LK=p$h"$'"'"'\n'"'"'; release_lock "$LK"; ls -A "'"$root"'/elsewhere" | tr "\n" " "')
+  assert_eq "$out" "pid.tmp start.tmp " "the files behind a symlinked lock path survive"
+  rm -rf "$root"
+}
+
+test_run_lock_the_pending_record_is_swapped_for_the_final_one_in_one_assignment(){
+  echo "# the run lock: lock_unrecord with a new record replaces the old one in a single assignment, so no TERM sees the directory with no record (#273)"
+  local root; root=$(setup_env); mkdir -p "$root/autodream"
+  local out
+  out=$(lock_fn "$root/autodream" 'LOCK_HOLDERS="/a=p5"$'"'"'\n/b=n6\n'"'"'; lock_unrecord /a t5; printf "%s" "$LOCK_HOLDERS" | tr "\n" " "; echo "[$LOCK_RECORD]"')
+  assert_eq "$out" "/b=n6 /a=t5 [p5]" "the pending record is gone and the final one stands in the same step"
+  rm -rf "$root"
+}
+
+test_run_lock_a_term_during_the_metadata_write_releases_what_this_run_made(){
+  echo "# the run lock: a TERM while the metadata is being written reaches release with the holder recorded, so a directory this run made goes and a stale one loses only the temps (#273)"
+  local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
+  local lk="$root/autodream/locks/x.lock" pidf="$root/shell.pid" dead top i left
+  true & dead=$!; wait "$dead" 2>/dev/null
+  LK="$lk" PIDF="$pidf" lock_fn "$root/autodream" 'echo $$ > "$PIDF"; on_exit(){ release_lock "$LK"; }; trap on_exit EXIT; mv(){ while :; do sleep 0.05; done; }; acquire_lock "$LK" 0' > "$root/acq.out" 2>&1 &
+  top=$!; i=0
+  while [ ! -e "$lk/start.tmp" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  assert_file "$lk/start.tmp" "the write is stalled with its temps in place"
+  kill -TERM "$(cat "$pidf")"; wait "$top" 2>/dev/null
+  [ -d "$lk" ] && no "a directory this run made is left behind by a TERM mid-write" || ok "a directory this run made is gone after a TERM mid-write"
+  i=0; while ! flock_free "$root/autodream/locks/x.flock" && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  rm -rf "$lk" "$pidf"; mkdir -p "$lk"; printf '%s\n' "$dead" > "$lk/pid"; printf 'Mon Jan  1 00:00:00 2018\n' > "$lk/start"
+  LK="$lk" PIDF="$pidf" lock_fn "$root/autodream" 'echo $$ > "$PIDF"; on_exit(){ release_lock "$LK"; }; trap on_exit EXIT; mv(){ while :; do sleep 0.05; done; }; acquire_lock "$LK" 0' > "$root/acq.out" 2>&1 &
+  top=$!; i=0
+  while [ ! -e "$lk/start.tmp" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  assert_file "$lk/start.tmp" "the write in the stale directory is stalled with its temps in place"
+  kill -TERM "$(cat "$pidf")"; wait "$top" 2>/dev/null
+  left=$(ls -A "$lk" 2>/dev/null | tr '\n' ' ')
+  assert_eq "$left" "pid start " "a stale directory taken over stays, with its old files and no temps"
+  rm -rf "$root"
+}
+
 test_run_lock_a_failed_pid_rename_leaves_a_dead_pid_no_rollback_and_no_temp(){
   echo "# the run lock: start and pid are renamed into place with pid last, so a failed pid rename reads as a dead holder, rolls nothing back and leaves no temp (#266)"
   local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
@@ -4742,6 +4798,10 @@ _run test_run_lock_a_stale_directory_that_cannot_be_written_is_left_as_found
 _run test_run_lock_release_leaves_a_directory_it_did_not_make
 _run test_run_lock_metadata_of_the_wrong_type_is_refused_before_any_write
 _run test_run_lock_a_failed_pid_rename_leaves_a_dead_pid_no_rollback_and_no_temp
+_run test_run_lock_a_term_during_the_metadata_write_releases_what_this_run_made
+_run test_run_lock_a_pending_release_before_the_directory_is_validated_touches_nothing
+_run test_run_lock_the_pending_record_is_swapped_for_the_final_one_in_one_assignment
+_run test_run_lock_release_after_an_older_runner_held_the_directory_leaves_it_alone
 _run test_run_lock_a_temp_that_cannot_be_removed_is_never_written_through
 _run test_run_lock_a_temp_that_is_a_link_is_replaced_and_never_written_through
 _run test_run_lock_only_the_word_dead_from_the_liveness_probe_reads_as_dead

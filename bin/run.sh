@@ -1152,17 +1152,21 @@ acquire_lock() {
     *) lock_stop_holder "$holder"; return 3 ;;
   esac
   rc=0
+  LOCK_DIR_MADE=0
+  LOCK_DIR_CLAIMED=0
+  LOCK_HOLDERS="$LOCK_HOLDERS$dir=p$holder"$'\n'
   lock_take_dir "$dir" "$owner" || rc=$?
   if [ "$rc" -eq 1 ]; then
     lock_stop_holder "$holder"
+    lock_unrecord "$dir"
     return 1
   fi
   if [ "$rc" -eq 0 ] && [ "$LOCK_DIR_MADE" -eq 1 ]; then
-    LOCK_HOLDERS="$LOCK_HOLDERS$dir=$holder"$'\n'
+    lock_unrecord "$dir" "$holder"
   elif [ "$rc" -eq 0 ]; then
-    LOCK_HOLDERS="$LOCK_HOLDERS$dir=t$holder"$'\n'
+    lock_unrecord "$dir" "t$holder"
   else
-    LOCK_HOLDERS="$LOCK_HOLDERS$dir=n$holder"$'\n'
+    lock_unrecord "$dir" "n$holder"
   fi
   return "$rc"
 }
@@ -1178,10 +1182,12 @@ lock_holder_name() {
 }
 
 LOCK_DIR_MADE=0
+LOCK_DIR_CLAIMED=0
 
 lock_take_dir() {
   local dir="$1" owner="$2"
   LOCK_DIR_MADE=0
+  LOCK_DIR_CLAIMED=0
   if lock_names_live_run "$dir"; then
     lock_holder_name "$dir"
     return 1
@@ -1198,6 +1204,7 @@ lock_take_dir() {
     LOCK_DIR_MADE=1
   fi
   lock_meta_writable "$dir" || return 3
+  LOCK_DIR_CLAIMED=1
   if ! lock_write_meta "$dir" "$owner"; then
     [ "$LOCK_DIR_MADE" -eq 0 ] || lock_discard_dir "$dir"
     return 3
@@ -1206,7 +1213,7 @@ lock_take_dir() {
 }
 
 lock_discard_dir() {
-  rm -f "$1/pid" "$1/start"
+  rm -f "$1/pid" "$1/start" "$1/pid.tmp" "$1/start.tmp"
   rmdir "$1" 2>/dev/null || true
 }
 
@@ -1237,20 +1244,32 @@ lock_write_meta() {
   return 1
 }
 
-release_lock() {
-  local dir="$1" holder="" rest="" line meta=1
+lock_unrecord() {
+  local line rest=""
+  LOCK_RECORD=""
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    if [ "${line%=*}" = "$dir" ]; then holder="${line##*=}"; else rest="$rest$line"$'\n'; fi
+    if [ "${line%=*}" = "$1" ]; then LOCK_RECORD="${line##*=}"; else rest="$rest$line"$'\n'; fi
   done <<< "$LOCK_HOLDERS"
+  LOCK_HOLDERS="$rest${2:+$1=$2$'\n'}"
+}
+
+release_lock() {
+  local dir="$1" holder meta=1
+  lock_unrecord "$dir"
+  holder="$LOCK_RECORD"
   [ -n "$holder" ] || return 0
-  LOCK_HOLDERS="$rest"
   case "$holder" in
     n*) meta=0; holder="${holder#n}" ;;
     t*) meta=0; holder="${holder#t}" ;;
+    p*) meta=2; holder="${holder#p}" ;;
   esac
   if [ "$meta" -eq 1 ]; then
     lock_discard_dir "$dir"
+  elif [ "$meta" -eq 2 ] && [ "$LOCK_DIR_MADE" -eq 1 ]; then
+    lock_discard_dir "$dir"
+  elif [ "$meta" -eq 2 ] && [ "$LOCK_DIR_CLAIMED" -eq 1 ]; then
+    rm -f "$dir/start.tmp" "$dir/pid.tmp"
   fi
   lock_stop_holder "$holder"
   return 0
