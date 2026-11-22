@@ -1153,19 +1153,20 @@ acquire_lock() {
   esac
   rc=0
   LOCK_DIR_MADE=0
+  LOCK_DIR_CLAIMED=0
   LOCK_HOLDERS="$LOCK_HOLDERS$dir=p$holder"$'\n'
   lock_take_dir "$dir" "$owner" || rc=$?
-  lock_unrecord "$dir"
   if [ "$rc" -eq 1 ]; then
     lock_stop_holder "$holder"
+    lock_unrecord "$dir"
     return 1
   fi
   if [ "$rc" -eq 0 ] && [ "$LOCK_DIR_MADE" -eq 1 ]; then
-    LOCK_HOLDERS="$LOCK_HOLDERS$dir=$holder"$'\n'
+    lock_unrecord "$dir" "$holder"
   elif [ "$rc" -eq 0 ]; then
-    LOCK_HOLDERS="$LOCK_HOLDERS$dir=t$holder"$'\n'
+    lock_unrecord "$dir" "t$holder"
   else
-    LOCK_HOLDERS="$LOCK_HOLDERS$dir=n$holder"$'\n'
+    lock_unrecord "$dir" "n$holder"
   fi
   return "$rc"
 }
@@ -1181,10 +1182,12 @@ lock_holder_name() {
 }
 
 LOCK_DIR_MADE=0
+LOCK_DIR_CLAIMED=0
 
 lock_take_dir() {
   local dir="$1" owner="$2"
   LOCK_DIR_MADE=0
+  LOCK_DIR_CLAIMED=0
   if lock_names_live_run "$dir"; then
     lock_holder_name "$dir"
     return 1
@@ -1201,6 +1204,7 @@ lock_take_dir() {
     LOCK_DIR_MADE=1
   fi
   lock_meta_writable "$dir" || return 3
+  LOCK_DIR_CLAIMED=1
   if ! lock_write_meta "$dir" "$owner"; then
     [ "$LOCK_DIR_MADE" -eq 0 ] || lock_discard_dir "$dir"
     return 3
@@ -1247,7 +1251,7 @@ lock_unrecord() {
     [ -n "$line" ] || continue
     if [ "${line%=*}" = "$1" ]; then LOCK_RECORD="${line##*=}"; else rest="$rest$line"$'\n'; fi
   done <<< "$LOCK_HOLDERS"
-  LOCK_HOLDERS="$rest"
+  LOCK_HOLDERS="$rest${2:+$1=$2$'\n'}"
 }
 
 release_lock() {
@@ -1264,7 +1268,7 @@ release_lock() {
     lock_discard_dir "$dir"
   elif [ "$meta" -eq 2 ] && [ "$LOCK_DIR_MADE" -eq 1 ]; then
     lock_discard_dir "$dir"
-  elif [ "$meta" -eq 2 ]; then
+  elif [ "$meta" -eq 2 ] && [ "$LOCK_DIR_CLAIMED" -eq 1 ]; then
     rm -f "$dir/start.tmp" "$dir/pid.tmp"
   fi
   lock_stop_holder "$holder"

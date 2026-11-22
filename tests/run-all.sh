@@ -3452,6 +3452,26 @@ test_run_lock_release_after_an_older_runner_held_the_directory_leaves_it_alone()
   rm -rf "$root"
 }
 
+test_run_lock_a_pending_release_before_the_directory_is_validated_touches_nothing(){
+  echo "# the run lock: a TERM while the pending record stands but before the lock path is validated removes nothing, even when the path is a symlink (#273)"
+  local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
+  local lk="$root/autodream/locks/x.lock" out
+  mkdir -p "$root/elsewhere"; printf 'a\n' > "$root/elsewhere/start.tmp"; printf 'b\n' > "$root/elsewhere/pid.tmp"
+  ln -s "$root/elsewhere" "$lk"
+  out=$(LK="$lk" lock_fn "$root/autodream" 'sleep 60 & h=$!; LOCK_DIR_MADE=0; LOCK_HOLDERS="$LK=p$h"$'"'"'\n'"'"'; release_lock "$LK"; ls -A "'"$root"'/elsewhere" | tr "\n" " "')
+  assert_eq "$out" "pid.tmp start.tmp " "the files behind a symlinked lock path survive"
+  rm -rf "$root"
+}
+
+test_run_lock_the_pending_record_is_swapped_for_the_final_one_in_one_assignment(){
+  echo "# the run lock: lock_unrecord with a new record replaces the old one in a single assignment, so no TERM sees the directory with no record (#273)"
+  local root; root=$(setup_env); mkdir -p "$root/autodream"
+  local out
+  out=$(lock_fn "$root/autodream" 'LOCK_HOLDERS="/a=p5"$'"'"'\n/b=n6\n'"'"'; lock_unrecord /a t5; printf "%s" "$LOCK_HOLDERS" | tr "\n" " "; echo "[$LOCK_RECORD]"')
+  assert_eq "$out" "/b=n6 /a=t5 [p5]" "the pending record is gone and the final one stands in the same step"
+  rm -rf "$root"
+}
+
 test_run_lock_a_term_during_the_metadata_write_releases_what_this_run_made(){
   echo "# the run lock: a TERM while the metadata is being written reaches release with the holder recorded, so a directory this run made goes and a stale one loses only the temps (#273)"
   local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
@@ -4779,6 +4799,8 @@ _run test_run_lock_release_leaves_a_directory_it_did_not_make
 _run test_run_lock_metadata_of_the_wrong_type_is_refused_before_any_write
 _run test_run_lock_a_failed_pid_rename_leaves_a_dead_pid_no_rollback_and_no_temp
 _run test_run_lock_a_term_during_the_metadata_write_releases_what_this_run_made
+_run test_run_lock_a_pending_release_before_the_directory_is_validated_touches_nothing
+_run test_run_lock_the_pending_record_is_swapped_for_the_final_one_in_one_assignment
 _run test_run_lock_release_after_an_older_runner_held_the_directory_leaves_it_alone
 _run test_run_lock_a_temp_that_cannot_be_removed_is_never_written_through
 _run test_run_lock_a_temp_that_is_a_link_is_replaced_and_never_written_through
