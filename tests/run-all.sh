@@ -286,7 +286,7 @@ run_dream(){ # $1=root ; inherits MOCK_MODE/MOCK_CAPTURE_DIR/FANOUT + changelog 
   AUTODREAM_CONFIG="${AUTODREAM_CONFIG:-$1/autodream/config}" \
   AUTODREAM_CONSUME_DATE="${AUTODREAM_CONSUME_DATE:-$DATE}" \
   AUTODREAM_NETCHECK="${AUTODREAM_NETCHECK:-0}" AUTODREAM_RETRY_WAIT=0 AUTODREAM_L1_ROUNDS="${AUTODREAM_L1_ROUNDS:-2}" \
-  PROJECTS_DIR="$1/projects" AUTODREAM_DIR="$1/autodream" DREAMS_DIR="$1/dreams" \
+  PROJECTS_DIR="$1/projects" AUTODREAM_DIR="${TEST_AUTODREAM_DIR:-$1/autodream}" DREAMS_DIR="$1/dreams" \
   /bin/bash "$RUN" "$DATE" > "$1/run.out" 2>&1
   # The run's own exit code, captured while $? still holds it: an unattended run has no other
   # signal for "delivered nothing", so the exit code is part of the contract.
@@ -3288,6 +3288,21 @@ test_l1_confine_setup_stops_before_l1_when_an_engine_prefix_cannot_be_built(){
   done
 }
 
+test_l1_confine_setup_stops_when_a_protected_directory_cannot_be_listed(){
+  echo "# L1 confinement: a protected directory whose path holds a colon would be split in two and left unprotected"
+  local root; root=$(setup_env); mk_session "$root" s1
+  local h ad; h=$(hash_of "$root/projects/proj-a/s1.jsonl")
+  # Only AUTODREAM_DIR carries the colon: a colon in the session root would be read as two roots.
+  mv "$root/autodream" "$root/auto:dream"; ad="$root/auto:dream"
+  fake_sandbox "$root"
+  TEST_AUTODREAM_DIR="$ad" PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec run_dream "$root"
+  assert_no_file "$root/dreams/$DATE.md" "no report is written"
+  assert_no_file "$ad/findings/$DATE/$h.json" "and no session gets a stub"
+  assert_grep "$ad/findings/$DATE/run-stats.txt" '^fatal: .*holds a colon' "run-stats names the colon"
+  assert_grep "$ad/logs/run-$DATE.log" 'FATAL:.*holds a colon' "and the log says so"
+  rm -rf "$root"
+}
+
 test_l1_confined_stat_is_partial_when_an_engine_runs_unconfined(){
   echo "# L1 confinement: l1_confined is yes only when every engine with sessions is confined"
   local root; root=$(setup_env); mk_session "$root" s1
@@ -4422,6 +4437,7 @@ _run test_l1_staging_failure_is_a_worker_failure_with_evidence
 _run test_l1_confine_names_the_engine_without_a_write_profile
 _run test_l1_confine_setup_stops_before_l1_when_an_engine_prefix_cannot_be_built
 _run test_l1_answer_is_moved_aside_before_it_is_tested
+_run test_l1_confine_setup_stops_when_a_protected_directory_cannot_be_listed
 _run test_run_lock_is_reclaimed_from_a_dead_holder
 _run test_killed_run_temps_are_swept_at_the_start_of_the_next_run
 _run test_self_audit_stats
