@@ -19,32 +19,9 @@ BIN=$(cd -P "$ADIR/../../bin" && pwd)
 # shellcheck source=/dev/null
 . "$BIN/lib-path-state.sh"
 
-# The overlay every headless omp call passes to --config. NO_ADVISOR_CFG replaces it, and a replacement that
-# does not turn the memory backend off (checked as memory.backend, not a text match) would put back the channel the default closes (omp retains and
-# consolidates memory into a store every later session recalls from), so it is used only if it says so.
-# An unusable one makes the argv verbs fail (exit 2) rather than run without the safeguard.
-# Does the overlay set memory.backend off? A `backend: "off"` under any other key (advisor, mnemopi) does not
-# count, and neither does a second memory.backend that says something else: the line must sit inside the
-# top-level `memory:` block, and every backend line there must be off.
-overlay_memory_off() {
-  awk '
-    /^memory:[[:space:]]*(#.*)?$/ { inmem = 1; next }
-    inmem && /^[^[:space:]#]/ { inmem = 0 }
-    inmem && /^[[:space:]]+backend:/ {
-      if ($0 ~ /^[[:space:]]+backend:[[:space:]]*"?off"?[[:space:]]*(#.*)?$/) ok = 1; else bad = 1
-    }
-    END { exit !(ok && !bad) }
-  ' "$1"
-}
-
-overlay_cfg() {
-  if [ -z "${NO_ADVISOR_CFG:-}" ]; then printf '%s' "$ADIR/l1-no-advisor.yml"; return 0; fi
-  if [ -r "$NO_ADVISOR_CFG" ] && overlay_memory_off "$NO_ADVISOR_CFG"; then
-    printf '%s' "$NO_ADVISOR_CFG"; return 0
-  fi
-  printf 'omp adapter: NO_ADVISOR_CFG=%s does not set the memory backend off (a backend: "off" line), so it is not used\n' "$NO_ADVISOR_CFG" >&2
-  return 1
-}
+# The overlay every headless omp call passes to --config. It is always the shipped file: it turns the
+# memory backend off, and a replacement hook would need a YAML parser here to prove it still does.
+OVERLAY="$ADIR/l1-no-advisor.yml"
 
 # Which omp runs. An explicit OMP_BIN wins, for pinning a build; then PATH; then the places
 # omp installs to, because a launchd job has a minimal PATH. On 2026-08-25 a 17.3.7-versus-
@@ -138,13 +115,12 @@ case "$cmd" in
     #                        headless workers exit 0 with empty stdout before any model call.
     #   --tools=Read,Write   read the transcript, write the findings JSON, nothing else.
     #   --no-session         leave no transcript, so the next night does not triage this one.
-    ovl=$(overlay_cfg) || exit 2
     printf '%s\0' "$(omp_bin)" \
       --allow-home \
       -p \
       --approval-mode yolo \
       --no-session \
-      --config "$ovl" \
+      --config "$OVERLAY" \
       --model "$1" \
       --tools=Read,Write \
       --append-system-prompt 'Headless triage worker. Read the session transcript and write exactly one findings JSON object, via the Write tool, to the literal output path given on line 2 of the prompt. Those paths are literal strings, not shell variables — never $-expand them. Print only the literal word done and exit.'
@@ -152,13 +128,12 @@ case "$cmd" in
 
   threads-argv) # $1=model -> NUL-delimited argv for the tool-less thread linker
     [ "$#" -ge 1 ] && [ -n "$1" ] || exit 2
-    ovl=$(overlay_cfg) || exit 2
     printf '%s\0' "$(omp_bin)" \
       --allow-home \
       -p \
       --approval-mode=always-ask \
       --no-session \
-      --config "$ovl" \
+      --config "$OVERLAY" \
       --model "$1" \
       --tools= \
       --no-tools \
@@ -175,13 +150,12 @@ case "$cmd" in
     # omp-autodream's warmup: the worker's flags minus --tools, and a system prompt that asks for
     # one word. It carries the same overlay, so the call that refreshes the token is the call a
     # worker would have made.
-    ovl=$(overlay_cfg) || exit 2
     printf '%s\0' "$(omp_bin)" \
       --allow-home \
       -p \
       --approval-mode yolo \
       --no-session \
-      --config "$ovl" \
+      --config "$OVERLAY" \
       --model "$1" \
       --append-system-prompt 'Reply with the single word ok and exit.'
     ;;
@@ -310,13 +284,12 @@ case "$cmd" in
     # The system prompt is prompts/L2_SYSTEM.txt, read through the loader. No file means no argv.
     # shellcheck source=/dev/null
     sysprompt=$(. "$BIN/l2-prompt.sh" && l2_system_prompt) || exit 2
-    ovl=$(overlay_cfg) || exit 2
     printf '%s\0' "$(omp_bin)" \
       --allow-home \
       -p \
       --approval-mode yolo \
       --no-session \
-      --config "$ovl" \
+      --config "$OVERLAY" \
       --model "$1" \
       --tools=Glob,Read \
       --append-system-prompt "$sysprompt"

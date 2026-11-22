@@ -138,8 +138,6 @@ def main():
             adapter_env["CLAUDE_BIN" if args.engine == "claude" else "OMP_BIN"] = os.environ.get(
                 "CLAUDE_BIN" if args.engine == "claude" else "OMP_BIN", args.engine
             )
-            if args.engine == "omp":
-                adapter_env["NO_ADVISOR_CFG"] = str(repo / "adapters" / "omp" / "l1-no-advisor.yml")
             model = "claude-haiku-5-5" if args.engine == "claude" else "anthropic/claude-haiku-5-5"
             with argv_path.open("wb") as output:
                 built = subprocess.run([str(adapter), "threads-argv", model], env=adapter_env, stdout=output)
