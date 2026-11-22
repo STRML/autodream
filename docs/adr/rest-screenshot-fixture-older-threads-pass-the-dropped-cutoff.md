@@ -8,7 +8,7 @@ An open work thread reads as Dropped when its newest session is older than `AUTO
 
 ## Decision
 
-`OLDER_THREADS` rows with stored status `open` use an age above seven days (`last_seen` is that many days back), so the read-time rule derives Dropped for them. The fixture never stores `dropped`.
+`OLDER_THREADS` work rows with stored status `open` and an unfinished outcome (`not_achieved`, `partially_achieved` or `unclear_from_transcript`) use an age above seven days (`last_seen` is that many days back), so the read-time rule (`bin/threads-status.jq`) derives Dropped for them. Idea rows stay open at any age, so the fixture's old ideas fill the Ideas tab instead. The fixture never stores `dropped`.
 
 ## Consequences
 

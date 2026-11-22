@@ -12,7 +12,7 @@ The Claude mod used to rewrite the file itself, without the script's lock. A cop
 
 ## Decision
 
-- A tags file that exists and is not a readable regular file, or does not parse, makes the script die with `nothing was changed`. Only an absent file counts as empty.
+- A tags file that exists and is not a readable regular file makes the script die with `nothing was changed`. Only an absent file counts as empty. A readable file with a line that does not parse is not a refusal: the line is kept as it stands.
 - Lines the script does not understand are kept as they stood: untagging drops only the lines whose parsed `.id` matches, found by 1-based line number (any number of them, in case of a hand edit), and an add never touches existing lines.
 - An add is one `O_APPEND` write of the line, preceded by a newline when the last byte of the file is not one (a torn last line), in the same write, so the new tag is not glued onto the torn one. It cannot drop another writer's line even if that writer takes no lock, and there is no copy to come out partial.
 - A take-back is a temp file in the same directory and one `mv`. The cksum fingerprint is taken before the copy and checked again just before the rename, and a change makes the script refuse. The lock holds off every cooperating writer; the fingerprint is for a writer that takes no lock.
