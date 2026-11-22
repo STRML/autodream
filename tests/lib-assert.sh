@@ -1,7 +1,7 @@
 #!/bin/bash
 
 ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
-no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
+no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); [ -n "${GITHUB_ACTIONS:-}" ] && printf '::error::FAIL %s\n' "$(printf '%s' "$1" | head -c 280 | tr '\n' ' ')"; return 0; }
 
 assert_eq(){
   if [ "$1" = "$2" ]; then ok "$3"; else no "$3 (got [$1] want [$2])"; fi
