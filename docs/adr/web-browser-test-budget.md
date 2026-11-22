@@ -11,7 +11,7 @@ Per-attempt deadlines cannot simply add up: a suite of 23 tests could spend 23 x
 ## Decision
 
 - `CHROME_ATTEMPTS` is a list of (virtual-time budget in ms, subprocess deadline in seconds) pairs. An attempt that wrote no `data-result` is retried with more room and a fresh profile. A `FAIL` result is returned at once.
-- `SUITE_BUDGET` (`ADWEB_BROWSER_BUDGET`, default 270 seconds) covers all Chrome time in the process. Each attempt is clamped to what is left. `tests/autodream-web.sh` gives the process a deadline above this one, so an exhausted budget fails one test with `TimeoutExpired` and the suite still prints its counts.
+- `SUITE_BUDGET` (`ADWEB_BROWSER_BUDGET`, default 270 seconds) covers all Chrome time in the process. Each attempt is clamped to what is left. `tests/autodream-web.sh` gives the process a deadline above this one, so the suite is not killed mid-run. When the budget is gone before any attempt starts, `dump_dom` raises `TimeoutExpired`. When it runs out after an unfinished attempt, `dump_dom` returns that last output and the calling test's assertion fails. Either way the suite still prints its counts.
 - A retry must start from the state the first attempt started from. `before_retry` puts back anything the page's own run changed, such as a killed backend. A `before_retry` that restarts the live backend waits up to 30 seconds for its origin line and 5 to stop the old one, so a retry needs `RESTART_RESERVE` (40 seconds) left before it may start.
 - The login handoff test gives Chrome a copy of the handoff page, because the server deletes the original on first login and a retry would otherwise read a file that is gone.
 
