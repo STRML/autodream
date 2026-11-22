@@ -1,0 +1,158 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 540" width="1280" height="540" role="img" aria-labelledby="t d">
+  <title id="t">autodream pipeline</title>
+  <desc id="d">Session transcripts from local config dirs, OMP and remote hosts are enumerated by run.sh, triaged by sandboxed Layer 1 workers into findings files, ranked by a read-only Layer 2 aggregator, and written by run.sh into a report, memory pins, a thread index and a dashboard.</desc>
+  <style>
+    :root {
+      --bg: #0d1117; --box: #151b2e; --stroke: #3b4796; --fg: #eef1ff; --muted: #9aa6d8;
+      --accent: #8ea2ff; --teal: #5eead4; --amber: #fbbf24; --line: #6b78c8;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f7f8ff; --box: #ffffff; --stroke: #aab5ea; --fg: #121838; --muted: #4a558c;
+        --accent: #3f53d6; --teal: #0b8a78; --amber: #b45309; --line: #6f7cc9;
+      }
+    }
+    .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .bg { fill: var(--bg); }
+    .box { fill: var(--box); stroke: var(--stroke); stroke-width: 1.5; }
+    .h { fill: var(--fg); font-size: 17px; font-weight: 700; }
+    .t { fill: var(--muted); font-size: 13px; }
+    .h2 { fill: var(--fg); font-size: 15px; font-weight: 700; }
+    .m { fill: var(--muted); font-size: 12px; }
+    .k { fill: var(--accent); font-size: 12px; font-weight: 700; letter-spacing: 1px; }
+    .arrow { stroke: var(--line); stroke-width: 2; fill: none; marker-end: url(#ah); }
+    .sandbox { fill: none; stroke: var(--amber); stroke-width: 2; stroke-dasharray: 7 5; }
+    .ro { fill: var(--box); stroke: var(--teal); stroke-width: 2; }
+    .amber { fill: var(--amber); font-size: 12px; font-weight: 700; letter-spacing: .5px; }
+    .teal { fill: var(--teal); font-size: 12px; font-weight: 700; letter-spacing: .5px; }
+    .worker { fill: var(--bg); stroke: var(--amber); stroke-width: 1.2; opacity: .95; }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="var(--line)"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" width="1280" height="540" rx="16"/>
+
+  <!-- stage labels -->
+  <g class="sans">
+    <text class="k" x="30"   y="50">SESSIONS</text>
+    <text class="k" x="230"  y="50">RUNNER</text>
+    <text class="k" x="410"  y="50">LAYER 1</text>
+    <text class="k" x="670"  y="50">FINDINGS</text>
+    <text class="k" x="850"  y="50">LAYER 2</text>
+    <text class="k" x="1050" y="50">OUTPUTS</text>
+  </g>
+
+  <!-- sources -->
+  <g class="sans">
+    <rect class="box" x="30" y="90"  width="170" height="72" rx="10"/>
+    <text class="h" x="46" y="118">Claude Code</text>
+    <text class="m mono" x="46" y="142">~/.claude*/projects</text>
+
+    <rect class="box" x="30" y="178" width="170" height="72" rx="10"/>
+    <text class="h" x="46" y="206">OMP</text>
+    <text class="m mono" x="46" y="230">~/.omp/agent/sessions</text>
+
+    <rect class="box" x="30" y="266" width="170" height="72" rx="10"/>
+    <text class="h" x="46" y="294">Other hosts</text>
+    <text class="t" x="46" y="318">one-way rsync over ssh</text>
+  </g>
+
+  <!-- runner -->
+  <g class="sans">
+    <rect class="box" x="230" y="120" width="150" height="190" rx="10"/>
+    <text class="h" x="246" y="150">run.sh</text>
+    <text class="t" x="246" y="176">enumerate</text>
+    <text class="t" x="246" y="196">pick the report day</text>
+    <text class="t" x="246" y="216">noise gate</text>
+    <text class="t" x="246" y="236">per-session stats</text>
+    <text class="t" x="246" y="256">normalize, slim,</text>
+    <text class="t" x="246" y="274">or chunk</text>
+  </g>
+
+  <!-- layer 1 -->
+  <rect class="sandbox" x="410" y="70" width="230" height="290" rx="12"/>
+  <g class="sans">
+    <rect class="worker" x="430" y="96"  width="190" height="52" rx="8"/>
+    <text class="h2" x="446" y="118">worker</text>
+    <text class="m" x="446" y="137">one session in, one JSON out</text>
+    <rect class="worker" x="430" y="160" width="190" height="52" rx="8"/>
+    <text class="h2" x="446" y="182">worker</text>
+    <text class="m" x="446" y="201">cheap model, effort high</text>
+    <rect class="worker" x="430" y="224" width="190" height="52" rx="8"/>
+    <text class="h2" x="446" y="246">worker</text>
+    <text class="m" x="446" y="265">FANOUT in parallel (8)</text>
+    <text class="amber" x="446" y="306">OS SANDBOX PER CALL</text>
+    <text class="m" x="446" y="326">writes only its staging dir</text>
+    <text class="m" x="446" y="344">reads and network unchanged</text>
+  </g>
+
+  <!-- findings -->
+  <g class="sans">
+    <rect class="box" x="670" y="120" width="150" height="190" rx="10"/>
+    <text class="h" x="686" y="150">findings/DATE</text>
+    <text class="t mono" x="686" y="176">&lt;hash&gt;.json</text>
+    <text class="t mono" x="686" y="196">rollup.tsv</text>
+    <text class="t mono" x="686" y="216">categories.tsv</text>
+    <text class="t mono" x="686" y="236">run-stats.txt</text>
+    <text class="m" x="686" y="272">counts come from the</text>
+    <text class="m" x="686" y="289">runner, not the model</text>
+  </g>
+
+  <!-- side inputs to L2 -->
+  <g class="sans">
+    <rect class="box" x="850" y="70" width="170" height="38" rx="8" stroke-dasharray="4 4"/>
+    <text class="t" x="865" y="94">changelogs and notes</text>
+  </g>
+
+  <!-- layer 2 -->
+  <g class="sans">
+    <rect class="ro" x="850" y="130" width="170" height="170" rx="10"/>
+    <text class="h" x="866" y="160">aggregator</text>
+    <text class="t" x="866" y="184">ranks by frequency</text>
+    <text class="t" x="866" y="202">and severity</text>
+    <text class="t" x="866" y="226">prints the report and</text>
+    <text class="t" x="866" y="244">proposed pins to stdout</text>
+    <text class="teal" x="866" y="280">TOOLS: GLOB, READ</text>
+  </g>
+
+  <!-- outputs -->
+  <g class="sans">
+    <rect class="box" x="1050" y="90"  width="200" height="52" rx="8"/>
+    <text class="h2" x="1066" y="112">dreams/DATE.md</text>
+    <text class="m" x="1066" y="130">report and open questions</text>
+    <rect class="box" x="1050" y="152" width="200" height="52" rx="8"/>
+    <text class="h2" x="1066" y="174">memory pins</text>
+    <text class="m" x="1066" y="192">validated, then Mnemopi</text>
+    <rect class="box" x="1050" y="214" width="200" height="52" rx="8"/>
+    <text class="h2" x="1066" y="236">threads.jsonl</text>
+    <text class="m" x="1066" y="254">dropped work, ideas</text>
+    <rect class="box" x="1050" y="276" width="200" height="52" rx="8"/>
+    <text class="h2" x="1066" y="298">local dashboard</text>
+    <text class="m" x="1066" y="316">127.0.0.1, five views</text>
+  </g>
+
+  <!-- arrows -->
+  <path class="arrow" d="M200 126 L230 190"/>
+  <path class="arrow" d="M200 214 L230 214"/>
+  <path class="arrow" d="M200 302 L230 240"/>
+  <path class="arrow" d="M380 215 L410 215"/>
+  <path class="arrow" d="M640 215 L670 215"/>
+  <path class="arrow" d="M820 215 L850 215"/>
+  <path class="arrow" d="M935 108 L935 130"/>
+  <path class="arrow" d="M1020 215 L1050 215"/>
+
+  <!-- legend and rule -->
+  <g class="sans">
+    <line x1="30" y1="400" x2="1250" y2="400" stroke="var(--stroke)" stroke-width="1" opacity=".6"/>
+    <path d="M30 432 L64 432" stroke="var(--amber)" stroke-width="2" stroke-dasharray="7 5" fill="none"/>
+    <text class="t" x="76" y="437">Layer 1 calls run confined (claude and omp) where the engine adapter declares a write list; the runner copies each answer out after the engine exits</text>
+    <path d="M30 462 L64 462" stroke="var(--teal)" stroke-width="2" fill="none"/>
+    <text class="t" x="76" y="467">Layer 2 has no Write tool; its output is a stream the runner parses</text>
+    <path d="M30 492 L64 492" stroke="var(--line)" stroke-width="2" fill="none"/>
+    <text class="t" x="76" y="497">run.sh is the only writer of the report, the pins and the state files</text>
+  </g>
+</svg>

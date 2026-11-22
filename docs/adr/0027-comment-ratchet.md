@@ -1,0 +1,13 @@
+# 0027: No new comments: the ratchet and where decisions go
+
+Status: accepted · Governs: 
+
+This record holds 1 sections: one per decision, and a Background section for each narrative that used to live in CLAUDE.md.
+
+- [Background: No new comments](#background-no-new-comments)
+
+## Background: No new comments
+
+This section was moved here from the former CLAUDE.md. Its original title: "No new comments".
+
+**No new comments.** Code carries its meaning in names and small functions, and a decision the code cannot show goes in `docs/adr/`. `tests/comment-ratchet.sh` enforces it: a tracked code file may not hold more real comment lines than `.comment-baseline` allows (none for a file not listed). After deleting comments, tighten the baseline with `tests/comment-ratchet.sh --update`; it refuses to raise a count unless `--allow-increase` is passed, which needs a reason in the PR. The counter is `bin/comment-count.sh`, a wrapper over `bin/comment-count.py`, and it parses instead of matching lines: `shfmt --to-json` for shell (every Comment node that starts its line; heredoc bodies and multiline strings are not comments in the AST), stdlib `tokenize` for Python, and a line-start rule for JS/TS (a line counts when its first non-blank characters are `//`, `/*` or `*`; a `/*` that a later `*/` closes counts every non-blank line up to it, an unclosed one counts only itself; no string, template or regex tracking, because telling `/` apart needs the grammar and a lexer guess failed five review rounds). Its trades are stated and pinned in `docs/plans/2026-11-22-chore_comment-ratchet-redesign.md`: a template-literal line that starts with `//` or `/*` is over-counted (it can fail a PR, never hide a comment), and a block that opens after code is not counted on its opening line. Declaration files count like any other file. Only the exact directive forms are exempt (`# shellcheck disable=|source=|shell=`, `# noqa`, `# type: ignore`, `# pragma:`, `// @ts-expect-error`, `// @ts-ignore`, `// oxlint-disable`), so `# pragmatism matters` is a comment. It fails closed: a file it cannot read or parse, a path with a tab or newline, a missing `shfmt` (`brew install shfmt`, `apt-get install shfmt`; CI installs it in `tests.yml` and `launchd.yml`), an empty, unreadable or malformed baseline, and any failed `awk`, `sort`, `mktemp` or `mv` in the check or in `--update` all exit 1, never a zero or a pass. `--update` builds the new baseline in a temp file beside the old one and renames it only after every step succeeded. A web-only PR still runs the ratchet (`comment ratchet, web scope` in `tests.yml`). The procedure for auditing what is left is the global `/delete-comment` skill.
