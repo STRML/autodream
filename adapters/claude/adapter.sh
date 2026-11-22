@@ -268,6 +268,28 @@ case "$cmd" in
     printf '%s\n' CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1
     ;;
 
+  l1-writes) # -> the paths an L1 worker may write besides its staging directory, one per line
+    # run.sh runs the worker under an OS sandbox that can write nothing else (#169, bin/l1-confine.sh),
+    # so this list is the whole of what the claude CLI is allowed to touch of its own. Default deny: a
+    # path is here only because a confined call needs it or it is a cache no later run executes.
+    #
+    # Deliberately NOT here, each a way for a prompt-injected worker to run code as the user later:
+    #   ~/.claude.json and its backups (mcpServers, allowedTools, enabledMcpjsonServers), the config dir's
+    #   settings, hooks, skills and plugins, session-env (sessionstart-hook env files a live session
+    #   sources), and the CLI's install dir (auto-update writes executables there).
+    # What is: the isolated work bucket (an AI-title stub lands there, and run.sh wipes it after L1 and
+    # again after L2) and the CLI's own cache, which holds logs and nothing that is read as code.
+    # A host whose confined call fails without something else names it in AUTODREAM_L1_WRITES_EXTRA
+    # (colon-separated, a trailing * is a prefix) and accepts that path's exposure; see docs/plans/
+    # 2026-11-21-l1-confine-write-list.md for how to find the paths and what each one costs.
+    [ -z "${AUTODREAM_WORK_BUCKET:-}" ] || printf '%s\n' "$AUTODREAM_WORK_BUCKET"
+    printf '%s\n' "$HOME/Library/Caches/claude-cli-nodejs" "$HOME/.cache/claude-cli-nodejs"
+    # Globbing off: an entry such as ~/.claude.json* must stay a prefix, not expand to the files that exist.
+    old_ifs=$IFS; IFS=:; set -f
+    for extra in ${AUTODREAM_L1_WRITES_EXTRA:-}; do [ -n "$extra" ] && printf '%s\n' "$extra"; done
+    set +f; IFS=$old_ifs
+    ;;
+
   l2-argv) # [$1=model] -> NUL-delimited argv for the L2 aggregator; the prompt arrives on stdin
     # Glob and Read only: the report and the pins come back on stdout and the runner is the only
     # writer. The model is optional, and absent means the CLI's own default, so an upgrade of the
