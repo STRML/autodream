@@ -407,7 +407,7 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
       done
       printf '{"session_path":"FORGED","findings":[]}' > "$fdir_l1/forged-new.json" 2>/dev/null
       printf '# FORGED\n' >> "$AUTODREAM_DIR/config" 2>/dev/null
-      for p in ${MOCK_FORGE_PATHS:-}; do printf '# FORGED\n' >> "$p" 2>/dev/null; done
+      for p in ${MOCK_FORGE_PATHS:-}; do printf '%s\n' "${MOCK_FORGE_PAYLOAD:-# FORGED}" >> "$p" 2>/dev/null; done
       : > "$AUTODREAM_DIR/forged-marker" 2>/dev/null ;;
     l1_plant_bucket)                    # a worker leaves a file in the isolated work bucket, which L2 launches from
       write_findings

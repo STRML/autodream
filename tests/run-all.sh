@@ -4317,33 +4317,62 @@ EOF
   assert_no_file "$root/evil-ran" "and never runs"
   rm -rf "$root"
 }
-test_report_scripts_a_confined_worker_cannot_write_the_allowlist_or_a_listed_script(){
-  echo "# report scripts: a confined L1 worker cannot rewrite report-scripts.conf or a script it lists (and an unconfined one could)"
-  local root conf script
-  root=$(setup_env); mk_session "$root" sess1
-  mkdir -p "$root/rs"
-  printf '#!/bin/bash\necho "good ran"\n' > "$root/rs/good.sh"; chmod +x "$root/rs/good.sh"
-  conf="$root/autodream/report-scripts.conf"; script="$root/rs/good.sh"
-  printf 'good %s\n' "$script" > "$conf"
-  # Unconfined first: the same hostile worker lands both writes, so the refusals below mean something.
-  FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_PATHS="$conf $script" run_dream "$root"
-  assert_grep "$conf" '# FORGED' "unconfined, a worker appends to the allowlist the next night reads"
-  assert_grep "$script" '# FORGED' "and to a script the allowlist names"
-  assert_file "$(fdir "$root")/report-index.txt" "the collector still writes its index"
-  assert_eq "$(awk -F'\t' '$1 == "good" { print $2 }' "$(fdir "$root")/report-index.txt")" "changed" \
-    "and the pinned hash refuses the rewritten script, which is the second line of defence"
-  rm -rf "$root"
-  if ! l1_confine_real; then echo "  skip - no working sandbox on this host: the refusals below are untested here"; return 0; fi
-  root=$(setup_env); mk_session "$root" sess1
-  mkdir -p "$root/rs"
-  printf '#!/bin/bash\necho "good ran"\n' > "$root/rs/good.sh"; chmod +x "$root/rs/good.sh"
-  conf="$root/autodream/report-scripts.conf"; script="$root/rs/good.sh"
-  printf 'good %s\n' "$script" > "$conf"
-  FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_PATHS="$conf $script" AUTODREAM_L1_CONFINE=1 run_dream "$root"
-  assert_eq "$(cat "$conf")" "good $script" "confined, the allowlist is byte for byte what the operator wrote"
-  assert_nogrep "$script" '# FORGED' "and the script it lists is unchanged"
-  assert_grep "$(fdir "$root")/report-good.md" 'good ran' "and the entry still runs"
+rs_forge_setup(){ # $1=root -> a good.sh that sources dep.sh, and a conf that lists it; sets RS_CONF RS_SCRIPT RS_DEP
+  RS_CONF="$1/autodream/report-scripts.conf"; RS_SCRIPT="$1/rs/good.sh"; RS_DEP="$1/rs/dep.sh"
+  mkdir -p "$1/rs"
+  printf 'echo "dep ok"\n' > "$RS_DEP"
+  printf '#!/bin/bash\n. "%s"\necho "good ran"\n' "$RS_DEP" > "$RS_SCRIPT"; chmod +x "$RS_SCRIPT"
+  printf 'good %s\n' "$RS_SCRIPT" > "$RS_CONF"
+}
+test_report_scripts_run_before_any_worker_so_a_rewritten_script_or_dependency_cannot_change_tonights_output(){
+  echo "# report scripts: collected before L1, so a worker that rewrites a listed script or a file it sources changes nothing tonight"
+  local root; root=$(setup_env); mk_session "$root" sess1; rs_forge_setup "$root"
+  FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_PATHS="$RS_CONF $RS_SCRIPT $RS_DEP" MOCK_FORGE_PAYLOAD='echo FORGED-RAN' run_dream "$root"
+  assert_grep "$RS_DEP" 'FORGED-RAN' "unconfined, the worker did append code to the file the script sources"
+  assert_grep "$(fdir "$root")/report-good.md" 'dep ok' "tonight's report holds what the script printed before the worker started"
+  assert_nogrep "$(fdir "$root")/report-good.md" 'FORGED-RAN' "and none of the code the worker added"
   assert_eq "$(awk -F'\t' '$1 == "good" { print $2 }' "$(fdir "$root")/report-index.txt")" "ok" "with status ok"
+  rm -rf "$root"
+}
+test_report_scripts_a_worker_that_rewrites_a_collected_report_file_is_replaced_by_unavailable(){
+  echo "# report scripts: the runner hashes the collected files before L1 and checks them before L2"
+  local f case_
+  for case_ in index report planted; do
+    local root; root=$(setup_env); mk_session "$root" sess1; rs_forge_setup "$root"
+    f=$(fdir "$root")
+    case "$case_" in
+      index)   FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_PATHS="$f/report-index.txt" run_dream "$root" ;;
+      report)  FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_PATHS="$f/report-good.md" run_dream "$root" ;;
+      planted) FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_PATHS="$f/report-planted.md" run_dream "$root" ;;
+    esac
+    assert_grep "$f/report-index.txt" '^# report-scripts: unavailable' "$case_: the index says unavailable"
+    assert_grep "$f/report-index.txt" 'changed after collection' "$case_: and why"
+    assert_no_file "$f/report-good.md" "$case_: the collected report file is gone"
+    assert_no_file "$f/report-planted.md" "$case_: and so is anything planted beside it"
+    assert_grep "$f/run-stats.txt" '^report_scripts: unavailable$' "$case_: run-stats says unavailable"
+    assert_file "$root/dreams/$DATE.md" "$case_: the report still lands"
+    rm -rf "$root"
+  done
+}
+test_report_scripts_untouched_files_keep_their_rows_through_l1(){
+  echo "# report scripts: a worker that writes elsewhere in the findings dir leaves the collected files alone"
+  local root f; root=$(setup_env); mk_session "$root" sess1; rs_forge_setup "$root"
+  f=$(fdir "$root")
+  FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_PATHS="$f/not-a-report.txt" run_dream "$root"
+  assert_grep "$f/report-good.md" 'good ran' "the collected report is still there"
+  assert_eq "$(awk -F'\t' '$1 == "good" { print $2 }' "$f/report-index.txt")" "ok" "and its row still says ok"
+  assert_grep "$f/run-stats.txt" '^report_scripts: 1$' "run-stats counts the entry"
+  rm -rf "$root"
+}
+test_report_scripts_a_confined_worker_cannot_write_the_allowlist_or_a_listed_script(){
+  echo "# report scripts: a confined L1 worker also cannot rewrite the conf, a listed script or a file it sources on disk"
+  if ! l1_confine_real; then echo "  skip - no working sandbox on this host: the refusals below are untested here"; return 0; fi
+  local root; root=$(setup_env); mk_session "$root" sess1; rs_forge_setup "$root"
+  FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_PATHS="$RS_CONF $RS_SCRIPT $RS_DEP" MOCK_FORGE_PAYLOAD='echo FORGED-RAN' AUTODREAM_L1_CONFINE=1 run_dream "$root"
+  assert_eq "$(cat "$RS_CONF")" "good $RS_SCRIPT" "confined, the allowlist is byte for byte what the operator wrote"
+  assert_nogrep "$RS_SCRIPT" 'FORGED-RAN' "the script it lists is unchanged"
+  assert_nogrep "$RS_DEP" 'FORGED-RAN' "and so is the file that script sources"
+  assert_grep "$(fdir "$root")/report-good.md" 'good ran' "and the entry ran"
   rm -rf "$root"
 }
 test_report_scripts_a_collector_changed_after_the_run_started_is_not_executed(){
@@ -11313,6 +11342,9 @@ _run test_report_scripts_land_in_the_findings_dir_and_a_failure_is_content
 _run test_report_scripts_no_conf_still_writes_the_index
 _run test_report_scripts_a_broken_or_missing_collector_never_aborts_the_run
 _run test_report_scripts_a_conf_rewritten_after_the_snapshot_runs_nothing_new
+_run test_report_scripts_run_before_any_worker_so_a_rewritten_script_or_dependency_cannot_change_tonights_output
+_run test_report_scripts_a_worker_that_rewrites_a_collected_report_file_is_replaced_by_unavailable
+_run test_report_scripts_untouched_files_keep_their_rows_through_l1
 _run test_report_scripts_a_confined_worker_cannot_write_the_allowlist_or_a_listed_script
 _run test_report_scripts_a_collector_changed_after_the_run_started_is_not_executed
 _run test_report_scripts_earlier_files_that_cannot_be_cleared_stop_the_run

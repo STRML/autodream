@@ -345,10 +345,12 @@ its stderr, so the report shows the failure instead of nothing. A failing script
 A script that ignores the timeout's TERM is killed five seconds later, and no file it writes can
 grow past four times the cap.
 A note, which can come from a phone, cannot make the run execute anything new. Neither can the
-model workers that read your transcripts: the run snapshots the conf and the sha256 of each listed
-script before any model starts, and runs only that. A script that changed since, or did not exist
-then, is not run and shows as `changed` in the index, so edit the conf or a script between nights,
-not during a run.
+model workers that read your transcripts. Before any model starts, the run snapshots the conf and
+the sha256 of each listed script, then runs those scripts at once. If a script changed after the
+snapshot, or did not exist then, the run skips it and the index shows `changed`, so edit the conf
+or a script between nights, not during a run. Before it writes the report, the run checks the files
+the scripts wrote. If any changed, the index becomes `unavailable`. A script reports the machine as
+it was when the run started.
 
 `stop-check-counts.sh [--since-hours N]` ships as one such script: it counts the
 `~/.claude/stop-check/verdicts.jsonl` verdicts by kind inside the window (default 36 hours),
