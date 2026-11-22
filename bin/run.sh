@@ -1206,7 +1206,7 @@ lock_take_dir() {
 }
 
 lock_discard_dir() {
-  rm -f "$1/pid" "$1/start" "$1/pid.tmp" "$1/start.tmp"
+  rm -f "$1/pid" "$1/start"
   rmdir "$1" 2>/dev/null || true
 }
 
