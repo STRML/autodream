@@ -1,5 +1,4 @@
 #!/bin/bash
-# Sourced by the test suites. The caller sets pass=0 fail=0 and ends with its own totals line.
 
 ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
 no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
