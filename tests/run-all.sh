@@ -3307,7 +3307,7 @@ test_l1_worker_setup_failure_defers_the_date_and_follows_no_planted_link(){
   printf 'precious\n' > "$root/victim"
   # A claude adapter with a state verb that passes the setup dry run (a stage named .setup-*) and fails every
   # attempt after it, planting a symlink at the old stderr path inside the stage first.
-  sed 's|^  l2-argv) |  l1-stage-env) case "$1" in *.setup-*) exit 0 ;; esac; ln -sf "$VICTIM" "$1/stage-env.err" 2>/dev/null; echo "no state dir" >\&2; exit 1 ;;\n\n  l2-argv) |' \
+  sed 's|^  l2-argv)|  l1-stage-env) case "$1" in *.setup-*) exit 0 ;; esac; ln -sf "$VICTIM" "$1/stage-env.err" 2>/dev/null; echo "no state dir" >\&2; exit 1 ;;\n\n  l2-argv)|' \
     "$REPO/adapters/claude/adapter.sh" > "$root/adapters/claude/adapter.sh"
   printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/notify.log"\n' "$root" > "$root/autodream/notify.sh"; chmod +x "$root/autodream/notify.sh"
   VICTIM="$root/victim" PATH="$root/shim-sb:$PATH" ADAPTERS_ROOT="$root/adapters" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec run_dream "$root"
