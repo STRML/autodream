@@ -53,23 +53,23 @@ settle_tree() {
   for p in $(cat "$1" 2>/dev/null); do kill -s KILL "$p" 2>/dev/null || true; done
 }
 
-reap_session() {
-  local sid="$1" leftflag="$2" pids rc i=0 limit=$((KILL_GRACE * 10))
-  pids=$(pgrep -s "$sid" 2>/dev/null); rc=$?
+reap_group() {
+  local g="$1" leftflag="$2" rc i=0 limit=$((KILL_GRACE * 10))
+  pgrep -g "$g" > /dev/null 2>&1; rc=$?
   case "$rc" in
     1) return 0 ;;
     0) ;;
     *) printf 'unknown\n' > "$leftflag"; return 0 ;;
   esac
   printf 'stopped\n' > "$leftflag"
-  kill -s TERM $pids 2>/dev/null || true
+  kill -s TERM -- "-$g" 2>/dev/null || true
   while [ "$i" -lt "$limit" ]; do
-    pgrep -s "$sid" > /dev/null 2>&1 || return 0
+    pgrep -g "$g" > /dev/null 2>&1 || return 0
     sleep 0.1; i=$((i + 1))
   done
-  kill -s KILL $(pgrep -s "$sid" 2>/dev/null) 2>/dev/null || true
+  kill -s KILL -- "-$g" 2>/dev/null || true
   sleep 0.2
-  if pgrep -s "$sid" > /dev/null 2>&1; then printf 'alive\n' > "$leftflag"; fi
+  if pgrep -g "$g" > /dev/null 2>&1; then printf 'alive\n' > "$leftflag"; fi
 }
 
 leftover_reason() {
@@ -94,7 +94,7 @@ run_bounded() {
   wait "$pid"; rc=$?
   kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
   if [ -s "$flag" ]; then settle_tree "$flag"; fi
-  reap_session "$pid" "$leftflag"
+  reap_group "$pid" "$leftflag"
   return "$rc"
 }
 
