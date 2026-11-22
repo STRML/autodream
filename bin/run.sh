@@ -1212,7 +1212,7 @@ lock_discard_dir() {
 lock_meta_writable() {
   local f
   [ -d "$1" ] && [ ! -L "$1" ] && [ -w "$1" ] || return 1
-  for f in "$1/start" "$1/pid"; do
+  for f in "$1/start" "$1/pid" "$1/start.tmp" "$1/pid.tmp"; do
     [ ! -L "$f" ] || return 1
     [ ! -e "$f" ] || { [ -f "$f" ] && [ -w "$f" ]; } || return 1
   done
