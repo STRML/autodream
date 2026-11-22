@@ -387,6 +387,22 @@ SPU="$tmp/skill-by-file-nocwd.jsonl"
 } > "$SPU"
 HOME= "$A" stats "$SPU" "$tmp/stspu.json" >/dev/null 2>&1
 assert_eq "$(jq -r '"\(.skills_invoked|join(",")) \(.skills_invoked_count)"' "$tmp/stspu.json")" "bar 1" "an unresolvable path falls back to the skill-name match; resolvable ones compare as files"
+# A SKILL.md fetched from the web is being installed or inspected, not invoked (#185). The session above hid it
+# only because it also wrote the file; one that fetches without writing used to be counted. A file-backed read
+# through omp's resolvers (file://, memory://, skill://) still names a skill, as does a plain path.
+SPW="$tmp/skill-url-reads.jsonl"
+{ echo "$HDR_TITLE"; hdr_session 41 /tmp; umsg u1 null a
+  RD 1 u1 'https://raw.githubusercontent.com/o/skills/main/skills/fetched/SKILL.md'
+  RD 2 r1 'http://example.invalid/skills/plain/SKILL.md:raw'
+  RD 3 r2 'file:///Users/x/.claude/skills/filed/SKILL.md'
+  RD 4 r3 'HTTPS://example.invalid/skills/upper/SKILL.md; /Users/x/.claude/skills/local/SKILL.md'
+  RD 5 r4 'www.example.invalid/skills/bare/SKILL.md'
+  RD 6 r5 'memory://root/skills/mem/SKILL.md'
+  RD 7 r6 'skill://real'
+  RD 8 r7 '/Users/x/.claude/skills/fetched/SKILL.md'
+} > "$SPW"
+"$A" stats "$SPW" "$tmp/stspw.json" >/dev/null 2>&1
+assert_eq "$(jq -r '"\(.skills_invoked|join(",")) \(.skills_invoked_count)"' "$tmp/stspw.json")" "fetched,filed,local,mem,real 5" "web reads (http, https in any case, bare www.) are not invocations; file://, memory://, skill:// and plain paths are, and a later local read of a fetched name counts"
 
 echo "# is-self: omp's own worker transcripts"
 SELF="$tmp/self.jsonl"
