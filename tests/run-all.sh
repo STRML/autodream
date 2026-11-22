@@ -3455,16 +3455,33 @@ test_run_lock_a_failed_pid_rename_leaves_a_dead_pid_no_rollback_and_no_temp(){
   rm -rf "$root"
 }
 
-test_run_lock_a_liveness_probe_that_fails_to_run_is_not_a_dead_holder(){
-  echo "# the run lock: only no such process reads as dead, so a probe that exits 1 for any other reason keeps the holder"
+test_run_lock_only_the_word_dead_from_the_liveness_probe_reads_as_dead(){
+  echo "# the run lock: only the word dead from a probe that exited 0 reads as dead, so a probe that fails, exits 91 or says anything else keeps the holder"
   local root; root=$(setup_env); local sh="$root/shim" dead out
   mkdir -p "$sh" "$root/autodream"
   printf '#!/bin/sh\nexit 1\n' > "$sh/python3"; chmod +x "$sh/python3"
   true & dead=$!; wait "$dead" 2>/dev/null
   out=$(PATH="$sh:$PATH" lock_fn "$root/autodream" 'lock_pid_alive 4242; echo rc=$?')
   assert_eq "$out" "rc=0" "a python that exits 1 before it probes reads as alive"
+  printf '#!/bin/sh\nexit 91\n' > "$sh/python3"
+  out=$(PATH="$sh:$PATH" lock_fn "$root/autodream" 'lock_pid_alive 4242; echo rc=$?')
+  assert_eq "$out" "rc=0" "a python that exits 91 and says nothing reads as alive"
+  printf '#!/bin/sh\necho dead; exit 91\n' > "$sh/python3"
+  out=$(PATH="$sh:$PATH" lock_fn "$root/autodream" 'lock_pid_alive 4242; echo rc=$?')
+  assert_eq "$out" "rc=0" "a python that prints the word dead and then fails is not believed"
+  printf '#!/bin/sh\necho dead; exit 1\n' > "$sh/python3"
+  out=$(PATH="$sh:$PATH" lock_fn "$root/autodream" 'lock_pid_alive 4242; echo rc=$?')
+  assert_eq "$out" "rc=0" "a python that prints the word dead and exits 1 reads as alive"
+  printf '#!/bin/sh\necho dead; exit 0\n' > "$sh/python3"
+  out=$(PATH="$sh:$PATH" lock_fn "$root/autodream" 'lock_pid_alive 4242; echo rc=$?')
+  assert_eq "$out" "rc=1" "a python that prints the word dead and exits 0 is believed"
+  printf '#!/bin/sh\necho later; exit 0\n' > "$sh/python3"
+  out=$(PATH="$sh:$PATH" lock_fn "$root/autodream" 'lock_pid_alive 4242; echo rc=$?')
+  assert_eq "$out" "rc=0" "any other word reads as alive"
   out=$(lock_fn "$root/autodream" "lock_pid_alive $dead; echo rc=\$?")
   assert_eq "$out" "rc=1" "a pid that no process has still reads as dead"
+  out=$(lock_fn "$root/autodream" "lock_pid_alive $$; echo rc=\$?")
+  assert_eq "$out" "rc=0" "and a live pid reads as alive"
   rm -rf "$root"
 }
 
@@ -4727,7 +4744,7 @@ _run test_run_lock_metadata_of_the_wrong_type_is_refused_before_any_write
 _run test_run_lock_a_failed_pid_rename_leaves_a_dead_pid_no_rollback_and_no_temp
 _run test_run_lock_a_temp_that_cannot_be_removed_is_never_written_through
 _run test_run_lock_a_temp_that_is_a_link_is_replaced_and_never_written_through
-_run test_run_lock_a_liveness_probe_that_fails_to_run_is_not_a_dead_holder
+_run test_run_lock_only_the_word_dead_from_the_liveness_probe_reads_as_dead
 _run test_run_lock_a_lock_path_that_is_a_file_or_a_symlink_is_never_written_through
 _run test_run_lock_a_pid_of_zero_is_not_a_holder
 _run test_run_lock_a_failed_probe_is_not_a_dead_holder
