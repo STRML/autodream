@@ -8,9 +8,9 @@ L2 reads the tallies as ground truth. A tally built from a pipeline that lost a 
 
 ## Decision
 
-- The script runs under `pipefail`, and each of the four build stages is checked. A failure prints a message and exits 1 before any file is written.
+- The script runs under `pipefail`, and each of the four build stages is checked. A failure prints a message and exits 1 before any file is written. The three files are then published one after another.
 - Each output is written through `write_atomic`: a temp file beside the target and one `mv`, so a reader never sees half a file and a failed write leaves no temp behind.
 
 ## Consequences
 
-Exit 1 means the previous `rollup.tsv`, `categories.tsv` and `findings.tsv` are untouched, not a partial new set. Removing `pipefail` or the per-stage checks turns a broken tally into an empty one that L2 reports as a quiet night.
+Exit 1 from a build stage means the previous `rollup.tsv`, `categories.tsv` and `findings.tsv` are untouched. Each file is replaced atomically but the three are not one unit: a failed write of `categories.tsv` or `findings.tsv` leaves the earlier files already replaced. Removing `pipefail` or the per-stage checks turns a broken tally into an empty one that L2 reports as a quiet night.
