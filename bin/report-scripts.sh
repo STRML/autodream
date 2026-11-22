@@ -61,6 +61,14 @@ marked_pids() {
   printf '%s\n' "$found"
 }
 
+kill_marked() {
+  local sig="$1" tok="$2" p; shift 2
+  for p in "$@"; do
+    ps eww -o command= -p "$p" 2>/dev/null | grep -q -e "AUTODREAM_REPORT_[R]UN=$tok\( \|\$\)" && kill -s "$sig" "$p" 2>/dev/null
+  done
+  return 0
+}
+
 reap_marked() {
   local tok="$1" leftflag="$2" pids rc i=0 limit=$((KILL_GRACE * 10))
   pids=$(marked_pids "$tok"); rc=$?
@@ -70,13 +78,13 @@ reap_marked() {
     *) printf 'unknown\n' > "$leftflag"; return 0 ;;
   esac
   printf 'stopped\n' > "$leftflag"
-  kill -s TERM $pids 2>/dev/null || true
+  kill_marked TERM "$tok" $pids
   while [ "$i" -lt "$limit" ]; do
     marked_pids "$tok" > /dev/null || return 0
     sleep 0.1; i=$((i + 1))
   done
   pids=$(marked_pids "$tok")
-  kill -s KILL $pids 2>/dev/null || true
+  kill_marked KILL "$tok" $pids
   sleep 0.2
   if marked_pids "$tok" > /dev/null; then printf 'alive\n' > "$leftflag"; fi
 }
