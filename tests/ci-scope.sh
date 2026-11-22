@@ -1,10 +1,4 @@
 #!/bin/bash
-# Tests for .github/ci-scope.sh, which decides whether a PR's tests.yml run needs the whole suite
-# or only the web dashboard's suite. The failure that matters is a PR classified `web` whose change
-# the full suite would have caught, so every assertion here leans toward `full`.
-#
-# Usage:  tests/ci-scope.sh
-# Exit:   0 if every assertion passes, 1 otherwise.
 
 set -u
 
@@ -13,9 +7,8 @@ REPO=$(cd "$HERE/.." && pwd)
 SCOPE="$REPO/.github/ci-scope.sh"
 
 pass=0; fail=0
-ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
-no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
-assert_eq(){ if [ "$1" = "$2" ]; then ok "$3"; else no "$3 (got [$1] want [$2])"; fi; }
+# shellcheck source=/dev/null
+. "$HERE/lib-assert.sh"
 scope(){ printf '%s\n' "$@" | bash "$SCOPE" 2>/dev/null; }
 
 if [ ! -f "$SCOPE" ]; then
@@ -48,8 +41,6 @@ assert_eq "$(scope web/../bin/run.sh)" full "a path that climbs out of web/"
 assert_eq "$(printf '' | bash "$SCOPE" 2>/dev/null)" full "no changed paths at all"
 
 echo "# given a base and a head, it diffs them itself and sees both sides of a rename"
-# --name-only alone reports a rename by its new path only, so moving bin/run.sh into web/ read as a
-# web-only change. The selector now runs the diff, with --no-renames, so CI cannot pass it half.
 G=$(mktemp -d "${TMPDIR:-/tmp}/ciscope.XXXXXX")
 ( cd "$G" && git init -q && git config user.email t@t && git config user.name t \
   && mkdir bin web && printf 'echo run\n' > bin/run.sh && printf 'a{}\n' > web/app.css \
@@ -66,20 +57,12 @@ fi
 rm -rf "$G"
 
 echo "# every tracked web file is one the full suite never reads"
-# The oracle for the rule: a file the selector calls web must not be named by any code tests.yml's
-# full suite runs. web/threads.* fails this, which is why the selector excludes it. Left out of the
-# readers: install.sh, which only links the web files; the macOS-only suites run-all adds on Darwin
-# (install-web-agent among them), which tests.yml's Linux shards never run and launchd.yml still
-# runs on its own paths; and bin/autodream-web, the launcher only the web suite and those macOS
-# suites start.
 web_files=$(cd "$REPO" && git ls-files | while IFS= read -r p; do
   if [ "$(scope "$p")" = web ] && [ "${p%.md}" = "$p" ]; then printf '%s\n' "$p"; fi
 done)
 [ -n "$web_files" ] && ok "some tracked files classify as web ($(printf '%s\n' "$web_files" | wc -l | tr -d ' '))" || no "no tracked file classifies as web"
 darwin_only=$(sed -n 's/.*Darwin \] && _suites="$_suites \(.*\)"$/\1/p' "$HERE/run-all.sh")
 [ -n "$darwin_only" ] && ok "run-all.sh's macOS-only suites are known ($darwin_only)" || no "could not read run-all.sh's macOS-only suites"
-# A function, not a loop inside $(...): bash 3.2 cannot parse a case pattern's `)` inside a command
-# substitution, which is the interpreter run-all.sh and launchd use on macOS.
 reader_paths() {
   local p
   cd "$REPO" && git ls-files 'bin/*' 'adapters/*' 'prompts/*' 'tests/*.sh' 'tests/*.py' | while IFS= read -r p; do
@@ -109,9 +92,24 @@ assert_eq "$(printf '%s\n' "$shfmt_step" | grep -c 'apt-get install.* shfmt')" 1
 assert_eq "$(printf '%s\n' "$shfmt_step" | grep -c "scope == 'full' || matrix.shard == 0")" 1 "on every full shard and on shard 0 of a web run"
 assert_eq "$(grep -c 'brew install shfmt' "$LAUNCHD_YML")" 1 "launchd.yml's full suite installs shfmt too"
 
-assert_eq "$(grep -c "^      - '!docs/\*\*'$" "$TESTS_YML") $(grep -c "^      - '!example/\*\*'$" "$TESTS_YML")" "2 2" "tests.yml keeps skipping docs/ and example/ in both lists (CI cost; the ratchet catches a comment added there on the next code PR)"
+assert_eq "$(grep -c "^      - '!docs/\*\*'$" "$TESTS_YML") $(grep -c "^      - '!example/\*\*'$" "$TESTS_YML")" "2 2" "tests.yml keeps skipping docs/ and example/ in both lists (CI cost; comment-ratchet.yml covers a comment added there)"
 assert_eq "$(grep -c "^      - 'docs/demo/\*\*'$" "$TESTS_YML") $(grep -c "^      - 'docs/screenshots/fixture.py'$" "$TESTS_YML")" "2 2" "and keeps the re-includes for the demo and the screenshot fixture"
 assert_eq "$(grep -c "^      - '!\*\*\.md'$" "$TESTS_YML")" 2 "and skips markdown, in both lists"
+
+echo "# a workflow with no paths filter runs the ratchet on every PR, docs-only ones included"
+RATCHET_YML="$REPO/.github/workflows/comment-ratchet.yml"
+if [ -f "$RATCHET_YML" ]; then
+  ok "comment-ratchet.yml exists"
+else
+  no "comment-ratchet.yml exists"
+fi
+assert_eq "$(grep -c '^ *paths' "$RATCHET_YML" 2>/dev/null)" 0 "it has no paths or paths-ignore filter, so a docs-only PR starts it"
+assert_eq "$(grep -c '^  pull_request:' "$RATCHET_YML" 2>/dev/null) $(grep -c '^  push:' "$RATCHET_YML" 2>/dev/null)" "1 1" "it runs on every pull request and on pushes to main"
+assert_eq "$(grep -c 'branches: \[main\]' "$RATCHET_YML" 2>/dev/null)" 1 "the push trigger is main only, as in tests.yml"
+assert_eq "$(grep -c 'run: bash tests/comment-ratchet.sh' "$RATCHET_YML" 2>/dev/null)" 1 "it runs only tests/comment-ratchet.sh"
+assert_eq "$(grep -c 'apt-get install.* shfmt' "$RATCHET_YML" 2>/dev/null)" 1 "and installs the shfmt the ratchet parses shell with"
+assert_eq "$(grep -c 'draft' "$RATCHET_YML" 2>/dev/null)" 0 "a draft PR is checked too: the ratchet takes seconds"
+assert_eq "$(grep -c '^ *#' "$RATCHET_YML" 2>/dev/null)" 0 "the workflow adds no comment lines, which the ratchet would count"
 
 printf '\npassed: %s   failed: %s\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

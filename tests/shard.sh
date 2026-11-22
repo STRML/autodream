@@ -1,15 +1,4 @@
 #!/bin/bash
-# Tests for the sharding of tests/run-all.sh: RUNALL_SHARD=i/n runs every n-th test and unit
-# suite, so n jobs together run the whole suite exactly once, and RUNALL_LIST=1 prints what a shard
-# would run without running it.
-#
-# The property that matters is a partition. A test that lands in no shard is a test nobody runs,
-# which is the failure the old duplicate "unit suites" CI step guarded against, and a test in two
-# shards is time paid twice. Listing is cheap, so the partition is proven here for every shard
-# count CI or a developer is likely to use; the run itself is proven by running the shards.
-#
-# Usage:  tests/shard.sh
-# Exit:   0 if every assertion passes, 1 otherwise.
 
 set -u
 
@@ -21,16 +10,12 @@ REPO=$(cd "$HERE/.." && pwd)
 . "$REPO/bin/portable.sh"   # tmo
 
 pass=0; fail=0
-ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
-no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
-assert_eq(){ if [ "$1" = "$2" ]; then ok "$3"; else no "$3 (got [$1] want [$2])"; fi; }
+# shellcheck source=/dev/null
+. "$HERE/lib-assert.sh"
 
 RUNALL="$HERE/run-all.sh"
 D=$(mktemp -d "${TMPDIR:-/tmp}/ccshard.XXXXXX")
 
-# what a shard would run, one entry per line; the outer environment must not leak in
-# Bounded: a run-all.sh that ignores RUNALL_LIST would run the whole suite per call, so a missing
-# feature has to fail in seconds, not in a quarter of an hour.
 list(){ tmo 30 env -u RUNALL_SHARD -u RUNALL_LIST ${1:+RUNALL_SHARD="$1"} RUNALL_LIST=1 bash "$RUNALL" 2>/dev/null; }
 sig(){ sort | cksum; }   # cksum, not md5sum: macOS has no md5sum
 
@@ -69,13 +54,9 @@ done
 out=$(tmo 30 env RUNALL_SHARD="" RUNALL_LIST=1 bash "$RUNALL" 2>/dev/null | wc -l | tr -d ' ')
 if [ "$out" = "$total" ]; then ok "an empty RUNALL_SHARD means unsharded"; else no "an empty RUNALL_SHARD changed the listing ($out vs $total)"; fi
 
-# leading zeros are numbers, not octal: "08" is a valid count
 assert_eq "$(list 07/08 | wc -l | tr -d ' ')" "$(list 7/8 | wc -l | tr -d ' ')" "07/08 is shard 7 of 8, not a bad octal"
 
 echo "# every test invocation is gated, and listing runs nothing"
-# A direct call to a test_ function, in any form: a bare line, an indented one, or one after && || ; or
-# then/do. Every such call must go through _run, or that test runs in EVERY shard. The function
-# definitions (`test_x(){`) and the `_run test_x` lines are not calls.
 direct_calls(){ grep -nE '(^|[;&|][[:space:]]*|(then|do)[[:space:]]+)[[:space:]]*test_[a-z_0-9]+([[:space:]]|;|\|\||&&|$)' "$1" | grep -v '_run test_' | grep -vE '^[0-9]+:[[:space:]]*#'; }
 printf '%s\n' 'test_bare' '  test_indented' 'test_or || true' '[ -n x ] && test_after_and' 'for t in a; do test_in_loop; done' > "$D/gate-bad.txt"
 printf '%s\n' 'test_def(){' '_run test_gated' '# test_commented' 'echo "see test_in_a_string"' 'assert_eq "$x" "y" "test_named"' > "$D/gate-ok.txt"
@@ -92,9 +73,6 @@ after=$(ls "${TMPDIR:-/tmp}" | grep -c '^ccad\.' || true)
 assert_eq "$after" "$before" "and left no test sandbox behind"
 
 echo "# the CI matrices run every shard"
-# Each sharded job lists the shard indexes in its matrix, and its run line, job name and step name
-# each carry the count. If they disagree, a shard no job runs is a part of the suite nobody runs,
-# and CI stays green. This is the one thing the sharding cannot check from inside run-all.sh.
 check_matrix(){   # <workflow file> <job-name prefix> <label>
   local wf=$1 prefix=$2 label=$3 matrix n_cmd n_name n_step want k
   matrix=$(sed -n 's/^ *shard: *\[\(.*\)\].*/\1/p' "$wf" | head -1 | tr -d ' ')
@@ -110,13 +88,9 @@ check_matrix(){   # <workflow file> <job-name prefix> <label>
 WF="$REPO/.github/workflows/tests.yml"
 check_matrix "$WF" test tests.yml
 if grep -qE '^  test:' "$WF" && grep -qE '^    needs: shards' "$WF"; then ok "the \`test\` check still exists and waits on every shard"; else no "the aggregating \`test\` job is missing or does not need the shards"; fi
-# The weekly macOS run is the only full run under the stock bash 3.2 and BSD tools. As one job it
-# outgrew its timeout and was cancelled two weeks running, so it is sharded the same way.
 LWF="$REPO/.github/workflows/launchd.yml"
 check_matrix "$LWF" "full suite" launchd.yml
 grep -q '/bin/bash tests/run-all.sh' "$LWF" && ok "launchd.yml: the weekly suite runs under /bin/bash" || no "launchd.yml: the weekly suite does not run under /bin/bash"
-# A manual dispatch with suite=web must run only the web job: every job that can run on a dispatch
-# says so in its own if, or selecting web would also start it (the launchd job did, #235 review).
 job_if(){ awk -v job="  $1:" '$0 == job { f = 1; next } f && /^  [a-z]/ { f = 0 } f && /^    if:/ { print; exit }' "$LWF"; }
 for job in launchd full; do
   case "$(job_if "$job")" in

@@ -1,17 +1,4 @@
 #!/bin/bash
-# Unit tests for bin/session-window.sh: the local-day window over a transcript.
-#
-# Why this exists. A session used to belong to a report day because of its FILE MTIME
-# (`-newermt DAY ! -newermt NEXT`), so a session written to again after its day closed
-# dropped out of every later rebuild of that day (issue #113), and a transcript spanning
-# several days was read whole for each of them. The timestamp INSIDE the transcript is now
-# what places it, so this helper has to be right about edges: the boundary second, fractional
-# seconds, 23h and 25h DST days in more than one country, records with no clock, a clock in
-# a shape it does not read, lines that are not JSON, and a file that is not in order.
-#
-# Exit codes of `in-window`, `needs-slice` and `day-file` are a three-way contract
-# (0 yes, 1 no, 2 error). The caller keeps a session on an error rather than dropping it, so
-# a broken helper reads as extra work and never as a quiet night.
 
 set -u
 
@@ -22,9 +9,8 @@ REPO=$(cd "$HERE/.." && pwd)
 WIN="$REPO/bin/session-window.sh"
 
 pass=0; fail=0
-ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
-no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
-assert_eq(){ [ "$1" = "$2" ] && ok "$3" || no "$3 (got [$1] want [$2])"; }
+# shellcheck source=/dev/null
+. "$HERE/lib-assert.sh"
 
 [ -x "$WIN" ] || {
   printf '  FAIL - bin/session-window.sh missing or not executable\n'
@@ -36,9 +22,6 @@ command -v jq >/dev/null 2>&1 || {
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/swtest.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 
-# 2026-10-01 00:00:00Z and 2026-10-02 00:00:00Z, written as literals on purpose: a
-# test that derives its expected bounds with the same `date` call as the code under
-# test cannot disagree with it.
 START=1790812800
 END=1790899200
 
@@ -47,8 +30,6 @@ rc_of(){ "$@" >/dev/null 2>&1; printf '%s' "$?"; }
 
 echo "# window: bounds are local midnight to local midnight, and DST-correct"
 assert_eq "$(TZ=UTC "$WIN" bounds 2026-10-01 2026-10-02)" "$START $END" "a UTC day is 1790812800..1790899200"
-# Every expected number below is a literal worked out separately (zoneinfo), not by the
-# `date` call the helper uses.
 assert_eq "$(TZ=America/New_York "$WIN" bounds 2026-10-01 2026-10-02)" "1790827200 1790913600" "New York: an ordinary day starts at 04:00Z, ends 24h later"
 assert_eq "$(TZ=America/New_York "$WIN" bounds 2026-03-08 2026-03-09)" "1772946000 1773028800" "New York spring-forward 2026-03-08: 23 hours, exact bounds"
 assert_eq "$(TZ=America/New_York "$WIN" bounds 2026-11-01 2026-11-02)" "1793505600 1793595600" "New York fall-back 2026-11-01: 25 hours, exact bounds"
@@ -83,10 +64,6 @@ assert_eq "$(rc_of "$WIN" in-window "$TMP/endlast.jsonl" $START $END)" "0" "23:5
 assert_eq "$(rc_of "$WIN" in-window "$TMP/mixed.jsonl" $START $END)" "0" "before, inside and after -> yes"
 assert_eq "$(rc_of "$WIN" in-window "$TMP/malformed-in.jsonl" $START $END)" "0" "malformed lines are skipped; the valid in-window record decides -> yes"
 assert_eq "$(rc_of "$WIN" in-window "$TMP/malformed-out.jsonl" $START $END)" "1" "malformed lines are skipped; the valid out-of-window record decides -> no (not placed in the wrong day)"
-# A file with no clock cannot be placed by its records, so its mtime decides, exactly as the
-# bounded find used to: modified by the end of the day -> yes (bias to triage); modified AFTER
-# the day -> no. Without that, dropping the find upper bound would enumerate a no-clock file on
-# every later date too and triage it twice, filed under the wrong day.
 touch -t 202610011200 "$TMP/nots.jsonl" "$TMP/empty.jsonl"
 assert_eq "$(rc_of "$WIN" in-window "$TMP/nots.jsonl" $START $END)" "0" "no parseable timestamp, modified inside the day -> yes (the old mtime rule)"
 assert_eq "$(rc_of "$WIN" in-window "$TMP/empty.jsonl" $START $END)" "0" "an empty file modified inside the day -> yes"
@@ -94,18 +71,13 @@ assert_eq "$(rc_of "$WIN" in-window "$TMP/empty.jsonl" $START $END)" "0" "an emp
 touch -t 202610031200 "$TMP/nots-late.jsonl" "$TMP/empty-late.jsonl"
 assert_eq "$(rc_of "$WIN" in-window "$TMP/nots-late.jsonl" $START $END)" "1" "no parseable timestamp, modified AFTER the day -> no (the old mtime rule)"
 assert_eq "$(rc_of "$WIN" in-window "$TMP/empty-late.jsonl" $START $END)" "1" "an empty file modified after the day -> no"
-# A file whose records have clocks is placed by them even when it was touched later: this is
-# the whole point of the window (#113).
 cp "$TMP/in.jsonl" "$TMP/in-late.jsonl"; touch -t 202610051200 "$TMP/in-late.jsonl"
 assert_eq "$(rc_of "$WIN" in-window "$TMP/in-late.jsonl" $START $END)" "0" "a file touched days after the day, with a record inside it -> yes"
 cp "$TMP/before.jsonl" "$TMP/before-fresh.jsonl"; touch -t 202610011200 "$TMP/before-fresh.jsonl"
 assert_eq "$(rc_of "$WIN" in-window "$TMP/before-fresh.jsonl" $START $END)" "1" "a file touched inside the day whose records are all older -> no (records outrank mtime)"
-# The clock must be the shape the harnesses write. A numeric or offset timestamp is not read,
-# so it neither selects a file nor misplaces it in a day.
 printf '{"type":"x","timestamp":1790850000}\n{"type":"x","timestamp":"2026-10-01T10:00:00+00:00"}\n{"type":"x","timestamp":null}\n{"type":"x"}\n' > "$TMP/oddclock.jsonl"
 touch -t 202610031200 "$TMP/oddclock.jsonl"
 assert_eq "$(rc_of "$WIN" in-window "$TMP/oddclock.jsonl" $START $END)" "1" "numeric, offset, null and missing timestamps are no clock: placed by mtime (after the day -> no)"
-# OMP puts an epoch-millisecond number on message.timestamp. Only the top-level string counts.
 printf '{"type":"message","message":{"role":"user","timestamp":1790850000000}}\n' > "$TMP/omp-msgts.jsonl"
 touch -t 202610031200 "$TMP/omp-msgts.jsonl"
 assert_eq "$(rc_of "$WIN" in-window "$TMP/omp-msgts.jsonl" $START $END)" "1" "an OMP message.timestamp number is not a clock"
@@ -127,8 +99,6 @@ assert_eq "$(rc_of "$WIN" needs-slice "$TMP/lead-clockless.jsonl" $START $END)" 
 { rec "2026-10-01T10:00:00Z" inside; rec "2026-10-02T09:00:00Z" late
   for i in $(seq 1 300); do printf '{"type":"summary","summary":"s%d"}\n' "$i"; done; } > "$TMP/trail-clockless.jsonl"
 assert_eq "$(rc_of "$WIN" needs-slice "$TMP/trail-clockless.jsonl" $START $END)" "0" "a later-day record followed by 300 clockless lines -> still slice"
-# A file that is not in order. The first and last records are inside the day, so a check of
-# just those two would read it whole and leak another day's records into this one.
 { rec "2026-10-01T10:00:00Z" a; rec "2026-09-29T10:00:00Z" stray; rec "2026-10-01T20:00:00Z" b; } > "$TMP/out-of-order.jsonl"
 assert_eq "$(rc_of "$WIN" needs-slice "$TMP/out-of-order.jsonl" $START $END)" "0" "an out-of-order record in the middle of an otherwise in-day file -> slice"
 assert_eq "$(rc_of "$WIN" needs-slice "$TMP/missing.jsonl" $START $END)" "2" "an unreadable file is an ERROR (2)"
@@ -147,18 +117,12 @@ assert_eq "$(cat "$TMP/slice-got.jsonl")" "$(cat "$TMP/slice-want.jsonl")" "only
 assert_eq "$src" "0" "a slice with nothing in window still exits 0"
 assert_eq "$(wc -c < "$TMP/slice-none.jsonl" | tr -d ' ')" "0" "and writes nothing"
 assert_eq "$(rc_of "$WIN" slice "$TMP/missing.jsonl" $START $END)" "2" "slice of an unreadable file is an ERROR (2)"
-# The header the OMP linearizer writes carries no clock and no event. It names the session
-# (cwd, advisor, nested), the stats and the project lookup read it, and every slice of that
-# session keeps it.
 { printf '{"type":"autodream_meta","source":"omp","cwd":"/work/x","is_advisor":true,"nested":true}\n'
   rec "2026-09-30T10:00:00Z" early; rec "2026-10-01T10:00:00Z" keep; } > "$TMP/meta.jsonl"
 "$WIN" slice "$TMP/meta.jsonl" $START $END > "$TMP/meta-got.jsonl"
 assert_eq "$(jq -r .type "$TMP/meta-got.jsonl" | paste -sd, -)" "autodream_meta,user" "autodream_meta is kept ahead of the in-window records, the early record is not"
 assert_eq "$(jq -r 'select(.type == "autodream_meta") | .is_advisor' "$TMP/meta-got.jsonl")" "true" "and it is the original header, byte for byte"
 
-# A linearized OMP chain: entry N points at entry N-1. Cut to a day, the first kept entry
-# points at an entry that is gone, which would make the slice an unreadable tree. It is
-# written as a root; every other record keeps its bytes.
 omp(){ printf '{"type":"message","id":"%s","parentId":%s,"timestamp":"%s","message":{"role":"user","timestamp":1790850000000}}\n' "$1" "$2" "$3"; }
 { printf '{"type":"autodream_meta","source":"omp","cwd":"/work/x"}\n'
   omp u1 null "2026-09-30T10:00:00.000Z"; omp a1 '"u1"' "2026-09-30T23:59:59.999Z"
@@ -170,11 +134,9 @@ assert_eq "$(jq -c 'select(.id == "u2") | .parentId' "$TMP/omp-slice.jsonl")" "n
 assert_eq "$(grep '"id":"a2"' "$TMP/omp-slice.jsonl")" "$(grep '"id":"a2"' "$TMP/omp-chain.jsonl")" "every other entry keeps its bytes"
 assert_eq "$(jq -s '[.[] | select(.type == "message")] as $m | ($m | map(.id)) as $ids | [$m[] | select(.parentId != null and (.parentId | IN($ids[]) | not))] | length' "$TMP/omp-slice.jsonl")" "0" "no parentId in the slice names an entry the slice dropped"
 assert_eq "$(jq -c 'select(.id == "u2") | .message.timestamp' "$TMP/omp-slice.jsonl")" "1790850000000" "re-writing that one entry leaves the rest of it as it was"
-# A chain that starts inside the day is not touched at all.
 { printf '{"type":"autodream_meta","source":"omp"}\n'; omp u1 null "2026-10-01T10:00:00.000Z"; omp a1 '"u1"' "2026-10-01T11:00:00.000Z"; } > "$TMP/omp-whole.jsonl"
 "$WIN" slice "$TMP/omp-whole.jsonl" $START $END > "$TMP/omp-whole-got.jsonl"
 assert_eq "$(cat "$TMP/omp-whole-got.jsonl")" "$(cat "$TMP/omp-whole.jsonl")" "a chain wholly inside the day is returned byte for byte"
-# Claude records link by parentUuid, a different key, and are never rewritten.
 { printf '{"type":"user","uuid":"c1","parentUuid":"c0","timestamp":"2026-10-01T10:00:00Z"}\n'; } > "$TMP/claude-link.jsonl"
 "$WIN" slice "$TMP/claude-link.jsonl" $START $END > "$TMP/claude-link-got.jsonl"
 assert_eq "$(cat "$TMP/claude-link-got.jsonl")" "$(cat "$TMP/claude-link.jsonl")" "a Claude record linking by parentUuid is not rewritten"
@@ -190,8 +152,6 @@ assert_eq "$(ls "$TMP" | grep -c '^day\.jsonl\.tmp\.')" "0" "no temp file is lef
 rm -f "$out"; "$WIN" day-file "$TMP/inside.jsonl" $START $END "$out" >/dev/null 2>&1; src=$?
 assert_eq "$src" "1" "a file wholly inside the day -> 1, nothing to cut"
 [ ! -e "$out" ] && ok "and no output file is created for it" || no "and no output file is created for it"
-# A file whose records the window cannot place leaves nothing to read, which must not stand in
-# for the session: an error, so the caller reads the whole transcript instead.
 { rec "2026-09-30T10:00:00Z" only-before; } > "$TMP/spill-empty.jsonl"
 rm -f "$out"; "$WIN" day-file "$TMP/spill-empty.jsonl" $START $END "$out" >/dev/null 2>&1; src=$?
 assert_eq "$src" "2" "a file with no in-window record at all -> 2 (an empty slice is not a verdict)"

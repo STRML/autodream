@@ -1,15 +1,4 @@
 #!/bin/bash
-# Did a directory tree change between two moments? Two functions, because "changed" includes a file that
-# is gone, a file that is new, and a file reached only through a symlinked directory below the root: a
-# check that lists files newer than a marker sees none of the first and not all of the others.
-#
-#   store_snapshot <dir> <out>   writes one "size mtime_ns path" line per regular file under <dir>, following
-#                                symlinks at every level, sorted. Returns 0 (written), 1 (could not scan) or
-#                                2 (no such directory). Prints a reason on 1 and 2.
-#   store_unchanged <before> <after>   0 when the two snapshots are identical, 1 with the differences printed.
-#
-# A store the snapshot cannot read is never a pass: path_state's "cannot tell" and an unreadable directory
-# both return 1.
 HERE_LIB=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=/dev/null
 . "$HERE_LIB/../bin/lib-path-state.sh"
@@ -63,10 +52,6 @@ store_unchanged() {
   return 1
 }
 
-# store_verdict <dir> <before-rc> <before-msg> <before-file> <after-file>: the whole decision of the real check, in
-# one place. A store that was absent before the call is a skip (2), one that could not be scanned before is a
-# failure (1), and one that was there before and is gone, unreadable or different after is a failure: a store
-# that disappears during the call is the loudest change there is, not a skip. Prints one line.
 store_verdict() {
   local dir="$1" brc="$2" bmsg="$3" bfile="$4" afile="$5" msg arc
   case "$brc" in

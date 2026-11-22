@@ -535,7 +535,7 @@ its section, and a night where every source fails posts a warning banner.
 
 Everything lives on disk (findings JSON, the report, run logs, stats) and every step
 is idempotent, so you can rerun any date. Configuration knobs are documented in
-`bin/run.sh`'s header.
+[docs/run-knobs.md](docs/run-knobs.md).
 
 Reading sessions is done through a **harness adapter**, so the runner does not know
 which agent produced a transcript. Two ship today, `claude` and `omp`; the seam is what lets a

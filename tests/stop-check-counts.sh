@@ -1,13 +1,4 @@
 #!/bin/bash
-# Tests for bin/stop-check-counts.sh: counts over the stop-check verdict log, by kind, in a window,
-# plus an eight-week weekly table. Model-free and read-only.
-#
-# Every fixture line is synthetic and the clock is injected (STOP_CHECK_NOW), so the expected numbers
-# below are literals worked out by hand, not another run of the code under test. The log's real
-# `message` and `note` fields hold quoted session text; the script must print counts only.
-#
-# Usage:  tests/stop-check-counts.sh
-# Exit:   0 if every assertion passes, 1 otherwise.
 
 set -u
 
@@ -18,13 +9,9 @@ REPO=$(cd "$HERE/.." && pwd)
 BIN="$REPO/bin/stop-check-counts.sh"
 
 pass=0; fail=0
-ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
-no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
-assert_eq(){     [ "$1" = "$2" ] && ok "$3" || no "$3 (got [$1] want [$2])"; }
-assert_grep(){   grep -q -- "$2" "$1" 2>/dev/null && ok "$3" || no "$3 (no /$2/ in $1)"; }
-assert_nogrep(){ grep -q -- "$2" "$1" 2>/dev/null && no "$3 (/$2/ unexpectedly in $1)" || ok "$3"; }
+# shellcheck source=/dev/null
+. "$HERE/lib-assert.sh"
 
-# 2026-11-19T12:00:00Z, a Thursday. Its UTC week starts Monday 2026-11-16.
 NOW=1795089600
 LOG="$SUITE_TMP/verdicts.jsonl"
 M='"message":"SECRET-MESSAGE-TEXT","note":"SECRET-NOTE-TEXT"'

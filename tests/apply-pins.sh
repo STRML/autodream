@@ -1,9 +1,4 @@
 #!/bin/bash
-# Unit tests for bin/apply-pins.sh: L2's pins.jsonl into Mnemopi via shared-memory.
-#
-# One test per row of the failure matrix in docs/plans/2026-09-15-mnemopi-pins.md
-# (rows A1-A24). shared-memory is always tests/mock-shared-memory.sh, so nothing
-# here can write real memory.
 set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -13,15 +8,12 @@ SM="$HERE/mock-shared-memory.sh"
 DATE=2020-01-02
 
 pass=0; fail=0
-ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
-no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
-assert_eq(){ [ "$1" = "$2" ] && ok "$3" || no "$3 (got [$1] want [$2])"; }
+# shellcheck source=/dev/null
+. "$HERE/lib-assert.sh"
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/appins.XXXXXX")
 trap 'rm -rf "$ROOT"' EXIT
 
-# Fresh findings dir. proj-a resolves to a real dir, proj-b has no cwd, and
-# proj-c names a dir that does not exist.
 setup(){
   T=$(mktemp -d "$ROOT/t.XXXXXX")
   F="$T/findings"

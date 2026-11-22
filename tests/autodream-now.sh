@@ -1,12 +1,4 @@
 #!/usr/bin/env bash
-# Tests for bin/autodream-now.sh's launch guard (#78).
-#
-# Every on-demand run for an install shares one launchd label. The script used to
-# `launchctl bootout` that label unconditionally before `bootstrap`, so launching a
-# second date while the first was still running evicted the first mid-run: no report,
-# no error, orphaned workers. The guard refuses to launch over a live process.
-#
-# launchctl is a mock on PATH; nothing here touches the real launchd.
 
 set -uo pipefail
 
@@ -27,11 +19,6 @@ assert_eq() { if [ "$1" = "$2" ]; then ok "$3"; else nope "$3" "want [$1] got [$
 
 mkdir -p "$SANDBOX/bin" "$SANDBOX/install" "$SANDBOX/dreams" "$SANDBOX/LaunchAgents" "$SANDBOX/mock"
 CALLS="$SANDBOX/calls"
-# MOCK_STATE: running = loaded with a live pid, idle = loaded with no process, absent = not loaded.
-# The --watch rows also set:
-#   MOCK_ON_BOOTSTRAP  a command run at `bootstrap`: the stand-in for the run itself
-#   MOCK_AFTER=<k>     after bootstrap, `print` shows the job running for k calls, then
-#                      finished (runs = 1, no pid)
 cat > "$SANDBOX/bin/launchctl" <<'MOCK'
 #!/bin/bash
 echo "$*" >> "$MOCK_CALLS"
@@ -89,11 +76,6 @@ case "$OUT" in *2020-01-03*) ok "the message names the date that holds the label
 LAST_DATE="$(sed -n 's#.*<string>\([0-9]\{4\}-[0-9][0-9]-[0-9][0-9]\)</string>.*#\1#p' "$SANDBOX"/install/*.plist)"
 assert_eq "2020-01-03" "$LAST_DATE" "the holder's plist was not overwritten"
 
-# ---------------------------------------------------------------------- --watch --
-# The mock's bootstrap hook stands in for the run: it writes the log and the report the way run.sh
-# would, and MOCK_AFTER decides how long launchd keeps reporting a process. The watcher decides
-# from one thing: the line run.sh appends to logs/run-<date>.outcome, keyed by the token the
-# watcher put in the one-shot plist. outcome.sh is that line, with the token read from the plist.
 COMPLETE='# r\n<!-- autodream:open-questions=0 -->\n'
 cat > "$SANDBOX/outcome.sh" <<'SH'
 #!/bin/bash
@@ -131,8 +113,6 @@ assert_eq "0" "$RC" "a delivered new report exits 0"
 case "$OUT" in *"✓ report ready"*) ok "it says the report is ready" ;; *) nope "it says the report is ready" "out: $OUT" ;; esac
 
 echo "# --watch: a degraded capture that already carries the marker is not a ready report, even if the run is killed with it in place"
-# L2 left a capture with the open-questions marker but no AUTODREAM_REPORT_END sentinel; run.sh keeps it at
-# the report path between attempts. Here the runner dies before it can move it aside: no outcome is written.
 D=2020-02-06
 watch_launch "$D" 8 "echo 'L2 attempt 1 wrote a complete-looking report but no AUTODREAM_REPORT_END sentinel; not a validated delivery, retrying' >> '$(logf $D)'; printf '$COMPLETE' > '$(repf $D)'"
 case "$OUT" in *"✓"*) nope "it never says ✓ for a capture nobody delivered" "out: $OUT" ;; *) ok "it never says ✓ for a capture nobody delivered" ;; esac
@@ -140,8 +120,6 @@ case "$OUT" in *"✓"*) nope "it never says ✓ for a capture nobody delivered" 
 [ "$(cat "$SANDBOX/mock/prints" 2>/dev/null || echo 0)" -ge 3 ] && ok "it waited for the job to finish" || nope "it waited for the job to finish" "prints: $(cat "$SANDBOX/mock/prints" 2>/dev/null)"
 
 echo "# --watch: text in the log, even the runner's own wording, does not stand for a delivery"
-# A model's summary is appended to this log after the sentinel, so any line a person could write there
-# can be written by L2. Only the outcome line counts.
 D=2020-02-09
 watch_launch "$D" 4 "echo 'report bytes: 1' >> '$(logf $D)'; echo 'delivered' >> '$(logf $D)'; printf '$COMPLETE' > '$(repf $D)'"
 [ "$RC" -ne 0 ] && ok "a forged report-bytes line does not make the report ready" || nope "a forged report-bytes line does not make the report ready" "rc=$RC out=$OUT"
@@ -189,7 +167,6 @@ watch_launch "$D" 1000 "echo NEW-RUN-LINE >> '$(logf $D)'; printf '$COMPLETE' > 
 case "$OUT" in *NEW-RUN-LINE*) ok "this run's lines are shown" ;; *) nope "this run's lines are shown" "out: $OUT" ;; esac
 case "$OUT" in *OLD-RUN-LINE*) nope "an earlier attempt's lines are not replayed" "out: $OUT" ;; *) ok "an earlier attempt's lines are not replayed" ;; esac
 
-# ------------------------------------------------- the scheduled job's environment --
 make_sched() { # make_sched <label> <runner-dir> <env-dict-body>
   cat > "$SANDBOX/LaunchAgents/$1.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
