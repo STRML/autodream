@@ -9236,16 +9236,17 @@ test_threads_cleanup_removes_own_tmp_without_trash(){
   local root shim cap calls left made kind report_rc
   root=$(setup_env)
   thread_group_publish_fixture "$root" no
-  shim="$root/trash-bin"; mkdir -p "$shim" "$root/tmp"
+  shim="$root/trash-bin"; mkdir -p "$shim" "$root/tmp" "$root/threads-adapters/.refused"
+  cp -R "$REPO/adapters/claude" "$root/threads-adapters/claude"
   printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/trash-calls.txt"\nexit 0\n' "$root" > "$shim/trash"
   chmod +x "$shim/trash"
   printf '#!/bin/sh\np=$(/usr/bin/mktemp "$@") || exit $?\nprintf "%%s\\n" "$p" >> "%s/mktemp-paths.txt"\nprintf "%%s\\n" "$p"\n' "$root" > "$shim/mktemp"
   chmod +x "$shim/mktemp"
   cap=$(( $(wc -c < "$REPO/prompts/THREAD_LINKER.md") + 1 ))
   MOCK_THREADS_MODE=good MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_THREADS_MAX_INPUT="$cap" \
-    AUTODREAM_DIR="$root/autodream" CLAUDE_BIN="$MOCK" PATH="$shim:$PATH" TMPDIR="$root/tmp" \
+    AUTODREAM_DIR="$root/autodream" CLAUDE_BIN="$MOCK" PATH="$shim:$PATH" TMPDIR="$root/tmp" ADAPTERS_ROOT="$root/threads-adapters" \
     /bin/bash "$REPO/bin/threads.sh" update "$DATE" < "$root/group-rows.jsonl" > "$root/update.out" 2>&1
-  AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" PATH="$shim:$PATH" TMPDIR="$root/tmp" \
+  AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" PATH="$shim:$PATH" TMPDIR="$root/tmp" ADAPTERS_ROOT="$root/threads-adapters" \
     /bin/bash "$REPO/bin/threads.sh" report "$DATE" > "$root/report.md" 2>&1
   report_rc=$?
   for kind in threads-update threads-render-state threads-report threads-report-status; do

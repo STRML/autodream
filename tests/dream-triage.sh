@@ -179,6 +179,15 @@ out=$(env AUTODREAM_DIR="$root/autodream" DREAMS_DIR="$root/dreams" AUTODREAM_CO
 case "$out" in *2020-01-02.triage*) no "review.sh picked the triage file: $out" ;; *) ok "review.sh picked the report" ;; esac
 rm -rf "$root"
 
+echo "# triage: a refused adapter dir leaves no reject log in TMPDIR"
+root=$(mk_root); mk_report "$root/dreams/2020-01-02.md" abcdef1
+mkdir -p "$root/tmp" "$root/repo/adapters/.refused"; cp -R "$REPO/adapters/claude" "$root/repo/adapters/claude"
+ln -s "$REPO/bin" "$root/repo/bin"; ln -s "$REPO/prompts" "$root/repo/prompts"
+run_triage "$root" TMPDIR="$root/tmp" ADAPTERS_ROOT="$root/repo/adapters"; rc=$?
+assert_eq "$rc" "0" "the pass succeeds beside a refused adapter dir"
+assert_eq "$(ls "$root/tmp" | grep -c 'autodream-adapters-rejected')" "0" "and no reject log is left in TMPDIR"
+rm -rf "$root"
+
 echo
 echo "passed: $pass   failed: $fail"
 [ "$fail" -eq 0 ]

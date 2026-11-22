@@ -16,6 +16,7 @@ resolve_install_dir "$THREADS_SRC" threads.sh
 # shellcheck source=/dev/null
 . "$THREADS_LIB_DIR/portable.sh" || exit 1
 . "$THREADS_LIB_DIR/adapters.sh" || exit 1
+: "${ADAPTERS_REJECT_LOG:=/dev/null}"
 . "$THREADS_LIB_DIR/lib-project.sh" || exit 1
 . "$THREADS_LIB_DIR/report-format.sh" || exit 1
 THREADS_FLOCK_LIB="$THREADS_LIB_DIR/lib-flock.sh"
