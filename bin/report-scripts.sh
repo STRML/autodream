@@ -53,34 +53,37 @@ settle_tree() {
   for p in $(cat "$1" 2>/dev/null); do kill -s KILL "$p" 2>/dev/null || true; done
 }
 
-reap_group() {
-  local g="$1" leftflag="$2" i=0 limit=$((KILL_GRACE * 10))
-  kill -s 0 -- "-$g" 2>/dev/null || return 0
+reap_session() {
+  local sid="$1" leftflag="$2" pids rc i=0 limit=$((KILL_GRACE * 10))
+  pids=$(pgrep -s "$sid" 2>/dev/null); rc=$?
+  case "$rc" in
+    1) return 0 ;;
+    0) ;;
+    *) printf 'unknown\n' > "$leftflag"; return 0 ;;
+  esac
   printf 'stopped\n' > "$leftflag"
-  kill -s TERM -- "-$g" 2>/dev/null || true
+  kill -s TERM $pids 2>/dev/null || true
   while [ "$i" -lt "$limit" ]; do
-    kill -s 0 -- "-$g" 2>/dev/null || return 0
+    pgrep -s "$sid" > /dev/null 2>&1 || return 0
     sleep 0.1; i=$((i + 1))
   done
-  kill -s KILL -- "-$g" 2>/dev/null || true
+  kill -s KILL $(pgrep -s "$sid" 2>/dev/null) 2>/dev/null || true
   sleep 0.2
-  if kill -s 0 -- "-$g" 2>/dev/null; then printf 'alive\n' > "$leftflag"; fi
+  if pgrep -s "$sid" > /dev/null 2>&1; then printf 'alive\n' > "$leftflag"; fi
 }
 
 leftover_reason() {
   local rc="$1" leftflag="$2"
-  if [ "$(cat "$leftflag" 2>/dev/null)" = alive ]; then
-    printf 'FAILED: left a background process running after exit %s and it could not be stopped' "$rc"
-  else
-    printf 'FAILED: left a background process running after exit %s; it was stopped' "$rc"
-  fi
+  case "$(cat "$leftflag" 2>/dev/null)" in
+    alive) printf 'FAILED: left a background process running after exit %s and it could not be stopped' "$rc" ;;
+    unknown) printf 'FAILED: could not check whether the command left a process running after exit %s (pgrep failed)' "$rc" ;;
+    *) printf 'FAILED: left a background process running after exit %s; it was stopped' "$rc" ;;
+  esac
 }
 
 run_bounded() {
   local secs="$1" flag="$2" leftflag="$3" pid wd rc; shift 3
-  set -m
-  "$@" & pid=$!
-  set +m
+  perl -MPOSIX -e 'POSIX::setsid(); exec { $ARGV[0] } @ARGV; exit 127' "$@" & pid=$!
   ( trap 'kill "${sp:-}" 2>/dev/null; exit 0' TERM
     sleep "$secs" & sp=$!; wait "$sp" || exit 0
     tree=$(tree_pids "$pid")
@@ -91,7 +94,7 @@ run_bounded() {
   wait "$pid"; rc=$?
   kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
   if [ -s "$flag" ]; then settle_tree "$flag"; fi
-  reap_group "$pid" "$leftflag"
+  reap_session "$pid" "$leftflag"
   return "$rc"
 }
 
@@ -181,6 +184,7 @@ collect() {
       esac
       if [ "$status" = ok ] && [ ! -f "$path" ]; then status=missing; reason="FAILED: script not found: $path"; fi
       if [ "$status" = ok ] && [ ! -x "$path" ]; then status=missing; reason="FAILED: script is not executable: $path"; fi
+      if [ "$status" = ok ] && ! command -v perl > /dev/null 2>&1; then status=missing; reason="FAILED: perl not found; it starts each command in its own session so a leftover process can be stopped: $path"; fi
       if [ "$status" = ok ] && [ "$checked" = 1 ]; then
         now=$(entry_hash "$path" ${args[@]+"${args[@]}"})
         if ! printf '%s' "$want" | grep -Eq '^[0-9a-f]{64}$' || [ "$now" != "$want" ]; then
