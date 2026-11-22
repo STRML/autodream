@@ -3098,43 +3098,22 @@ run() {
 No sessions were triaged on this date.
 
 $( if [ "${ROOTS_FAILED:-0}" -gt 0 ] || [ "${ROOTS_UNAVAILABLE:-0}" -gt 0 ]; then
-     # A failed root makes "no session files were modified" a claim this run
-     # cannot support: it did not read one of the stores it was meant to. The
-     # fatal for a single failed root was removed because on a single-root host
-     # that shape is a quiet date plus a transient find error, and losing the
-     # night is the wrong trade. That is only defensible while the stub refuses
-     # to state an empty night as fact.
-     # Both classes, and against ROOTS_CONFIGURED rather than ROOTS_SCANNED. A root
-     # that was never a directory — a `:` inside a SESSION_ROOTS entry, or a store
-     # that moved — was not read either, and it is missing from ROOTS_SCANNED
-     # entirely, so measuring against that under-reported how many were configured.
      printf '%s of %s configured session root(s) were unreadable or failed to enumerate, so this run did not read the whole store. Nothing was triaged from what it did read. See roots_failed and roots_unavailable in run-stats.txt — whether this was an empty night is unknown.' \
        "$(( ROOTS_FAILED + ROOTS_UNAVAILABLE ))" "$ROOTS_CONFIGURED"
    elif [ "$REMOTE_SYNC_SHORT" -gt 0 ]; then
-     # A remote host that did not fully sync was not wholly read this run, so an empty night is
-     # a claim this run cannot make about it.
      printf '%s of %s remote host(s) in AUTODREAM_REMOTE_ROOTS were not fully synced, so their sessions from this day may be missing. See remote_sync_* in run-stats.txt — whether this was an empty night is unknown.' \
        "$REMOTE_SYNC_SHORT" "$REMOTE_SYNC_TOTAL"
    elif [ "$RAW" -eq 0 ] && [ "$refused" -eq 0 ] && [ "$OUT_OF_WINDOW" -gt 0 ]; then
-     # Files were modified since the day began, so "none were modified" is false. They
-     # hold no record inside the day, which makes this a quiet day for them to be quiet
-     # about, but it is said with the count rather than left to read as an empty store.
      printf 'No session had a record inside this day. %s file(s) modified since it began hold none and belong to another day. See sessions_out_of_window in run-stats.txt.' \
        "$OUT_OF_WINDOW"
    elif [ "$RAW" -eq 0 ] && [ "$refused" -eq 0 ]; then
      printf 'No session files were modified.'
    else
-     # Refused paths never reach sessions.txt.raw, so they are NOT part of RAW.
-     # Folding them into "N session file(s) were modified" produced sentences
-     # like "0 session file(s) were modified ... 3 with an unrepresentable path".
-     # The two are counted separately because they are separate facts.
      printf 'Nothing was triaged. %s session file(s) were enumerated (%s autodream-own, %s with no substantive turns); a further %s path(s) were refused before enumeration, and %s hash-collision event(s) each dropped two or more paths. See run-stats.txt — this is not an empty night.' \
        "$RAW" "$EXCLUDED" "$SKIPPED_EMPTY" "$REJECTED_PATHS" "$HASH_COLLISIONS"
    fi )
 
 $( if [ "$REMOTE_SHORT_UNREADABLE" -gt 0 ]; then
-     # A night with nothing to triage skips L2, so this stub is the only place a failure of the
-     # historical scan itself (#230) can be said.
      printf '%s earlier night(s) had no readable report, so whether a remote host missed them could not be checked. See remote_short_scan_unreadable in run-stats.txt.\n\n' "$REMOTE_SHORT_UNREADABLE"
    fi
    if [ "$REMOTE_MIRROR_UNKNOWN" -gt 0 ]; then
@@ -3147,8 +3126,6 @@ AUTODREAM_QUESTIONS_BEGIN
 ## Open questions for the user
 
 $( if [ "$REMOTE_SHORT_QCOUNT" -gt 0 ]; then
-     # The dates a remote host missed (#230) are a question here too, inside the block and counted,
-     # so the streak store sees it and escalates it instead of reading the night as question-free.
      printf '%s' "$REMOTE_SHORT_QUESTIONS"
    else
      printf 'None; no sessions were triaged on this date.\n'
