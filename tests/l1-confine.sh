@@ -204,7 +204,7 @@ assert_eq "$rc" "2" "an engine with no adapter is refused"
 echo "# omp l1-stage-env: a throwaway state dir inside the stage, seeded from what the worker only reads"
 OA="$REPO/adapters/omp/adapter.sh"
 RH="$D/omphome"; mkdir -p "$RH/.omp/agent" "$RH/.omp/natives" "$RH/Library" "$D/ostage"
-printf 'k: v\n' > "$RH/.omp/agent/config.yml"; printf 'y: 1\n' > "$RH/.omp/agent/config.yaml"; printf 'm: 1\n' > "$RH/.omp/agent/models.yml"
+printf 'k: v\n' > "$RH/.omp/agent/config.yml"; printf 'y: 1\n' > "$RH/.omp/agent/config.yaml"; printf 'm: 1\n' > "$RH/.omp/agent/models.yml"; printf '{}\n' > "$RH/.omp/agent/mcp.json"
 printf 'secret' > "$RH/.omp/agent/sessions-not-seeded"; printf 'x' > "$RH/.omp/agent/extensions-not-seeded"
 # agent.db is a live WAL database with an api key, an OAuth credential and one committed row that sits only in
 # the log; the connection stays open while the verb runs, as a live omp would.
@@ -223,7 +223,7 @@ time.sleep(30)
 PY
 holder=$!
 for _ in $(seq 1 50); do [ -e "$RH/.omp/agent/ready" ] && break; sleep 0.1; done
-out=$(env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" 2>"$D/err"); rc=$?
+out=$(env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" 2>"$D/err"); rc=$?
 assert_eq "$rc" "0" "the verb prepares the stage"
 assert_eq "$out" "HOME=$D/ostage/omp-home
 PI_CONFIG_DIR=.omp
@@ -239,25 +239,28 @@ assert_eq "$(python3 -c "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).
 kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
 [ -L "$D/ostage/omp-home/Library" ] && [ -L "$D/ostage/omp-home/.omp/natives" ] && ok "Library and the native binaries are linked back" || no "Library or natives link missing"
 printf 'stale' > "$SA/left-by-the-last-attempt"
-env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" >/dev/null 2>&1
+env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>&1
 [ ! -e "$SA/left-by-the-last-attempt" ] && ok "a retry reseeds from a clean tree" || no "a retry kept the last attempt's files"
 env HOME="$RH" bash "$OA" l1-stage-env "$D/no-such-stage" >/dev/null 2>&1; rc=$?
 assert_eq "$rc" "1" "a stage that does not exist is a failure, not the no-such-verb exit"
 env HOME="$RH" bash "$REPO/adapters/claude/adapter.sh" l1-stage-env "$D/ostage" >/dev/null 2>&1; rc=$?
 assert_eq "$rc" "2" "claude has no such verb (exit 2), so its workers keep their own state"
 
+[ ! -e "$SA/mcp.json" ] && ok "mcp.json is not seeded: the worker starts no MCP server" || no "mcp.json was seeded"
+has "$(cat "$REPO/adapters/omp/l1-no-advisor.yml")" 'backend: "off"' "the L1 overlay turns the memory backend off: no retain or consolidate into a store later sessions recall from"
+
 echo "# omp l1-stage-env: the overrides omp honors, and what it cannot model"
 mkdir -p "$D/otherhome/agentdir"; printf 'other: 1\n' > "$D/otherhome/agentdir/config.yml"
-out=$(env HOME="$RH" PI_CODING_AGENT_DIR="$D/otherhome/agentdir" bash "$OA" l1-stage-env "$D/ostage" 2>/dev/null)
+out=$(env HOME="$RH" PI_CODING_AGENT_DIR="$D/otherhome/agentdir" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" 2>/dev/null)
 assert_eq "$(cat "$D/ostage/omp-home/.omp/agent/config.yml" 2>/dev/null)" "other: 1" "an inherited PI_CODING_AGENT_DIR is the source that is seeded"
 has "$out" "PI_CODING_AGENT_DIR=$D/ostage/omp-home/.omp/agent" "and is replaced by the stage's, so the worker cannot be pointed at the real tree"
 mkdir -p "$RH/.omp-alt/agent"; printf 'alt: 1\n' > "$RH/.omp-alt/agent/config.yml"
-out=$(env HOME="$RH" PI_CONFIG_DIR=.omp-alt bash "$OA" l1-stage-env "$D/ostage" 2>/dev/null)
+out=$(env HOME="$RH" PI_CONFIG_DIR=.omp-alt bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" 2>/dev/null)
 assert_eq "$(cat "$D/ostage/omp-home/.omp-alt/agent/config.yml" 2>/dev/null)" "alt: 1" "a renamed config directory is seeded under the same name"
 has "$out" "PI_CONFIG_DIR=.omp-alt" "and kept"
-env HOME="$RH" PI_CONFIG_DIR=/etc bash "$OA" l1-stage-env "$D/ostage" >/dev/null 2>"$D/err"; rc=$?
+env HOME="$RH" PI_CONFIG_DIR=/etc bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>"$D/err"; rc=$?
 assert_eq "$rc" "1" "a PI_CONFIG_DIR that is not a plain name under HOME is refused"
-env HOME="$RH" OMP_PROFILE=work bash "$OA" l1-stage-env "$D/ostage" >/dev/null 2>"$D/err"; rc=$?
+env HOME="$RH" OMP_PROFILE=work bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>"$D/err"; rc=$?
 assert_eq "$rc" "1" "a named profile is refused: its state is somewhere this seeding does not model"
 has "$(cat "$D/err")" "profile" "and the reason says so"
 mkdir -p "$D/lockedhome/.omp/agent"; chmod 000 "$D/lockedhome/.omp/agent"
@@ -273,11 +276,11 @@ mkdir -p "$D/freshhome"
 out=$(env HOME="$D/freshhome" bash "$OA" l1-stage-env "$D/ostage" 2>/dev/null); rc=$?
 assert_eq "$rc" "0" "a host with no omp state yet seeds nothing and succeeds"
 mkdir -p "$D/xdg/omp"
-env HOME="$RH" XDG_STATE_HOME="$D/xdg" bash "$OA" l1-stage-env "$D/ostage" >/dev/null 2>"$D/err"; rc=$?
+env HOME="$RH" XDG_STATE_HOME="$D/xdg" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>"$D/err"; rc=$?
 assert_eq "$rc" "1" "an XDG directory that holds an omp tree is refused, on macOS as on Linux: omp keeps part of its state there"
 has "$(cat "$D/err")" "$D/xdg/omp" "and named"
 mkdir -p "$D/xdg-empty"
-env HOME="$RH" XDG_STATE_HOME="$D/xdg-empty" bash "$OA" l1-stage-env "$D/ostage" >/dev/null 2>&1; rc=$?
+env HOME="$RH" XDG_STATE_HOME="$D/xdg-empty" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>&1; rc=$?
 assert_eq "$rc" "0" "an XDG variable with no omp tree under it changes nothing, as in omp"
 mkdir -p "$D/blocked/home/.omp"; chmod 000 "$D/blocked"
 if [ ! -x "$D/blocked" ]; then
@@ -303,8 +306,22 @@ env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/some-model" >/dev
 assert_eq "$rc" "0" "a provider with an api key seeds"
 env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "no-rows-prov/some-model" >/dev/null 2>&1; rc=$?
 assert_eq "$rc" "0" "so does one with no rows at all (its key comes from the environment)"
+env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "fuzzy-selector" >/dev/null 2>"$D/err"; rc=$?
+assert_eq "$rc" "4" "a selector with no provider (omp resolves it) is refused while any OAuth credential exists: it may be the one used"
+has "$(cat "$D/err")" "names no provider" "with the reason"
 env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" >/dev/null 2>&1; rc=$?
-assert_eq "$rc" "0" "and a call with no model"
+assert_eq "$rc" "4" "and so is a call with no model"
+mkdir -p "$D/apikeyhome/.omp/agent"
+python3 - "$D/apikeyhome/.omp/agent" <<'PY'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1] + "/agent.db")
+c.execute("CREATE TABLE auth_credentials (id INTEGER PRIMARY KEY, provider TEXT, credential_type TEXT, data TEXT, disabled_cause TEXT DEFAULT NULL)")
+c.execute("INSERT INTO auth_credentials (provider, credential_type, data) VALUES ('neuralwatt','api_key','k')")
+c.execute("INSERT INTO auth_credentials (provider, credential_type, data, disabled_cause) VALUES ('old','oauth','r','revoked')")
+c.commit()
+PY
+env HOME="$D/apikeyhome" bash "$OA" l1-stage-env "$D/ostage" "fuzzy-selector" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "0" "a host with no live OAuth credential has nothing to lose: a bare selector passes"
 
 echo "# real confinement (only where a sandbox works here)"
 real=$(env TMPDIR="$D" bash "$H" probe)

@@ -178,6 +178,15 @@ elif [ "$shrc" -eq 0 ]; then
 else
   pass "a write outside the staging directory, attempted by a shell that did write its stage, was refused"
 fi
+if [ "$engine" = omp ]; then
+  # A worker reads untrusted transcripts, and omp retains and consolidates memory at the end of a session into a
+  # store that every later session recalls from, through a server or daemon that is not the worker. The overlay
+  # turns the backend off; this is the proof, on the real store. Another live omp session writes here too, so a
+  # FAIL needs a rerun on a quiet host before it is read as a leak.
+  mem_changed=$(find "$HOME/.omp/agent/memories" -newer "$marker" -type f 2>/dev/null | head -5)
+  if [ -z "$mem_changed" ]; then pass "nothing under ~/.omp/agent/memories changed during the confined call"
+  else fail "files under ~/.omp/agent/memories changed during the call (a live omp session, or a leak through the memory server): $(printf '%s' "$mem_changed" | tr '\n' ' ')"; fi
+fi
 echo "# stdout: $(head -c 300 "$W/stdout")"
 
 echo "# files under \$HOME the engine wrote during the call (compare with l1-writes):"

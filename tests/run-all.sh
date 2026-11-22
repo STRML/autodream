@@ -3308,11 +3308,15 @@ test_l1_worker_setup_failure_defers_the_date_and_follows_no_planted_link(){
   # attempt after it, planting a symlink at the old stderr path inside the stage first.
   sed 's|^  l2-argv) |  l1-stage-env) case "$1" in *.setup-*) exit 0 ;; esac; ln -sf "$VICTIM" "$1/stage-env.err" 2>/dev/null; echo "no state dir" >\&2; exit 1 ;;\n\n  l2-argv) |' \
     "$REPO/adapters/claude/adapter.sh" > "$root/adapters/claude/adapter.sh"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/notify.log"\n' "$root" > "$root/autodream/notify.sh"; chmod +x "$root/autodream/notify.sh"
   VICTIM="$root/victim" PATH="$root/shim-sb:$PATH" ADAPTERS_ROOT="$root/adapters" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec run_dream "$root"
   assert_eq "$(cat "$root/victim")" "precious" "the file the planted link pointed at is untouched across the retry"
   assert_no_file "$(fdir "$root")/$h.json" "the session is not stubbed"
   assert_no_file "$root/dreams/$DATE.md" "and no report is written over it"
   assert_grep "$(fdir "$root")/l1-netdown.txt" " staging\$" "the ledger names the failure"
+  assert_grep "$(fdir "$root")/$h.json.err" 'could not be prepared in the stage' "the .err names what failed"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^fatal: .*could not set up L1 workers' "run-stats carries the cause: a setup failure heals nothing by waiting, so it is a fatal and not an outage deferral"
+  assert_grep "$root/notify.log" 'could not set up L1 workers' "a banner is posted, because with no findings JSON unassembled_dates would never name the date"
   [ "$(cat "$root/run.exit")" != 0 ] && ok "the run exits non-zero, so the date is retried" || no "the run exited 0"
   rm -rf "$root"
 }

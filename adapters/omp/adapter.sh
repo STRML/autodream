@@ -180,6 +180,8 @@ case "$cmd" in
     # omp resolves its whole state tree (agent dir, logs, run, cache) from HOME, so every write lands in
     # the stage. Measured 2026-11-21 on a real host: tests/l1-confine-real.sh --engine omp, ALL PASS, and no
     # write reached ~/.omp except the -shm of mnemopi banks (a live server mapping them, not the worker).
+    # mcp.json is deliberately not seeded: a worker holds Read and Write only, and an MCP server it started
+    # would be one more process outside the sandbox's reach to talk to.
     # Seeded from what the worker only reads: settings (config and models, .yml or .yaml), the context files
     # omp loads into its prompt, and one consistent SQLite snapshot of each database (seed-db.py, the backup
     # API: a live database is not safe to copy file by file). The OAuth rows are left out of the copy, so a
@@ -214,7 +216,7 @@ case "$cmd" in
     if [ -e "$osrc" ]; then
       { [ -d "$osrc" ] && [ -r "$osrc" ] && [ -x "$osrc" ]; } || err "cannot read the agent directory $osrc"
       command -v python3 >/dev/null 2>&1 || err "python3 is needed to snapshot omp's databases"
-      for f in config.yml config.yaml models.yml models.yaml mcp.json AGENTS.md APPEND_SYSTEM.md RULES.md kimi-device-id; do
+      for f in config.yml config.yaml models.yml models.yaml AGENTS.md APPEND_SYSTEM.md RULES.md kimi-device-id; do
         [ -e "$osrc/$f" ] || continue
         cp "$osrc/$f" "$odst/$f" || err "could not copy $osrc/$f"
       done
@@ -222,10 +224,10 @@ case "$cmd" in
         [ -e "$osrc/$f" ] || continue
         if [ "$f" = agent.db ]; then
           oprov=""; case "${2:-}" in */*) oprov="${2%%/*}" ;; esac
-          python3 "$ADIR/seed-db.py" "$osrc/$f" "$odst/$f" --drop-oauth ${oprov:+--provider "$oprov"}; orc=$?
+          python3 "$ADIR/seed-db.py" "$osrc/$f" "$odst/$f" --drop-oauth --provider "$oprov"; orc=$?
           case "$orc" in
             0) ;;
-            4) printf 'omp l1-stage-env: the %s provider authenticates with OAuth only\n' "$oprov" >&2; exit 4 ;;
+            4) printf 'omp l1-stage-env: OAuth credentials cannot be used from a throwaway copy (model: %s)\n' "${2:-none}" >&2; exit 4 ;;
             *) err "could not snapshot $osrc/$f" ;;
           esac
         else

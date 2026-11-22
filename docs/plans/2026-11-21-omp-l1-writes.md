@@ -52,7 +52,9 @@ native addon still resolve; a write through either link is refused like any othe
 | An agent dir that exists and cannot be read refuses; one that does not exist seeds nothing, once its nearest existing ancestor is shown searchable | a failed `-e` test must not read as "empty state": a path under a directory this user cannot search tests as absent too |
 | Setup runs the verb once per engine with the engine's model, before any worker | a setup that cannot work (an unreadable database) stops the run there, with no stub and no report, instead of failing every attempt |
 | The verb writes its stderr to a file beside the stages, not inside one | the runner runs outside the sandbox, and a worker can leave a symlink at any path in its own stage; a redirection into the stage would follow it and truncate the target |
-| A setup failure defers the date (ledger value `staging`) and writes no stub | a stub fills the slot, satisfies the missing-work check and lets a report publish over sessions that were never triaged. The same holds for the staging-root, stage-directory and sandbox failures before the engine starts |
+| A setup failure writes no stub and, when it is what the last round left missing, is a fatal (ledger value `staging`) | a stub fills the slot, satisfies the missing-work check and lets a report publish over sessions that were never triaged. It is a fatal and not an outage deferral because it heals nothing by waiting: a deferral wrote no report, no banner and, with no findings JSON, no `unassembled_dates` entry, every night. The same holds for the staging-root, stage-directory and sandbox failures before the engine starts |
+| The L1 overlay sets `memory.backend: off`, and `mcp.json` is not seeded | a worker reads untrusted transcripts, and omp retains and consolidates memory at the end of a session into a store every later session recalls from, through a server or daemon that is not the worker. The confined run on 03c327f saw the real mnemopi banks change; the overlay now switches the subsystem off for every headless omp call, and `l1-confine-real.sh` checks that nothing under `~/.omp/agent/memories` changes during the confined call (rerun on a quiet host if it fails: a live omp session writes there too) |
+| A model selector with no provider (a fuzzy name omp resolves itself) leaves omp unconfined while any live OAuth credential exists | which credential the worker will use is unknown, and it may be the OAuth one |
 
 ## Cost and residual
 
@@ -60,9 +62,10 @@ native addon still resolve; a write through either link is refused like any othe
 - Credentials sit in the stage for the life of the call (`models.yml` and the api-key rows of `agent.db`):
   0700 directory under `$AUTODREAM_DIR/staging`, removed when the session's answer is accepted and swept
   when the run is dead. The worker can already read the real files, so nothing new is readable.
-- The mnemopi bank `-shm` files changed in the real tree during the isolated run. They are the shared-memory
-  index of a bank, mapped by the live mnemopi server (a separate process), not by the worker: with
-  `HOME` in the stage the worker's own config root, and so its mnemopi socket and banks, are the stage's.
-  Reaching the real server would take a tool, and the worker holds `Read` and `Write` only. Not proved
-  here: a quiet-host rerun that shows no `-shm` write at all would. The confirming run on 0a6a819 wrote
-  nothing under the real `$HOME`.
+- The mnemopi banks changed in the real tree during a confined run on 03c327f. The worker holds `Read` and
+  `Write` only and its own config root is the stage, so the writer is a process outside the sandbox: a live
+  interactive omp, or a memory server the worker reached. The memory backend is now off for every headless
+  omp call this repo makes, `mcp.json` is not seeded, and the real check fails when anything under
+  `~/.omp/agent/memories` changes during the confined call. A failure on a busy host needs a rerun on a quiet
+  one before it is read as a leak. The claude worker cannot reach mnemopi: it runs `--strict-mcp-config` with
+  no MCP servers (pinned by `tests/adapter-claude.sh`).

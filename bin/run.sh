@@ -4545,6 +4545,7 @@ EOF
   # it. A report written from a dead-network or no-balance run looks complete, ships open
   # questions, and its own self-audit cannot tell the corpus is missing.
   NET_DEFERRED=no
+  NET_DEFERRED_CAUSE=none
   # Consecutive rounds that recovered nothing. A streak, not a comparison against the last
   # round's ending count: comparing end-to-end counts calls two rounds barren whenever the SECOND
   # one is, because round 1 having recovered sessions is invisible in its own ending number.
@@ -4558,6 +4559,7 @@ EOF
     # through its trigger, so round 1 is the round most likely to run at a host with no route.
     if ! wait_for_network "$(l1_probe_urls)"; then
       NET_DEFERRED=yes
+      NET_DEFERRED_CAUSE=network
       log "L1 round $round not dispatched: no route to the API. Deferring $TARGET_DATE for a later run."
       break
     fi
@@ -4614,12 +4616,26 @@ EOF
   # conditions are required: sessions are still missing, AND the last round that dispatched
   # saw a no-route failure or a permanent provider refusal. A run that recovered is never
   # deferred, however bad round 1 was.
+  # A runner that cannot set its own workers up is not an outage: it heals nothing by waiting, and a
+  # deferral would leave no report, no banner and (with no findings JSON) no unassembled_dates entry,
+  # every night. It is a fatal, which posts the banner and leaves the marker the next run reads.
   if [ "$MISSING" -gt 0 ] && [ "$LAST_ROUND_RUN" -gt 0 ] \
      && [ -s "$FINDINGS_DIR/l1-netdown.txt" ] \
-     && awk -v r="$LAST_ROUND_RUN" '$2 == r && ($3 == "true" || $3 == "provider" || $3 == "staging") { found = 1 } END { exit !found }' \
+     && awk -v r="$LAST_ROUND_RUN" '$2 == r && $3 == "staging" { found = 1 } END { exit !found }' "$FINDINGS_DIR/l1-netdown.txt"; then
+    rm -rf "$L1_STAGE_ROOT" 2>/dev/null
+    clean_work_bucket
+    log_fatal "the runner could not set up L1 workers for $MISSING session(s) in round $LAST_ROUND_RUN (stage directory, engine state or sandbox; the .err files in $FINDINGS_DIR name the cause); no stub was written, so $TARGET_DATE is deferred and a later run retries it"
+    fatal_exit
+    return 1
+  fi
+  if [ "$MISSING" -gt 0 ] && [ "$LAST_ROUND_RUN" -gt 0 ] \
+     && [ -s "$FINDINGS_DIR/l1-netdown.txt" ] \
+     && awk -v r="$LAST_ROUND_RUN" '$2 == r && ($3 == "true" || $3 == "provider") { found = 1 } END { exit !found }' \
           "$FINDINGS_DIR/l1-netdown.txt"; then
     NET_DEFERRED=yes
-    log "L1 finished with $MISSING session(s) missing and round $LAST_ROUND_RUN failing with no route or a provider refusal — deferring $TARGET_DATE for a later run"
+    NET_DEFERRED_CAUSE=network
+    awk -v r="$LAST_ROUND_RUN" '$2 == r && $3 == "provider" { found = 1 } END { exit !found }' "$FINDINGS_DIR/l1-netdown.txt" && NET_DEFERRED_CAUSE=provider
+    log "L1 finished with $MISSING session(s) missing and round $LAST_ROUND_RUN failing with no route or a provider refusal — deferring $TARGET_DATE for a later run ($NET_DEFERRED_CAUSE)"
   fi
   L1_ELAPSED=$(( $(date +%s) - L1_START ))
   # Whatever a failed worker left in staging was kept for the retries, and the rounds are over.
@@ -5072,6 +5088,7 @@ PY
     # appended after the aggregator loop as network_down_seconds_l2 / network_deferred_l2.
     printf 'network_down_seconds: %s\n' "$NET_DOWN_SECONDS"
     printf 'network_deferred: %s\n' "$NET_DEFERRED"
+    printf 'l1_deferred_cause: %s\n' "$NET_DEFERRED_CAUSE"
     # network_down_seconds is time the runner spent blocked BETWEEN rounds; the per-worker
     # ledger is one curl at the instant a worker failed. A flapping network makes the first
     # large and the second false for every worker, which is not a contradiction.
