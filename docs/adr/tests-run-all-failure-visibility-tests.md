@@ -6,6 +6,8 @@ Status: accepted · Date: 2026-11-22 · Code: `tests/run-all.sh` (`test_failing_
 
 ### Context
 
+`test_failing_enumerator_aborts_the_run` exists because its absence once let 306 assertions pass over a broken fix: the runner staged enumeration to a file and checked its exit status, but the `enumerate_for` wrapper ended in a literal `return 0`, so the check always read success, and no test drove an adapter whose enumerate fails.
+
 `find` exits 1 for any unreadable directory in the walk, with or without matches (verified on the dev host: an unreadable sibling gives exit 1 both ways, exit 0 only without one). A secondary root legitimately matches nothing on a given date, so treating "nonzero exit, no output" as fatal let one permission-denied directory under a quiet secondary root kill a night on which the primary had a full corpus. It died invisibly: `run()` returned before `notify.sh`, and no findings JSONs existed for `unassembled_dates()`.
 
 On a single-root host, "enumerator exited nonzero and returned nothing" is also the shape of a quiet date plus a transient find error.
