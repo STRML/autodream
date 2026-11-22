@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { FocusTag } from '../types'
-import { focusScript, forWriter, readTags, tagId, tagsFile, TEXT_CAP } from '../hooks/focus-lib'
+import { focusScript, forWriter, readTags, tagId, tagsFileFromEnv, TEXT_CAP } from '../hooks/focus-lib'
 
 const TAG: FocusTag = {
   id: 's1:r1',
@@ -63,14 +63,14 @@ test('characters are counted as the writer counts them, in code points, so emoji
 })
 
 test('the tags file is next to the rest of autodream, and AUTODREAM_DIR moves it', () => {
-  expect(tagsFile({ HOME: '/Users/x' })).toBe('/Users/x/.claude/autodream/tags.jsonl')
-  expect(tagsFile({ HOME: '/Users/x', AUTODREAM_DIR: '/opt/ad' })).toBe('/opt/ad/tags.jsonl')
-  expect(tagsFile({ HOME: '/Users/x', AUTODREAM_DIR: '' })).toBe('/Users/x/.claude/autodream/tags.jsonl')
+  expect(tagsFileFromEnv({ HOME: '/Users/x' })).toBe('/Users/x/.claude/autodream/tags.jsonl')
+  expect(tagsFileFromEnv({ HOME: '/Users/x', AUTODREAM_DIR: '/opt/ad' })).toBe('/opt/ad/tags.jsonl')
+  expect(tagsFileFromEnv({ HOME: '/Users/x', AUTODREAM_DIR: '' })).toBe('/Users/x/.claude/autodream/tags.jsonl')
 })
 
 test('AUTODREAM_TAGS_FILE moves the tags file, as it moves the one bin/vault-notes.sh reads', () => {
-  expect(tagsFile({ HOME: '/Users/x', AUTODREAM_DIR: '/opt/ad', AUTODREAM_TAGS_FILE: '/elsewhere/t.jsonl' })).toBe('/elsewhere/t.jsonl')
-  expect(tagsFile({ HOME: '/Users/x', AUTODREAM_TAGS_FILE: '' })).toBe('/Users/x/.claude/autodream/tags.jsonl')
+  expect(tagsFileFromEnv({ HOME: '/Users/x', AUTODREAM_DIR: '/opt/ad', AUTODREAM_TAGS_FILE: '/elsewhere/t.jsonl' })).toBe('/elsewhere/t.jsonl')
+  expect(tagsFileFromEnv({ HOME: '/Users/x', AUTODREAM_TAGS_FILE: '' })).toBe('/Users/x/.claude/autodream/tags.jsonl')
 })
 
 test('the writer is the install directory script, AUTODREAM_DIR moves it, and AUTODREAM_FOCUS_BIN overrides it', () => {

@@ -16,13 +16,13 @@ import {
 } from './lib'
 
 const PANE = 'dream'
+const MARKDOWN_ELEMENT_LIMIT = 9_500
 
 const report = atom({ plugin: 'autodream-band', key: 'report' } as const, null)
 const viewing = atom({ plugin: 'autodream-band', key: 'viewing' } as const, null)
 const isHidden = atom({ plugin: 'autodream-band', key: 'isHidden' } as const, false)
 
-/** Where the reports, review.sh and cmux are: review.sh's own environment knobs, then its defaults. */
-const where = async ($: EngineInterface) => {
+const autodreamPaths = async ($: EngineInterface) => {
   const [HOME, AUTODREAM_DIR, DREAMS_DIR, CMUX_BIN] = await Promise.all([
     $.env.get('HOME'),
     $.env.get('AUTODREAM_DIR'),
@@ -33,10 +33,9 @@ const where = async ($: EngineInterface) => {
   return locations({ HOME, AUTODREAM_DIR, DREAMS_DIR, CMUX_BIN })
 }
 
-/** The newest report on disk, whether or not the band would show it. */
 const load = async ($: EngineInterface): Promise<DreamReport | null> => {
   try {
-    const { dreams: dir } = await where($)
+    const { dreams: dir } = await autodreamPaths($)
     const name = latestReport((await $.fs.list(dir)).map(entry => entry.name))
 
     if (name === null) return null
@@ -45,15 +44,14 @@ const load = async ($: EngineInterface): Promise<DreamReport | null> => {
     const text = await $.fs.read(path)
     const parsed = typeof text === 'string' ? parseReport(text) : null
 
-    return parsed === null || typeof text !== 'string' ? null : { ...parsed, path, sections: keySections(text, 9_500) }
+    return parsed === null || typeof text !== 'string' ? null : { ...parsed, path, sections: keySections(text, MARKDOWN_ELEMENT_LIMIT) }
   } catch {
     return null
   }
 }
 
-/** Why there is nothing to show: no report at all, or one the band cannot read (a title it does not recognise). */
 const explainNoReport = async ($: EngineInterface): Promise<string> => {
-  const { dreams } = await where($)
+  const { dreams } = await autodreamPaths($)
   const name = await $.fs.list(dreams).then(
     entries => latestReport(entries.map(entry => entry.name)),
     () => null,
@@ -92,7 +90,6 @@ const open = async ($: EngineInterface, latest: DreamReport) => {
 
 const plural = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`
 
-/** Whether there is anything for a triage to do: review.sh's own rule, which `force` overrides. */
 const nothingToTriage = (latest: DreamReport, isForced: boolean): string | null => {
   if (isForced) return null
 
@@ -101,10 +98,6 @@ const nothingToTriage = (latest: DreamReport, isForced: boolean): string | null 
   return latest.openQuestions === 0 ? `${latest.date} has no open questions, so there is nothing to triage. /dream triage force starts anyway.` : null
 }
 
-/**
- * Starts review.sh's walk-through in this session. The prompt goes from a timer: the call resolves when the new turn
- * starts, and a call begun in a dispatch (a press, a command) is dropped when that dispatch ends.
- */
 const triageHere = ($: EngineInterface, latest: DreamReport, isForced: boolean): string => {
   const blocked = nothingToTriage(latest, isForced)
 
@@ -117,9 +110,8 @@ const triageHere = ($: EngineInterface, latest: DreamReport, isForced: boolean):
   return `Starting triage of the ${latest.date} report here: one open question at a time.`
 }
 
-/** Opens review.sh's own triage session in a cmux workspace and reports what the script said. */
 const triageInCmux = async ($: EngineInterface, latest: DreamReport, isForced: boolean): Promise<string> => {
-  const { script } = await where($)
+  const { script } = await autodreamPaths($)
   const { argv, env } = cmuxTriage(script, latest.date, isForced)
 
   if (!(await $.fs.exists(script))) {
@@ -136,18 +128,27 @@ const triageInCmux = async ($: EngineInterface, latest: DreamReport, isForced: b
   }
 }
 
-/**
- * The default way to triage: review.sh's own session in a split beside this one, so this conversation stays about
- * what it was about. cmux's `new-split` and `send` default to the surface this session runs in. Every way it can
- * go wrong has a fallback: no readable split address or a failed send opens a cmux workspace instead; outside cmux
- * there is nothing to split, so review.sh opens the workspace itself; no cmux or no review.sh means this session.
- */
+const runInNewSplit = async ($: EngineInterface, cmux: string, commandLine: string): Promise<boolean> => {
+  try {
+    const made = await $.process.run([cmux, 'new-split', 'right', '--focus', 'true'], { timeoutMs: 15_000 })
+    const ref = made.exitCode === 0 ? surfaceRef(made.stdout) : null
+
+    if (ref === null) return false
+
+    const typed = await $.process.run([cmux, 'send', '--surface', ref, '--', `${commandLine}\\n`], { timeoutMs: 15_000 })
+
+    return typed.exitCode === 0
+  } catch {
+    return false
+  }
+}
+
 const triageBeside = async ($: EngineInterface, latest: DreamReport, isForced: boolean): Promise<string> => {
   const blocked = nothingToTriage(latest, isForced)
 
   if (blocked !== null) return blocked
 
-  const { script, cmux } = await where($)
+  const { script, cmux } = await autodreamPaths($)
 
   if (!(await $.fs.exists(cmux))) {
     return `cmux was not found, so triage runs in this session. ${triageHere($, latest, isForced)}`
@@ -161,20 +162,8 @@ const triageBeside = async ($: EngineInterface, latest: DreamReport, isForced: b
 
   if (surface === undefined || surface === '') return triageInCmux($, latest, isForced)
 
-  try {
-    const made = await $.process.run([cmux, 'new-split', 'right', '--focus', 'true'], { timeoutMs: 15_000 })
-    const ref = made.exitCode === 0 ? surfaceRef(made.stdout) : null
-
-    if (ref !== null) {
-      // cmux reads a backslash-n in the text as Enter.
-      const typed = await $.process.run([cmux, 'send', '--surface', ref, '--', `${triageCommandLine(script, latest.date, isForced)}\\n`], {
-        timeoutMs: 15_000,
-      })
-
-      if (typed.exitCode === 0) return `Opened the ${latest.date} triage in a split to the right: a fresh session with the report preloaded.`
-    }
-  } catch {
-    // fall through to the workspace
+  if (await runInNewSplit($, cmux, triageCommandLine(script, latest.date, isForced))) {
+    return `Opened the ${latest.date} triage in a split to the right: a fresh session with the report preloaded.`
   }
 
   const said = await triageInCmux($, latest, isForced)
@@ -190,13 +179,11 @@ export const register: Register = on => {
       argumentHint: '[triage|here|cmux] [force]',
     })
     await refresh($)
-    // A session can outlive the night; check again for a fresh report.
     $.clock.every(30 * 60_000, () => refresh($))
 
     return next(e)
   })
 
-  // A triage ends by logging its decisions into the report; the turn that ends it clears the band.
   on('turn.complete', async ($, e, next) => {
     await refresh($)
 
@@ -264,13 +251,11 @@ export const register: Register = on => {
       ...(shown.openQuestions > 0 ? [plural(shown.openQuestions, 'open question')] : []),
       ...(top === undefined ? [] : [`top pattern: ${top.title}`]),
     ]
-    // Other plugins and the engine draw in this slot too: stack under them rather than replace them.
     const beneath = await next(e)
 
     return (
       <Box flexDirection="column">
         {beneath}
-        {/* One row: the summary takes what room the buttons leave and ends in an ellipsis rather than wrapping around them. */}
         <Box key="band" gap={1}>
           <Box flexGrow={1} flexShrink={1}>
             <Text dimColor wrap="truncate-end">{`🌙 Autodream ${shown.date}: ${parts.join(' · ')}`}</Text>

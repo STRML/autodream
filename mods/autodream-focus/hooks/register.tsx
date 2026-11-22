@@ -2,25 +2,20 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderElement } from 'claude-code'
 
 import type { FocusTag } from '../types'
-import { focusScript, forWriter, readTags, tagId, tagsFile } from './focus-lib'
+import { focusScript, forWriter, readTags, tagId, tagsFileFromEnv } from './focus-lib'
 
-/**
- * Plain text, not an icon: a glyph's width is a guess the engine and the terminal make separately (the emoji eye with
- * its selector drew as an ellipsis, and a bare one was small), and words cannot be measured wrong. The check mark is
- * one cell in every terminal.
- */
 const LABEL = 'autodream focus'
 const OFF = `+ ${LABEL}`
 const ON = `✓ ${LABEL}`
-/** The label plus the padding a plain Button gives it, with room to spare: squeezed below that, it truncates to an ellipsis. */
-const WIDTH = OFF.length + 5
+const BUTTON_WIDTH = OFF.length + 5
+
+const isTypedByPerson = (kind: string | undefined): boolean => kind === 'composer' || kind === 'bridge'
 
 const tagged = atom({ plugin: 'autodream-focus', key: 'tagged' } as const, [])
 
 type Ui = ReturnType<EngineInterface['ui']['resolve']>
 type Turn = { uuid: string; role: FocusTag['role']; text: string }
 
-/** The script, the two settings that move the file it writes (passed on, as the writer reads them from its environment), and where this mod would look without it. */
 const writer = async ($: EngineInterface): Promise<{ script: string; env: Record<string, string>; fallback: string }> => {
   const [HOME, AUTODREAM_DIR, AUTODREAM_TAGS_FILE, AUTODREAM_FOCUS_BIN] = await Promise.all([
     $.env.get('HOME'),
@@ -32,17 +27,11 @@ const writer = async ($: EngineInterface): Promise<{ script: string; env: Record
   return {
     script: focusScript({ HOME, AUTODREAM_DIR, AUTODREAM_FOCUS_BIN }),
     env: { ...(AUTODREAM_DIR ? { AUTODREAM_DIR } : {}), ...(AUTODREAM_TAGS_FILE ? { AUTODREAM_TAGS_FILE } : {}) },
-    fallback: tagsFile({ HOME, AUTODREAM_DIR, AUTODREAM_TAGS_FILE }),
+    fallback: tagsFileFromEnv({ HOME, AUTODREAM_DIR, AUTODREAM_TAGS_FILE }),
   }
 }
 
-/**
- * The tags file, asked of the writer. The writer also reads `$AUTODREAM_DIR/config`, which this mod cannot (it cannot source a
- * shell file), so a tags file named only there would be written by the script and invisible here: no button would light, and
- * pressing one again would take a tag back that was never shown. The environment's answer is the fallback when the script is
- * not installed or cannot answer.
- */
-const where = async ($: EngineInterface): Promise<string> => {
+const tagsFilePath = async ($: EngineInterface): Promise<string> => {
   const { script, env, fallback } = await writer($)
 
   try {
@@ -52,7 +41,6 @@ const where = async ($: EngineInterface): Promise<string> => {
       if (exitCode === 0 && stdout.trim() !== '') return stdout.trim()
     }
   } catch {
-    // fall back to what the environment says
   }
 
   return fallback
@@ -60,15 +48,8 @@ const where = async ($: EngineInterface): Promise<string> => {
 
 const reason = (cause: unknown): string => (cause instanceof Error ? cause.message : String(cause))
 
-/**
- * The tags on disk now, to light the buttons. This mod only reads the file: every write goes through bin/autodream-focus.sh,
- * which holds the lock the other two harnesses use, so a tag from the button and one from OMP or Codex cannot overwrite each other.
- *
- * Only a file that is not there is empty. One that is there and will not read (over the 4 MiB a read allows, no permission,
- * an I/O error) throws, so the buttons say so rather than show every turn as untagged.
- */
 const load = async ($: EngineInterface): Promise<FocusTag[]> => {
-  const file = await where($)
+  const file = await tagsFilePath($)
 
   if (!(await $.fs.exists(file))) return []
 
@@ -99,7 +80,6 @@ const press = async ($: EngineInterface, turn: Turn) => {
       return
     }
 
-    // The writer toggles: a second press on a tagged turn takes the tag back, and says which it did.
     const { exitCode, stdout, stderr } = await $.process.run(
       [script, 'tag', '--harness', 'claude', '--session', session, '--uuid', turn.uuid, '--role', turn.role, '--cwd', cwd, '--text', forWriter(turn.text)],
       { env, timeoutMs: 15_000 },
@@ -118,12 +98,6 @@ const press = async ($: EngineInterface, turn: Turn) => {
   }
 }
 
-/**
- * The row as the engine draws it, with the focus button over its top-right corner. The button is absolutely positioned
- * so showing it moves nothing, and it sits on the right because the left edge of a split pane has no cells to spare.
- * Untagged it appears while the pointer is over the row; tagged it stays, so a glance down the transcript finds what
- * was marked.
- */
 const withFocus = async ($: EngineInterface, ui: Ui, turn: Turn, requestId: string, beneath: RenderElement) => {
   if (typeof turn.text !== 'string' || turn.text.trim() === '') return beneath
 
@@ -138,7 +112,7 @@ const withFocus = async ($: EngineInterface, ui: Ui, turn: Turn, requestId: stri
         position="absolute"
         top={0}
         right={0}
-        width={WIDTH}
+        width={BUTTON_WIDTH}
         justifyContent="flex-end"
         display={isTagged ? 'flex' : 'none'}
         hover={isTagged ? undefined : { display: 'flex' }}
@@ -156,12 +130,10 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // Only what the person typed (here or from the phone): a task notification or a peer's message is not theirs to tag.
   on('ui.render', { component: 'UserMessage' }, async ($, e, next) => {
     const beneath = await next(e)
-    const kind = e.props.origin?.kind
 
-    if (kind !== 'composer' && kind !== 'bridge') return beneath
+    if (!isTypedByPerson(e.props.origin?.kind)) return beneath
 
     return withFocus($, $.ui.resolve(e), { uuid: e.requestId, role: 'user', text: e.props.text }, e.requestId, beneath)
   })

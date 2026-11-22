@@ -42,18 +42,12 @@ type Run = { argv: readonly string[]; env?: Record<string, string> }
 type Reply = { exitCode: number; stdout: string }
 
 type Machine = {
-  /** review.sh is installed */
   hasScript?: boolean
-  /** the cmux app is installed */
   hasCmux?: boolean
-  /** this session runs inside a cmux surface (CMUX_SURFACE_ID is set) */
   inCmux?: boolean
-  /** what `cmux new-split` prints, and what `cmux send` does */
   split?: Reply
   send?: Reply
-  /** exported variables beyond HOME, such as DREAMS_DIR, AUTODREAM_DIR or CMUX_BIN */
   env?: Record<string, string>
-  /** where review.sh and cmux are on this machine, when not at the defaults */
   scriptAt?: string
   cmuxAt?: string
 }
@@ -95,7 +89,6 @@ const world = (
   on('process.run', (_$, e) => {
     runs.push({ argv: e.argv, env: e.init?.env })
 
-    // cmux answers new-split and send; anything else (review.sh itself) says it opened a workspace
     const reply: Reply =
       e.argv[0] === cmuxAt ? (e.argv[1] === 'new-split' ? split : e.argv[1] === 'send' ? send : { exitCode: 0, stdout: '' }) : { exitCode: 0, stdout: WORKSPACE_SAID }
 
@@ -117,7 +110,6 @@ const world = (
     return text === undefined ? { deny: `ENOENT ${e.path}` } : { value: text }
   })
 
-  // The mod sends a triage prompt from a timer, outside the press that asked for it, so tests let the timer fire.
   return { sent, runs, listed, clock, landed: () => clock.advance(100) }
 }
 
@@ -146,7 +138,6 @@ test('the band is one row: the summary truncates instead of wrapping around the 
   const summary = await ui.find({ type: 'Text', text: /Autodream 2026-10-01/ })
 
   expect(summary?.props?.wrap).toBe('truncate-end')
-  // the buttons are in the band row, not beneath the summary
   expect(await ui.find({ key: 'triage' })).toBeDefined()
   expect(await ui.find({ key: 'view' })).toBeDefined()
   expect(await ui.find({ key: 'dismiss' })).toBeDefined()
@@ -204,7 +195,6 @@ test('Triage on the band opens review.sh in a split beside this session and send
 
   expect(runs.map(one => one.argv)).toEqual([
     [CMUX, 'new-split', 'right', '--focus', 'true'],
-    // cmux reads a backslash-n in the text as Enter
     [CMUX, 'send', '--surface', 'surface:7', '--', `${SPLIT_LINE}\\n`],
   ])
   expect(sent).toEqual([])
@@ -239,7 +229,6 @@ test('the band clears on the turn that finishes the triage', async ($, on) => {
   await start($)
   expect(await (await band($)).find({ key: 'band' })).toBeDefined()
 
-  // the triage session logs its decisions into the report, then its turn ends
   reports['2026-10-01.md'] = `${BUSY}\n## Triage decisions\n- 1. approved\n`
   await $.turn.complete({ answer: 'done', durationMs: 1000, isAborted: false, turnId: 't', reason: 'answer' })
 

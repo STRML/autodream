@@ -1,105 +1,49 @@
 #!/bin/bash
-# Count how many consecutive reports have carried the same open question, and escalate the
-# ones that have gone unanswered too long.
-#
-# WHY THIS EXISTS
-#
-# Detection was never the problem. The X bookmarks walk broke on 2026-09-05; every report
-# from then to 09-14 said `x_queryid_source: failed`, and the Open questions section asked
-# "Fix the X bookmarks walker, or turn the feature off?" six times. Ten nights, six asks,
-# one banner a night that looked exactly like every other banner — and nothing changed
-# until the user happened to notice the other install had gone quiet. A signal that repeats
-# at constant volume is a signal you learn to skim.
-#
-# So this counts the repeats mechanically and makes the Nth one look different from the
-# first. L2 already writes "Sixth ask" into its own prose, but that is the model counting
-# its own history from context, which is exactly the kind of number that drifts. This one
-# is derived from the reports on disk.
-#
-# HOW A QUESTION IS IDENTIFIED
-#
-# By its bolded title, normalized. Verified against five consecutive cc-autodream reports
-# (2026-09-10..14): the body prose is rewritten every night, but the title is BYTE-identical
-# across all of them —
-#   **Fix the X bookmarks walker, or turn the feature off?**
-#   **Where should autodream's memory pins go now that markdown memory is retired?**
-# so an exact key on the normalized title matches without any fuzzy scoring. Keying on the
-# body instead is not an option precisely because the body is rewritten nightly.
-#
-# PROMPT.md treats the bold lead-in as REQUIRED for this reason. It used to call it
-# optional, and a plain numbered question would then parse as nothing while its siblings
-# parsed fine — the streak would vanish with no warning. The guard against that living on
-# the prompt alone is the parsed-vs-marker check below: any disagreement between the number
-# of questions parsed and the report's own count marker refuses to touch state and says so.
-# Freezing every streak at its last value is the failure that would switch this feature off
-# silently, which is exactly what `overlap_measured` and `stats_sidecars_unparseable` exist
-# to prevent elsewhere in this repo.
-#
-# A streak counts CONSECUTIVE REPORTS, not calendar days: a night that produced no report
-# must not reset a streak, because the whole point is to survive the nights that fail. A
-# question absent from a report that WAS produced is treated as resolved and forgotten —
-# including a report with zero questions, which is why run.sh calls this on the
-# nothing-was-triaged path too.
-#
-# RERUNS
-#
-# Updates are idempotent per report date and refuse to go backwards. `AUTODREAM_FORCE=1
-# run.sh <today>` rebuilds the same report and must not advance a streak to a false
-# escalation; rebuilding an OLDER date must not clobber the live state with history. Both
-# are decided from the stored last-seen date rather than trusted not to happen.
-#
-# Usage:
-#   question-streaks.sh update <report.md> [findings-dir]   # count, escalate, notify
-#   question-streaks.sh status                              # print current streaks
-#   question-streaks.sh clear all|<key>                     # forget a streak once acted on
-#
-# Environment:
-#   AUTODREAM_DIR                    default $HOME/.claude/autodream
-#   AUTODREAM_QUESTION_STATE         streak store   default $AUTODREAM_DIR/question-streaks.tsv
-#   AUTODREAM_QUESTION_ESCALATE_AT   escalate at N consecutive reports   default 3
-#   AUTODREAM_QUESTION_LOCK_WAIT     seconds to wait for a held lock   default 15 (tests lower it)
-#   AUTODREAM_NOTIFY_DRYRUN          1 = never post a banner (tests, dry runs)
-#
-# Exit: always 0 on `update`. This runs at the end of a nightly pipeline and a bookkeeping
-# helper must never be the thing that costs a night its report. `clear` DOES report a
-# failed write, because an operator who is told a streak is forgotten must not find it
-# still escalating tomorrow.
 set -uo pipefail
 
-_pp="$(dirname "${BASH_SOURCE[0]}")/portable.sh"
-# Installed copies are symlinks: a merge updates them before install.sh links a new helper.
-[ -r "$_pp" ] || _pp="$(dirname "$(readlink "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/portable.sh"
-# shellcheck source=/dev/null
-. "$_pp"
+usage() {
+  cat <<'EOF'
+usage: question-streaks.sh update <report.md> [findings-dir]   count, escalate, notify
+       question-streaks.sh status                              print current streaks
+       question-streaks.sh clear all|<key>                     forget a streak once acted on
 
-# install.sh links this script into the install's own AUTODREAM_DIR, so a bare invocation
-# (status, clear, or run.sh's early empty-night path) finds the store there, the same way
-# run.sh finds its install dir. The legacy ~/.claude/autodream stays the last resort
-# (Codex review of 232c94c).
-_src="${BASH_SOURCE[0]}"; _lib="$(dirname "$_src")/lib-install-dir.sh"
-# Installed copies are symlinks: a merge updates them before install.sh links a new helper.
-[ -r "$_lib" ] || _lib="$(dirname "$(readlink "$_src" 2>/dev/null || echo "$_src")")/lib-install-dir.sh"
+Counts how many consecutive reports have carried the same open question, and escalates the
+ones that have gone unanswered too long.
+
+Environment:
+  AUTODREAM_DIR                    default $HOME/.claude/autodream
+  AUTODREAM_QUESTION_STATE         streak store   default $AUTODREAM_DIR/question-streaks.tsv
+  AUTODREAM_QUESTION_ESCALATE_AT   escalate at N consecutive reports   default 3
+  AUTODREAM_QUESTION_LOCK_WAIT     seconds to wait for a held lock   default 15
+  AUTODREAM_NOTIFY_DRYRUN          1 = never post a banner
+
+Exit: always 0 on `update`, so this bookkeeping helper never costs a night its report.
+`clear` reports a failed write.
+EOF
+}
+
+_src="${BASH_SOURCE[0]}"
+sibling() {
+  local p; p="$(dirname "$_src")/$1"
+  [ -r "$p" ] || p="$(dirname "$(readlink "$_src" 2>/dev/null || echo "$_src")")/$1"
+  printf '%s' "$p"
+}
+
 # shellcheck source=/dev/null
-. "$_lib"
+. "$(sibling portable.sh)"
+# shellcheck source=/dev/null
+. "$(sibling lib-install-dir.sh)"
 resolve_install_dir "$_src"
-_rf="$(dirname "$_src")/report-format.sh"
-[ -r "$_rf" ] || _rf="$(dirname "$(readlink "$_src" 2>/dev/null || echo "$_src")")/report-format.sh"
-if [ ! -r "$_rf" ]; then
-  # Without the lib every report reads as "no marker", which would freeze every streak behind a
-  # message about the report. Say what is wrong. `update` still exits 0, as the header promises.
-  echo "question-streaks: report-format.sh not found beside $_src or its link target; streaks not touched" >&2
+_rf="$(sibling report-format.sh)"
+_ll="$(sibling lib-flock.sh)"
+for _p in "$_rf" "$_ll"; do
+  [ -r "$_p" ] && continue
+  echo "question-streaks: $(basename "$_p") not found beside $_src or its link target; streaks not touched" >&2
   [ "${1:-}" = update ] && exit 0
   exit 1
-fi
+done
 # shellcheck source=/dev/null
 . "$_rf"
-_ll="$(dirname "$_src")/lib-flock.sh"
-[ -r "$_ll" ] || _ll="$(dirname "$(readlink "$_src" 2>/dev/null || echo "$_src")")/lib-flock.sh"
-if [ ! -r "$_ll" ]; then
-  echo "question-streaks: lib-flock.sh not found beside $_src or its link target; streaks not touched" >&2
-  [ "${1:-}" = update ] && exit 0
-  exit 1
-fi
 # shellcheck source=/dev/null
 . "$_ll"
 STATE="${AUTODREAM_QUESTION_STATE:-$AUTODREAM_DIR/question-streaks.tsv}"
@@ -108,15 +52,6 @@ ESCALATE_AT="${AUTODREAM_QUESTION_ESCALATE_AT:-3}"
 case "$ESCALATE_AT" in ''|*[!0-9]*) ESCALATE_AT=3 ;; esac
 [ "$ESCALATE_AT" -ge 1 ] || ESCALATE_AT=3
 
-# Line count that is 0 for an empty or missing file. NOT `grep -c . || echo 0`: grep -c
-# prints 0 AND exits 1 on no match, so the fallback fires too and the value becomes "0\n0".
-# That trap is documented in this repo's CLAUDE.md and it still shipped in the first draft
-# of this file, where it logged "clearing 0 0 streak(s)".
-nlines() { [ -s "$1" ] && wc -l < "$1" | tr -d ' ' || echo 0; }
-
-# Title -> stable key. Lowercase and collapse whitespace only. The titles are identical
-# night to night, so heavier normalization would buy nothing and would risk collapsing two
-# genuinely different questions onto one key, which silently merges their streaks.
 key_of() {
   printf '%s' "$1" \
     | tr '[:upper:]' '[:lower:]' \
@@ -125,63 +60,27 @@ key_of() {
     | shasum | cut -c1-12
 }
 
-# Pull the bolded titles out of the Open questions section. Bounded to that section so a
-# bold run anywhere else in the report cannot register as a question.
-# Tolerates leading indent and `1)` as well as `1.`. Deliberately still anchored to a
-# NUMBERED item: PROMPT.md mandates numbering and review.sh walks the questions in order,
-# so a bulleted question is already broken for other reasons. The real safety net against
-# a format change is the parsed-vs-marker check in cmd_update, not the breadth of this
-# pattern — a regex loose enough to match anything would start matching sub-bullets.
-titles_of() { # $1=report
-  # report_questions(), not a heading match: the section's boundaries are the
-  # questions block sentinels (report-format.sh), so this agrees with review.sh
-  # and notify.sh about which lines are questions.
+titles_of() {
   report_questions "$1" 2>/dev/null \
     | sed -n '/^<!-- *autodream:open-questions/q;p' \
     | grep -oE '^[[:space:]]*[0-9]+[.)][[:space:]]*\*\*[^*]+\*\*' \
     | sed 's/^[[:space:]]*[0-9]*[.)][[:space:]]*\*\*//; s/\*\*$//'
 }
 
-# Serialize the read-modify-write. STATE is one shared file per install, and the scheduled
-# nightly and an `autodream-now.sh` run carry different launchd labels, so launchd's
-# one-instance-per-label rule does not keep them apart. Two overlapping runs would each
-# read the old state and the second write would discard the first's increment.
-#
-# The lock is an flock(2) on $STATE.flock (lib-flock.sh, the mechanism threads.sh uses). It was a
-# mkdir lock that contenders reclaimed by age and then by pid, and a shell cannot make "judge the
-# holder gone, then take its lock" atomic: four review rounds on #192 each found another interleaving
-# (docs/plans/2026-11-21-fix_question-streaks-lock-owner-redesign.md). The kernel drops an flock when
-# its holder ends, so nothing is judged, reclaimed or put back. Failure to take it SKIPS the update
-# rather than blocking: a missed increment costs one night of escalation latency, while a bookkeeping
-# helper that hangs would hold up the pipeline behind it. $STATE.lock is the older version's mkdir
-# lock, still honored while it is young (lib-flock.sh) and never removed.
 LOCK="$STATE.flock"
 LEGACY_LOCK="$STATE.lock"
 
-# ONE FILE, ONE WRITE
-#
-# The newest counted report date is the first line of STATE, `#last<TAB>YYYY-MM-DD`, above
-# the streak rows. A question-free report leaves only that line, so the watermark survives
-# an empty board. Every write replaces the whole file: a temp file in the same directory,
-# then one rename. The watermark used to live in a second file, and three reviews in a row
-# (Codex on 232c94c, 4eea84d and 600e6dd) each found a write order or a failure between the
-# two files that let an older rebuild recreate a streak. One rename cannot leave the board
-# and its watermark disagreeing, so there is no order left to get wrong:
-#
-#   failure                                STATE afterwards
-#   temp file cannot be created            unchanged
-#   temp write fails (disk full)           unchanged, temp removed
-#   rename fails                           unchanged, temp removed
-#   killed between write and rename        unchanged, a stray STATE.XXXXXX left behind
-#   STATE exists but cannot be read        unchanged; update refuses, it is not an empty board
 rows_of() { awk '!/^#/ && NF' "$STATE" 2>/dev/null; }
 nrows()   { rows_of | wc -l | tr -d ' '; }
+streak_field() {
+  awk -F'\t' -v k="$1" -v n="$2" '$1"" == k"" {print $n; exit}' "$STATE" 2>/dev/null
+}
 newest_of() {
   awk -F'\t' '/^#last\t/ {print $2} !/^#/ && NF>=4 {print $4}' "$STATE" 2>/dev/null \
     | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' | sort | tail -1
 }
 unreadable_state() { [ -e "$STATE" ] && { [ ! -f "$STATE" ] || [ ! -r "$STATE" ]; }; }
-write_state() { # $1=rows file  $2=watermark date, or empty for none
+write_state() {
   local t; t=$(mktemp "$STATE.XXXXXX" 2>/dev/null) || return 1
   if ( { [ -z "$2" ] || printf '#last\t%s\n' "$2"; } && cat "$1" ) > "$t" 2>/dev/null \
      && mv -f "$t" "$STATE" 2>/dev/null; then
@@ -190,18 +89,13 @@ write_state() { # $1=rows file  $2=watermark date, or empty for none
   rm -f "$t" 2>/dev/null
   return 1
 }
-# Waits up to AUTODREAM_QUESTION_LOCK_WAIT seconds for a live holder, and returns flock_acquire's code.
 take_lock() {
   local max="${AUTODREAM_QUESTION_LOCK_WAIT:-15}"
-  # A bad value keeps the default rather than failing the night. More than four digits would make
-  # the wait effectively endless; 10# keeps 08 decimal.
   case "$max" in ''|*[!0-9]*|?????*) max=15 ;; esac
   flock_acquire "$LOCK" "$((10#$max))" "$LEGACY_LOCK"
 }
 drop_lock() { flock_release; }
-# What a refused take_lock says. A held lock is routine (another run is mid-update); the other codes are
-# permanent states, and an update that silently skips on them would freeze every streak for good.
-lock_message() { # $1=flock_acquire code
+lock_message() {
   case "$1" in
     1) echo "another run holds $LOCK" ;;
     5) echo "another run holds $LEGACY_LOCK (an older version's lock)" ;;
@@ -218,28 +112,17 @@ cmd_update() {
   [ -s "$report" ] || { echo "question-streaks: no report at $report; nothing to count"; return 0; }
   local date; date=$(basename "$report" .md)
 
-  # The lock lives beside the state, so its directory must exist before the lock is taken.
-  # Otherwise the first update on a new state path reads as a held lock and never creates
-  # the state (Codex review of b72f0e4).
   mkdir -p "$(dirname "$STATE")" 2>/dev/null || true
   local lrc=0
   take_lock || lrc=$?
   if [ "$lrc" -ne 0 ]; then
     echo "question-streaks: $(lock_message "$lrc"); skipping this update"
-    # A permanent refusal posts a banner: skipping every night would otherwise read as a quiet week.
-    lock_is_permanent "$lrc" && post_alert "streak updates are DOWN: $(lock_message "$lrc")"
+    lock_is_permanent "$lrc" && show_notification "streak updates are DOWN: $(lock_message "$lrc")"
     return 0
   fi
-  # ONE trap for both the lock and the scratch dir. A second `trap ... RETURN` later in
-  # this function would silently replace this one rather than adding to it, leaking
-  # whichever cleanup was registered first — and a leaked lock dir stays until its holder is gone.
   local tmp=""
   trap 'drop_lock; [ -n "$tmp" ] && rm -rf "$tmp"' RETURN
 
-  # Refuse to go backwards. Rebuilding an old date would otherwise drop every streak that
-  # old report does not mention and rewrite the live state with history.
-  # A state file that cannot be read is not an empty board. Reading it as empty would drop
-  # the watermark and restart every streak.
   if unreadable_state; then
     echo "question-streaks: cannot read $STATE; leaving streaks untouched"
     return 0
@@ -249,40 +132,26 @@ cmd_update() {
     echo "question-streaks: $date is older than the last counted report ($newest); leaving streaks untouched"
     return 0
   fi
-  # Same date means a rebuild of a report already counted. Refresh membership, hold counts.
   local same_date=0
   [ -n "$newest" ] && [ "$date" = "$newest" ] && same_date=1
 
   tmp="$(mktemp -d)" || return 0
 
   titles_of "$report" > "$tmp/titles" 2>/dev/null || : > "$tmp/titles"
-  local n marker; n=$(nlines "$tmp/titles"); marker=$(report_marker_count "$report")
+  local n marker; n=$(wc -l < "$tmp/titles" | tr -d ' '); marker=$(report_marker_count "$report")
 
-  # No marker means the report is incomplete. This is stricter than run.sh's report_complete,
-  # which accepts any line containing `autodream:open-questions=`. An L2 run truncated
-  # before the Open questions section parses as zero questions, and
-  # counting that clears every streak and advances the watermark. run.sh leaves such a
-  # report in place when it cannot move it aside (Codex review of b72f0e4).
   if [ -z "$marker" ]; then
     echo "question-streaks: $date has no open-questions marker, so the report is incomplete; streaks not updated"
     return 0
   fi
 
-  # The marker is the report's own count. Any disagreement means the format moved and some
-  # questions parsed as nothing — refuse to touch state rather than silently dropping a
-  # streak or freezing every one of them at its last value.
   if [ "$marker" -ne "$n" ]; then
     echo "question-streaks: WARNING $date says $marker open question(s) but $n parsed — the title format changed; streaks not updated"
-    # Banner, not just a log line. This feature exists because a signal buried in a place
-    # nobody looks gets skimmed, and a parser breakage hidden in the run log is that same
-    # failure one level up: every streak silently frozen, no escalation ever again, and no
-    # way to tell that from a quiet week. The safety net going down has to be louder than
-    # the thing it was watching for.
     post_banner "$date" 1 "parser broke: $marker question(s), $n parsed — escalation is DOWN"
     return 0
   fi
 
-  if [ "${n:-0}" -eq 0 ]; then
+  if [ "$n" -eq 0 ]; then
     echo "question-streaks: no open questions in $date; clearing $(nrows) streak(s)"
     write_state /dev/null "$date" || echo "question-streaks: could not write $STATE; streaks untouched (continuing)"
     return 0
@@ -294,14 +163,10 @@ cmd_update() {
     [ -n "$title" ] || continue
     local k count first
     k=$(key_of "$title")
-    # `""` forces a string compare: keys are hex, so two all-digit keys that differ only in
-    # leading zeros would otherwise compare equal as numbers (Codex review of 5f7ddaa).
-    count=$(awk -F'\t' -v k="$k" '$1"" == k"" {print $2}' "$STATE" 2>/dev/null | head -1)
-    first=$(awk -F'\t' -v k="$k" '$1"" == k"" {print $3}' "$STATE" 2>/dev/null | head -1)
+    count=$(streak_field "$k" 2)
+    first=$(streak_field "$k" 3)
     case "${count:-}" in ''|*[!0-9]*) count=0 ;; esac
-    # A rebuild of an already-counted report holds the count where it is; a question that
-    # is new even on a rebuild still starts at 1.
-    if [ "$same_date" -eq 1 ] && [ "$count" -gt 0 ]; then :; else count=$(( count + 1 )); fi
+    if [ "$same_date" -ne 1 ] || [ "$count" -eq 0 ]; then count=$(( count + 1 )); fi
     [ -n "$first" ] || first="$date"
     printf '%s\t%s\t%s\t%s\t%s\n' "$k" "$count" "$first" "$date" "$title" >> "$tmp/next"
     if [ "$count" -ge "$ESCALATE_AT" ]; then
@@ -325,7 +190,6 @@ cmd_update() {
   cat "$tmp/block"
   [ -n "$findings" ] && [ -d "$findings" ] && cp "$tmp/block" "$findings/question-escalations.txt" 2>/dev/null || true
 
-  # A rebuild of an already-counted report must not re-post last night's banner.
   if [ "$same_date" -eq 1 ]; then
     echo "question-streaks: rebuild of $date; escalation written but no banner re-posted"
   else
@@ -334,28 +198,17 @@ cmd_update() {
   return 0
 }
 
-# One notification. osascript runs with fd 9 closed: a child that outlives this script would otherwise
-# keep the flock alive after the script is killed.
-show_notification() { # $1=message
+show_notification() {
+  [ "${AUTODREAM_NOTIFY_DRYRUN:-0}" = "1" ] && { echo "question-streaks: dry run, no banner"; return 0; }
   command -v osascript >/dev/null 2>&1 || { echo "question-streaks: no osascript; banner skipped"; return 0; }
-  local msg="$1"
-  # Quotes and backslashes in a question title would otherwise end the AppleScript string
-  # and turn the whole -e into a syntax error, which osascript reports on a stderr this
-  # drops — so the banner would vanish for exactly the questions with punctuation in them.
-  msg=$(printf '%s' "$msg" | sed 's/\\/\\\\/g; s/"/\\"/g')
+  local msg
+  msg=$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')
   osascript -e "display notification \"$msg\" with title \"Autodream — still unanswered\"" >/dev/null 2>&1 9>&- \
     && echo "question-streaks: posted banner" \
     || echo "question-streaks: banner post failed (continuing)"
   return 0
 }
-post_alert() { # $1=message
-  [ "${AUTODREAM_NOTIFY_DRYRUN:-0}" = "1" ] && { echo "question-streaks: dry run, no banner"; return 0; }
-  show_notification "$1"
-}
-# The banner is the point: it is the one surface that looks different from last night's.
-# Best-effort and never fatal, same posture as notify.sh.
-post_banner() { # $1=date $2=count $3=lead line
-  [ "${AUTODREAM_NOTIFY_DRYRUN:-0}" = "1" ] && { echo "question-streaks: dry run, no banner"; return 0; }
+post_banner() {
   local plural=""; [ "$2" -ne 1 ] && plural="s"
   show_notification "$2 question$plural unanswered $ESCALATE_AT+ nights: $3"
 }
@@ -368,24 +221,12 @@ cmd_status() {
   return 0
 }
 
-# Unlike update, this reports failure. Telling an operator a streak is forgotten while it
-# is still on disk means tomorrow's escalation looks like the feature is broken.
 cmd_clear() {
   local what="${1:?usage: question-streaks.sh clear all|<key>}"
-  # A key is exactly what key_of prints: 12 lowercase hex characters. Refusing anything else
-  # before awk sees it closes both ways a wrong key reached a real row: awk comparing
-  # numeric-looking keys as numbers, and awk -v decoding backslash escapes (Codex reviews of
-  # 5f7ddaa and b67c2f1).
   if [ "$what" != "all" ] && ! [[ "$what" =~ ^[0-9a-f]{12}$ ]]; then
     echo "question-streaks: FAILED to clear: '$what' is not a streak key (12 lowercase hex characters; status lists them)" >&2
     return 1
   fi
-  # Same lock as update. Without it an update that already read the old state writes it
-  # back after this clear, and the streak the operator just cleared returns (Codex review
-  # of 232c94c). The lock comes BEFORE the empty check: an update holding it may be about
-  # to write the first streak onto an empty board (Codex review of 4eea84d). With no state
-  # directory there is no lock to hold and nothing to clear, so that case stays a no-op
-  # rather than waiting out the lock and failing.
   [ -d "$(dirname "$STATE")" ] || { echo "question-streaks: nothing to clear"; return 0; }
   local lrc=0
   take_lock || lrc=$?
@@ -396,14 +237,10 @@ cmd_clear() {
   trap 'drop_lock' RETURN
   unreadable_state && { echo "question-streaks: FAILED to clear: cannot read $STATE" >&2; return 1; }
   [ "$(nrows)" -gt 0 ] || { echo "question-streaks: nothing to clear"; return 0; }
-  # An unknown key is a failure, not a no-op. Printing "cleared" for a mistyped key leaves
-  # the real streak escalating tomorrow (#32). `status` lists the keys.
-  # Keys compare as strings (`""`), or `89709551468` would match the row `089709551468`.
   if [ "$what" != "all" ] && ! rows_of | awk -F'\t' -v k="$what" '$1"" == k"" {f=1} END {exit !f}'; then
     echo "question-streaks: FAILED to clear: no streak with key $what (status lists the keys)" >&2
     return 1
   fi
-  # Forget streaks, keep the watermark: an older rebuild after a clear is still history.
   local tmp; tmp="$(mktemp)" || { echo "question-streaks: FAILED to stage a rewrite of $STATE" >&2; return 1; }
   rows_of | awk -F'\t' -v k="$what" 'k"" != "all" && $1"" != k""' > "$tmp"
   if write_state "$tmp" "$(newest_of)"; then
@@ -417,5 +254,6 @@ case "${1:-}" in
   update) shift; cmd_update "$@" ;;
   status) shift; cmd_status "$@" ;;
   clear)  shift; cmd_clear  "$@" ;;
-  *) echo "usage: question-streaks.sh update <report.md> [findings-dir] | status | clear all|<key>" >&2; exit 2 ;;
+  -h|--help) usage ;;
+  *) usage >&2; exit 2 ;;
 esac
