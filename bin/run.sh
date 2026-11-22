@@ -638,9 +638,10 @@ notify_fatal() { # $1=reason
 # run is not a partial result anyone should read.
 sweep_killed_leftovers() {
   local _f _n=0
-  for _f in "$FINDINGS_DIR"/*.tmp.?????? "$FINDINGS_DIR"/*.pre.jsonl; do
-    [ -f "$_f" ] || continue
-    rm -f "$_f" 2>/dev/null && _n=$((_n + 1))
+  for _f in "$FINDINGS_DIR"/*.tmp.?????? "$FINDINGS_DIR"/*.pre.jsonl "$FINDINGS_DIR"/*.stage "$FINDINGS_DIR"/.chunks/*/*.stage; do
+    # A symlink or a directory is what a worker leaves as its answer: -f would skip both.
+    { [ -e "$_f" ] || [ -L "$_f" ]; } || continue
+    rm -rf "$_f" 2>/dev/null && _n=$((_n + 1))
   done
   [ "$_n" -eq 0 ] || log "removed $_n temp file(s) left in $FINDINGS_DIR by a killed run"
 }
@@ -3057,9 +3058,11 @@ L1_CONFINED_ENGINES=""
 L1_CONFINE_STATS=""
 L1_STAGE_ROOT=""
 L1_CONFINE_PROTECT=""
+L1_CONFINED_STAT=no
+L1_CONFINE_FATAL=""
 l1_confine_setup() {
-  local probe verdict reason eng d p ok_engines="" all_engines
-  L1_CONFINED=no; L1_CONFINE_USING=none; L1_CONFINED_ENGINES=""; L1_CONFINE_STATS=""
+  local probe verdict reason eng d p ok_engines="" no_engines="" all_engines err sstage wrc
+  L1_CONFINED=no; L1_CONFINE_USING=none; L1_CONFINED_ENGINES=""; L1_CONFINE_STATS=""; L1_CONFINE_FATAL=""
   L1_STAGE_ROOT="$AUTODREAM_DIR/staging/run-$$"
   L1_CONFINE_PROTECT="$AUTODREAM_DIR:$FINDINGS_DIR:$DREAMS_DIR"
   # A run killed mid-flight leaves its staging root behind. Only roots whose run is gone are removed:
@@ -3081,8 +3084,6 @@ l1_confine_setup() {
     reason=$(printf '%s' "$probe" | cut -f2-)
     if [ "$verdict" != yes ]; then
       L1_CONFINE_REASON="${reason:-the probe printed nothing}"
-    elif ! L1_CONFINE_PROTECT="$L1_CONFINE_PROTECT" bash "$L1_CONFINER" prefix "$AUTODREAM_DIR" >/dev/null 2>&1; then
-      L1_CONFINE_REASON="a path under $AUTODREAM_DIR cannot be written into a sandbox profile"
     else
       L1_CONFINED=yes
       L1_CONFINE_USING="$reason"
@@ -3090,28 +3091,61 @@ l1_confine_setup() {
     fi
   fi
   if [ "$L1_CONFINED" = yes ]; then
+    # The protected directories are joined with a colon, so one that holds a colon would be split into
+    # two paths and left unprotected; a relative one protects nothing.
+    for p in "$AUTODREAM_DIR" "$FINDINGS_DIR" "$DREAMS_DIR"; do
+      case "$p" in
+        *:*) L1_CONFINE_FATAL="a protected directory path holds a colon, so the protect list would split it: $p"; break ;;
+        /*) ;;
+        *) L1_CONFINE_FATAL="a protected directory path is not absolute: $p"; break ;;
+      esac
+    done
     all_engines=$(printf '%s' "$AUTODREAM_L1_ENGINES" | awk -F'\t' 'NF >= 2 && $2 != "" && !seen[$2]++ { print $2 }')
     while IFS= read -r eng; do
       [ -n "$eng" ] || continue
-      if "$ADAPTERS_DIR/$eng/adapter.sh" l1-writes >/dev/null 2>&1; then
-        ok_engines="${ok_engines:+$ok_engines }$eng"
-        L1_CONFINE_STATS="${L1_CONFINE_STATS}l1_confined_$(printf '%s' "$eng" | tr '-' '_'): yes"$'\n'
+      "$ADAPTERS_DIR/$eng/adapter.sh" l1-writes >/dev/null 2>&1; wrc=$?
+      # Exit 2 is "no write profile" (omp). Any other failure is a write list the adapter refused, which
+      # is a fatal below with its reason and never an engine that quietly runs unconfined.
+      if [ "$wrc" -ne 2 ]; then
+        # The probe built a prefix with no paths. The real one carries this engine's write list, the
+        # operator's additions and the protect list, and a character the profile cannot hold in any of
+        # them fails every call: build it now, so a run that cannot confine stops here and not with a
+        # stub for every session.
+        sstage="$L1_STAGE_ROOT/.setup-$eng"; err=""
+        if ( umask 077; mkdir -p "$sstage" ) 2>/dev/null \
+           && err=$(L1_STAGE_ROOT="$L1_STAGE_ROOT" L1_CONFINE_PROTECT="$L1_CONFINE_PROTECT" bash "$L1_CONFINER" engine-prefix "$ADAPTERS_DIR/$eng/adapter.sh" "$sstage" 2>&1 >/dev/null); then
+          ok_engines="${ok_engines:+$ok_engines }$eng"
+          L1_CONFINE_STATS="${L1_CONFINE_STATS}l1_confined_$(printf '%s' "$eng" | tr '-' '_'): yes"$'\n'
+        else
+          [ -n "$L1_CONFINE_FATAL" ] || L1_CONFINE_FATAL="the $eng engine's sandbox cannot be built: $(printf '%s' "${err:-the staging directory could not be made}" | head -c 300 | tr '\n\t' '  ')"
+        fi
+        rm -rf "$sstage"
       else
+        no_engines="${no_engines:+$no_engines }$eng"
         L1_CONFINE_STATS="${L1_CONFINE_STATS}l1_confined_$(printf '%s' "$eng" | tr '-' '_'): no"$'\n'"l1_confined_$(printf '%s' "$eng" | tr '-' '_')_reason: the $eng adapter declares no write profile (l1-writes)"$'\n'
         log "WARNING: the $eng engine runs unconfined: its adapter declares no write profile (l1-writes)"
       fi
     done <<< "$all_engines"
     L1_CONFINED_ENGINES="$ok_engines"
+    L1_CONFINED_STAT=yes
+    if [ -n "$no_engines" ]; then
+      L1_CONFINED_STAT=partial
+      [ -n "$ok_engines" ] || L1_CONFINED_STAT=no
+      L1_CONFINE_REASON="engines with no write profile run unconfined: $no_engines"
+    fi
     log "L1 workers confined with $L1_CONFINE_USING: writes only to their staging directory under $L1_STAGE_ROOT and the engine state paths"
-  elif [ "${AUTODREAM_L1_CONFINE:-1}" != 0 ]; then
-    log "WARNING: L1 workers run unconfined (l1_confined: no): $L1_CONFINE_REASON"
+  else
+    L1_CONFINED_STAT=no
+    [ "${AUTODREAM_L1_CONFINE:-1}" = 0 ] || log "WARNING: L1 workers run unconfined (l1_confined: no): $L1_CONFINE_REASON"
   fi
   export L1_CONFINER L1_CONFINED L1_CONFINED_ENGINES L1_STAGE_ROOT L1_CONFINE_PROTECT DREAMS_DIR
+  # Where a worker launched from $WORK_DIR may leave an AI-title stub. It is not on the write list, so a
+  # confined worker cannot write it; an unconfined one still can, which is why run.sh wipes it.
   export AUTODREAM_WORK_BUCKET="$WORK_BUCKET"
 }
 # What run-stats says about it, in every block that reports l1 stats.
 l1_confine_stat_lines() {
-  printf 'l1_confined: %s\n' "$L1_CONFINED"
+  printf 'l1_confined: %s\n' "$L1_CONFINED_STAT"
   printf 'l1_confine_tool: %s\n' "$L1_CONFINE_USING"
   printf 'l1_confine_reason: %s\n' "$L1_CONFINE_REASON"
   # What an operator added to the claude write list (AUTODREAM_L1_WRITES_EXTRA), so a widened sandbox does not read like the default one.
@@ -3397,7 +3431,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       fi
       l1ans_name=$(basename "$2")
       l1stage="$L1_STAGE_ROOT/$hash.$l1ans_name"
-      if ! { ( umask 077; mkdir -p "$l1stage/tmp" ) 2>/dev/null && l1stage=$(cd "$l1stage" && pwd -P); }; then
+      if ! { [ ! -L "$l1stage" ] && ( umask 077; mkdir -p "$l1stage/tmp" ) 2>/dev/null && l1stage=$(cd "$l1stage" && pwd -P); }; then
         printf "could not make the staging directory %s for %s\n" "$l1stage" "${l1_subject:-$session}" >> "$3"
         return 1
       fi
@@ -3406,9 +3440,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       l1pre=()
       case " ${L1_CONFINED_ENGINES:-} " in
         *" $engine "*)
-          l1wpaths=()
-          while IFS= read -r l1wl; do [ -n "$l1wl" ] && l1wpaths+=("$l1wl"); done < <("$ADAPTERS_DIR/$engine/adapter.sh" l1-writes 2>/dev/null)
-          while IFS= read -r -d "" l1wa; do l1pre+=("$l1wa"); done < <(bash "$L1_CONFINER" prefix "$l1stage" ${l1wpaths[@]+"${l1wpaths[@]}"} 2>>"$3")
+          while IFS= read -r -d "" l1wa; do l1pre+=("$l1wa"); done < <(bash "$L1_CONFINER" engine-prefix "$ADAPTERS_DIR/$engine/adapter.sh" "$l1stage" 2>>"$3")
           if [ "${#l1pre[@]}" -eq 0 ]; then
             printf "the sandbox for %s could not be built, and a confined run does not fall back to an unconfined worker\n" "${l1_subject:-$session}" >> "$3"
             return 1
@@ -3450,10 +3482,16 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       l1elapsed=$(($(date +%s) - l1start))
       # The engine has exited, so the runner is the only writer here. Only a regular file is taken: a
       # symlink left at the answer path would have the runner read whatever it points at.
-      if [ -f "$l1ans" ] && [ ! -L "$l1ans" ] && [ -s "$l1ans" ]; then
-        cp "$l1ans" "$2.stage" 2>/dev/null && mv -f "$2.stage" "$2" || rm -f "$2.stage" "$2"
-      elif [ -L "$l1ans" ]; then
-        printf "the answer path was a symlink; it was not read\n" >> "$3"
+      # The answer is renamed to the findings side first, and only then tested: a rename does not follow
+      # a symlink, so what is tested is the thing that was moved and nothing can be swapped in between.
+      rm -rf "$2.stage"
+      if mv -f "$l1ans" "$2.stage" 2>/dev/null; then
+        if [ -f "$2.stage" ] && [ ! -L "$2.stage" ] && [ -s "$2.stage" ]; then
+          mv -f "$2.stage" "$2" || rm -rf "$2.stage" "$2"
+        else
+          [ ! -L "$2.stage" ] || printf "the answer path was a symlink; it was not read\n" >> "$3"
+          rm -rf "$2.stage"
+        fi
       fi
       # 124 is timeout reporting that it fired; 137 is 128+SIGKILL, which is what the -k grace
       # period escalates to. Elapsed is the positive evidence that the deadline actually fired: GNU
@@ -4049,6 +4087,8 @@ run() {
   fi
   log "found $RAW session files; excluded $EXCLUDED autodream-own, skipped $SKIPPED_EMPTY empty; $COUNT to triage; $OUT_OF_WINDOW out of window (modified since the day began, nothing inside it)"
 
+  # Before the nothing-to-triage exit: a night with no sessions still owes the cleanup.
+  sweep_killed_leftovers
   if [ "$COUNT" -eq 0 ]; then
     log "no sessions to triage; writing stub report and exiting"
     THREAD_SOURCE_ROWS=$(thread_source_rows "$(pdate_shift "$TARGET_DATE" -13 d)" "$TARGET_DATE" 2>/dev/null) || THREAD_SOURCE_ROWS=""
@@ -4379,14 +4419,17 @@ EOF
     : > "$FINDINGS_DIR/l1-chunk-calls.txt"
   fi
 
-  sweep_killed_leftovers
   reconcile_findings_with_worklist
   drop_unacceptable_l1_cache
 
   clean_work_bucket  # start clean: drop any stub left by a prior run's workers
   l1_confine_setup
-  # Under bwrap only a path that exists can be bound writable, and the bucket was just wiped.
-  mkdir -p "$WORK_BUCKET" 2>/dev/null
+  if [ -n "$L1_CONFINE_FATAL" ]; then
+    rm -rf "$L1_STAGE_ROOT" 2>/dev/null
+    log_fatal "L1 confinement cannot be set up, so no worker was started: $L1_CONFINE_FATAL"
+    fatal_exit
+    return 1
+  fi
 
   # Pre-L1 cache snapshot: how many sessions in the worklist already have a valid
   # findings JSON before any worker runs. Without this, a re-run after a partial

@@ -284,8 +284,6 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
   # attack is the runner's, which it inherits in the environment, not the answer's own directory.
   fdir_l1="${FINDINGS_DIR:-$(dirname "$out")}"
   [ -n "${MOCK_CALL_LOG:-}" ] && printf '%s\n' "$out" >> "$MOCK_CALL_LOG"
-  # Whether the work bucket (writable to a confined worker, and bound only if it exists under bwrap) is there.
-  [ -n "${MOCK_CAPTURE_DIR:-}" ] && { [ -d "${AUTODREAM_WORK_BUCKET:-/nonexistent}" ] && echo yes || echo no; } > "$MOCK_CAPTURE_DIR/l1-bucket-$(basename "$out" .json).txt"
   # What the worker was pointed at, so a test can tell the normalized copy from the raw tree.
   [ -n "${MOCK_CAPTURE_DIR:-}" ] && [ -r "$sess" ] && cp "$sess" "$MOCK_CAPTURE_DIR/l1-read-$(basename "$out" .json).txt"
   [ -n "${MOCK_CAPTURE_DIR:-}" ] && printf '%s\n' "$@" > "$MOCK_CAPTURE_DIR/l1-args-$(basename "$out" .json).txt"

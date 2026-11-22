@@ -14,6 +14,10 @@
 #       One line: "yes<TAB><tool>" or "no<TAB><reason>". Runs a real confined shell and checks it
 #       can write inside a staging directory and cannot write beside it, so a tool that accepts a
 #       profile and then confines nothing reads as "no". Always exits 0.
+#   l1-confine.sh engine-prefix <adapter.sh> <stage>
+#       The prefix for one engine: its writable paths come from `<adapter.sh> l1-writes`, so setup and
+#       every worker call build the same thing from the same list. Exits 1 with the reason when the
+#       adapter declares no write profile or a path in it is refused.
 #   l1-confine.sh prefix <stage> [writable-path ...]
 #       NUL-delimited argv to put in front of the engine command. A writable path is a directory
 #       (subpath), or a prefix when it ends in "*" (~/.claude.json and, under sandbox-exec, the temp
@@ -21,11 +25,17 @@
 #       cannot write even when a writable path covers them: $AUTODREAM_DIR sits under ~/.claude on
 #       a default install. Under bwrap a prefix binds only the files that already match it.
 #
+# Every path that reaches a profile or a bind is checked first, whatever the tool: absolute, from the
+# characters a profile can hold (no glob, no quote), and a writable path is not a symlink itself (it would
+# grant its target). The staging directory is not a symlink and, when L1_STAGE_ROOT is set, resolves
+# under it. Globbing is off for the whole script; the one place a prefix rule needs it turns it on.
+#
 # L1_CONFINE_TOOL=sandbox-exec|bwrap picks a tool (default: sandbox-exec, then bwrap).
 #
 # The profile denies writes only. Reads, the network and process exec are unchanged: the engine
 # must read transcripts and reach its provider, and read access is not what #169 is about.
 set -u
+set -f
 
 tool_for() {
   case "${L1_CONFINE_TOOL:-}" in
@@ -69,6 +79,47 @@ profile_path() { # $1=path -> the resolved path, or exit 1
   printf '%s' "$r"
 }
 
+# What every path must satisfy before it can reach a profile or a bind (a message on stderr, exit 1).
+check_writable() { # $1=path as listed (a trailing * makes it a prefix)
+  local p="${1%\*}"
+  case "$p" in
+    /*) ;;
+    *) printf 'l1-confine: a writable path must be absolute: %s\n' "$1" >&2; return 1 ;;
+  esac
+  safe_path "$p" || { printf 'l1-confine: refusing writable path with a character the profile cannot hold: %s\n' "$1" >&2; return 1; }
+  if [ -L "$p" ]; then
+    printf 'l1-confine: a writable path must not be a symlink, it would grant its target: %s\n' "$1" >&2; return 1
+  fi
+}
+
+check_protect() { # $1=path
+  case "$1" in
+    /*) ;;
+    *) printf 'l1-confine: a protected path must be absolute: %s\n' "$1" >&2; return 1 ;;
+  esac
+  safe_path "$1" || { printf 'l1-confine: a protected path cannot be written into a profile: %s\n' "$1" >&2; return 1; }
+}
+
+check_stage() { # $1=stage
+  local s="$1" real root
+  if [ -L "$s" ]; then printf 'l1-confine: the staging directory is a symlink: %s\n' "$s" >&2; return 1; fi
+  real=$(phys "$s") || { printf 'l1-confine: the staging directory does not exist: %s\n' "$s" >&2; return 1; }
+  [ -n "${L1_STAGE_ROOT:-}" ] || return 0
+  root=$(phys "$L1_STAGE_ROOT") || { printf 'l1-confine: the staging root does not exist: %s\n' "$L1_STAGE_ROOT" >&2; return 1; }
+  case "$real/" in
+    "$root"/?*) ;;
+    *) printf 'l1-confine: %s does not resolve under the staging root %s\n' "$s" "$root" >&2; return 1 ;;
+  esac
+}
+
+check_all() { # $1=stage, rest: writable paths
+  local stage="$1" p; shift
+  check_stage "$stage" || return 1
+  for p in "$@"; do [ -n "$p" ] || continue; check_writable "$p" || return 1; done
+  local IFS=:
+  for p in ${L1_CONFINE_PROTECT:-}; do [ -n "$p" ] || continue; check_protect "$p" || return 1; done
+}
+
 sb_profile() { # $1=stage, rest: writable paths. Protected paths come from L1_CONFINE_PROTECT.
   local stage="$1" p base; shift
   safe_path "$stage" || { printf 'l1-confine: the staging path cannot be written into a profile: %s\n' "$stage" >&2; return 1; }
@@ -96,6 +147,7 @@ sb_profile() { # $1=stage, rest: writable paths. Protected paths come from L1_CO
 
 emit_prefix() { # $1=tool $2=stage, rest: writable paths -> NUL-delimited argv
   local tool="$1" stage="$2" p; shift 2
+  check_all "$stage" "$@" || return 1
   stage=$(phys "$stage") || return 1
   case "$tool" in
     sandbox-exec)
@@ -112,7 +164,7 @@ emit_prefix() { # $1=tool $2=stage, rest: writable paths -> NUL-delimited argv
       for p in "$@"; do
         case "$p" in
           "") continue ;;
-          *"*") for f in "${p%\*}"*; do [ -e "$f" ] && printf '%s\0' --bind "$f" "$f"; done ;;
+          *"*") set +f; for f in "${p%\*}"*; do [ -L "$f" ] && continue; [ -e "$f" ] && printf '%s\0' --bind "$f" "$f"; done; set -f ;;
           *) [ -e "$p" ] && printf '%s\0' --bind "$p" "$p" ;;
         esac
       done
@@ -129,7 +181,7 @@ cmd_probe() {
   d=$(mktemp -d "${TMPDIR:-/tmp}/l1-confine-probe.XXXXXX") || { printf 'no\tcould not make a probe directory\n'; return 0; }
   stage="$d/stage"; outside="$d/outside"; err="$d/err"
   mkdir -p "$stage" "$outside"
-  while IFS= read -r -d '' a; do argv+=("$a"); done < <(L1_CONFINE_PROTECT='' emit_prefix "$tool" "$stage" 2>"$err")
+  while IFS= read -r -d '' a; do argv+=("$a"); done < <(L1_CONFINE_PROTECT='' L1_STAGE_ROOT='' emit_prefix "$tool" "$stage" 2>"$err")
   if [ "${#argv[@]}" -eq 0 ]; then
     printf 'no\t%s could not build a profile: %s\n' "$tool" "$(head -c 200 "$err" | tr '\n\t' '  ')"
     rm -rf "$d"; return 0
@@ -154,8 +206,29 @@ cmd_prefix() { # $1=stage, rest: writable paths
   emit_prefix "$tool" "$@"
 }
 
+cmd_engine_prefix() { # $1=adapter.sh, $2=stage
+  local adapter="$1" stage="$2" out err rc
+  err=$(mktemp "${TMPDIR:-/tmp}/l1-confine-writes.XXXXXX") || { printf 'l1-confine: could not make a temp file to read the write list\n' >&2; return 1; }
+  out=$("$adapter" l1-writes 2>"$err"); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 2 ]; then printf 'l1-confine: %s declares no write profile\n' "$adapter" >&2
+    else printf 'l1-confine: %s l1-writes failed (exit %s): %s\n' "$adapter" "$rc" "$(head -c 200 "$err" | tr '\n' ' ')" >&2; fi
+    rm -f "$err"; return 1
+  fi
+  rm -f "$err"
+  # One path per line, split by IFS alone (globbing is off for the whole script): no here-string and
+  # no loop, so no temp file whose failure could leave an empty list behind. An adapter refuses to
+  # print a path that holds a newline, since a line is the only separator there is.
+  local IFS=$'\n'
+  # shellcheck disable=SC2086
+  set -- $out
+  IFS=$' \t\n'
+  cmd_prefix "$stage" "$@"
+}
+
 case "${1:-}" in
   probe) cmd_probe ;;
+  engine-prefix) shift; [ "$#" -eq 2 ] || exit 2; cmd_engine_prefix "$@" ;;
   prefix) shift; [ "$#" -ge 1 ] || exit 2; cmd_prefix "$@" ;;
-  *) echo "usage: l1-confine.sh probe | prefix <stage> [writable-path ...]" >&2; exit 2 ;;
+  *) echo "usage: l1-confine.sh probe | prefix <stage> [writable-path ...] | engine-prefix <adapter.sh> <stage>" >&2; exit 2 ;;
 esac
