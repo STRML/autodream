@@ -43,7 +43,7 @@ if [ -n "${GITHUB_ACTIONS:-}" ]; then
   perl -MPOSIX -e 'POSIX::setsid(); exec { $ARGV[0] } @ARGV; exit 127' /usr/bin/true & dbg_t=$!
   wait "$dbg_t"; dbg_trc=$?
   dbg_tafter=$(pgrep -s "$dbg_t" 2>&1); dbg_tarc=$?
-  echo "::error::sessdbg uname=$(uname -s) pid=$dbg_pid live_s=[$(echo $dbg_s)] rc=$dbg_src live_g=[$(echo $dbg_g)] rc=$dbg_grc ps=[$dbg_ps] after_kill_s=[$(echo $dbg_after)] rc=$dbg_arc true_rc=$dbg_trc after_true_s=[$(echo $dbg_tafter)] rc=$dbg_tarc"
+  echo "::error::FAIL sessdbg uname=$(uname -s) pid=$dbg_pid live_s=[$(echo $dbg_s)] rc=$dbg_src live_g=[$(echo $dbg_g)] rc=$dbg_grc ps=[$dbg_ps] after_kill_s=[$(echo $dbg_after)] rc=$dbg_arc true_rc=$dbg_trc after_true_s=[$(echo $dbg_tafter)] rc=$dbg_tarc"
 fi
 if ! session_probe_usable && [ "${CI:-}" != true ]; then
   skip "$SESSION_SKIP: every entry would be failed, so the whole suite is skipped"
@@ -88,6 +88,7 @@ assert_grep "$F/report-hello.md" '^row one$' "stdout is the body"
 assert_grep "$F/report-hello.md" '^row two: --since-hours 36$' "args reach the script"
 assert_nogrep "$F/report-hello.md" 'noise' "stderr of a clean run stays out of the report"
 assert_eq "$(row hello)" "ok" "index row says ok"
+[ "$(row hello)" = ok ] || echo "::error::FAIL gooddbg $(head -c 500 "$F/report-hello.md" | tr '\n' '|')"
 assert_grep "$F/report-index.txt" "$F/report-hello.md" "index row carries the exact path L2 will Read"
 
 echo "# non-zero exit: the failure is the content"
