@@ -1,6 +1,6 @@
 # Comment ratchet: redesign after round 4
 
-Branch `chore/comment-ratchet`, PR 249. The gate used four rounds. Round 1 found 9 P1 and 1 P2, round 2 found 4, round 3 found 2, round 4 found 1. Rounds 3 and 4 were the same class twice.
+Branch `chore/comment-ratchet`, PR 249. The gate used four rounds. Round 1 found 9 P1 and 1 P2, round 2 found 4, round 3 found 2, round 4 found 1. Rounds 2, 3 and 4 hit the same class.
 
 ```
 round 1  ██████████  10   scanner guessed a grammar; every I/O step failed open
@@ -14,49 +14,42 @@ round 4  █            1   regex guess (labeled block)
 | Class | Findings | The mistake behind them | Design change |
 |---|---|---|---|
 | A. A hand-written scanner guesses shell, Python and JS grammar | r1: heredoc detection, multiline strings, directive prefixes | Matching lines instead of parsing | Shell: `shfmt --to-json` Comment nodes. Python: `tokenize`. Done in b7e7a59 and held through rounds 2 to 4. |
-| B. Every I/O step fails open | r1: unreadable file counted as 0, baseline comparison, `--update` publish, empty baseline `NR==FNR`; r2: `isfile` swallows a stat failure; r2: symlinks skipped | A failed `awk`, `sort`, `mv` or `stat` read as "nothing found" | Every status is checked, a file the counter cannot read or stat fails naming it, `--update` renames a same-directory temp file last, and every one of these has a test that shims the tool to fail. Held through rounds 3 and 4. |
+| B. Every I/O step fails open | r1: unreadable file counted as 0, baseline comparison, `--update` publish, empty baseline `NR==FNR`; r2: `isfile` swallows a stat failure; r2: symlinks skipped | A failed `awk`, `sort`, `mv` or `stat` read as "nothing found" | Every status is checked, a file the counter cannot read or stat fails naming it, `--update` renames a same-directory temp file last, and each of these has a test that shims the tool to fail. Held through rounds 3 and 4. |
 | C. CI does not run the check | r1: web-only PRs skip the ratchet | Scope selector had no rule for it | `tests.yml` step for web scope, `ci-scope` test pins it. Held. |
-| D. JS regex literal versus division, decided by one heuristic | r2: `if (x) /[/*]/`, CRLF continuation (separate site); r3: `1 + + /[/*]/`, `o.if(x) / 2`; r4: `label: {} /[/*]/` | A `/` is ambiguous without a full grammar. Each round patched the heuristic for the last counterexample and the reviewer found the next one. | Stop trying to be right everywhere. See below. |
+| D. JS regex literal versus division, decided by a lexer that tracks string and template state | r2: `if (x) /[/*]/`; r2: CRLF string continuation; r3: `1 + + /[/*]/`, `o.if(x) / 2`; r4: `label: {} /[/*]/` | A JS lexer needs the grammar to tell `/` apart, and a stateful lexer that guesses wrong loses its place for the rest of the file. Each patch fixed the last counterexample and the reviewer found the next. | Delete the state. See below. |
 
-## Class D: why patching the heuristic cannot end it
+## Class D: no state, so no guess
 
-Telling a regex from a division needs the grammar. Round 4's `label: {}` is a statement context that a lexer only knows from the parser. Each heuristic rule I added (paren stack, brace stack, adjacency, property names) is correct for the case that prompted it and wrong for a neighbor.
-
-What the ratchet actually needs is only the lexer state at the start of each line, and a regex literal cannot span lines. So a wrong guess costs something only when the text between the slash and the next slash on that line holds a character that changes lexer state.
+The lexer existed to answer one question: is a line that starts with `//` or `/*` really a comment, or data inside a template literal or string? The rule that does not need the answer reads each line on its own:
 
 ```
-slash ─▶ no closing slash on the line ───────────────▶ division (a regex needs one)
-      ─▶ span has none of  ` ' " { } ( ) /  ─────────▶ both readings leave the same state: use the heuristic
-      ─▶ span has one of them ─▶ speculate:
-             1. read the file with the heuristic's choice
-             2. a lexical error (unclosed block comment, template, expression)
-                flips the latest such decision and reads again
-             3. at most 64 flips, then the original error stands
+in a block?  yes ─▶ count the line; a `*/` on it ends the block
+             no  ─▶ first non-blank characters are
+                      //  ─▶ count (unless an exact directive: @ts-expect-error, @ts-ignore, oxlint-disable)
+                      /*  ─▶ count; a `*/` later on the line closes it, otherwise a block opens
+                      else ─▶ nothing (a `*` line outside a block is multiplication or a pointer, not a comment)
 ```
 
-What this rules out: every counterexample the reviewer produced was one where the wrong reading ends in an unclosed construct (they reported "block comment is never closed" or "template literal is never closed"), and the speculation recovers each of them. The heuristic stays as the tie-breaker when both readings lex.
+There are no strings, templates, regexes or division to classify, so there is nothing to guess and nothing to lose track of. The coordinator chose this on 2026-11-22. The JS and TS tracks had already deleted the real comments, so the rule only has to guard against new ones.
 
-What it does not rule out, and I say so: a file where both readings lex cleanly and differ in which lines are comments. That needs a slash with a quote or brace in its span, a wrong heuristic guess, and no later unclosed construct to expose it. I could not construct one that is also plausible code.
+### Accepted trades, and which way each one fails
 
-## Failure matrix for the slash decision
+| Input | What the rule does | Direction | Fixture |
+|---|---|---|---|
+| a line inside a multiline template literal that starts with `//` or `/*` | counts it | over-count: can fail a PR, never hides a comment | `a template literal line that starts with // is over-counted…` |
+| a block comment that opens after code (`x = 1; /* a`) with continuation lines | counts none of them | under-count: a comment can slip past on a continuation line | `a block that opens after code is not tracked…` |
+| a regex, division or string in the middle of a line | ignored | none: only line starts are read | `a slash, regex or string in the middle of a line never matters…` |
+| an unclosed `/*` | counts to the end of the file | over-count, no error | `an unclosed block comment counts to the end of the file` |
+| CRLF endings | read the same | none | `CRLF line endings read the same` |
+| `#!` hashbang | not counted | none | `a hashbang line is not a comment` |
+| a `*` line outside a block | not counted | none | `a * line counts inside a block…` |
 
-| Input | Heuristic says | Truth | What happens | Test |
-|---|---|---|---|---|
-| `if (ok) /[/*]/.test(v);` | regex (control paren) | regex | regex, one comment counted after it | `a regex literal after the parenthesis of an if…` |
-| `1 + + /[/*]/.test(v);` | regex (not adjacent) | regex | regex | `two separated plus signs…` |
-| `o.if(true) / 2; const t = \`` | division (property) | division | template opens on the same line | `a property named like a control keyword…` |
-| `label: {} /[/*]/.test(v);` | division (labeled block read as object) | regex | division reading hits `/*` with no close, flip, regex reading lexes | `a regex after a labeled block…` |
-| `b /[/*]/ c;` | division | regex | flips the same way | `a slash the heuristic reads as division is flipped…` |
-| `1 +` newline `/ 2;` | regex (after `+`) | division | no closing slash on the line, so division | `a slash with no closing slash…` |
-| `</div>` in TSX text | regex | text | no state-changing char in the span, no effect | the TSX torture check |
-| `i++ / 2 / 4` | division | division | division | `division after a parenthesis or an increment…` |
-| both readings lex, comment lines differ | heuristic | unknown | heuristic wins (the residual risk above) | none possible without a valid example |
-| more than 64 flips needed | n/a | n/a | the original error, naming the file | none; the cap is a guard |
+The under-count row is the one to weigh. It needs a block comment that starts after code, which is not how this repo writes comments, and that line still carries code a reviewer reads. I accept it for the same reason the coordinator accepted the over-count: it keeps the rule stateless.
+
+### What this removes
+
+The scanner class (about 200 lines), the paren and brace stacks, the adjacency rule and the speculation with 64 flips from the first draft of this plan. Every class D finding depended on a lexer, so none of them can recur.
 
 ## Not changing
 
 Parsers for shell and Python, the exact directive list, fail-closed I/O, baseline rules, CI steps. They held through rounds 2 to 4 with no new findings.
-
-## Cost
-
-Speculation re-reads the file once per flip, only on a file that already failed to lex. The repo's 18 JS and TS files lex on the first reading (23 slashes had a risky span, all of them settled by the heuristic with no error), so the usual path costs nothing extra.
