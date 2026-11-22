@@ -1,4 +1,4 @@
-# bin-a: `AUTODREAM_NOTIFY_DRYRUN=1` stops before the first side effect, in every form of notify.sh
+# bin-a: `AUTODREAM_NOTIFY_DRYRUN=1` stops before any banner, inbox file or opener, in every form of notify.sh
 
 Status: accepted · Date: 2026-11-21 · Code: `bin/notify.sh` (the two `AUTODREAM_NOTIFY_DRYRUN` checks)
 
@@ -12,8 +12,8 @@ The failure and warning branch used to return before reaching the dry-run check.
 
 ## Decision
 
-`AUTODREAM_NOTIFY_DRYRUN=1` reports the question count (or the banner it would post) and exits 0. It writes no inbox file, posts no banner and opens nothing. The check sits after the count in the report form and before the notifier in the failure and warning form.
+`AUTODREAM_NOTIFY_DRYRUN=1` reports the question count (or the banner it would post) and exits 0. It writes no inbox file, posts no banner and opens nothing. The check sits after the count in the report form and before the notifier in the failure and warning form. The inbox directory is still created, and the branded notifier bundle may still be built, because both run above either check.
 
 ## Consequences
 
-Anything above the dry-run check in the report form must stay free of side effects, and anything new that posts or writes in the failure form belongs below its check. `tests/run-all.sh` exercises the dry-run output.
+Anything that posts, opens or writes an inbox file belongs below the dry-run check in both forms. The inbox directory and the notifier bundle are the two things created above it. `tests/run-all.sh` exercises the dry-run output.
