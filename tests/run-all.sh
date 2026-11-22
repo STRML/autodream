@@ -3146,7 +3146,8 @@ test_run_lock_is_reclaimed_from_a_dead_holder(){
   run_dream "$root"
   assert_nogrep "$root/run.out" 'holds the lock' "a dead holder does not block the run"
   assert_file "$root/dreams/$DATE.md" "the run produced its report"
-  assert_no_file "$(lock_dir "$root")" "and released the lock when it finished"
+  assert_eq "$(flock_free "$(lock_dir "$root" | sed "s/\.lock$/.flock/")" && echo free || echo held)" "free" "and released the flock when it finished"
+  assert_file "$(lock_dir "$root")/pid" "and left the stale directory it took over in place"
   if [ -n "$(ps -o lstart= -p $$ 2>/dev/null)" ]; then
     sleep 120 & local other=$!
     mk_lock "$root" "$other"; printf 'Mon Jan  1 00:00:00 1990\n' > "$(lock_dir "$root")/start"
@@ -3284,7 +3285,8 @@ test_run_lock_a_directory_with_no_pid_that_is_old_is_reclaimed(){
   mkdir -p "$(lock_dir "$root")"; touch -t 202001010000 "$(lock_dir "$root")"
   run_dream "$root"
   assert_file "$root/dreams/$DATE.md" "the run took the lock and produced its report"
-  assert_no_file "$(lock_dir "$root")" "and released it"
+  assert_eq "$(flock_free "$(lock_dir "$root" | sed "s/\.lock$/.flock/")" && echo free || echo held)" "free" "and released the flock"
+  assert_file "$(lock_dir "$root")/pid" "and left the directory it took over in place"
   rm -rf "$root"
 }
 
@@ -10926,7 +10928,8 @@ test_remote_sync_reclaims_a_stale_lock(){
   AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
   assert_grep "$(rs_stats "$root")" '^remote_sync_studio2: ok$' "the host reads ok after the reclaim"
   assert_eq "$(rs_lines "$root/rsync.log")" "1" "rsync ran"
-  assert_no_file "$lock" "the lock is released after the sync"
+  assert_eq "$(flock_free "${lock%.lock}.flock" && echo free || echo held)" "free" "the flock is released after the sync"
+  assert_file "$lock/pid" "and the stale directory it took over is left in place"
   rm -rf "$root"
 }
 
