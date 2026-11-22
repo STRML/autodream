@@ -3394,8 +3394,8 @@ test_run_lock_release_leaves_a_directory_it_did_not_make(){
   rm -rf "$root"
 }
 
-test_run_lock_metadata_of_the_wrong_type_or_a_write_that_fails_midway_changes_nothing(){
-  echo "# the run lock: a pid that is a directory is refused before any write, and a write that fails midway restores what it replaced"
+test_run_lock_metadata_of_the_wrong_type_is_refused_before_any_write(){
+  echo "# the run lock: a pid that is a directory is refused before any write"
   local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
   local lk="$root/autodream/locks/x.lock" dead out
   true & dead=$!; wait "$dead" 2>/dev/null
@@ -3403,8 +3403,22 @@ test_run_lock_metadata_of_the_wrong_type_or_a_write_that_fails_midway_changes_no
   touch -t 202001010000 "$lk"
   out=$(LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"; cat "$LK/start"')
   assert_eq "$(printf '%s' "$out" | tr '\n' '|')" "rc=3|Mon Jan  1 00:00:00 2018" "a pid that is a directory is cannot-lock and start keeps its old value"
-  out=$(LK="$lk" lock_fn "$root/autodream" 'lock_meta_writable(){ return 0; }; acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"; cat "$LK/start"')
-  assert_eq "$(printf '%s' "$out" | tr '\n' '|')" "rc=3|Mon Jan  1 00:00:00 2018" "a pid write that fails after start was replaced puts the old start back"
+  rm -rf "$root"
+}
+
+test_run_lock_a_failed_pid_rename_leaves_a_dead_pid_no_rollback_and_no_temp(){
+  echo "# the run lock: start and pid are renamed into place with pid last, so a failed pid rename reads as a dead holder, rolls nothing back and leaves no temp (#266)"
+  local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
+  local lk="$root/autodream/locks/x.lock" dead out stale='Mon Jan  1 00:00:00 2018'
+  true & dead=$!; wait "$dead" 2>/dev/null
+  mkdir -p "$lk"; printf '%s\n' "$dead" > "$lk/pid"; printf '%s\n' "$stale" > "$lk/start"
+  out=$(LK="$lk" lock_fn "$root/autodream" 'mv(){ case "$*" in *"/pid.tmp"*) return 1 ;; esac; command mv "$@"; }; acquire_lock "$LK" 0; echo rc=$?; ls -A "$LK" | tr "\n" " "; echo; cat "$LK/pid"; [ "$(cat "$LK/start")" != "'"$stale"'" ] && echo start=new || echo start=old; release_lock "$LK"')
+  assert_eq "$(printf '%s' "$out" | tr '\n' '|')" "rc=3|pid start |$dead|start=new" "a failed pid rename is cannot-lock, leaves the old dead pid, the start is not rolled back, and no temp is left"
+  out=$(LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"')
+  assert_eq "$out" "rc=0" "and the next run reads that directory as stale and takes it over"
+  rm -rf "$lk"
+  out=$(LK="$lk" lock_fn "$root/autodream" 'mv(){ case "$*" in *"/pid.tmp"*) return 1 ;; esac; command mv "$@"; }; acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"; [ -d "$LK" ] && echo left || echo gone')
+  assert_eq "$(printf '%s' "$out" | tr '\n' ' ')" "rc=3 gone" "a directory this run made is removed on release even after a failed write"
   rm -rf "$root"
 }
 
@@ -4676,7 +4690,8 @@ _run test_run_lock_release_ignores_a_directory_it_never_acquired
 _run test_run_lock_an_older_runner_holding_the_directory_is_honored
 _run test_run_lock_a_stale_directory_that_cannot_be_written_is_left_as_found
 _run test_run_lock_release_leaves_a_directory_it_did_not_make
-_run test_run_lock_metadata_of_the_wrong_type_or_a_write_that_fails_midway_changes_nothing
+_run test_run_lock_metadata_of_the_wrong_type_is_refused_before_any_write
+_run test_run_lock_a_failed_pid_rename_leaves_a_dead_pid_no_rollback_and_no_temp
 _run test_run_lock_a_liveness_probe_that_fails_to_run_is_not_a_dead_holder
 _run test_run_lock_a_lock_path_that_is_a_file_or_a_symlink_is_never_written_through
 _run test_run_lock_a_pid_of_zero_is_not_a_holder
