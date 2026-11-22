@@ -8369,7 +8369,7 @@ if [ -z "$_list" ]; then
 fi
 # The suites that drive launchd need plutil and launchctl, so they run on macOS only (CI runs
 # them in launchd.yml, when a launchd file changes).
-_suites="portable report-scripts stop-check-counts rollup l1-confine lib-project preflight adapters adapter-claude adapter-omp adapter-contract threads-state slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux review-prompt notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt autodream-web shard ci-scope"
+_suites="portable report-scripts stop-check-counts rollup l1-confine lib-project preflight adapters adapter-claude adapter-omp adapter-contract threads-state slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux review-prompt notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt autodream-web shard ci-scope comment-ratchet"
 [ "$(uname -s)" = Darwin ] && _suites="$_suites scheduler-label autodream-now install-review-agent install-web-agent install-dry-run install-dir install-skill"
 for _suite in $_suites; do
   _owns || continue
