@@ -17,8 +17,8 @@ name: tests
 # '**.md' ignore, and left two tests red on main (#178). So the filter is `paths` with negations,
 # where the last matching pattern wins: everything, minus docs, plus that markdown back again.
 # `paths-ignore` cannot re-include, and an event cannot have both. Keep the two lists in step.
-# A script under docs/ or example/ that gains a comment in a docs-only PR starts no run; the
-# comment ratchet catches it on the next code PR (the cost trade, see docs/plans/2026-11-22-chore_comment-ratchet-redesign.md).
+# A script under docs/ or example/ that gains a comment in a docs-only PR starts no run of this
+# workflow; comment-ratchet.yml has no paths filter and runs the ratchet on every PR and push to main.
 on:
   push:
     branches: [main]
