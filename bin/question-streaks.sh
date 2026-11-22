@@ -93,6 +93,15 @@ if [ ! -r "$_rf" ]; then
 fi
 # shellcheck source=/dev/null
 . "$_rf"
+_ll="$(dirname "$_src")/lib-flock.sh"
+[ -r "$_ll" ] || _ll="$(dirname "$(readlink "$_src" 2>/dev/null || echo "$_src")")/lib-flock.sh"
+if [ ! -r "$_ll" ]; then
+  echo "question-streaks: lib-flock.sh not found beside $_src or its link target; streaks not touched" >&2
+  [ "${1:-}" = update ] && exit 0
+  exit 1
+fi
+# shellcheck source=/dev/null
+. "$_ll"
 STATE="${AUTODREAM_QUESTION_STATE:-$AUTODREAM_DIR/question-streaks.tsv}"
 ESCALATE_AT="${AUTODREAM_QUESTION_ESCALATE_AT:-3}"
 
@@ -138,11 +147,16 @@ titles_of() { # $1=report
 # one-instance-per-label rule does not keep them apart. Two overlapping runs would each
 # read the old state and the second write would discard the first's increment.
 #
-# mkdir is the atomic primitive; a stale directory from a killed run is reclaimed by age so
-# one crash cannot wedge the feature forever. Failure to acquire SKIPS the update rather
-# than blocking — a missed increment costs one night of escalation latency, while a
-# bookkeeping helper that hangs would hold up the pipeline behind it.
-LOCK="$STATE.lock"
+# The lock is an flock(2) on $STATE.flock (lib-flock.sh, the mechanism threads.sh uses). It was a
+# mkdir lock that contenders reclaimed by age and then by pid, and a shell cannot make "judge the
+# holder gone, then take its lock" atomic: four review rounds on #192 each found another interleaving
+# (docs/plans/2026-11-21-fix_question-streaks-lock-owner-redesign.md). The kernel drops an flock when
+# its holder ends, so nothing is judged, reclaimed or put back. Failure to take it SKIPS the update
+# rather than blocking: a missed increment costs one night of escalation latency, while a bookkeeping
+# helper that hangs would hold up the pipeline behind it. $STATE.lock is the older version's mkdir
+# lock, still honored while it is young (lib-flock.sh) and never removed.
+LOCK="$STATE.flock"
+LEGACY_LOCK="$STATE.lock"
 
 # ONE FILE, ONE WRITE
 #
@@ -176,24 +190,27 @@ write_state() { # $1=rows file  $2=watermark date, or empty for none
   rm -f "$t" 2>/dev/null
   return 1
 }
-acquire_lock() {
-  local i=0 max="${AUTODREAM_QUESTION_LOCK_WAIT:-15}"
-  # A bad value keeps the default rather than failing the night. More than four digits overflows
-  # the -gt test below, which then never succeeds and the loop waits forever; 10# keeps 08 decimal.
+# Waits up to AUTODREAM_QUESTION_LOCK_WAIT seconds for a live holder, and returns flock_acquire's code.
+take_lock() {
+  local max="${AUTODREAM_QUESTION_LOCK_WAIT:-15}"
+  # A bad value keeps the default rather than failing the night. More than four digits would make
+  # the wait effectively endless; 10# keeps 08 decimal.
   case "$max" in ''|*[!0-9]*|?????*) max=15 ;; esac
-  max=$((10#$max))
-  while ! mkdir "$LOCK" 2>/dev/null; do
-    if [ -d "$LOCK" ]; then
-      local age; age=$(( $(date +%s) - $(pstat_mtime "$LOCK" || date +%s) ))
-      [ "$age" -gt 120 ] && { rmdir "$LOCK" 2>/dev/null; continue; }
-    fi
-    i=$(( i + 1 ))
-    [ "$i" -gt "$max" ] && return 1
-    sleep 1
-  done
-  return 0
+  flock_acquire "$LOCK" "$((10#$max))" "$LEGACY_LOCK"
 }
-release_lock() { rmdir "$LOCK" 2>/dev/null || true; }
+drop_lock() { flock_release; }
+# What a refused take_lock says. A held lock is routine (another run is mid-update); the other codes are
+# permanent states, and an update that silently skips on them would freeze every streak for good.
+lock_message() { # $1=flock_acquire code
+  case "$1" in
+    1) echo "another run holds $LOCK" ;;
+    5) echo "another run holds $LEGACY_LOCK (an older version's lock)" ;;
+    2) echo "cannot lock $LOCK (it cannot be opened, or the kernel refused the lock)" ;;
+    3) echo "python3 is required to lock $LOCK" ;;
+    *) echo "this process already holds a lock (a caller bug)" ;;
+  esac
+}
+lock_is_permanent() { case "$1" in 2|3|4) return 0 ;; *) return 1 ;; esac; }
 
 cmd_update() {
   local report="${1:?usage: question-streaks.sh update <report.md> [findings-dir]}"
@@ -205,15 +222,19 @@ cmd_update() {
   # Otherwise the first update on a new state path reads as a held lock and never creates
   # the state (Codex review of b72f0e4).
   mkdir -p "$(dirname "$STATE")" 2>/dev/null || true
-  if ! acquire_lock; then
-    echo "question-streaks: another run holds $LOCK; skipping this update"
+  local lrc=0
+  take_lock || lrc=$?
+  if [ "$lrc" -ne 0 ]; then
+    echo "question-streaks: $(lock_message "$lrc"); skipping this update"
+    # A permanent refusal posts a banner: skipping every night would otherwise read as a quiet week.
+    lock_is_permanent "$lrc" && post_alert "streak updates are DOWN: $(lock_message "$lrc")"
     return 0
   fi
   # ONE trap for both the lock and the scratch dir. A second `trap ... RETURN` later in
   # this function would silently replace this one rather than adding to it, leaking
-  # whichever cleanup was registered first — and a leaked lock dir wedges the next 120s.
+  # whichever cleanup was registered first — and a leaked lock dir stays until its holder is gone.
   local tmp=""
-  trap 'release_lock; [ -n "$tmp" ] && rm -rf "$tmp"' RETURN
+  trap 'drop_lock; [ -n "$tmp" ] && rm -rf "$tmp"' RETURN
 
   # Refuse to go backwards. Rebuilding an old date would otherwise drop every streak that
   # old report does not mention and rewrite the live state with history.
@@ -313,21 +334,30 @@ cmd_update() {
   return 0
 }
 
-# The banner is the point: it is the one surface that looks different from last night's.
-# Best-effort and never fatal, same posture as notify.sh.
-post_banner() { # $1=date $2=count $3=lead line
-  [ "${AUTODREAM_NOTIFY_DRYRUN:-0}" = "1" ] && { echo "question-streaks: dry run, no banner"; return 0; }
+# One notification. osascript runs with fd 9 closed: a child that outlives this script would otherwise
+# keep the flock alive after the script is killed.
+show_notification() { # $1=message
   command -v osascript >/dev/null 2>&1 || { echo "question-streaks: no osascript; banner skipped"; return 0; }
-  local plural=""; [ "$2" -ne 1 ] && plural="s"
-  local msg="$2 question$plural unanswered $ESCALATE_AT+ nights: $3"
+  local msg="$1"
   # Quotes and backslashes in a question title would otherwise end the AppleScript string
   # and turn the whole -e into a syntax error, which osascript reports on a stderr this
   # drops — so the banner would vanish for exactly the questions with punctuation in them.
   msg=$(printf '%s' "$msg" | sed 's/\\/\\\\/g; s/"/\\"/g')
-  osascript -e "display notification \"$msg\" with title \"Autodream — still unanswered\"" >/dev/null 2>&1 \
-    && echo "question-streaks: posted escalation banner for $1" \
+  osascript -e "display notification \"$msg\" with title \"Autodream — still unanswered\"" >/dev/null 2>&1 9>&- \
+    && echo "question-streaks: posted banner" \
     || echo "question-streaks: banner post failed (continuing)"
   return 0
+}
+post_alert() { # $1=message
+  [ "${AUTODREAM_NOTIFY_DRYRUN:-0}" = "1" ] && { echo "question-streaks: dry run, no banner"; return 0; }
+  show_notification "$1"
+}
+# The banner is the point: it is the one surface that looks different from last night's.
+# Best-effort and never fatal, same posture as notify.sh.
+post_banner() { # $1=date $2=count $3=lead line
+  [ "${AUTODREAM_NOTIFY_DRYRUN:-0}" = "1" ] && { echo "question-streaks: dry run, no banner"; return 0; }
+  local plural=""; [ "$2" -ne 1 ] && plural="s"
+  show_notification "$2 question$plural unanswered $ESCALATE_AT+ nights: $3"
 }
 
 cmd_status() {
@@ -357,11 +387,13 @@ cmd_clear() {
   # directory there is no lock to hold and nothing to clear, so that case stays a no-op
   # rather than waiting out the lock and failing.
   [ -d "$(dirname "$STATE")" ] || { echo "question-streaks: nothing to clear"; return 0; }
-  if ! acquire_lock; then
-    echo "question-streaks: FAILED to clear: another run holds $LOCK" >&2
+  local lrc=0
+  take_lock || lrc=$?
+  if [ "$lrc" -ne 0 ]; then
+    echo "question-streaks: FAILED to clear: $(lock_message "$lrc")" >&2
     return 1
   fi
-  trap 'release_lock' RETURN
+  trap 'drop_lock' RETURN
   unreadable_state && { echo "question-streaks: FAILED to clear: cannot read $STATE" >&2; return 1; }
   [ "$(nrows)" -gt 0 ] || { echo "question-streaks: nothing to clear"; return 0; }
   # An unknown key is a failure, not a no-op. Printing "cleared" for a mistyped key leaves

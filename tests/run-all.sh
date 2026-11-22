@@ -692,6 +692,383 @@ test_focus_tag_without_jq_is_reported(){
   rm -rf "$root"
 }
 
+# ---- autodream-focus.sh: the writer OMP and Codex tag through ------------------------
+# It replaces the whole tags file, so what has to be pinned is what it must not do: lose
+# lines it does not understand, overwrite a file it could not read, leave a lock behind.
+
+focus_cli(){ # $1=root, rest = arguments; the install dir is $root/autodream, with no config
+  local root="$1"; shift
+  AUTODREAM_DIR="$root/autodream" AUTODREAM_CONFIG=/nonexistent /bin/bash "$REPO/bin/autodream-focus.sh" "$@"
+}
+
+test_focus_cli_tag_and_untag(){
+  echo "# autodream-focus.sh: a tag is written, and the same turn again takes it back"
+  local root; root=$(setup_env); local f="$root/autodream/tags.jsonl"
+  local out; out=$(focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --cwd /x --transcript /t/s1.jsonl --text $'two\nlines')
+  assert_eq "$out" "tagged s1:r1" "it says what it did"
+  assert_eq "$(jq -r '[.id, .role, .harness, .transcript, .cwd, .text] | @tsv' "$f" | tr '\t' '|')" 's1:r1|assistant|omp|/t/s1.jsonl|/x|two\nlines' "the line carries the harness, transcript, cwd and text"
+  assert_eq "$(wc -l < "$f" | tr -d ' ')" "1" "a multi-line text is still one line"
+  out=$(focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text again)
+  assert_eq "$out" "untagged s1:r1" "the second press says it took the tag back"
+  assert_eq "$(wc -c < "$f" | tr -d ' ')" "0" "and the file is empty again"
+  rm -rf "$root"
+}
+
+test_focus_cli_text_on_stdin_and_capped(){
+  echo "# autodream-focus.sh: text may come on stdin, and a long turn is capped"
+  local root; root=$(setup_env); local f="$root/autodream/tags.jsonl"
+  printf 'from stdin' | focus_cli "$root" tag --harness codex --session s2 --uuid r1 --role user >/dev/null
+  assert_eq "$(jq -r .text "$f")" "from stdin" "stdin is read when --text is absent"
+  focus_cli "$root" tag --harness codex --session s2 --uuid r2 --role assistant --text "$(head -c 5000 /dev/zero | tr '\0' x)" >/dev/null
+  assert_eq "$(jq -s -r '.[1].text | length' "$f")" "2001" "5000 characters become 2000 and an ellipsis"
+  rm -rf "$root"
+}
+
+test_focus_cli_keeps_lines_it_does_not_understand(){
+  echo "# autodream-focus.sh: lines it does not understand survive a tag and an untag unchanged"
+  local root; root=$(setup_env); local f="$root/autodream/tags.jsonl"
+  printf '{"note":"hand edit"}\n{"id":"torn' > "$f"
+  cp "$f" "$root/before"
+  focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x >/dev/null
+  assert_eq "$(sed -n 1,2p "$f")" "$(cat "$root/before")" "both survive a tag, and the new tag is not glued onto the torn line"
+  assert_eq "$(wc -l < "$f" | tr -d ' ')" "3" "the new tag is on a line of its own"
+  focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x >/dev/null
+  # Content, not bytes: the torn last line comes back with the newline that ends it, which is what
+  # stops the next tag being glued onto it.
+  assert_eq "$(cat "$f")" "$(cat "$root/before")" "an untag leaves both lines as they were"
+  rm -rf "$root"
+}
+
+test_focus_cli_unreadable_file_is_never_overwritten(){
+  echo "# autodream-focus.sh: a tags file that exists and cannot be read is a refusal, not an empty file"
+  local root; root=$(setup_env); local f="$root/autodream/tags.jsonl"
+  printf '{"id":"keep:me","text":"someone else"}\n' > "$f"
+  chmod 000 "$f"
+  local out rc=0; out=$(focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1) || rc=$?
+  chmod 644 "$f"
+  assert_eq "$rc" "1" "it refuses"
+  assert_grep_str "$out" "nothing was changed" "and says nothing was changed"
+  assert_eq "$(cat "$f")" '{"id":"keep:me","text":"someone else"}' "the file is exactly as it was"
+  assert_eq "$(ls -A "$root/autodream" | grep -v '\.lock$' | grep -c '^tags\.jsonl\.' || true)" "0" "no lock or scratch file is left behind"
+  rm -rf "$root"
+}
+
+test_focus_cli_refuses_empty_text(){
+  echo "# autodream-focus.sh: a turn with no text is not tagged"
+  local root; root=$(setup_env)
+  local rc=0; focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text '  ' >/dev/null 2>&1 || rc=$?
+  assert_eq "$rc" "1" "it refuses"
+  assert_no_file "$root/autodream/tags.jsonl" "and writes nothing"
+  rm -rf "$root"
+}
+
+test_focus_cli_usage_errors(){
+  echo "# autodream-focus.sh: a bad harness, role or subcommand is a usage error"
+  local root rc; root=$(setup_env)
+  rc=0; focus_cli "$root" tag --harness vim --session s --uuid r --role assistant --text x >/dev/null 2>&1 || rc=$?
+  assert_eq "$rc" "2" "an unknown harness"
+  rc=0; focus_cli "$root" tag --harness omp --session s --uuid r --role system --text x >/dev/null 2>&1 || rc=$?
+  assert_eq "$rc" "2" "an unknown role"
+  rc=0; focus_cli "$root" nonsense >/dev/null 2>&1 || rc=$?
+  assert_eq "$rc" "2" "an unknown subcommand"
+  assert_no_file "$root/autodream/tags.jsonl" "nothing is written by any of them"
+  rm -rf "$root"
+}
+
+hold_flock(){ # $1=lock file -> a background process holds flock(2) on it until killed; its pid is HOLDER
+  python3 -c 'import fcntl, os, sys, time
+fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(sys.argv[2], "w").write("held")
+time.sleep(600)' "$1" "$1.held" &
+  HOLDER=$!
+  local i; for i in $(seq 1 100); do [ -f "$1.held" ] && break; sleep 0.1; done
+}
+
+test_focus_cli_a_killed_holder_leaves_no_stale_lock(){
+  echo "# autodream-focus.sh: the lock is the kernel's, so a writer that dies leaves nothing to reclaim"
+  local root; root=$(setup_env); local lock="$root/autodream/tags.jsonl.lock" out
+  mkdir -p "$root/autodream"; hold_flock "$lock"
+  kill -9 "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null || true
+  out=$(focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1)
+  assert_eq "$out" "tagged s1:r1" "a holder killed with SIGKILL frees the lock at once"
+  assert_eq "$(jq -r .id "$root/autodream/tags.jsonl")" "s1:r1" "and the tag is written"
+  rm -rf "$root"
+}
+
+test_focus_cli_a_failed_read_never_becomes_a_write(){
+  echo "# autodream-focus.sh: a read that fails cannot become a write that drops the tags"
+  local root; root=$(setup_env); local f="$root/autodream/tags.jsonl" sh="$root/shim" out rc real_tail real_jq
+  real_tail=$(command -v tail); real_jq=$(command -v jq); mkdir -p "$sh"
+  printf '{"id":"keep:1","text":"one"}\n{"id":"keep:2","text":"two"}\n' > "$f"
+  cp "$f" "$root/before"
+  # jq that fails on the read of the tags file, as an I/O error would
+  printf '#!/bin/bash\ncase " $* " in *" -R -n "*tags.jsonl*) exit 5 ;; esac\nexec "%s" "$@"\n' "$real_jq" > "$sh/jq"
+  chmod +x "$sh/jq"
+  rc=0; out=$(PATH="$sh:$PATH" focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1) || rc=$?
+  assert_eq "$rc" "1" "a read of the tags file that fails is a refusal"
+  assert_grep_str "$out" "nothing was changed" "and says nothing was changed"
+  assert_eq "$(cat "$f")" "$(cat "$root/before")" "the tags are exactly as they were"
+  assert_eq "$(ls -A "$root/autodream" | grep -v '\.lock$' | grep -c '^tags\.jsonl\.' || true)" "0" "no scratch file is left behind"
+  rm -f "$sh/jq"
+  # tail that fails: the torn-line check cannot be answered, so it cannot be guessed
+  printf '#!/bin/bash\ncase "$*" in *tags.jsonl*) exit 1 ;; esac\nexec "%s" "$@"\n' "$real_tail" > "$sh/tail"
+  chmod +x "$sh/tail"
+  rc=0; out=$(PATH="$sh:$PATH" focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1) || rc=$?
+  assert_eq "$rc" "1" "a failed torn-line check is a refusal too"
+  assert_eq "$(cat "$f")" "$(cat "$root/before")" "and the tags are exactly as they were"
+  rm -rf "$root"
+}
+
+test_focus_cli_a_lock_directory_from_the_earlier_build_does_not_block_tagging(){
+  echo "# autodream-focus.sh: the earlier build kept its lock as a directory; one left by a killed writer is cleared, a foreign one is refused"
+  local root; root=$(setup_env); local d="$root/autodream" out rc=0
+  mkdir -p "$d/tags.jsonl.lock"; echo 12345 > "$d/tags.jsonl.lock/pid"
+  out=$(focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1)
+  assert_eq "$out" "tagged s1:r1" "a directory lock with only its pid file does not stop the new lock"
+  rm -rf "$d/tags.jsonl.lock"; mkdir -p "$d/tags.jsonl.lock"; echo precious > "$d/tags.jsonl.lock/other"
+  out=$(focus_cli "$root" tag --harness omp --session s1 --uuid r2 --role assistant --text y 2>&1) || rc=$?
+  assert_eq "$rc" "1" "a directory holding anything else is refused, not deleted"
+  assert_grep_str "$out" "nothing was changed" "and says nothing was changed"
+  assert_eq "$(cat "$d/tags.jsonl.lock/other")" "precious" "its contents are untouched"
+  rm -rf "$root"
+}
+
+test_focus_cli_without_python3_it_refuses_and_writes_nothing(){
+  echo "# autodream-focus.sh: the lock needs python3, and without it the script says so instead of writing unlocked"
+  local root; root=$(setup_env); local bin="$root/nopy" t out rc=0
+  mkdir -p "$bin"
+  for t in jq dirname basename readlink sed tr cat date mkdir tail awk head mktemp rm cksum find sort cut seq env stat; do
+    [ -x "$(command -v "$t" 2>/dev/null)" ] && ln -sf "$(command -v "$t")" "$bin/$t"
+  done
+  out=$(PATH="$bin" AUTODREAM_DIR="$root/autodream" AUTODREAM_CONFIG=/nonexistent /bin/bash "$REPO/bin/autodream-focus.sh" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1) || rc=$?
+  assert_eq "$rc" "3" "exit 3"
+  assert_grep_str "$out" "python3 is required" "and says what is missing"
+  assert_no_file "$root/autodream/tags.jsonl" "and nothing is written"
+  rm -rf "$root"
+}
+
+test_focus_cli_last_omp_leaves_no_copy_when_it_cannot_read_a_turn(){
+  echo "# autodream-focus.sh last: a failure after the live-branch copy is made leaves no copy of the transcript behind"
+  local root; root=$(setup_env); local f="$root/s.jsonl" sh="$root/shim" tmp="$root/tmp" real_jq out rc
+  real_jq=$(command -v jq); mkdir -p "$sh" "$tmp"
+  jq -cn --arg cwd "$root" '{type:"session",version:3,id:"live",timestamp:"2020-01-02T12:00:00.000Z",cwd:$cwd}' > "$f"
+  jq -cn '{type:"message",id:"u1",parentId:null,message:{role:"user",content:"hello"}}' >> "$f"
+  jq -cn '{type:"message",id:"a1",parentId:"u1",message:{role:"assistant",content:"hi"}}' >> "$f"
+  # jq that fails only on the turn-picking call (-c -s), so the copy exists when it dies
+  printf '#!/bin/bash\ncase " $* " in *" -c -s "*) exit 5 ;; esac\nexec "%s" "$@"\n' "$real_jq" > "$sh/jq"
+  chmod +x "$sh/jq"
+  rc=0; out=$(PATH="$sh:$PATH" TMPDIR="$tmp" focus_cli "$root" last --harness omp --file "$f" 2>&1) || rc=$?
+  assert_eq "$rc" "1" "it refuses"
+  assert_grep_str "$out" "nothing was changed" "and says nothing was changed"
+  assert_eq "$(ls -A "$tmp" | wc -l | tr -d ' ')" "0" "no copy of the transcript is left in TMPDIR"
+  assert_no_file "$root/autodream/tags.jsonl" "and nothing was tagged"
+  rm -rf "$root"
+}
+
+test_focus_cli_tags_made_at_once_are_all_kept(){
+  echo "# autodream-focus.sh: tags and untags made at the same moment by several writers all land"
+  local root; root=$(setup_env); local f="$root/autodream/tags.jsonl" i
+  focus_cli "$root" tag --harness omp --session q --uuid old --role assistant --text old >/dev/null
+  for i in 1 2 3 4 5 6 7 8; do focus_cli "$root" tag --harness omp --session p --uuid "r$i" --role assistant --text "n$i" >/dev/null 2>&1 & done
+  focus_cli "$root" tag --harness omp --session q --uuid old --role assistant --text old >/dev/null 2>&1 &
+  wait
+  assert_eq "$(jq -s '[.[] | select(.session == "p")] | length' "$f")" "8" "eight tags made at once are all kept"
+  assert_eq "$(jq -s '[.[] | select(.session == "q")] | length' "$f")" "0" "and an untag made at the same moment took its tag back"
+  rm -rf "$root"
+}
+
+test_focus_cli_the_tags_file_named_in_the_config_is_the_one_written(){
+  echo "# autodream-focus.sh: it resolves the tags file the way the collector does, config included"
+  local root; root=$(setup_env); local ad="$root/autodream"
+  printf 'AUTODREAM_TAGS_FILE=%s\n' "$root/moved.jsonl" > "$ad/config"
+  AUTODREAM_DIR="$ad" /bin/bash "$REPO/bin/autodream-focus.sh" tag --harness omp --session s1 --uuid r1 --role assistant --text x >/dev/null
+  assert_eq "$(jq -r .id "$root/moved.jsonl" 2>/dev/null)" "s1:r1" "a tags file named only in the install's config is the one written"
+  assert_no_file "$ad/tags.jsonl" "and the default file is not touched"
+  assert_eq "$(AUTODREAM_DIR="$ad" /bin/bash "$REPO/bin/autodream-focus.sh" path)" "$root/moved.jsonl" "path prints it, which is where the mod and the OMP picker look"
+  AUTODREAM_TAGS_FILE="$root/exported.jsonl" AUTODREAM_DIR="$ad" /bin/bash "$REPO/bin/autodream-focus.sh" tag --harness omp --session s1 --uuid r2 --role assistant --text y >/dev/null
+  assert_eq "$(jq -r .id "$root/exported.jsonl" 2>/dev/null)" "s1:r2" "an exported one still wins over the config"
+  rm -rf "$root"
+}
+
+test_focus_cli_last_finds_a_session_behind_newer_ones_in_other_directories(){
+  echo "# autodream-focus.sh last: the directory's session is found however many newer sessions other directories have"
+  local root; root=$(setup_env); local home="$root/codex" i
+  mk_codex_session "$home" cx-mine "$root" >/dev/null
+  sleep 1
+  for i in $(seq 1 90); do mk_codex_session "$home" "cx-other-$i" "$root/elsewhere" >/dev/null; done
+  CODEX_HOME="$home" focus_cli "$root" last --harness codex --cwd "$root" >/dev/null
+  assert_eq "$(jq -r .session "$root/autodream/tags.jsonl" 2>/dev/null)" "cx-mine" "90 newer sessions of another directory do not hide it"
+  rm -rf "$root"
+}
+
+test_focus_cli_a_relative_transcript_is_recorded_as_an_absolute_path(){
+  echo "# autodream-focus.sh: the transcript a tag records is absolute, because the nightly run reads it from elsewhere"
+  local root; root=$(setup_env); local want
+  mkdir -p "$root/rel"; : > "$root/rel/s.jsonl"; want="$(cd "$root/rel" && pwd -P)/s.jsonl"
+  ( cd "$root" && focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --transcript rel/s.jsonl --text x ) >/dev/null
+  assert_eq "$(jq -r .transcript "$root/autodream/tags.jsonl")" "$want" "tag --transcript with a relative path"
+  local f; f=$(mk_codex_session "$root/codex" cx-rel "$root")
+  ( cd "$(dirname "$f")" && CODEX_HOME="$root/codex" focus_cli "$root" last --harness codex --file "$(basename "$f")" ) >/dev/null
+  assert_eq "$(jq -r 'select(.session == "cx-rel") | .transcript' "$root/autodream/tags.jsonl")" "$(cd "$(dirname "$f")" && pwd -P)/$(basename "$f")" "last --file with a relative path"
+  local out rc=0; out=$( cd "$root" && focus_cli "$root" tag --harness omp --session s2 --uuid r1 --role assistant --transcript nodir/s.jsonl --text x 2>&1 ) || rc=$?
+  assert_eq "$rc" "1" "a path whose directory is not there is refused"
+  assert_grep_str "$out" "nothing was changed" "and says nothing was changed"
+  rm -rf "$root"
+}
+
+test_focus_cli_a_live_holder_is_never_pushed_aside(){
+  echo "# autodream-focus.sh: a writer that holds the lock keeps it however long it holds it; a waiter gives up and changes nothing"
+  local root; root=$(setup_env); local d="$root/autodream" out rc=0
+  mkdir -p "$d"
+  : > "$d/tags.jsonl.lock"; touch -t 202001010000 "$d/tags.jsonl.lock"
+  hold_flock "$d/tags.jsonl.lock"
+  out=$(focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1) || rc=$?
+  assert_eq "$rc" "1" "a lock file with a years-old mtime and a live holder is still held, so the waiter gives up"
+  assert_grep_str "$out" "nothing was changed" "and says nothing was changed"
+  assert_no_file "$d/tags.jsonl" "and nothing was written"
+  kill -9 "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null || true
+  rm -rf "$root"
+}
+
+test_focus_cli_a_write_by_a_writer_that_takes_no_lock_is_not_overwritten(){
+  echo "# autodream-focus.sh: a writer that takes no lock (an older mod build) cannot lose a tag to, or take one from, an add"
+  local root; root=$(setup_env); local f="$root/autodream/tags.jsonl" sh="$root/shim" out rc real_tail real_awk
+  real_tail=$(command -v tail); real_awk=$(command -v awk); mkdir -p "$sh"
+  printf '{"id":"keep:1","text":"one"}\n' > "$f"
+  # tail runs just before the append: the shim writes a line the way an unlocked writer would
+  cat > "$sh/tail" <<SH
+#!/bin/bash
+case "\$*" in *tags.jsonl*) echo '{"id":"late:1","text":"unlocked"}' >> "$f" ;; esac
+exec "$real_tail" "\$@"
+SH
+  chmod +x "$sh/tail"
+  rc=0; out=$(PATH="$sh:$PATH" focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1) || rc=$?
+  assert_eq "$rc" "0" "an add is an append, so it succeeds beside the other writer's line"
+  assert_eq "$(grep -c late:1 "$f")" "1" "the other writer's tag is still there"
+  assert_eq "$(grep -c keep:1 "$f")" "1" "and so is the one that was there before"
+  assert_eq "$(grep -c s1:r1 "$f")" "1" "and this tag was added after them, not instead of them"
+  # the untag path replaces the file: awk is the rewrite, and the shim writes after it
+  printf '{"id":"s1:r1","session":"s1","uuid":"r1","text":"mine"}\n' > "$f"
+  rm -f "$sh/tail"
+  cat > "$sh/awk" <<SH
+#!/bin/bash
+"$real_awk" "\$@" || exit \$?
+echo '{"id":"late:2","text":"unlocked"}' >> "$f"
+SH
+  chmod +x "$sh/awk"
+  rc=0; out=$(PATH="$sh:$PATH" focus_cli "$root" tag --harness omp --session s1 --uuid r1 --role assistant --text x 2>&1) || rc=$?
+  assert_eq "$rc" "1" "an untag refuses when the file changed under it"
+  assert_eq "$(grep -c late:2 "$f")" "1" "the other writer's tag is still there"
+  assert_eq "$(grep -c '"id":"s1:r1"' "$f")" "1" "and the tag being removed is as it was"
+  rm -rf "$root"
+}
+
+mk_codex_session(){ # $1=codex home $2=session id $3=cwd — a rollout in the shape Codex writes
+  local d="$1/sessions/2020/01/02"; mkdir -p "$d"
+  local f="$d/rollout-2020-01-02T12-00-00-$2.jsonl"
+  jq -cn --arg id "$2" --arg cwd "$3" '{timestamp:"2020-01-02T12:00:00.000Z",type:"session_meta",payload:{id:$id,cwd:$cwd}}' > "$f"
+  local role id text
+  # What a person typed is an item_completed UserMessage event; the response_item messages with role user
+  # are what Codex injects (instructions, environment context), and the last one is injected after the
+  # last real prompt, so choosing by position or by the text's first character would pick the wrong turn.
+  jq -cn '{timestamp:"2020-01-02T12:00:01.000Z",type:"event_msg",payload:{type:"item_completed",item:{type:"UserMessage",id:"um_1",content:[{type:"text",text:"why is it slow?",text_elements:[]}]}}}' >> "$f"
+  jq -cn '{timestamp:"2020-01-02T12:00:02.000Z",type:"event_msg",payload:{type:"item_completed",item:{type:"UserMessage",id:"um_2",content:[{type:"text",text:"<div>Why does this fail?</div>",text_elements:[]}]}}}' >> "$f"
+  while IFS='|' read -r role id text; do
+    jq -cn --arg role "$role" --arg id "$id" --arg text "$text" \
+      '{timestamp:"2020-01-02T12:00:03.000Z",type:"response_item",payload:({type:"message",role:$role,content:[{type:(if $role=="assistant" then "output_text" else "input_text" end),text:$text}]} + (if $id=="" then {} else {id:$id} end))}' >> "$f"
+  done <<'EOF'
+developer||standing instructions
+assistant|msg_first|first answer
+assistant|msg_last|final answer
+user||<environment_context>cwd</environment_context>
+EOF
+  printf '%s' "$f"
+}
+
+test_focus_cli_last_codex(){
+  echo "# autodream-focus.sh last: the newest Codex session for a directory, its last reply"
+  local root; root=$(setup_env); local home="$root/codex"
+  local f; f=$(mk_codex_session "$home" cx-1 "$root")
+  CODEX_HOME="$home" focus_cli "$root" last --harness codex --cwd "$root" >/dev/null
+  local tags="$root/autodream/tags.jsonl"
+  assert_eq "$(jq -r '[.id, .role, .harness, .text, .transcript] | join("|")' "$tags")" "cx-1:msg_last|assistant|codex|final answer|$f" "the last assistant message, with the rollout as its transcript"
+  rm -f "$tags"
+  CODEX_HOME="$home" focus_cli "$root" last --harness codex --cwd "$root" --role user >/dev/null
+  assert_eq "$(jq -r '[.id, .text] | join("|")' "$tags")" "cx-1:um_2|<div>Why does this fail?</div>" "--role user is the last thing the person typed, even one that starts with an angle bracket, and never the context Codex injected after it"
+  rm -rf "$root"
+}
+
+test_focus_cli_last_omp(){
+  echo "# autodream-focus.sh last: the newest OMP session for a directory, not a sibling's or an advisor's"
+  local root; root=$(setup_env); local pi="$root/pi" b
+  b="$pi/sessions/-x"; mkdir -p "$b"
+  mk_omp(){ # $1=file $2=id $3=cwd $4=reply id $5=reply text
+    jq -cn --arg id "$2" --arg cwd "$3" '{type:"session",version:3,id:$id,timestamp:"2020-01-02T12:00:00.000Z",cwd:$cwd}' > "$1"
+    jq -cn '{type:"message",id:"u1",parentId:null,message:{role:"user",content:"hello"}}' >> "$1"
+    jq -cn --arg id "$4" --arg t "$5" '{type:"message",id:$id,parentId:"u1",message:{role:"assistant",content:[{type:"thinking",thinking:"hm"},{type:"text",text:$t}]}}' >> "$1"
+  }
+  mk_omp "$b/2020-01-02T12-00-00-000Z_old.jsonl" old "$root" a_old "old reply"
+  mk_omp "$b/2020-01-02T13-00-00-000Z_new.jsonl" new "$root" a_new "new reply"
+  mk_omp "$b/2020-01-02T14-00-00-000Z_other.jsonl" other "$root/elsewhere" a_other "other project"
+  mkdir -p "$b/2020-01-02T13-00-00-000Z_new"; mk_omp "$b/2020-01-02T13-00-00-000Z_new/__advisor.jsonl" adv "$root" a_adv "advisor"
+  touch -t 202001021200 "$b/2020-01-02T12-00-00-000Z_old.jsonl"
+  sleep 1; touch "$b/2020-01-02T13-00-00-000Z_new.jsonl"; sleep 1; touch "$b/2020-01-02T14-00-00-000Z_other.jsonl"; sleep 1; touch "$b/2020-01-02T13-00-00-000Z_new/__advisor.jsonl"
+  PI_CODING_AGENT_DIR="$pi" focus_cli "$root" last --harness omp --cwd "$root" >/dev/null
+  assert_eq "$(jq -r '[.id, .text, .harness] | join("|")' "$root/autodream/tags.jsonl")" "new:a_new|new reply|omp" "newest session of this directory, thinking left out of the text"
+  rm -rf "$root"
+}
+
+test_focus_cli_last_omp_reads_the_live_branch(){
+  echo "# autodream-focus.sh last: OMP's last human turn on the live branch, not an abandoned one or an agent's"
+  local root; root=$(setup_env); local f="$root/s.jsonl"
+  m(){ # $1=id $2=parent $3=role $4=text [$5=attribution]
+    jq -cn --arg id "$1" --arg p "$2" --arg r "$3" --arg t "$4" --arg a "${5:-}" \
+      '{type:"message",id:$id,parentId:(if $p == "" then null else $p end),message:({role:$r,content:$t} + (if $a == "" then {} else {attribution:$a} end))}' >> "$f"
+  }
+  jq -cn --arg cwd "$root" '{type:"session",version:3,id:"live",timestamp:"2020-01-02T12:00:00.000Z",cwd:$cwd}' > "$f"
+  m u1 "" user "first"; m a1 u1 assistant "one"; m u2 a1 user "kept question"; m a2 u2 assistant "two"
+  m u3 a1 user "abandoned question"; m a3 u3 assistant "abandoned reply"
+  m u4 a2 user "steering note" agent; m a4 u4 assistant "four"
+  focus_cli "$root" last --harness omp --file "$f" --role user >/dev/null
+  assert_eq "$(jq -r '[.id, .text] | join("|")' "$root/autodream/tags.jsonl")" "live:u2|kept question" "the abandoned branch and the agent-attributed turn are both skipped"
+  local out rc=0; printf '{"type":"session","version":3,"id":"bad","cwd":"/x"}\nnot json\n' > "$root/bad.jsonl"
+  out=$(focus_cli "$root" last --harness omp --file "$root/bad.jsonl" 2>&1) || rc=$?
+  assert_eq "$rc" "1" "a file that cannot be walked is refused"
+  assert_grep_str "$out" "could not be read as a single OMP conversation" "and says why, instead of reading the raw file"
+  rm -rf "$root"
+}
+
+test_focus_cli_last_without_a_session(){
+  echo "# autodream-focus.sh last: no session for the directory is a plain error"
+  local root; root=$(setup_env)
+  local out rc=0; out=$(CODEX_HOME="$root/none" focus_cli "$root" last --harness codex --cwd "$root" 2>&1) || rc=$?
+  assert_eq "$rc" "1" "it fails"
+  assert_grep_str "$out" "no recent codex session" "and says why"
+  assert_no_file "$root/autodream/tags.jsonl" "and writes nothing"
+  rm -rf "$root"
+}
+
+test_focus_tag_uses_the_recorded_harness_and_transcript(){
+  echo "# focus tags: a tag from OMP or Codex names its harness and its own session file"
+  local root; root=$(setup_env); mk_session "$root" s1
+  mkdir -p "$root/elsewhere"; : > "$root/elsewhere/real.jsonl"
+  local at; at=$(focus_at "$DATE" 12:00)
+  jq -cn --arg a "$at" --arg t "$root/elsewhere/real.jsonl" '{id:"cx:1",session:"cx",uuid:"1",role:"assistant",text:"codex reply",cwd:"/p",taggedAt:$a,harness:"codex",transcript:$t}' >> "$root/autodream/tags.jsonl"
+  jq -cn --arg a "$at" --arg t "$root/elsewhere/gone.jsonl" '{id:"om:1",session:"om",uuid:"1",role:"assistant",text:"omp reply",cwd:"/p",taggedAt:$a,harness:"omp",transcript:$t}' >> "$root/autodream/tags.jsonl"
+  jq -cn --arg a "$at" '{id:"ev:1",session:"ev",uuid:"1",role:"assistant",text:"evil path",cwd:"/p",taggedAt:$a,harness:"omp",transcript:"/etc/passwd"}' >> "$root/autodream/tags.jsonl"
+  jq -cn --arg a "$at" '{id:"rl:1",session:"rl",uuid:"1",role:"assistant",text:"relative path",cwd:"/p",taggedAt:$a,harness:"omp",transcript:"elsewhere/real.jsonl"}' >> "$root/autodream/tags.jsonl"
+  # Run from the directory where that relative path happens to exist: it still must not be trusted.
+  ( cd "$root" && focus_collect "$root" "$DATE" )
+  local f; f="$(fdir "$root")/operator-notes.md"
+  assert_grep "$f" "autodream focus in Codex" "the harness is named"
+  assert_grep "$f" "autodream focus in OMP" "for OMP too"
+  assert_grep "$f" "Transcript: $root/elsewhere/real.jsonl" "a recorded transcript that exists is used as given"
+  assert_eq "$(grep -c "Transcript: not found" "$f")" "3" "one that is gone, one that is not a .jsonl, and a relative one are reported as not found, not trusted"
+  assert_nogrep "$f" "Transcript: /etc/passwd" "a path to a file that is not a session is never handed to L2"
+  rm -rf "$root"
+}
+
 test_force_rebuild_failed_l2_does_not_consume(){
   echo "# regression: a stale report must not satisfy the consume gate under --force"
   local root; root=$(setup_env); mk_session "$root" s1
@@ -744,6 +1121,44 @@ test_partial_report_does_not_consume(){
   assert_grep "$root/run.out" "no open-questions marker" "the run names the reason"
   # It must also have RETRIED rather than accepting the partial file on attempt 1.
   assert_grep "$root/run.out" "L2 aggregation attempt 2" "a truncated report triggers a retry"
+  rm -rf "$root"
+}
+
+test_run_outcome_is_written_only_for_a_delivered_or_untouched_report(){
+  echo "# autodream-now --watch reads logs/run-<date>.outcome: the runner writes it, under the launch's token, only when it delivered or left a finished report alone"
+  local root o sh; root=$(setup_env); mk_session "$root" s1; o="$root/autodream/logs/run-$DATE.outcome"
+  AUTODREAM_RUN_TOKEN=tok.1 vault_run "$root"
+  assert_eq "$(sed -n 1p "$o" 2>/dev/null)" "tok.1 delivered" "a validated delivery is written under the token"
+  AUTODREAM_RUN_TOKEN=tok.2 vault_run "$root"
+  assert_eq "$(sed -n 2p "$o" 2>/dev/null)" "tok.2 noop" "a finished report left alone (the idempotency guard) is a noop"
+  AUTODREAM_FORCE=1 AUTODREAM_RUN_TOKEN=tok.3 vault_run "$root"
+  assert_eq "$(sed -n 3p "$o" 2>/dev/null)" "tok.3 delivered" "a forced rebuild that delivers is delivered"
+  vault_run "$root"
+  AUTODREAM_RUN_TOKEN='bad token; touch x' vault_run "$root"
+  assert_eq "$(wc -l < "$o" | tr -d ' ')" "3" "no token, or a token with characters outside [0-9A-Za-z._-], writes nothing (every scheduled run)"
+  rm -rf "$root"
+
+  # a degraded capture (complete-looking, no sentinel) whose move-aside fails: the file stays at the report path
+  root=$(setup_env); mk_session "$root" s1; o="$root/autodream/logs/run-$DATE.outcome"; sh="$root/shim"; mkdir -p "$sh"
+  printf '#!/bin/bash\ncase "$*" in *.partial-*) exit 1 ;; esac\nexec /bin/mv "$@"\n' > "$sh/mv"; chmod +x "$sh/mv"
+  export MOCK_MODE=l2_partial_marker AUTODREAM_L2_ATTEMPTS=1
+  PATH="$sh:$PATH" AUTODREAM_RUN_TOKEN=tok.4 vault_run "$root"
+  unset MOCK_MODE AUTODREAM_L2_ATTEMPTS
+  assert_grep "$root/run.out" "an incomplete report is at" "the run says the capture could not be moved aside"
+  assert_eq "$(cat "$o" 2>/dev/null)" "" "and writes no outcome for it"
+  rm -rf "$root"
+
+  # no sessions: the stub report is complete and is the run's delivery
+  root=$(setup_env); o="$root/autodream/logs/run-$DATE.outcome"
+  AUTODREAM_RUN_TOKEN=tok.5 vault_run "$root"
+  assert_eq "$(cat "$o" 2>/dev/null)" "tok.5 delivered" "the no-sessions stub counts as delivered"
+  # a forced rebuild whose stub cannot be staged leaves the old report, which is complete: it is not this run's delivery.
+  # (The stub is written to <report>.tmp and renamed over the report, so a read-only old report is replaced; a
+  # directory at the staging path is what makes the write fail.)
+  mkdir -p "$root/dreams/$DATE.md.tmp"
+  AUTODREAM_FORCE=1 AUTODREAM_RUN_TOKEN=tok.6 vault_run "$root"
+  assert_eq "$(grep -c 'tok.6' "$o" || true)" "0" "a stub that could not be staged over the old report is not reported as delivered"
+  assert_grep "$root/run.out" "could not publish the report" "and the run says so"
   rm -rf "$root"
 }
 
@@ -3173,7 +3588,7 @@ Other findings dropped by the gate:
 EOF
 )
   run_notify "$f"
-  assert_grep "$root/inbox/2020-02-01-open-questions.md" '^# 1 open question$' "marker wins over the 6 list lines in the section"
+  assert_grep "$root/inbox/2020-02-01-open-questions.md" '^\*\*1 open question\*\*$' "marker wins over the 6 list lines in the section"
 
   # --- marker of 0 must stay silent even though the section has prose and bullets ---
   f=$(mk_report 2020-02-02 <<'EOF'
@@ -3199,7 +3614,7 @@ EOF
 EOF
 )
   run_notify "$f"
-  assert_grep "$root/inbox/2020-02-03-open-questions.md" '^# 2 open questions$' "no marker: 2 items, not 5 list lines"
+  assert_grep "$root/inbox/2020-02-03-open-questions.md" '^\*\*2 open questions\*\*$' "no marker: 2 items, not 5 list lines"
 
   # --- no marker: bold topic titles beat the bullets underneath them ---
   f=$(mk_report 2020-02-04 <<'EOF'
@@ -3213,7 +3628,7 @@ EOF
 EOF
 )
   run_notify "$f"
-  assert_grep "$root/inbox/2020-02-04-open-questions.md" '^# 2 open questions$' "no marker: 2 titles, not 4 bullets"
+  assert_grep "$root/inbox/2020-02-04-open-questions.md" '^\*\*2 open questions\*\*$' "no marker: 2 titles, not 4 bullets"
 
   # --- no marker: plain bullets are the questions ---
   f=$(mk_report 2020-02-05 <<'EOF'
@@ -3222,7 +3637,7 @@ EOF
 EOF
 )
   run_notify "$f"
-  assert_grep "$root/inbox/2020-02-05-open-questions.md" '^# 2 open questions$' "no marker: plain bullets counted"
+  assert_grep "$root/inbox/2020-02-05-open-questions.md" '^\*\*2 open questions\*\*$' "no marker: plain bullets counted"
 
   # --- no marker: bare prose still pops, since a non-empty section has something to say ---
   f=$(mk_report 2020-02-06 <<'EOF'
@@ -3230,7 +3645,7 @@ Should the fanout be raised to 12 given the recent session volume?
 EOF
 )
   run_notify "$f"
-  assert_grep "$root/inbox/2020-02-06-open-questions.md" '^# 1 open question$' "no marker: prose falls back to 1"
+  assert_grep "$root/inbox/2020-02-06-open-questions.md" '^\*\*1 open question\*\*$' "no marker: prose falls back to 1"
 
   # --- no marker: a "None ..." lead-in is zero, not a prose question ---
   # Without this case the prose tier turns every quiet pre-marker night into a false pop.
@@ -3819,10 +4234,33 @@ _run test_focus_tag_unparseable_time_is_dated_by_the_report
 _run test_focus_tag_text_cannot_forge_a_note
 _run test_focus_tag_archive_is_idempotent
 _run test_focus_tag_without_jq_is_reported
+_run test_focus_cli_tag_and_untag
+_run test_focus_cli_text_on_stdin_and_capped
+_run test_focus_cli_keeps_lines_it_does_not_understand
+_run test_focus_cli_unreadable_file_is_never_overwritten
+_run test_focus_cli_refuses_empty_text
+_run test_focus_cli_usage_errors
+_run test_focus_cli_a_killed_holder_leaves_no_stale_lock
+_run test_focus_cli_a_failed_read_never_becomes_a_write
+_run test_focus_cli_last_omp_leaves_no_copy_when_it_cannot_read_a_turn
+_run test_focus_cli_tags_made_at_once_are_all_kept
+_run test_focus_cli_the_tags_file_named_in_the_config_is_the_one_written
+_run test_focus_cli_last_finds_a_session_behind_newer_ones_in_other_directories
+_run test_focus_cli_a_relative_transcript_is_recorded_as_an_absolute_path
+_run test_focus_cli_a_live_holder_is_never_pushed_aside
+_run test_focus_cli_a_lock_directory_from_the_earlier_build_does_not_block_tagging
+_run test_focus_cli_without_python3_it_refuses_and_writes_nothing
+_run test_focus_cli_a_write_by_a_writer_that_takes_no_lock_is_not_overwritten
+_run test_focus_cli_last_codex
+_run test_focus_cli_last_omp
+_run test_focus_cli_last_omp_reads_the_live_branch
+_run test_focus_cli_last_without_a_session
+_run test_focus_tag_uses_the_recorded_harness_and_transcript
 _run test_force_rebuild_failed_l2_does_not_consume
 _run test_unmovable_stale_report_disarms_consuming
 _run test_partial_report_does_not_consume
 _run test_partial_report_keeps_previous
+_run test_run_outcome_is_written_only_for_a_delivered_or_untouched_report
 _run test_partial_report_does_not_block_retry
 _run test_complete_report_retires_partials
 _run test_dead_stdout_does_not_kill_the_run
@@ -4082,6 +4520,7 @@ test_install_deploys_the_adapter_runtime(){
     bash "$REPO/install.sh" --no-schedule > "$T/install.out" 2>&1 || true
   local target="$T/home/.claude/autodream"
   assert_file "$target/lib-project.sh" "lib-project.sh is installed"
+  assert_file "$target/lib-flock.sh" "lib-flock.sh is installed"
   assert_file "$target/adapters.sh"    "adapters.sh is installed"
   assert_file "$target/preflight.sh"   "preflight.sh is installed"
   assert_file "$target/session-window.sh" "session-window.sh is installed"
@@ -7300,6 +7739,26 @@ done
 
 streak_rows(){ awk '!/^#/ && NF' "$1" 2>/dev/null | wc -l | tr -d ' '; }
 
+hold_flock(){ # $1=lock file -> a python process holds its flock; sets HOLD_PID once it does
+  local ready="$1.ready" i=0
+  rm -f "$ready"
+  python3 -c 'import fcntl, sys, time
+f = open(sys.argv[1], "a")
+fcntl.flock(f, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close()
+time.sleep(600)' "$1" "$ready" &
+  HOLD_PID=$!
+  while [ ! -e "$ready" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+}
+flock_free(){ # $1=lock file: 0 when a non-blocking flock on it succeeds
+  python3 -c 'import fcntl, sys
+f = open(sys.argv[1], "a")
+try:
+    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(1)' "$1"
+}
+
 test_question_streaks_state_lives_with_the_install(){
   echo "# question streaks: the store is the install's, one file holds the watermark, clear takes the lock"
   local root; root=$(setup_env)
@@ -7348,13 +7807,13 @@ test_question_streaks_state_lives_with_the_install(){
   # clear takes the same lock as update, or an update that already read the old state puts
   # the cleared streak back when it writes.
   printf 'k\t1\t2026-03-03\t2026-03-03\tHeld?\n' > "$st"
-  mkdir "$st.lock"
+  hold_flock "$st.flock"; local holder=$HOLD_PID
   # AUTODREAM_QUESTION_LOCK_WAIT=1: the default is 15 one-second tries, and this case and the next
   # each held a lock on purpose for all of them (32 of the suite's seconds, one test in 46).
   local t0=$SECONDS
   AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" bash "$QS" clear all >/dev/null 2>&1; local rc=$?
   local waited=$((SECONDS - t0))
-  rmdir "$st.lock" 2>/dev/null
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
   assert_eq "$rc" "1" "clear fails while an update holds the lock"
   [ "$waited" -le 6 ] && ok "and gives up after the configured wait, not the default 15 tries (${waited}s)" || no "and gives up after the configured wait, not the default 15 tries (took ${waited}s)"
   assert_eq "$(streak_rows "$st")" "1" "and leaves the state for that update"
@@ -7362,9 +7821,9 @@ test_question_streaks_state_lives_with_the_install(){
   # An EMPTY board is not a reason to skip the lock: an update holding it may be about to
   # write the first streak, which clear would then report as cleared (Codex review of 4eea84d).
   : > "$st"
-  mkdir "$st.lock"
+  hold_flock "$st.flock"; holder=$HOLD_PID
   AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" bash "$QS" clear all >/dev/null 2>&1; rc=$?
-  rmdir "$st.lock" 2>/dev/null
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
   assert_eq "$rc" "1" "clear on an empty board still waits for the lock and fails while it is held"
 
   # A state file that exists but cannot be read is not an empty board. Reading it as empty
@@ -7573,9 +8032,164 @@ test_question_streaks_reruns_and_mismatch(){
   rm -rf "$root"
 }
 
+test_question_streaks_lock_is_a_kernel_flock(){
+  echo "# question streaks: the lock is an flock; a live holder keeps it, a dead one loses it at once (#192)"
+  command -v python3 >/dev/null 2>&1 || { echo "  skip - python3 not available"; return 0; }
+  local root; root=$(setup_env)
+  local QS="$REPO/bin/question-streaks.sh"
+  [ -x "$QS" ] || { no "question-streaks.sh executable"; return 0; }
+  local st="$root/own.tsv" lk="$root/own.tsv.flock" out rc t0
+  qs(){ AUTODREAM_QUESTION_LOCK_WAIT="${QS_WAIT:-1}" AUTODREAM_QUESTION_STATE="$st" AUTODREAM_NOTIFY_DRYRUN=1 /bin/bash "$QS" "$@" 2>&1; }
+  local body; body=$(printf '## Open questions for the user\n\n1. **Owned?** body\n\n<!-- autodream:open-questions=1 -->\n')
+  local d; for d in 2026-04-01 2026-04-02 2026-04-03; do printf '%s\n' "$body" > "$root/$d.md"; done
+  qs update "$root/2026-04-01.md" >/dev/null
+  cp "$st" "$root/own.before"
+
+  # 1. A live holder keeps the lock however old its lock file looks. The old mkdir lock was reclaimed by age.
+  hold_flock "$lk"; local holder=$HOLD_PID
+  touch -t 200001010000 "$lk"
+  out=$(qs update "$root/2026-04-02.md"); rc=$?
+  assert_eq "$rc" "0" "update beside a live holder exits 0"
+  case "$out" in *"another run holds"*) ok "and skips loudly" ;; *) no "and skips loudly (got: $out)" ;; esac
+  cmp -s "$st" "$root/own.before" && ok "and the state is untouched" || no "and the state is untouched"
+  out=$(qs clear all); rc=$?
+  assert_eq "$rc" "1" "clear beside a live holder fails"
+  case "$out" in *"FAILED to clear: another run holds"*) ok "with its message unchanged" ;; *) no "with its message unchanged (got: $out)" ;; esac
+  t0=$SECONDS
+  out=$(QS_WAIT=0 qs update "$root/2026-04-02.md")
+  [ $((SECONDS - t0)) -le 2 ] && ok "a zero-second wait returns at once" || no "a zero-second wait took $((SECONDS - t0))s"
+  case "$out" in *"another run holds"*) ok "with the skip message" ;; *) no "with the skip message (got: $out)" ;; esac
+
+  # 2. A holder killed with SIGKILL loses the lock at once: no age to wait out, nothing to reclaim.
+  kill -9 "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+  t0=$SECONDS
+  out=$(qs update "$root/2026-04-02.md")
+  case "$out" in *"1 question(s) in 2026-04-02"*) ok "after the holder is killed the next update runs" ;; *) no "after the holder is killed the next update runs (got: $out)" ;; esac
+  [ $((SECONDS - t0)) -le 3 ] && ok "at once, not after an age bound" || no "took $((SECONDS - t0))s"
+  flock_free "$lk" && ok "and releases the lock when it finishes" || no "and releases the lock when it finishes"
+  case "$out" in *"lost the lock"*|*"no longer ours"*) no "a clean update does not claim it lost the lock" ;; *) ok "a clean update does not claim it lost the lock" ;; esac
+
+  # 3. The script itself is the holder. A shim mktemp stalls it inside its critical section: from outside the
+  # lock is taken, clear is refused, and the state is not touched.
+  mkdir -p "$root/shim"
+  local real_mktemp; real_mktemp=$(command -v mktemp)
+  # shellcheck disable=SC2016 # the dollar signs belong to the shim
+  printf '#!/bin/sh\ncase "$*" in *.tsv.XXXXXX) echo $$ > "$SHIM_READY"; exec sleep 600 ;; esac\nexec "%s" "$@"\n' "$real_mktemp" > "$root/shim/mktemp"
+  chmod +x "$root/shim/mktemp"
+  cp "$st" "$root/own.before"
+  rm -f "$root/ready"
+  ( PATH="$root/shim:$PATH" SHIM_READY="$root/ready" AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" AUTODREAM_NOTIFY_DRYRUN=1 \
+      /bin/bash "$QS" update "$root/2026-04-03.md" >/dev/null 2>&1 ) &
+  local upid=$!
+  local i=0; while [ ! -s "$root/ready" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -s "$root/ready" ] && ok "the update is stalled inside its critical section" || no "the update never reached its critical section"
+  flock_free "$lk" && no "the running update holds the lock" || ok "the running update holds the lock"
+  out=$(qs clear all); rc=$?
+  assert_eq "$rc" "1" "clear is refused while an update is mid-write"
+  cmp -s "$st" "$root/own.before" && ok "and the state is untouched" || no "and the state is untouched"
+  kill "$(cat "$root/ready" 2>/dev/null)" 2>/dev/null; kill "$upid" 2>/dev/null; wait "$upid" 2>/dev/null
+  rm -rf "$root/shim"
+
+  # 4. A child that outlives the holder must not keep the lock: the banner runs with fd 9 closed. An osascript shim
+  # stalls the banner; killing the script leaves the shim running and the lock free.
+  mkdir -p "$root/shim2"
+  printf '#!/bin/sh\necho $$ > "$SHIM_PID"\nexec sleep 600\n' > "$root/shim2/osascript"; chmod +x "$root/shim2/osascript"
+  rm -f "$root/ospid"
+  printf '%s\n' "$body" > "$root/2026-04-04.md"
+  ( PATH="$root/shim2:$PATH" SHIM_PID="$root/ospid" AUTODREAM_QUESTION_ESCALATE_AT=1 AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" \
+      /bin/bash "$QS" update "$root/2026-04-04.md" >/dev/null 2>&1 ) &
+  upid=$!
+  i=0; while [ ! -s "$root/ospid" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -s "$root/ospid" ] && ok "the banner is stalled in osascript" || no "the banner never reached osascript"
+  kill -9 "$upid" 2>/dev/null; wait "$upid" 2>/dev/null
+  flock_free "$lk" && ok "a killed update leaves no lock behind even with osascript still running" || no "osascript kept the lock after the update was killed"
+  kill "$(cat "$root/ospid" 2>/dev/null)" 2>/dev/null; rm -rf "$root/shim2"
+
+  # 5. A lock path that cannot be opened is a loud permanent refusal, not a wait and not a held lock.
+  rm -f "$lk"; mkdir "$lk"
+  cp "$st" "$root/own.before"
+  t0=$SECONDS
+  out=$(qs update "$root/2026-04-04.md"); rc=$?
+  assert_eq "$rc" "0" "update with an unopenable lock path exits 0"
+  case "$out" in *"cannot lock"*) ok "and says it cannot lock" ;; *) no "and says it cannot lock (got: $out)" ;; esac
+  [ $((SECONDS - t0)) -le 2 ] && ok "without waiting out the deadline" || no "waited $((SECONDS - t0))s"
+  out=$(qs clear all); rc=$?
+  assert_eq "$rc" "1" "clear with an unopenable lock path fails"
+  [ -d "$lk" ] && ok "and the directory is untouched" || no "the directory at the lock path was removed"
+  cmp -s "$st" "$root/own.before" && ok "and the state is untouched" || no "and the state is untouched"
+  rmdir "$lk"
+
+  # 6. An older version's mkdir lock: a young directory blocks, an old one is ignored and left in place.
+  mkdir "$st.lock"
+  out=$(qs update "$root/2026-04-04.md")
+  case "$out" in *"another run holds"*) ok "a young older-version lock directory blocks" ;; *) no "a young older-version lock directory blocks (got: $out)" ;; esac
+  t0=$SECONDS; out=$(QS_WAIT=0 qs update "$root/2026-04-04.md")
+  [ $((SECONDS - t0)) -le 2 ] && ok "and a zero-second wait returns at once" || no "a zero-second wait took $((SECONDS - t0))s"
+  flock_free "$lk" && ok "the flock is released after a refusal" || no "the flock stayed held after a refusal"
+  touch -t 200001010000 "$st.lock"
+  out=$(qs update "$root/2026-04-04.md")
+  case "$out" in *"another run holds"*) no "an old older-version lock directory is ignored (got: $out)" ;; *) ok "an old older-version lock directory is ignored" ;; esac
+  [ -d "$st.lock" ] && ok "and never removed" || no "and was removed"
+  rmdir "$st.lock"
+
+  # 6b. An older version's lock path that cannot be read (a symlink loop) is a permanent refusal that says so,
+  # not a live older writer: a quiet skip every night would freeze the streaks with no banner.
+  ln -s "$(basename "$st.lock")" "$st.lock"
+  cp "$st" "$root/own.before"
+  out=$(qs update "$root/2026-04-04.md"); rc=$?
+  assert_eq "$rc" "0" "update with an unreadable older-version lock path exits 0"
+  case "$out" in *"cannot lock"*) ok "and reports cannot lock, not a routine hold" ;; *) no "and reports cannot lock (got: $out)" ;; esac
+  case "$out" in *"banner"*) ok "and attempts a banner" ;; *) no "and attempts a banner (got: $out)" ;; esac
+  out=$(qs clear all); rc=$?
+  assert_eq "$rc" "1" "clear with an unreadable older-version lock path fails"
+  cmp -s "$st" "$root/own.before" && ok "and the state is untouched" || no "and the state is untouched"
+  rm -f "$st.lock"
+
+  # 7. A missing python3 is loud and permanent: update skips with the reason and a banner is attempted, clear fails.
+  mkdir -p "$root/bare"
+  local t
+  for t in bash sh awk sed grep sort tail head tr cut wc cat cp mv rm mkdir mktemp dirname basename readlink date stat shasum env uname touch printf ls; do
+    local tp; tp=$(command -v "$t" 2>/dev/null) && [ -x "$tp" ] && ln -sf "$tp" "$root/bare/$t"
+  done
+  cp "$st" "$root/own.before"
+  out=$(PATH="$root/bare" AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" AUTODREAM_NOTIFY_DRYRUN=1 /bin/bash "$QS" update "$root/2026-04-04.md" 2>&1); rc=$?
+  assert_eq "$rc" "0" "update without python3 exits 0"
+  case "$out" in *"python3 is required"*) ok "and says why" ;; *) no "and says why (got: $out)" ;; esac
+  case "$out" in *"no banner"*|*"posted banner"*|*"banner"*) ok "and a banner is attempted for a permanent refusal" ;; *) no "and a banner is attempted for a permanent refusal (got: $out)" ;; esac
+  out=$(PATH="$root/bare" AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" /bin/bash "$QS" clear all 2>&1); rc=$?
+  assert_eq "$rc" "1" "clear without python3 fails"
+  cmp -s "$st" "$root/own.before" && ok "and the state is untouched" || no "and the state is untouched"
+  # A python3 that fails, or exits with a number the lock code once used for a holder, is not a held lock.
+  mkdir -p "$root/badpy"
+  local code
+  for code in 1 7 11 15; do
+    printf '#!/bin/sh\nexit %s\n' "$code" > "$root/badpy/python3"; chmod +x "$root/badpy/python3"
+    out=$(PATH="$root/badpy:$PATH" AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" AUTODREAM_NOTIFY_DRYRUN=1 /bin/bash "$QS" update "$root/2026-04-04.md" 2>&1)
+    case "$out" in *"cannot lock"*) ok "a python3 that exits $code is reported as cannot lock, not as a held lock" ;; *) no "a python3 that exits $code is reported as cannot lock (got: $out)" ;; esac
+  done
+  # A FIFO at the lock path would block the open before any deadline exists.
+  rm -f "$lk"; mkfifo "$lk" 2>/dev/null
+  t0=$SECONDS
+  out=$(QS_WAIT=0 qs update "$root/2026-04-04.md")
+  [ $((SECONDS - t0)) -le 2 ] && ok "a FIFO at the lock path is refused at once, not blocked on" || no "a FIFO at the lock path blocked for $((SECONDS - t0))s"
+  case "$out" in *"cannot lock"*) ok "and reported as cannot lock" ;; *) no "and reported as cannot lock (got: $out)" ;; esac
+  rm -f "$lk"
+
+  # 8. A second acquire in one process is refused and does not drop the first lock.
+  out=$( ( . "$REPO/bin/lib-flock.sh"; flock_acquire "$root/dbl.flock" 0; first=$?; flock_acquire "$root/dbl.flock" 0; second=$?
+           flock_free_probe=$(python3 -c 'import fcntl,sys
+f=open(sys.argv[1],"a")
+try: fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB); print("free")
+except BlockingIOError: print("held")' "$root/dbl.flock")
+           echo "$first $second $flock_free_probe" ) )
+  assert_eq "$out" "0 4 held" "a second flock_acquire in one process is refused and the first lock stays held"
+  rm -rf "$root"
+}
+
 _run test_question_streaks
 _run test_question_streaks_reruns_and_mismatch
 _run test_question_streaks_state_lives_with_the_install
+_run test_question_streaks_lock_is_a_kernel_flock
 
 # ---- L2 attempt diagnostics (issue 42): a signal-shaped L2 death leaves evidence ----
 # Exit 143 on the aggregator was seen on 2026-08-01, 08-31, 09-02, 09-04, 09-19 and 10-02 with
