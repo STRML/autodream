@@ -100,6 +100,16 @@ jobs:
       # The comment ratchet parses shell with shfmt and fails when it is missing, so the job that
       # runs it installs it: every shard of a full run (the ratchet is one of the unit suites
       # run-all.sh runs) and shard 0 of a web-only run.
+      - uses: actions/setup-node@v4
+        if: steps.scope.outputs.scope == 'full' || matrix.shard == 0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: npm ci
+        if: steps.scope.outputs.scope == 'full' || matrix.shard == 0
+        run: npm ci
+
       - name: shfmt
         if: steps.scope.outputs.scope == 'full' || matrix.shard == 0
         run: |
