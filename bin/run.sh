@@ -3770,8 +3770,8 @@ PY
       if report_complete; then
         log "L2 attempt $attempt wrote a complete-looking report but no AUTODREAM_REPORT_END sentinel; not a validated delivery, retrying (exit $L2_RC)"
       else
-        L2_INCOMPLETE_CAUSE=$(report_incomplete_cause "$REPORT_PATH")
-        log "L2 attempt $attempt left a report with ${L2_INCOMPLETE_CAUSE:-no open-questions marker}; it ends with: \"$(report_last_line_excerpt "$REPORT_PATH")\"; treating it as truncated and retrying (exit $L2_RC)"
+        L2_INCOMPLETE_CAUSE=$(report_incomplete_cause "$REPORT_PATH" "$FINDINGS_DIR/dropped-threads.md")
+        log "L2 attempt $attempt left a report with ${L2_INCOMPLETE_CAUSE:-no open-questions marker}; it ends with: \"$(report_last_line_excerpt "$REPORT_PATH" "$FINDINGS_DIR/dropped-threads.md")\"; treating it as truncated and retrying (exit $L2_RC)"
       fi
     else
       log "L2 attempt $attempt wrote no report (exit $L2_RC)"

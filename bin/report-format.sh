@@ -57,9 +57,12 @@ report_finishes(){
 }
 
 report_last_line(){
-  RF_REPORT="$1" LC_ALL=C awk '
+  local trailers
+  trailers=$(printf 'report: %s\n' "$@")
+  RF_TRAILERS="$trailers" LC_ALL=C awk '
+    BEGIN { n = split(ENVIRON["RF_TRAILERS"], t, "\n"); for (i = 1; i <= n; i++) want[t[i]] = 1 }
     { l[NR] = $0 }
-    $0 == "report: " ENVIRON["RF_REPORT"] || $0 ~ /^report: \/.*\/dropped-threads\.md$/ { r = NR }
+    $0 in want { r = NR }
     END {
       stop = (r && NR - r <= 4) ? r : NR + 1
       for (i = stop - 1; i >= 1; i--)
@@ -83,7 +86,7 @@ report_cut_chars(){
   }'
 }
 
-report_last_line_excerpt(){ report_last_line "$1" | LC_ALL=C tr -d '[:cntrl:]' | report_cut_chars 80; }
+report_last_line_excerpt(){ report_last_line "$@" | LC_ALL=C tr -d '[:cntrl:]' | report_cut_chars 80; }
 
 report_incomplete_cause(){
   local report="$1" last
@@ -92,7 +95,7 @@ report_incomplete_cause(){
     printf 'an open-questions marker but no AUTODREAM_QUESTIONS_BEGIN/END block\n'
     return 0
   fi
-  last=$(report_last_line "$report")
+  last=$(report_last_line "$@")
   case "$last" in
     *'?') printf 'no open-questions marker, and the report ends in a question written as prose outside an AUTODREAM_QUESTIONS_BEGIN/END block\n' ;;
     *)    printf 'no open-questions marker and no AUTODREAM_QUESTIONS_BEGIN/END block\n' ;;
