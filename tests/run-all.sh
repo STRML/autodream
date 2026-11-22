@@ -3316,7 +3316,7 @@ test_run_lock_a_stale_directory_is_taken_over_in_place(){
   true & dead=$!; wait "$dead" 2>/dev/null
   mkdir -p "$lk"; printf '%s\n' "$dead" > "$lk/pid"
   before=$(ls -di "$lk" | awk '{print $1}')
-  out=$(LK="$lk" BEFORE="$before" lock_fn "$root/autodream" 'mv(){ echo MOVED; }
+  out=$(LK="$lk" BEFORE="$before" lock_fn "$root/autodream" 'mv(){ local a; for a in "$@"; do case "$a" in *.lock) echo MOVED; return 0 ;; esac; done; command mv "$@"; }
     acquire_lock "$LK" 0; echo rc=$?; p=$(cat "$LK/pid"); [ "$p" = "$$" ] && echo pid=self || echo pid=other
     [ "$(ls -di "$LK" | awk "{print \$1}")" = "$BEFORE" ] && echo same-dir || echo new-dir; release_lock "$LK"')
   assert_eq "$(printf '%s' "$out" | tr '\n' ' ')" "rc=0 pid=self same-dir" "the dead holder's directory now names the new owner and was never moved"
@@ -3394,8 +3394,8 @@ test_run_lock_release_leaves_a_directory_it_did_not_make(){
   rm -rf "$root"
 }
 
-test_run_lock_metadata_of_the_wrong_type_or_a_write_that_fails_midway_changes_nothing(){
-  echo "# the run lock: a pid that is a directory is refused before any write, and a write that fails midway restores what it replaced"
+test_run_lock_metadata_of_the_wrong_type_changes_nothing(){
+  echo "# the run lock: a pid that is a directory is refused before any write"
   local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
   local lk="$root/autodream/locks/x.lock" dead out
   true & dead=$!; wait "$dead" 2>/dev/null
@@ -3403,8 +3403,26 @@ test_run_lock_metadata_of_the_wrong_type_or_a_write_that_fails_midway_changes_no
   touch -t 202001010000 "$lk"
   out=$(LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"; cat "$LK/start"')
   assert_eq "$(printf '%s' "$out" | tr '\n' '|')" "rc=3|Mon Jan  1 00:00:00 2018" "a pid that is a directory is cannot-lock and start keeps its old value"
-  out=$(LK="$lk" lock_fn "$root/autodream" 'lock_meta_writable(){ return 0; }; acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"; cat "$LK/start"')
-  assert_eq "$(printf '%s' "$out" | tr '\n' '|')" "rc=3|Mon Jan  1 00:00:00 2018" "a pid write that fails after start was replaced puts the old start back"
+  rm -rf "$root"
+}
+
+test_run_lock_metadata_is_replaced_by_rename_and_a_failed_replace_reads_as_dead(){
+  echo "# the run lock: start and pid are each replaced whole by a rename, and a replace that fails leaves a directory every reader calls dead"
+  local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
+  local lk="$root/autodream/locks/x.lock" dead out before after
+  true & dead=$!; wait "$dead" 2>/dev/null
+  mkdir -p "$lk"; printf '%s\n' "$dead" > "$lk/pid"; printf 'Mon Jan  1 00:00:00 2018\n' > "$lk/start"
+  before=$(ls -i "$lk/start" "$lk/pid" | awk '{print $1}' | tr '\n' ' ')
+  out=$(LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"')
+  after=$(ls -i "$lk/start" "$lk/pid" | awk '{print $1}' | tr '\n' ' ')
+  assert_eq "$out" "rc=0" "a stale directory is taken over"
+  [ "$before" != "$after" ] && ok "start and pid were replaced by rename, not rewritten in place" || no "start and pid were replaced by rename, not rewritten in place"
+  assert_eq "$(ls -A "$lk" | tr '\n' ' ')" "pid start " "and no temporary file is left beside them"
+  rm -rf "$lk"; mkdir -p "$lk"; printf '%s\n' "$dead" > "$lk/pid"; printf 'Mon Jan  1 00:00:00 2018\n' > "$lk/start"
+  out=$(LK="$lk" lock_fn "$root/autodream" 'mv(){ case "$*" in *"/pid") return 1 ;; esac; command mv "$@"; }; acquire_lock "$LK" 0; echo rc=$?; lock_names_live_run "$LK" && echo live || echo dead; release_lock "$LK"')
+  assert_eq "$(printf '%s' "$out" | tr '\n' '|')" "rc=3|dead" "a pid replace that fails after start was replaced is cannot-lock and the directory reads as dead"
+  assert_eq "$(ls -A "$lk" | tr '\n' ' ')" "pid start " "with no temporary file left"
+  [ -s "$lk/start" ] && ok "and start is whole, never empty" || no "and start is whole, never empty" "empty or missing"
   rm -rf "$root"
 }
 
@@ -4676,7 +4694,8 @@ _run test_run_lock_release_ignores_a_directory_it_never_acquired
 _run test_run_lock_an_older_runner_holding_the_directory_is_honored
 _run test_run_lock_a_stale_directory_that_cannot_be_written_is_left_as_found
 _run test_run_lock_release_leaves_a_directory_it_did_not_make
-_run test_run_lock_metadata_of_the_wrong_type_or_a_write_that_fails_midway_changes_nothing
+_run test_run_lock_metadata_of_the_wrong_type_changes_nothing
+_run test_run_lock_metadata_is_replaced_by_rename_and_a_failed_replace_reads_as_dead
 _run test_run_lock_a_liveness_probe_that_fails_to_run_is_not_a_dead_holder
 _run test_run_lock_a_lock_path_that_is_a_file_or_a_symlink_is_never_written_through
 _run test_run_lock_a_pid_of_zero_is_not_a_holder

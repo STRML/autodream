@@ -1210,17 +1210,18 @@ lock_meta_writable() {
   done
 }
 
-lock_write_meta() {
-  local dir="$1" owner="$2" start oldstart="" oldpid="" hadstart=0 hadpid=0
-  start=$(proc_start "$owner")
-  if [ -e "$dir/start" ]; then hadstart=1; oldstart=$({ cat "$dir/start" && printf x; }) || return 1; fi
-  if [ -e "$dir/pid" ]; then hadpid=1; oldpid=$({ cat "$dir/pid" && printf x; }) || return 1; fi
-  if printf '%s\n' "$start" > "$dir/start" 2>/dev/null && printf '%s\n' "$owner" > "$dir/pid" 2>/dev/null; then
+lock_put_file() {
+  local file="$1" tmp
+  tmp=$(mktemp "$file.XXXXXX" 2>/dev/null) || return 1
+  if printf '%s\n' "$2" > "$tmp" 2>/dev/null && mv -f "$tmp" "$file" 2>/dev/null; then
     return 0
   fi
-  if [ "$hadstart" -eq 1 ]; then printf '%s' "${oldstart%x}" > "$dir/start" 2>/dev/null; else rm -f "$dir/start"; fi
-  if [ "$hadpid" -eq 1 ]; then printf '%s' "${oldpid%x}" > "$dir/pid" 2>/dev/null; else rm -f "$dir/pid"; fi
+  rm -f "$tmp"
   return 1
+}
+
+lock_write_meta() {
+  lock_put_file "$1/start" "$(proc_start "$2")" && lock_put_file "$1/pid" "$2"
 }
 
 release_lock() {
