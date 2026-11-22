@@ -1,0 +1,10 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "ignorePatterns": ["node_modules", "**/*.d.ts", "**/.claude-plugin"],
+  "overrides": [
+    {
+      "files": ["web/threads.js"],
+      "rules": { "no-unused-vars": ["warn", { "varsIgnorePattern": "^(threadCommand|copyCommand|mountThreads)$" }] }
+    }
+  ]
+}

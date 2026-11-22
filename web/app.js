@@ -25,7 +25,7 @@ function appendInline(parent, source, depth = 0) {
       parent.append(child);
     } else {
       let url;
-      try { url = new URL(token.url); } catch (_) { url = null; }
+      try { url = new URL(token.url); } catch { url = null; }
       if (url && ['http:', 'https:'].includes(url.protocol)) {
         const link = node('a', token.label);
         link.href = url.href;
@@ -341,9 +341,9 @@ async function performThreadAction(id, action) {
       message: 'Action succeeded. Refresh to read the updated threads.'
     });
     if (currentView === 'threads') {
-      try { await refreshThreads(); } catch (_) {}
+      try { await refreshThreads(); } catch {}
     }
-  } catch (_) {
+  } catch {
     threadActionStates.set(id, {
       action, pending: false, requiresRefresh: true,
       message: 'The outcome is unknown. Refresh before trying again.'
@@ -516,7 +516,7 @@ async function loadView(view, date) {
       try {
         const threads = await fetch('/api/threads', {credentials: 'same-origin'});
         if (threads.ok) data.thread_links = (await threads.json()).threads;
-      } catch (_) {}
+      } catch {}
     }
     if (request !== viewRequest) return;
     if (view === 'stats') renderStats(data);

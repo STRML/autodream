@@ -1,0 +1,15 @@
+{
+  "name": "autodream",
+  "private": true,
+  "description": "Dev tooling only: the lint and the comment ratchet. The runtime is shell.",
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "oxlint": "1.93.0",
+    "typescript": "5.9.3"
+  },
+  "scripts": {
+    "lint": "oxlint --deny-warnings web docs/demo mods extensions"
+  }
+}
