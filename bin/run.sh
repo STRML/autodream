@@ -2051,12 +2051,12 @@ acquire_lock() {
   esac
   rc=0
   lock_take_dir "$dir" "$owner" || rc=$?
-  if [ "$rc" -ne 0 ]; then
+  if [ "$rc" -eq 1 ]; then
     lock_stop_holder "$holder"
-    return "$rc"
+    return 1
   fi
   LOCK_HOLDERS="$LOCK_HOLDERS$dir=$holder"$'\n'
-  return 0
+  return "$rc"
 }
 
 lock_holder_name() {
@@ -2065,29 +2065,17 @@ lock_holder_name() {
 }
 
 lock_take_dir() {
-  local dir="$1" owner="$2" aside="$1.stale.$$.$RANDOM"
+  local dir="$1" owner="$2"
   if lock_names_live_run "$dir"; then
     lock_holder_name "$dir"
     return 1
   fi
-  if [ -e "$dir" ]; then
-    mv "$dir" "$aside" 2>/dev/null || [ ! -e "$dir" ] || return 3
-    if lock_names_live_run "$aside"; then
-      lock_holder_name "$aside"
-      python3 -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' "$aside" "$dir" 2>/dev/null || true
-      return 1
-    fi
-    rm -rf "$aside"
-  fi
-  if ! mkdir "$dir" 2>/dev/null; then
+  if [ ! -e "$dir" ] && ! mkdir "$dir" 2>/dev/null; then
     [ -d "$dir" ] || return 3
     lock_holder_name "$dir"
     return 1
   fi
-  if ! { printf '%s\n' "$owner" > "$dir/pid" && proc_start "$owner" > "$dir/start"; } 2>/dev/null; then
-    rm -rf "$dir"
-    return 3
-  fi
+  { proc_start "$owner" > "$dir/start" && printf '%s\n' "$owner" > "$dir/pid"; } 2>/dev/null || return 3
   return 0
 }
 

@@ -101,17 +101,15 @@ release_lock <dir>: only for a dir this process recorded: rm -rf <dir>, then end
 | Run killed between forking the holder and its first look at the owner | n/a | the holder's parent is already pid 1, or `kill -0` fails before its first attempt: it leaves without taking the lock | none |
 | Acquire in a pipeline or background subshell (interactive run, remote sync job) | n/a | the holder watches the forking subshell, not the top-level shell: the lock frees when that subshell dies | none |
 | Older runner between its `mkdir` and its pid write | n/a | a directory with no usable pid under a minute old is held | "another run holds the lock" |
-| Older runner creates the directory between our check and our move | n/a | the moved copy is judged live and put back with an atomic rename: held | same |
-| Older runner creates the directory between our move and our `mkdir` | n/a | the plain `mkdir` fails: held | same |
-| Directory with no usable pid, over a minute old | Reclaimed after three tries | crashed run's: replaced | none |
+| Older runner creates the directory before our `mkdir` | n/a | the plain `mkdir` fails: held. Nothing of the older runner's is moved (see the redesign plan) | same |
+| Directory with no usable pid, over a minute old | Reclaimed after three tries | crashed run's: pid and start written in place | none |
 | Run killed while its holder waits behind another holder | n/a | holder checks the owner on every attempt and leaves, not at the end of the wait | none |
 | A child of the run outlives it | Not an issue (pid check) | does not hold the lock: the descriptor is only in the holder | none |
 | Flock file exists, owned by another user, readable | n/a | opened read-only, locked normally | none |
 | Flock file exists and this user cannot open it | n/a | held: someone else's file | "another run holds the lock (pid unknown)" |
 | Runner from before the flock is alive and holds the directory | Reclaimed or not by pid | directory names a live pid with its start: held | "another run holds the lock" |
 | Directory names a dead or reused pid (start differs) | Reclaimed | not alive, proceed | none |
-| pid or start file cannot be written | Success reported | directory removed, holder stopped, cannot lock, run goes ahead with a WARNING | log line |
-| A stale directory cannot be renamed aside | n/a | cannot lock, run goes ahead with a WARNING | log line |
+| pid or start file cannot be written | Success reported | cannot lock, the directory left as found, the flock still held, run goes ahead with a WARNING | log line |
 | Sweep probes while another run acquires | Reads a pid | probe holds the flock for milliseconds, the run lock waits 2 s | none |
 | Sweep, python3 missing, no flock file | n/a | held: nothing can be proven | the date's pins wait |
 | python3 missing at acquire | Not an issue | run unlocked with a WARNING; remote sync `failed (cannot take the lock ...)` | log line and run-stats |
