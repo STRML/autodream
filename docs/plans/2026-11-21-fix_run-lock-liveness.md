@@ -98,14 +98,19 @@ release_lock <dir>: only for a dir this process recorded: rm -rf <dir>, then end
 | Holder dead, directory with pid and start left | Reclaimed by rename | flock free, directory's pid dead, pid and start overwritten | none needed |
 | Two contenders see the same dead holder | The slower `mv` can nest a restored lock | no reclaim step: one flock winner | the loser is told the lock is held |
 | Run killed with SIGKILL | Directory left, reclaimed next run | holder sees the pid gone within a quarter second, flock free | dashboard shows stale until the next run |
-| Run killed between forking the holder and its first look at the owner | n/a | holder finds the owner gone before its first attempt and leaves without taking the lock | none |
+| Run killed between forking the holder and its first look at the owner | n/a | the holder's parent is already pid 1, or `kill -0` fails before its first attempt: it leaves without taking the lock | none |
+| Acquire in a pipeline or background subshell (interactive run, remote sync job) | n/a | the holder watches the forking subshell, not the top-level shell: the lock frees when that subshell dies | none |
+| Older runner between its `mkdir` and its pid write | n/a | a directory with no usable pid under a minute old is held | "another run holds the lock" |
+| Older runner creates the directory between our check and our `mkdir` | n/a | the stale directory is renamed aside and ours made with a plain `mkdir`, which fails: held | same |
+| Directory with no usable pid, over a minute old | Reclaimed after three tries | crashed run's: replaced | none |
 | Run killed while its holder waits behind another holder | n/a | holder checks the owner on every attempt and leaves, not at the end of the wait | none |
 | A child of the run outlives it | Not an issue (pid check) | does not hold the lock: the descriptor is only in the holder | none |
 | Flock file exists, owned by another user, readable | n/a | opened read-only, locked normally | none |
 | Flock file exists and this user cannot open it | n/a | held: someone else's file | "another run holds the lock (pid unknown)" |
 | Runner from before the flock is alive and holds the directory | Reclaimed or not by pid | directory names a live pid with its start: held | "another run holds the lock" |
 | Directory names a dead or reused pid (start differs) | Reclaimed | not alive, proceed | none |
-| pid or start file cannot be written | Success reported | holder stopped, cannot lock, run goes ahead with a WARNING | log line |
+| pid or start file cannot be written | Success reported | directory removed, holder stopped, cannot lock, run goes ahead with a WARNING | log line |
+| A stale directory cannot be renamed aside | n/a | cannot lock, run goes ahead with a WARNING | log line |
 | Sweep probes while another run acquires | Reads a pid | probe holds the flock for milliseconds, the run lock waits 2 s | none |
 | Sweep, python3 missing, no flock file | n/a | held: nothing can be proven | the date's pins wait |
 | python3 missing at acquire | Not an issue | run unlocked with a WARNING; remote sync `failed (cannot take the lock ...)` | log line and run-stats |
@@ -125,13 +130,19 @@ Red first, against the unchanged runner. A test that needs a holder takes a real
 4. `test_run_lock_a_killed_run_frees_it_while_its_child_lives`: SIGKILL the run during a hung L1
    worker, the flock frees and the worker is still alive.
 5. `test_run_lock_a_flock_file_this_user_cannot_open_is_held`: mode 000.
-6. `test_run_lock_a_holder_does_not_outlive_a_dead_owner`: a holder handed a dead pid, behind a
-   busy lock, leaves at once and never takes the lock.
+6. `test_run_lock_a_holder_does_not_outlive_a_dead_owner`: a holder whose parent exited before it
+   started, behind a busy lock, leaves and never takes the lock.
 7. `test_run_lock_release_ignores_a_directory_it_never_acquired`: a directory naming this pid.
 8. `test_run_lock_an_older_runner_holding_the_directory_is_honored`: live pid, no flock.
-9. `test_run_lock_a_failed_metadata_write_is_not_a_taken_lock`: read-only pid file.
+9. `test_run_lock_a_directory_that_cannot_be_replaced_is_not_a_taken_lock`: read-only locks dir.
 10. `test_run_lock_the_pin_sweep_reads_an_unprobeable_lock_as_held`: no python3 on PATH.
 11. `test_run_lock_a_killed_acquire_leaves_no_result_file_for_long`: an old `.hold.*` file.
+12. `test_run_lock_a_holder_follows_the_subshell_that_acquired`: acquire in a subshell that exits while
+    the top-level shell lives; the flock frees.
+13. `test_run_lock_a_directory_an_older_runner_is_still_creating_is_held`: young pid-less directory,
+    for the run and the pin sweep.
+14. `test_run_lock_a_directory_with_no_pid_that_is_old_is_reclaimed`.
+15. `test_run_lock_a_stale_directory_is_replaced_by_a_rename_then_mkdir`.
 
 The existing run-lock, remote-sync and pin-sweep tests change from writing a pid file to holding a
 flock.

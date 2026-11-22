@@ -1951,7 +1951,10 @@ proc_start() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '; }
 
 LOCK_HOLD_PY='
 import fcntl, os, sys, time
-path, res, wait, owner = sys.argv[1], sys.argv[2], float(sys.argv[3]), int(sys.argv[4])
+owner = os.getppid()
+path, res, wait = sys.argv[1], sys.argv[2], float(sys.argv[3])
+if owner == 1:
+    sys.exit(0)
 
 def say(word):
     with open(res, "w") as out:
@@ -1994,15 +1997,18 @@ except BaseException:
     sys.exit(0)
 if not owner_alive():
     sys.exit(0)
-say("ok")
+say("ok %d" % owner)
 while owner_alive():
     time.sleep(0.25)
 '
 
+lock_dir_young() { [ -n "$(find "$1" -maxdepth 0 -mmin -1 2>/dev/null)" ]; }
+
 lock_names_live_run() {
   local pid start now
-  pid=$(cat "$1/pid" 2>/dev/null) || return 1
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ -d "$1" ] || return 1
+  pid=$(cat "$1/pid" 2>/dev/null) || pid=""
+  case "$pid" in ''|*[!0-9]*) lock_dir_young "$1"; return ;; esac
   kill -0 "$pid" 2>/dev/null || ps -p "$pid" >/dev/null 2>&1 || return 1
   start=$(cat "$1/start" 2>/dev/null) || start=""
   [ -n "$start" ] || return 0
@@ -2017,13 +2023,13 @@ lock_stop_holder() {
 }
 
 acquire_lock() {
-  local dir="$1" wait="${2:-0}" flk="${1%.lock}.flock" locks res holder verdict="" i=0 end
+  local dir="$1" wait="${2:-0}" flk="${1%.lock}.flock" locks res holder verdict="" owner i=0 end rc
   locks=$(dirname "$dir")
   mkdir -p "$locks" 2>/dev/null || return 3
   command -v python3 >/dev/null 2>&1 || return 3
   find "$locks" -maxdepth 1 -name '.hold.*' -mmin +10 -exec rm -f {} + 2>/dev/null || true
   res=$(mktemp "$locks/.hold.XXXXXX" 2>/dev/null) || return 3
-  python3 -c "$LOCK_HOLD_PY" "$flk" "$res" "$wait" "$$" </dev/null >/dev/null 2>&1 &
+  python3 -c "$LOCK_HOLD_PY" "$flk" "$res" "$wait" </dev/null >/dev/null 2>&1 &
   holder=$!
   end=$((SECONDS + wait + 10))
   until [ -s "$res" ]; do
@@ -2034,25 +2040,49 @@ acquire_lock() {
   done
   verdict=$(head -n 1 "$res" 2>/dev/null) || verdict=""
   rm -f "$res"
+  owner="${verdict#* }"
   case "$verdict" in
-    ok) ;;
+    "ok "[0-9]*) ;;
     held)
       wait "$holder" 2>/dev/null || true
-      LOCK_HOLDER=$(cat "$dir/pid" 2>/dev/null) || LOCK_HOLDER=""
-      [ -n "$LOCK_HOLDER" ] || LOCK_HOLDER="unknown"
+      lock_holder_name "$dir"
       return 1 ;;
     *) lock_stop_holder "$holder"; return 3 ;;
   esac
-  if lock_names_live_run "$dir"; then
-    LOCK_HOLDER=$(cat "$dir/pid" 2>/dev/null) || LOCK_HOLDER="unknown"
+  rc=0
+  lock_take_dir "$dir" "$owner" || rc=$?
+  if [ "$rc" -ne 0 ]; then
     lock_stop_holder "$holder"
-    return 1
-  fi
-  if ! { mkdir -p "$dir" && printf '%s\n' "$$" > "$dir/pid" && proc_start "$$" > "$dir/start"; } 2>/dev/null; then
-    lock_stop_holder "$holder"
-    return 3
+    return "$rc"
   fi
   LOCK_HOLDERS="$LOCK_HOLDERS$dir=$holder"$'\n'
+  return 0
+}
+
+lock_holder_name() {
+  LOCK_HOLDER=$(cat "$1/pid" 2>/dev/null) || LOCK_HOLDER=""
+  [ -n "$LOCK_HOLDER" ] || LOCK_HOLDER="unknown"
+}
+
+lock_take_dir() {
+  local dir="$1" owner="$2" aside="$1.stale.$$.$RANDOM"
+  if lock_names_live_run "$dir"; then
+    lock_holder_name "$dir"
+    return 1
+  fi
+  if [ -e "$dir" ]; then
+    mv "$dir" "$aside" 2>/dev/null || [ ! -e "$dir" ] || return 3
+    rm -rf "$aside"
+  fi
+  if ! mkdir "$dir" 2>/dev/null; then
+    [ -d "$dir" ] || return 3
+    lock_holder_name "$dir"
+    return 1
+  fi
+  if ! { printf '%s\n' "$owner" > "$dir/pid" && proc_start "$owner" > "$dir/start"; } 2>/dev/null; then
+    rm -rf "$dir"
+    return 3
+  fi
   return 0
 }
 

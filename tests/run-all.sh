@@ -3602,18 +3602,68 @@ test_run_lock_a_flock_file_this_user_cannot_open_is_held(){
 }
 
 test_run_lock_a_holder_does_not_outlive_a_dead_owner(){
-  echo "# the run lock: a holder started for an owner that is already gone exits at once and never takes the lock (#242)"
+  echo "# the run lock: a holder whose parent is already gone exits at once and never takes the lock (#242)"
   local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
-  local flk="$root/autodream/locks/x.flock" dead t0 took
-  true & dead=$!; wait "$dead" 2>/dev/null
+  local flk="$root/autodream/locks/x.flock"
   hold_flock "$flk"
-  t0=$SECONDS
-  FLK="$flk" RES="$root/res.txt" DEAD="$dead" lock_fn "$root/autodream" 'python3 -c "$LOCK_HOLD_PY" "$FLK" "$RES" 8 "$DEAD"'
-  took=$((SECONDS - t0))
-  [ "$took" -lt 5 ] && ok "it left within $took seconds instead of waiting out the 8 second lock wait" || no "it waited $took seconds behind a busy lock for an owner that was gone"
+  FLK="$flk" RES="$root/res.txt" lock_fn "$root/autodream" '( python3 -c "$LOCK_HOLD_PY" "$FLK" "$RES" 8 </dev/null >/dev/null 2>&1 & )'
+  sleep 1
   kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
-  assert_no_file "$root/res.txt" "and it reported nothing"
-  flock_free "$flk" && ok "and it did not take the lock when the holder let go" || no "the dead owner's holder took the lock"
+  sleep 1
+  assert_no_file "$root/res.txt" "it reported nothing"
+  flock_free "$flk" && ok "and it did not take the lock when the holder let go" || no "the orphaned holder took the lock"
+  rm -rf "$root"
+}
+
+test_run_lock_a_holder_follows_the_subshell_that_acquired(){
+  echo "# the run lock: the holder watches the shell that acquired, not the top-level shell, so a killed pipeline run frees it (#242)"
+  local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
+  local lk="$root/autodream/locks/x.lock" flk="$root/autodream/locks/x.flock" i=0 owner
+  LK="$lk" lock_fn "$root/autodream" '( acquire_lock "$LK" 0 || echo rc=$?; sleep 1 ); sleep 8' > "$root/acq.out" 2>&1 &
+  local top=$!
+  while [ ! -s "$lk/pid" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  owner=$(cat "$lk/pid" 2>/dev/null)
+  [ -n "$owner" ] && [ "$owner" != "$top" ] && ok "the pid file names the acquiring subshell, not the top-level shell" || no "pid file [$owner] is the top-level shell [$top]"
+  flock_free "$flk" && no "the subshell holds the lock while it runs" || ok "the subshell holds the lock while it runs"
+  i=0; while ! flock_free "$flk" && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i + 1)); done
+  flock_free "$flk" && ok "the lock is free soon after the subshell exits, with the top-level shell still alive" || no "the holder kept the lock for the top-level shell"
+  kill -0 "$top" 2>/dev/null && ok "(the top-level shell was still running)" || no "the top-level shell had already exited, so this proved nothing"
+  kill "$top" 2>/dev/null; wait "$top" 2>/dev/null
+  rm -rf "$root"
+}
+
+test_run_lock_a_directory_an_older_runner_is_still_creating_is_held(){
+  echo "# the run lock: a directory with no pid yet, made seconds ago, is an older runner mid-acquire and is held (#242)"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  mkdir -p "$(lock_dir "$root")"
+  run_dream "$root"
+  assert_grep "$root/run.out" 'holds the lock' "a young pid-less directory is not taken over"
+  assert_no_file "$(fdir "$root")/sessions.txt" "so the run did not touch the findings dir"
+  local out
+  out=$(LK="$(lock_dir "$root")" lock_fn "$root/autodream" 'lock_is_held "$LK" && echo held || echo free')
+  assert_eq "$out" "held" "and the pin sweep reads it as held"
+  rm -rf "$root"
+}
+
+test_run_lock_a_directory_with_no_pid_that_is_old_is_reclaimed(){
+  echo "# the run lock: a pid-less directory a crashed run left long ago is taken over (#242)"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  mkdir -p "$(lock_dir "$root")"; touch -t 202001010000 "$(lock_dir "$root")"
+  run_dream "$root"
+  assert_file "$root/dreams/$DATE.md" "the run took the lock and produced its report"
+  assert_no_file "$(lock_dir "$root")" "and released it"
+  rm -rf "$root"
+}
+
+test_run_lock_a_stale_directory_is_replaced_by_a_rename_then_mkdir(){
+  echo "# the run lock: taking over a stale directory names the new owner and leaves nothing set aside (#242)"
+  local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
+  local lk="$root/autodream/locks/x.lock" dead out
+  true & dead=$!; wait "$dead" 2>/dev/null
+  mkdir -p "$lk"; printf '%s\n' "$dead" > "$lk/pid"
+  out=$(LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?; p=$(cat "$LK/pid"); [ "$p" = "$$" ] && echo pid=self || echo pid=other; release_lock "$LK"')
+  assert_eq "$(printf '%s' "$out" | tr '\n' ' ')" "rc=0 pid=self" "a dead holder's directory is replaced and names the new owner"
+  assert_eq "$(ls "$root/autodream/locks" | grep -c 'stale')" "0" "and the directory set aside is removed"
   rm -rf "$root"
 }
 
@@ -3638,15 +3688,18 @@ test_run_lock_an_older_runner_holding_the_directory_is_honored(){
   rm -rf "$root"
 }
 
-test_run_lock_a_failed_metadata_write_is_not_a_taken_lock(){
-  echo "# the run lock: an acquire whose pid file cannot be written reports that it could not lock (#242)"
+test_run_lock_a_directory_that_cannot_be_replaced_is_not_a_taken_lock(){
+  echo "# the run lock: a stale directory that cannot be set aside reports that it could not lock (#242)"
   [ "$(id -u)" != 0 ] || { echo "  skip - root can write any file"; return 0; }
-  local root; root=$(setup_env); mk_session "$root" sess1
-  local dead; true & dead=$!; wait "$dead" 2>/dev/null
-  mkdir -p "$(lock_dir "$root")"; printf '%s\n' "$dead" > "$(lock_dir "$root")/pid"; chmod 444 "$(lock_dir "$root")/pid"
-  run_dream "$root"
-  assert_grep "$root/run.out" 'could not take the per-date lock' "the run says it went ahead without the lock"
-  assert_file "$root/dreams/$DATE.md" "and still produced its report"
+  local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
+  local lk="$root/autodream/locks/x.lock" dead out
+  true & dead=$!; wait "$dead" 2>/dev/null
+  : > "$root/autodream/locks/x.flock"
+  mkdir -p "$lk"; printf '%s\n' "$dead" > "$lk/pid"
+  chmod 555 "$root/autodream/locks"
+  out=$(LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?')
+  chmod 755 "$root/autodream/locks"
+  assert_eq "$out" "rc=3" "it reports cannot-lock and not a taken lock"
   rm -rf "$root"
 }
 
@@ -4978,7 +5031,11 @@ _run test_run_lock_a_flock_file_this_user_cannot_open_is_held
 _run test_run_lock_a_holder_does_not_outlive_a_dead_owner
 _run test_run_lock_release_ignores_a_directory_it_never_acquired
 _run test_run_lock_an_older_runner_holding_the_directory_is_honored
-_run test_run_lock_a_failed_metadata_write_is_not_a_taken_lock
+_run test_run_lock_a_directory_that_cannot_be_replaced_is_not_a_taken_lock
+_run test_run_lock_a_holder_follows_the_subshell_that_acquired
+_run test_run_lock_a_directory_an_older_runner_is_still_creating_is_held
+_run test_run_lock_a_directory_with_no_pid_that_is_old_is_reclaimed
+_run test_run_lock_a_stale_directory_is_replaced_by_a_rename_then_mkdir
 _run test_run_lock_the_pin_sweep_reads_an_unprobeable_lock_as_held
 _run test_run_lock_a_killed_acquire_leaves_no_result_file_for_long
 _run test_killed_run_temps_are_swept_at_the_start_of_the_next_run
