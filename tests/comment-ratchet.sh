@@ -2,9 +2,10 @@
 set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-REPO=$(cd "$HERE/.." && pwd)
-COUNT="${COMMENT_COUNT_BIN:-$REPO/bin/comment-count.sh}"
+REPO=${COMMENT_RATCHET_REPO:-$(cd "$HERE/.." && pwd)}
+COUNT="${COMMENT_COUNT_BIN:-$HERE/../bin/comment-count.sh}"
 BASELINE="$REPO/.comment-baseline"
+TAB=$(printf '\t')
 pass=0
 fail=0
 ok(){ pass=$((pass + 1)); printf '  ok   - %s\n' "$1"; }
@@ -19,61 +20,338 @@ Without flags: checks the counter against fixtures, then fails if any tracked
 code file has more real comment lines than .comment-baseline allows (a file not
 listed is allowed 0).
 --update rewrites .comment-baseline from the current tree. It refuses when any
-file would go up, unless --allow-increase is also given.
+file would go up, unless --allow-increase is also given. Anything that cannot be
+read, parsed, compared or written is a failure, never a pass.
 EOF
 }
 
-current_counts() {
-  local out rc
-  out=$(bash "$COUNT" --repo "$REPO")
+complain() { printf '%s\n' "$*" >&2; }
+
+rows_valid() {
+  awk -F'\t' -v numcol="$2" '
+    NF != 2 { bad = 1; next }
+    $numcol !~ /^[0-9]+$/ { bad = 1; next }
+    { key = (numcol == 1) ? $2 : $1; if (seen[key]++) bad = 1 }
+    END { exit bad ? 1 : 0 }
+  ' "$1"
+}
+
+baseline_problem() {
+  [ -e "$BASELINE" ] || { echo "$BASELINE does not exist"; return 0; }
+  [ -f "$BASELINE" ] || { echo "$BASELINE is not a file"; return 0; }
+  [ -r "$BASELINE" ] || { echo "$BASELINE cannot be read"; return 0; }
+  [ -s "$BASELINE" ] || { echo "$BASELINE is empty, so every increase would pass"; return 0; }
+  rows_valid "$BASELINE" 2 || { echo "$BASELINE has a row that is not <path><TAB><count>, or a path twice"; return 0; }
+  return 1
+}
+
+collect_counts() {
+  local out=$1 rc
+  bash "$COUNT" --repo "$REPO" > "$out"
   rc=$?
-  if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
-    printf 'comment-count.sh failed (exit %s, %s lines of output)\n' "$rc" "$(printf '%s' "$out" | grep -c .)" >&2
+  if [ "$rc" -ne 0 ]; then
+    complain "comment-count failed (exit $rc)"
     return 1
   fi
-  printf '%s\n' "$out" | awk -F'\t' '$1 > 0'
+  [ -s "$out" ] || { complain "comment-count listed no files"; return 1; }
+  rows_valid "$out" 1 || { complain "comment-count printed a row that is not <count><TAB><path>"; return 1; }
+}
+
+over_baseline() {
+  awk -F'\t' -v base="$1" '
+    BEGIN {
+      while ((rc = (getline line < base)) > 0) { split(line, f, "\t"); allow[f[1]] = f[2] + 0 }
+      if (rc < 0) { err = 3; exit }
+      close(base)
+    }
+    ($1 + 0) > (allow[$2] + 0) { print "    " $2 ": " $1 " comment lines, baseline allows " (allow[$2] + 0); found = 1 }
+    END { if (err) exit err; exit found ? 1 : 0 }
+  ' "$2"
+}
+
+below_baseline() {
+  awk -F'\t' -v counts="$2" '
+    BEGIN {
+      while ((rc = (getline line < counts)) > 0) { split(line, f, "\t"); cur[f[2]] = f[1] + 0 }
+      if (rc < 0) { err = 3; exit }
+      close(counts)
+    }
+    ($2 + 0) > (cur[$1] + 0) { n++ }
+    END { if (err) exit err; print n + 0 }
+  ' "$1"
+}
+
+new_baseline_rows() {
+  awk -F'\t' '($1 + 0) > 0 { print $2 "\t" $1 }' "$1" > "$2" || return 1
+  LC_ALL=C sort -o "$2" "$2"
 }
 
 update_baseline() {
-  local allow=$1 tmp counts
-  counts=$(current_counts) || exit 1
-  tmp=$(mktemp "$REPO/.comment-baseline.XXXXXX")
-  printf '%s\n' "$counts" | awk -F'\t' 'NF == 2 {print $2 "\t" $1}' | sort > "$tmp"
-  if [ "$allow" != 1 ] && [ -f "$BASELINE" ]; then
-    local up
-    up=$(awk -F'\t' 'NR==FNR { base[$1] = $2; next } ($2 + 0) > (base[$1] + 0) { print $1 ": " (base[$1] + 0) " -> " $2 }' "$BASELINE" "$tmp")
-    if [ -n "$up" ]; then
-      rm -f "$tmp"
-      printf 'refusing to raise the baseline (pass --allow-increase):\n%s\n' "$up" >&2
-      exit 1
+  local allow=$1 tmp counts rows rc
+  counts=$(mktemp "${TMPDIR:-/tmp}/comment-counts.XXXXXX") || { complain "cannot make a scratch file"; return 1; }
+  rows=$(mktemp "${TMPDIR:-/tmp}/comment-rows.XXXXXX") || { rm -f "$counts"; complain "cannot make a scratch file"; return 1; }
+  tmp=$(mktemp "$REPO/.comment-baseline.XXXXXX") || { rm -f "$counts" "$rows"; complain "cannot make a temp file beside $BASELINE"; return 1; }
+  rc=0
+  update_into "$allow" "$counts" "$rows" "$tmp" || rc=$?
+  rm -f "$counts" "$rows"
+  [ "$rc" -eq 0 ] || { rm -f "$tmp"; return 1; }
+}
+
+update_into() {
+  local allow=$1 counts=$2 rows=$3 tmp=$4 problem up rc
+  collect_counts "$counts" || return 1
+  new_baseline_rows "$counts" "$rows" || { complain "could not build the new baseline rows"; return 1; }
+  [ -s "$rows" ] || { complain "no file has a comment left, so there is nothing to ratchet; delete the ratchet on purpose, not through --update"; return 1; }
+  cp "$rows" "$tmp" || { complain "could not write $tmp"; return 1; }
+  if [ "$allow" != 1 ]; then
+    if problem=$(baseline_problem); then
+      complain "cannot compare against the old baseline: $problem (pass --allow-increase to replace it)"
+      return 1
     fi
+    up=$(awk -F'\t' -v base="$BASELINE" '
+      BEGIN {
+        while ((rc = (getline line < base)) > 0) { split(line, f, "\t"); old[f[1]] = f[2] + 0 }
+        if (rc < 0) { err = 3; exit }
+        close(base)
+      }
+      ($2 + 0) > (old[$1] + 0) { print $1 ": " (old[$1] + 0) " -> " $2; found = 1 }
+      END { if (err) exit err; exit found ? 1 : 0 }
+    ' "$rows")
+    rc=$?
+    if [ "$rc" -eq 1 ]; then
+      printf 'refusing to raise the baseline (pass --allow-increase):\n%s\n' "$up" >&2
+      return 1
+    fi
+    [ "$rc" -eq 0 ] || { complain "comparing against the old baseline failed (exit $rc)"; return 1; }
   fi
-  mv "$tmp" "$BASELINE"
-  echo "wrote $BASELINE ($(awk -F'\t' '{s += $2} END {print s + 0}' "$BASELINE") comment lines across $(wc -l < "$BASELINE" | tr -d ' ') files)"
+  mv "$tmp" "$BASELINE" || { complain "could not replace $BASELINE"; return 1; }
+  echo "wrote $BASELINE ($(awk -F'\t' '{ s += $2 } END { print s + 0 }' "$BASELINE") comment lines across $(wc -l < "$BASELINE" | tr -d ' ') files)"
 }
 
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
-  --update) update_baseline "$([ "${2:-}" = --allow-increase ] && echo 1 || echo 0)"; exit 0 ;;
+  --update) update_baseline "$([ "${2:-}" = --allow-increase ] && echo 1 || echo 0)"; exit $? ;;
 esac
 
-fixtures() {
-  local d
+gitq() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git "$@"; }
+
+mkrepo() {
+  local fx
+  fx=$(mktemp -d) || return 1
+  gitq init -q "$fx" || return 1
+  printf '%s' "$fx"
+}
+
+track() { gitq -C "$1" add -A; }
+
+stray_temps() { find "$1" -maxdepth 1 -name '.comment-baseline.*' | wc -l | tr -d ' '; }
+
+ratchet_in() {
+  local fx=$1
+  shift
+  COMMENT_RATCHET_REPO="$fx" COMMENT_RATCHET_INNER=1 bash "$HERE/comment-ratchet.sh" "$@"
+}
+
+num() { bash "$COUNT" "$1" | cut -f1; }
+
+not_root() { [ "$(id -u)" -ne 0 ]; }
+
+fail_naming() {
+  local err rc
+  err=$(bash "$COUNT" "$1" 2>&1 >/dev/null)
+  rc=$?
+  printf '%s %s' "$rc" "$(printf '%s' "$err" | grep -c "$(basename "$1")")"
+}
+
+same_as() { [ "$(cksum < "$1")" = "$2" ]; }
+
+counter_fixtures() {
+  local d rc
   d=$(mktemp -d)
   printf '%s\n' '#!/bin/bash' '# a comment' '# shellcheck disable=SC2086' 'echo hi # trailing' \
     'cat <<EOF' '# inside a heredoc' 'EOF' "cat <<'X'" '# quoted heredoc' 'X' \
     'cat <<-T' "$(printf '\t# dash heredoc')" "$(printf '\tT')" '  # indented comment' 'n=$((1<<2))' > "$d/a.sh"
-  eq "$(bash "$COUNT" "$d/a.sh" | cut -f1)" 2 "shell: shebang, shellcheck, heredoc bodies and trailing comments are not counted"
+  eq "$(num "$d/a.sh")" 2 "shell: shebang, shellcheck, heredoc bodies and trailing comments are not counted"
   printf '%s\n' '#!/usr/bin/env python3' '# one' 'x = 1  # trailing' '# noqa: E501' '    # two' > "$d/b.py"
-  eq "$(bash "$COUNT" "$d/b.py" | cut -f1)" 2 "python: shebang and noqa are not counted"
+  eq "$(num "$d/b.py")" 2 "python: shebang and noqa are not counted"
   printf '%s\n' '// one' '/* two' ' three */' '// @ts-expect-error' 'const x = 1 // trailing' > "$d/c.ts"
-  eq "$(bash "$COUNT" "$d/c.ts" | cut -f1)" 3 "ts: line and block comments count, a @ts directive does not"
+  eq "$(num "$d/c.ts")" 3 "ts: line and block comments count, a @ts directive does not"
   printf '%s\n' '#!/bin/bash' 'echo no comments' > "$d/noext"
-  eq "$(bash "$COUNT" "$d/noext" | cut -f1)" 0 "a bash shebang without an extension is read as shell"
+  eq "$(num "$d/noext")" 0 "a bash shebang without an extension is read as shell"
   printf '%s\n' '# not code' > "$d/notes.md"
   eq "$(bash "$COUNT" "$d/notes.md")" "" "markdown is not code"
   printf '%s\n' 'echo "see <<EOF in the docs"' "echo 'a <<WORD in single quotes'" 'echo x # see <<EOF' '# still counted' > "$d/q.sh"
-  eq "$(bash "$COUNT" "$d/q.sh" | cut -f1)" 1 "a heredoc marker inside quotes or a trailing comment does not start a heredoc"
+  eq "$(num "$d/q.sh")" 1 "a heredoc marker inside quotes or a trailing comment does not start a heredoc"
+
+  printf '%s\n' '#' '# x' '  #' 'echo a' > "$d/bare.sh"
+  eq "$(num "$d/bare.sh")" 3 "shell: a bare # line is a comment line"
+  printf '%s\n' '((x=1<<bits))' '# real comment' 'echo done' > "$d/shift.sh"
+  eq "$(num "$d/shift.sh")" 1 "a shift inside (( )) is not a heredoc, so the comment after it counts"
+  printf '%s\n' 'cat <<EOF-END' '# body' 'EOF-END' '# real comment' > "$d/dashword.sh"
+  eq "$(num "$d/dashword.sh")" 1 "a heredoc delimiter with a dash ends at the whole word"
+  printf '%s\n' 'cat <<A <<B' '# a body' 'A' '# b body' 'B' '# real comment' > "$d/two.sh"
+  eq "$(num "$d/two.sh")" 1 "two heredocs on one command are both skipped"
+  printf '%s\n' "x='" '# data' "'" '# real comment' > "$d/mlstr.sh"
+  eq "$(num "$d/mlstr.sh")" 1 "a comment-looking line inside a multiline shell string is data"
+  printf '%s\n' 's = """' '# data' '"""' '# real comment' > "$d/doc.py"
+  eq "$(num "$d/doc.py")" 1 "a comment-looking line inside a python triple-quoted string is data"
+  printf '%s\n' 'const t = `' '// data' '${ a /* x */ + `n ${ b }` }' '`' '// real comment' > "$d/tmpl.ts"
+  eq "$(num "$d/tmpl.ts")" 1 "a comment-looking line inside a template literal is data"
+  printf '%s\n' 'const r = /\/\/ not a comment/;' "const s = 'it'" '// real comment' > "$d/rx.ts"
+  eq "$(num "$d/rx.ts")" 1 "slashes inside a regex literal are not a comment"
+
+  printf '%s\n' '# pragmatism matters' '# shellcheck sourced from here' '# shellcheck disable=SC2086' '# shellcheck source=/dev/null' '# shellcheck shell=bash' > "$d/dir.sh"
+  eq "$(num "$d/dir.sh")" 2 "shell: only the exact shellcheck disable=, source= and shell= forms are exempt"
+  printf '%s\n' '# pragmatism matters' '# noqa' '# noqa: E501' '# pragma: no cover' '# type: ignore[attr-defined]' '# noqanother' > "$d/dir.py"
+  eq "$(num "$d/dir.py")" 2 "python: only the exact noqa, pragma: and type: ignore forms are exempt"
+  printf '%s\n' '// oxlinting keeps us honest' '// oxlint-disable-next-line no-x' '// oxlint-disable' '// @ts-ignore' '// @ts-expect-error: why' '// @ts-nocheckish' > "$d/dir.ts"
+  eq "$(num "$d/dir.ts")" 2 "ts: only the exact @ts-expect-error, @ts-ignore and oxlint-disable forms are exempt"
+
+  printf '%s\n' '// one' > "$d/types.d.ts"
+  eq "$(num "$d/types.d.ts")" 1 "a declaration file is counted like any other"
+
+  eq "$(bash "$COUNT" "$d/missing.sh" >/dev/null 2>&1; echo $?)" 1 "a file that does not exist is an error, not a zero"
+  if not_root; then
+    printf '%s\n' '# one' > "$d/locked.sh"
+    chmod 000 "$d/locked.sh"
+    eq "$(bash "$COUNT" "$d/locked.sh" >/dev/null 2>&1; echo $?)" 1 "a file that cannot be read is an error, not a zero"
+    chmod 600 "$d/locked.sh"
+  fi
+  printf '%s\n' 'def broken(:' > "$d/broken.py"
+  eq "$(fail_naming "$d/broken.py")" "1 1" "a python file that will not tokenize fails and names the file"
+  printf '%s\n' 'if then fi done' '(' > "$d/broken.sh"
+  eq "$(fail_naming "$d/broken.sh")" "1 1" "a shell file that will not parse fails and names the file"
+  printf '%s\n' '/* never closed' > "$d/open.ts"
+  eq "$(fail_naming "$d/open.ts")" "1 1" "a ts file with an unclosed block comment fails and names the file"
+  printf '%s\n' '# one' > "$d/needs-shfmt.sh"
+  COMMENT_COUNT_SHFMT="$d/no-such-shfmt" bash "$COUNT" "$d/needs-shfmt.sh" > "$d/out" 2> "$d/err"
+  rc=$?
+  eq "$rc $(grep -c shfmt "$d/err") $(wc -c < "$d/out" | tr -d ' ')" "1 1 0" "a missing shfmt fails with a message and counts nothing"
+  rm -rf "$d"
+}
+
+enumeration_fixtures() {
+  local fx rc
+  fx=$(mkrepo) || { bad "make a fixture repo"; return; }
+  mkdir "$fx/types"
+  printf '%s\n' '// one' > "$fx/types/index.d.ts"
+  printf '%s\n' '# one' > "$fx/a.sh"
+  track "$fx"
+  eq "$(bash "$COUNT" --repo "$fx" | tr '\t' ' ' | tr '\n' ';')" "1 a.sh;1 types/index.d.ts;" "enumeration lists a tracked declaration file"
+  printf '%s\n' '# one' > "$fx/tab$TAB.sh"
+  track "$fx"
+  bash "$COUNT" --repo "$fx" > "$fx/out" 2> "$fx/err"
+  rc=$?
+  eq "$rc $(grep -c 'tab' "$fx/err")" "1 1" "a tab in a tracked path fails and names it instead of breaking the row format"
+  rm -rf "$fx"
+}
+
+baseline_fixture() {
+  local fx
+  fx=$(mkrepo) || return 1
+  printf '%s\n' '# one' '# two' > "$fx/a.sh"
+  printf '%s\n' '# one' > "$fx/b.sh"
+  track "$fx"
+  printf '%s\t%s\n' a.sh 2 b.sh 1 > "$fx/.comment-baseline"
+  printf '%s' "$fx"
+}
+
+ratchet_fixtures() {
+  local fx before out rc
+  fx=$(baseline_fixture) || { bad "make a fixture repo"; return; }
+  out=$(ratchet_in "$fx" 2>&1); rc=$?
+  eq "$rc" 0 "a tree at its baseline passes"
+  printf '%s\n' '# three' >> "$fx/a.sh"
+  out=$(ratchet_in "$fx" 2>&1); rc=$?
+  eq "$rc $(printf '%s' "$out" | grep -c 'a.sh: 3 comment lines, baseline allows 2')" "1 1" "a file over its baseline fails and says which"
+  printf '%s\n' '# new' > "$fx/new.sh"
+  track "$fx"
+  out=$(ratchet_in "$fx" 2>&1); rc=$?
+  eq "$rc" 1 "a new file with a comment fails (an unlisted file is allowed none)"
+  rm -rf "$fx"
+
+  fx=$(baseline_fixture) || { bad "make a fixture repo"; return; }
+  : > "$fx/.comment-baseline"
+  printf '%s\n' '# new' > "$fx/new.sh"
+  track "$fx"
+  out=$(ratchet_in "$fx" 2>&1); rc=$?
+  eq "$rc" 1 "an empty baseline fails, so an increase cannot ride on it"
+  out=$(ratchet_in "$fx" --update 2>&1); rc=$?
+  eq "$rc $(wc -c < "$fx/.comment-baseline" | tr -d ' ')" "1 0" "--update refuses to compare against an empty baseline and leaves it alone"
+  rm -rf "$fx"
+
+  fx=$(baseline_fixture) || { bad "make a fixture repo"; return; }
+  printf '%s\n' 'not a baseline row' > "$fx/.comment-baseline"
+  out=$(ratchet_in "$fx" 2>&1); rc=$?
+  eq "$rc" 1 "a baseline row that is not <path><TAB><count> fails"
+  rm -rf "$fx"
+
+  fx=$(baseline_fixture) || { bad "make a fixture repo"; return; }
+  rm -f "$fx/.comment-baseline"
+  mkdir "$fx/.comment-baseline"
+  out=$(ratchet_in "$fx" 2>&1); rc=$?
+  eq "$rc" 1 "a baseline that is a directory fails"
+  rm -rf "$fx"
+
+  if not_root; then
+    fx=$(baseline_fixture) || { bad "make a fixture repo"; return; }
+    chmod 000 "$fx/.comment-baseline"
+    out=$(ratchet_in "$fx" 2>&1); rc=$?
+    eq "$rc" 1 "an unreadable baseline fails the check"
+    out=$(ratchet_in "$fx" --update 2>&1); rc=$?
+    eq "$rc" 1 "an unreadable baseline stops --update from passing the increase check"
+    chmod 600 "$fx/.comment-baseline"
+    rm -rf "$fx"
+  fi
+
+  fx=$(baseline_fixture) || { bad "make a fixture repo"; return; }
+  printf '%s\n' '# three' >> "$fx/a.sh"
+  before=$(cksum < "$fx/.comment-baseline")
+  out=$(ratchet_in "$fx" --update 2>&1); rc=$?
+  eq "$rc $(same_as "$fx/.comment-baseline" "$before" && echo same)" "1 same" "--update refuses an increase and leaves the baseline as it was"
+  out=$(ratchet_in "$fx" --update --allow-increase 2>&1); rc=$?
+  eq "$rc $(grep -c 'a.sh' "$fx/.comment-baseline")" "0 1" "--update --allow-increase accepts it"
+  eq "$(awk -F'\t' '$1 == "a.sh" { print $2 }' "$fx/.comment-baseline")" 3 "and records the new count"
+  rm -rf "$fx"
+}
+
+failing_tool_fixtures() {
+  local fx shim tool before out rc
+  for tool in sort mv awk mktemp; do
+    fx=$(baseline_fixture) || { bad "make a fixture repo"; return; }
+    shim=$(mktemp -d)
+    printf '#!/bin/bash\nexit 1\n' > "$shim/$tool"
+    chmod +x "$shim/$tool"
+    printf '%s\n' '# three' > "$fx/c.sh"
+    track "$fx"
+    before=$(cksum < "$fx/.comment-baseline")
+    out=$(PATH="$shim:$PATH" ratchet_in "$fx" --update --allow-increase 2>&1); rc=$?
+    eq "$rc $(printf '%s' "$out" | grep -c '^wrote') $(same_as "$fx/.comment-baseline" "$before" && echo same) $(stray_temps "$fx")" "1 0 same 0" "--update fails, says nothing was written and leaves no partial file when $tool fails"
+    rm -rf "$fx" "$shim"
+  done
+  fx=$(baseline_fixture) || { bad "make a fixture repo"; return; }
+  shim=$(mktemp -d)
+  printf '#!/bin/bash\nexit 1\n' > "$shim/awk"
+  chmod +x "$shim/awk"
+  out=$(PATH="$shim:$PATH" ratchet_in "$fx" 2>&1); rc=$?
+  eq "$rc" 1 "the check fails when the awk comparison itself fails"
+  rm -rf "$fx" "$shim"
+  if not_root; then
+    fx=$(baseline_fixture) || { bad "make a fixture repo"; return; }
+    printf '%s\n' '# three' > "$fx/c.sh"
+    track "$fx"
+    before=$(cksum < "$fx/.comment-baseline")
+    chmod 555 "$fx"
+    out=$(ratchet_in "$fx" --update --allow-increase 2>&1); rc=$?
+    chmod 755 "$fx"
+    eq "$rc $(printf '%s' "$out" | grep -c '^wrote') $(same_as "$fx/.comment-baseline" "$before" && echo same)" "1 0 same" "--update fails when the directory will not take a temp file"
+    rm -rf "$fx"
+  fi
+}
+
+counter_exit_fixtures() {
+  local d
+  d=$(mktemp -d)
   printf '#!/bin/bash\nexit 3\n' > "$d/broken-counter"
   if COMMENT_COUNT_BIN="$d/broken-counter" COMMENT_RATCHET_INNER=1 bash "$HERE/comment-ratchet.sh" > "$d/out" 2>&1; then
     bad "a counter that fails makes the ratchet fail"
@@ -90,25 +368,42 @@ fixtures() {
 }
 
 ratchet() {
-  [ -f "$BASELINE" ] || { bad ".comment-baseline exists (run tests/comment-ratchet.sh --update)"; return; }
-  local counts over
-  if ! counts=$(current_counts); then
-    bad "the counter ran and listed the tracked files"
+  local problem counts over rc slack
+  if problem=$(baseline_problem); then
+    bad "$problem (run tests/comment-ratchet.sh --update --allow-increase)"
     return
   fi
-  over=$(printf '%s\n' "$counts" | awk -F'\t' 'NR==FNR { base[$1] = $2; next } NF == 2 && ($1 + 0) > (base[$2] + 0) { print "    " $2 ": " $1 " comment lines, baseline allows " (base[$2] + 0) }' "$BASELINE" -)
-  if [ -z "$over" ]; then
-    ok "no file has more comment lines than .comment-baseline allows"
-  else
-    bad "comment lines went up (delete them, move a decision into docs/adr/, or run tests/comment-ratchet.sh --update --allow-increase):"
-    printf '%s\n' "$over"
+  counts=$(mktemp "${TMPDIR:-/tmp}/comment-counts.XXXXXX") || { bad "make a scratch file"; return; }
+  if ! collect_counts "$counts"; then
+    bad "the counter ran and listed the tracked files"
+    rm -f "$counts"
+    return
   fi
-  local slack
-  slack=$(printf '%s\n' "$counts" | awk -F'\t' 'NR==FNR { cur[$2] = $1; next } ($2 + 0) > (cur[$1] + 0) { n++ } END { print n + 0 }' - "$BASELINE")
-  [ "$slack" -eq 0 ] || echo "  note - $slack file(s) are below their baseline; tighten it with tests/comment-ratchet.sh --update"
+  over=$(over_baseline "$BASELINE" "$counts")
+  rc=$?
+  case "$rc" in
+    0) ok "no file has more comment lines than .comment-baseline allows" ;;
+    1)
+      bad "comment lines went up (delete them, move a decision into docs/adr/, or run tests/comment-ratchet.sh --update --allow-increase):"
+      printf '%s\n' "$over"
+      ;;
+    *) bad "comparing the counts with .comment-baseline failed (exit $rc)" ;;
+  esac
+  if slack=$(below_baseline "$BASELINE" "$counts"); then
+    [ "$slack" -eq 0 ] || echo "  note - $slack file(s) are below their baseline; tighten it with tests/comment-ratchet.sh --update"
+  else
+    bad "counting the files below their baseline failed"
+  fi
+  rm -f "$counts"
 }
 
-[ -n "${COMMENT_RATCHET_INNER:-}" ] || fixtures
+if [ -z "${COMMENT_RATCHET_INNER:-}" ]; then
+  counter_fixtures
+  enumeration_fixtures
+  ratchet_fixtures
+  failing_tool_fixtures
+  counter_exit_fixtures
+fi
 ratchet
 echo
 echo "passed: $pass   failed: $fail"

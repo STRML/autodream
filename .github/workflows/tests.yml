@@ -95,9 +95,24 @@ jobs:
           echo "scope: $scope"
           echo "scope=$scope" >> "$GITHUB_OUTPUT"
 
+      # The comment ratchet parses shell with shfmt and fails when it is missing, so the job that
+      # runs it installs it: every shard of a full run (the ratchet is one of the unit suites
+      # run-all.sh runs) and shard 0 of a web-only run.
+      - name: shfmt
+        if: steps.scope.outputs.scope == 'full' || matrix.shard == 0
+        run: |
+          sudo apt-get install -y --no-install-recommends shfmt
+          shfmt --version
+
       - name: web suite only
         if: steps.scope.outputs.scope == 'web' && matrix.shard == 0
         run: bash tests/autodream-web.sh
+
+      # A web-only PR can still add a comment to web/app.js, so the ratchet runs beside the web
+      # suite. On a full run it is one of run-all.sh's unit suites.
+      - name: comment ratchet, web scope
+        if: steps.scope.outputs.scope == 'web' && matrix.shard == 0
+        run: bash tests/comment-ratchet.sh
 
       # gtimeout: four oversized-gate assertions look for GNU timeout under that name,
       # which is how it is installed on a Mac. On Linux it is plain `timeout`.

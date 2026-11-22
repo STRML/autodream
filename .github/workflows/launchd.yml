@@ -115,6 +115,8 @@ jobs:
           jq --version
           python3 --version
           command -v gtimeout >/dev/null 2>&1 || brew install coreutils
+          command -v shfmt >/dev/null 2>&1 || brew install shfmt
+          shfmt --version
           /bin/bash --version | head -1
 
       - name: run-all, shard ${{ matrix.shard }} of 4
