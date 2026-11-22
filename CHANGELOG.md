@@ -19,6 +19,16 @@ All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 ### Removed
 - **`autodream-web open` no longer tries port 8765.** It checked a second, hard-coded port in case a service started before `web-port` existed was still running on the old default. The default is 47823 and every `serve` records its port in `web-port`, so only a service that has not restarted since the first release could ever answer there. `open` now checks the one recorded or configured port, and its failure message names that port. A changed default is a restart. Closes #243.
 
+## 2026-11-19
+
+### Added
+- **Report scripts: an operator note can ask for a command's output.** The model that writes the report has Read and Glob only, so a note such as "run `review-gate-raises.sh` and quote the rows" failed silently. `bin/report-scripts.sh` now runs every entry of `$AUTODREAM_DIR/report-scripts.conf` (`<name> <path> [args...]`) before the report is written and leaves `report-<name>.md` and `report-index.txt` in the findings dir, with a timeout, no stdin and no evaluation of arguments. A failing, timed-out or missing script still writes its file with the failure as the content, and never stops the run. PROMPT.md answers a note from those files, and says plainly when a note names a command no entry covers. A new report is one conf line.
+- **`bin/stop-check-counts.sh`**: a model-free report script counting the stop-check verdict log by kind in a window (default 36 hours) and by UTC week for eight weeks. Counts only.
+
+### Fixed
+- **A report script that fails every night shows up in the self-audit.** run-stats gains `report_scripts` (`off`, `unavailable` or the entry count) and `report_scripts_not_ok` (the names, or `none`), and PROMPT.md's self-audit names every entry that is not `ok`. PROMPT.md also names the `changed` and `write-failed` statuses and says what a `-` file column means. Output past the per-file size cap reads as such instead of `exited 153`, and `stop-check-counts.sh` counts a kind outside `[a-z]+` as `other` so a log line cannot forge a row.
+- **A watchdog no longer leaves its `sleep` running.** `tmo` (`bin/portable.sh`), the report-script timeout and the `prune-worktrees.sh` hard cap each left a `sleep` behind until its timeout whenever the command finished in time. The watchdog subshell now traps TERM and kills its own sleep.
+
 ## 2026-11-18
 
 ### Changed

@@ -206,7 +206,8 @@ def tracked_files(repo):
     if run.returncode != 0:
         detail = run.stderr.decode("utf-8", "replace").strip()
         raise CountError("git ls-files failed in %s (%s)" % (repo, detail))
-    return [name for name in run.stdout.decode("utf-8", "surrogateescape").split("\0") if name]
+    names = run.stdout.decode("utf-8", "surrogateescape").split("\0")
+    return list(dict.fromkeys(name for name in names if name))
 
 
 def stat_or_none(path, follow):
