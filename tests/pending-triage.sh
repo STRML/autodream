@@ -1,11 +1,4 @@
 #!/bin/bash
-# Tests for bin/pending-triage.sh: which dreams still have open questions nobody answered.
-#
-# Fixture reports in a sandbox dreams/ dir, dated relative to today because the script
-# only looks at a trailing window. No network, no model calls.
-#
-# Usage:  tests/pending-triage.sh
-# Exit:   0 if every assertion passes, 1 otherwise.
 
 set -u
 
@@ -18,14 +11,12 @@ REPO=$(cd "$HERE/.." && pwd)
 PENDING="$REPO/bin/pending-triage.sh"
 
 pass=0; fail=0
-ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
-no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
-assert_eq(){ if [ "$1" = "$2" ]; then ok "$3"; else no "$3 (got [$1] want [$2])"; fi; }
+# shellcheck source=/dev/null
+. "$HERE/lib-assert.sh"
 
 TODAY=$(date +%Y-%m-%d)
 ago(){ pdate_shift "$TODAY" "-$1" d; }
 
-# report DIR DATE QUESTIONS [triaged]
 report(){
   local f="$1/$2.md"
   { printf '# Autodream — %s\n\n## Open questions\n\n<!-- autodream:open-questions=%s -->\n' "$2" "$3"

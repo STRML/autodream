@@ -1,15 +1,5 @@
 #!/bin/bash
 # shellcheck disable=SC2016 # the `bash -c` bodies below are single-quoted on purpose: $1 is theirs, not ours
-# Tests for the L2 system prompt: one file (prompts/L2_SYSTEM.txt), one loader (bin/l2-prompt.sh),
-# three consumers (the claude adapter, the omp adapter, run.sh's built-in claude fallback).
-#
-# The text states the stdout grammar that bin/report-format.sh parses. Three byte-identical copies
-# used to carry it; the risk was one of them drifting from the parser and an L2 run printing a
-# report the runner could not split. A missing prompt must stop an engine from starting rather
-# than start it with no instructions, so that failure is pinned here too.
-#
-# Usage:  tests/l2-prompt.sh
-# Exit:   0 if every assertion passes, 1 otherwise.
 
 set -u
 
@@ -19,17 +9,14 @@ REPO=$(cd "$HERE/.." && pwd)
 . "$HERE/lib-tmp.sh"; suite_tmp ccl2p
 
 pass=0; fail=0
-ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
-no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
-assert_eq(){ if [ "$1" = "$2" ]; then ok "$3"; else no "$3 (got [$1] want [$2])"; fi; }
+# shellcheck source=/dev/null
+. "$HERE/lib-assert.sh"
 
 PROMPT_FILE="$REPO/prompts/L2_SYSTEM.txt"
 WANT=$(cat "$PROMPT_FILE" 2>/dev/null)
 
-# Inside the suite's own temp root, which suite_tmp removes on every way out.
 T=$(mktemp -d "${TMPDIR:-/tmp}/ccl2p.XXXXXX")
 
-# a minimal install tree: bin/, adapters/{claude,omp}, and optionally prompts/
 mk_tree(){ # $1=name $2=with-prompt(1|0)
   local r="$T/$1"
   mkdir -p "$r/bin" "$r/adapters/claude" "$r/adapters/omp" "$r/prompts"
@@ -39,7 +26,6 @@ mk_tree(){ # $1=name $2=with-prompt(1|0)
   [ "$2" = 1 ] && cp "$PROMPT_FILE" "$r/prompts/" 2>/dev/null
   printf '%s' "$r"
 }
-# the value after --append-system-prompt in an adapter's NUL-delimited argv
 sys_prompt_of(){ tr '\0' '\n' | awk '/^--append-system-prompt$/ { getline; print; exit }'; }
 
 echo "# the file states the grammar the report parser reads"
@@ -66,7 +52,6 @@ assert_eq "$(env -u AUTODREAM_DIR bash -c '. "$1/farm/l2-prompt.sh"; l2_system_p
 
 r=$(mk_tree wsonly 0); printf '  \n\n\t\n' > "$r/prompts/L2_SYSTEM.txt"
 env -u AUTODREAM_DIR bash -c '. "$1/bin/l2-prompt.sh"; l2_system_prompt' _ "$r" >/dev/null 2>&1; assert_eq "$?" "2" "a prompt file of only whitespace is refused too"
-# a symlink whose target is RELATIVE, as a hand-made link might be (install.sh writes absolute ones)
 mkdir -p "$T/rel/real/bin" "$T/rel/real/prompts" "$T/rel/farm"
 cp "$REPO/bin/l2-prompt.sh" "$T/rel/real/bin/"; cp "$PROMPT_FILE" "$T/rel/real/prompts/"
 ln -s ../real/bin/l2-prompt.sh "$T/rel/farm/l2-prompt.sh"
