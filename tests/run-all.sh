@@ -11312,6 +11312,45 @@ test_remote_sync_a_degraded_capture_at_the_path_does_not_hide_the_moved_aside_re
   rm -rf "$root"
 }
 
+test_remote_sync_a_delivered_report_keeps_a_moved_aside_copy_that_holds_triage_decisions(){
+  echo "# remote sync: a delivered report renames a moved-aside copy with Triage decisions out of the .stale glob and deletes the rest"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  printf '255\n' > "$root/rsync.rc"; printf 'ssh: connect to host studio2.invalid port 22: No route to host\n' > "$root/rsync.err"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short=studio2 -->' "the first report records the host"
+  printf '\n## Triage decisions\n\n- Sam wrote this\n' >> "$root/dreams/$DATE.md"
+  printf '# an older report with no decisions\n' > "$root/dreams/$DATE.md.stale-1600000000"
+  rm -f "$root/rsync.rc" "$root/rsync.err"
+  MOCK_MODE=l2_fail AUTODREAM_L2_ATTEMPTS=1 AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short= -->' "the retry delivered a report that read the host"
+  assert_eq "$(ls "$root/dreams/" | grep -c '\.stale-')" "0" "no copy is left in the .stale glob"
+  assert_eq "$(ls "$root/dreams/" | grep -c '\.triaged-')" "1" "the copy holding Triage decisions was kept, and the plain one deleted"
+  assert_grep "$(ls "$root/dreams/$DATE.md".triaged-*)" '^- Sam wrote this$' "and it still holds what Sam wrote"
+  AUTODREAM_FORCE=1 rs_run "$root"
+  AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="b=b.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short= -->' "a kept copy is not read by the next lookup, so studio2 does not come back"
+  assert_eq "$(ls "$root/dreams/" | grep -c '\.triaged-')" "1" "and it is still kept"
+  rm -rf "$root"
+}
+
+test_remote_sync_an_interrupted_rebuild_of_a_triaged_report_still_keeps_the_dropped_host(){
+  echo "# remote sync: a triaged report moved aside by a rebuild killed mid-L2 is still read for its record, then kept"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  printf '255\n' > "$root/rsync.a.invalid.rc"; printf 'ssh: connect to host a.invalid port 22: No route to host\n' > "$root/rsync.a.invalid.err"
+  AUTODREAM_REMOTE_ROOTS="a=a.invalid:$root/studio b=b.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short=a -->' "host a was short"
+  printf '\n## Triage decisions\n\n- Sam wrote this\n' >> "$root/dreams/$DATE.md"
+  mv "$root/dreams/$DATE.md" "$root/dreams/$DATE.md.stale-1700000000"
+  printf '# Autodream - partial\n\nL2 stdout cut off here\n' > "$root/dreams/$DATE.md"
+  rm -f "$root/rsync.a.invalid.rc" "$root/rsync.a.invalid.err"
+  AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="b=b.invalid:$root/studio" rs_run "$root"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short=a -->' "the retry reads the triaged copy and keeps a"
+  assert_eq "$(ls "$root/dreams/" | grep -c '\.stale-')" "0" "the copy left the .stale glob once a report was delivered"
+  assert_grep "$(ls "$root/dreams/$DATE.md".triaged-*)" '^- Sam wrote this$' "and it is kept with Sam's writing"
+  rm -rf "$root"
+}
+
 test_remote_sync_a_failed_body_filter_is_not_published(){
   echo "# remote sync: when the filter that drops a model-written record line fails, the report is not published"
   local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
@@ -11549,6 +11588,8 @@ _run test_remote_sync_failed_rebuild_with_fewer_hosts_keeps_the_dropped_host_for
 _run test_remote_sync_an_older_moved_aside_copy_is_ignored_while_a_report_stands
 _run test_remote_sync_a_stub_that_cannot_be_published_fails_the_run
 _run test_remote_sync_a_degraded_capture_at_the_path_does_not_hide_the_moved_aside_record
+_run test_remote_sync_a_delivered_report_keeps_a_moved_aside_copy_that_holds_triage_decisions
+_run test_remote_sync_an_interrupted_rebuild_of_a_triaged_report_still_keeps_the_dropped_host
 _run test_remote_sync_a_failed_body_filter_is_not_published
 _run test_remote_sync_a_record_line_the_model_writes_is_dropped
 _run test_remote_sync_rebuild_with_remote_sync_off_keeps_the_record

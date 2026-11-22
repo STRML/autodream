@@ -134,8 +134,10 @@ A pull is read-only on the remote and needs only sshd there.
     anything moves the old report: the report at the path if it carries a record, else the newest
     moved-aside `.stale-<epoch>` copy that does, because a rebuild killed mid-L2 can leave a
     record-less capture at the path. A copy cannot resurface an old label: a delivered report, L2 or
-    stub, deletes every copy it supersedes (`drop_stale_report_copies`), so a copy that still exists
-    means nothing has been delivered since), so a rebuild with fewer
+    stub, takes every copy it supersedes out of the `.stale-*` glob (`drop_stale_report_copies`: a
+    copy holding a `## Triage decisions` heading is renamed to `<report>.triaged-<epoch>`, because it
+    holds the user's own writing, and every other copy is deleted), so a copy still in the glob
+    means nothing has been delivered since and a `.triaged-*` copy is never read by the lookup), so a rebuild with fewer
     hosts cannot erase it, including across the retry of a failed rebuild. With remote sync
     off the line is still written when the replaced report had one to keep.
   - **No migration.** A report with no record line was written with remote sync off or before the

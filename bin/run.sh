@@ -2247,13 +2247,22 @@ remote_short_scan() {
   remote_sync_stat "remote_short_scan_unreadable: $REMOTE_SHORT_UNREADABLE"
 }
 
-# Every moved-aside copy (<report>.stale-<epoch>) of this date's earlier reports, removed once a
-# report has been delivered in their place. They are copies this runner made; nothing else reads them.
+# Every moved-aside copy (<report>.stale-<epoch>) of this date's earlier reports, taken out of the
+# .stale-* glob once a report has been delivered in their place. A copy with a "## Triage decisions"
+# heading holds the user's own writing, so it is renamed to <report>.triaged-<epoch>, which the record
+# lookup never reads; every other copy is deleted. A copy that cannot be read is kept, not deleted.
 drop_stale_report_copies() {
-  local s
+  local s rc keep
   for s in "$REPORT_PATH".stale-*; do
     [ -f "$s" ] || continue
-    rm -f "$s" || log "WARNING: could not remove the superseded report copy $s"
+    grep -q '^## Triage decisions' "$s" 2>/dev/null && rc=0 || rc=$?
+    if [ "$rc" = 1 ]; then
+      rm -f "$s" || log "WARNING: could not remove the superseded report copy $s"
+      continue
+    fi
+    keep="$REPORT_PATH.triaged-${s##*.stale-}"
+    [ -e "$keep" ] && keep="$keep.$$"
+    mv "$s" "$keep" || log "WARNING: could not set aside the report copy $s that holds triage decisions"
   done
 }
 
@@ -2264,8 +2273,8 @@ sync_remote_roots() {
   # moved-aside .stale-<epoch> copy that does. A rebuild that died in L2 moved the real report aside
   # and may have left a capture with no record at the path, so a record-less file at the path is no
   # reason to ignore the copy. Copies cannot resurface an old label: a delivered report (L2 or the
-  # stub) deletes every copy it supersedes, so a copy that still exists means no report has been
-  # delivered since it was made.
+  # stub) deletes every copy it supersedes, or renames one holding triage decisions to .triaged-*,
+  # so a copy still in the .stale-* glob means no report has been delivered since it was made.
   if [ -f "$REPORT_PATH" ] && prev=$(cat "$REPORT_PATH" 2>/dev/null) && rec=$(remote_report_record "$prev"); then
     REMOTE_PREV_SHORT=$rec
   else
