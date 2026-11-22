@@ -220,7 +220,7 @@ run.sh handles it with:
 - **L1 retry loop** (`dispatch_l1` + `l1_missing_count`): re-dispatches only the sessions still missing a findings JSON, up to `AUTODREAM_L1_ROUNDS` (5), calling `wait_for_network` between rounds. The worker is idempotent, so retries are cheap.
 - **L2 retry loop**: retries the aggregator up to `AUTODREAM_L2_ATTEMPTS` (3) until `$REPORT_PATH` is non-empty.
 - **Idempotency guard**: at the top of `run()`, if a finished report exists for the date it exits in a second (`AUTODREAM_FORCE=1` to rebuild). Finished means the open-questions marker is present (or the date predates `AUTODREAM_MARKER_EPOCH`); a marker-less report is moved aside and rebuilt (#111). This is what makes multiple launchd catch-up triggers safe.
-- **Per-date run lock** (#55): `run()` takes `$AUTODREAM_DIR/locks/run-<date>.lock` (a `mkdir`, with the owner's pid and start time inside) before touching the findings dir, because launchd serialises a label only against itself and `autodream-now.sh` uses another. A live holder makes the second run log and exit 0; a dead holder (a killed run, the normal failure here) or a reused pid is reclaimed.
+- **Per-date run lock** (#55): `run()` takes `$AUTODREAM_DIR/locks/run-<date>.lock` (a `mkdir`, with the owner's pid and start time inside) before touching the findings dir, because launchd serialises a label only against itself and `autodream-now.sh` uses another. A live holder makes the second run log and exit 0; a dead holder (a killed run, the normal failure here) or a reused pid is reclaimed. This lock stays a reclaimable mkdir lock; the three defects it still carries are https://github.com/STRML/autodream/issues/242, and `question-streaks.sh` and `threads.sh` do not use it (see "Open questions that never get answered").
 - The plist example schedules several morning triggers (03:15/06:15/09:15/12:15) so a failed-overnight date gets retried on later wakes; the guard no-ops the rest.
 
 `net_up` checks reachability of `api.anthropic.com` (any HTTP code beats `000`). Disable the wait with `AUTODREAM_NETCHECK=0` (tests set this).
@@ -775,8 +775,21 @@ after the suite was green. Four are why the file reads as it does now:
   now — otherwise a question reappearing two reports later was called consecutive.
 - **Concurrency could lose an increment.** The scheduled nightly and `autodream-now.sh`
   carry different launchd labels, so one-instance-per-label does not keep them apart. The
-  read-modify-write takes an atomic `mkdir` lock, reclaims a stale one by age, and SKIPS
-  rather than blocks when it cannot get it.
+  read-modify-write takes an `flock(2)` on `$STATE.flock` (`bin/lib-flock.sh`, the lock `threads.sh`
+  uses), and SKIPS rather than blocks when it cannot get it. It was a mkdir lock that contenders
+  reclaimed by age and then by pid, and a shell cannot make "judge the holder gone, then take its
+  lock" atomic: a holder that stalled past 120 s lost the lock to a second writer and its release
+  removed the second writer's (#192), and four gate rounds on the fix each found another interleaving
+  (`docs/plans/2026-11-21-fix_question-streaks-lock-owner-redesign.md`). The kernel drops an flock when
+  its holder ends, so nothing is judged, reclaimed or put back, and a live holder keeps it however long
+  it takes. Distinct outcomes: held (skip, exit 0 for `update`, exit 1 for `clear`), cannot lock and no
+  python3 (permanent: `update` skips with the reason and posts a banner, because skipping every night
+  looks like a quiet week), a double acquire in one process (refused: a second `exec 9>>` would drop the
+  first lock). An older version's mkdir lock at `$STATE.lock` is honored while younger than 300 s, checked
+  inside the same deadline loop, and never removed (one whose state cannot be read, such as a symlink loop, is
+  cannot-lock: permanent, banner): the one age judgment left. Children that can outlive
+  the holder run with fd 9 closed (the banner's `osascript` does), or they would keep the lock alive after
+  a kill.
 - **A parser breakage only wrote to the run log.** That is this feature's own failure mode
   one level up: every streak silently frozen, no escalation ever again, indistinguishable
   from a quiet week. A mismatch now posts a banner saying the escalation is down.

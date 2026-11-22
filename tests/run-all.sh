@@ -4519,6 +4519,7 @@ test_install_deploys_the_adapter_runtime(){
     bash "$REPO/install.sh" --no-schedule > "$T/install.out" 2>&1 || true
   local target="$T/home/.claude/autodream"
   assert_file "$target/lib-project.sh" "lib-project.sh is installed"
+  assert_file "$target/lib-flock.sh" "lib-flock.sh is installed"
   assert_file "$target/adapters.sh"    "adapters.sh is installed"
   assert_file "$target/preflight.sh"   "preflight.sh is installed"
   assert_file "$target/session-window.sh" "session-window.sh is installed"
@@ -7737,6 +7738,26 @@ done
 
 streak_rows(){ awk '!/^#/ && NF' "$1" 2>/dev/null | wc -l | tr -d ' '; }
 
+hold_flock(){ # $1=lock file -> a python process holds its flock; sets HOLD_PID once it does
+  local ready="$1.ready" i=0
+  rm -f "$ready"
+  python3 -c 'import fcntl, sys, time
+f = open(sys.argv[1], "a")
+fcntl.flock(f, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close()
+time.sleep(600)' "$1" "$ready" &
+  HOLD_PID=$!
+  while [ ! -e "$ready" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+}
+flock_free(){ # $1=lock file: 0 when a non-blocking flock on it succeeds
+  python3 -c 'import fcntl, sys
+f = open(sys.argv[1], "a")
+try:
+    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(1)' "$1"
+}
+
 test_question_streaks_state_lives_with_the_install(){
   echo "# question streaks: the store is the install's, one file holds the watermark, clear takes the lock"
   local root; root=$(setup_env)
@@ -7785,13 +7806,13 @@ test_question_streaks_state_lives_with_the_install(){
   # clear takes the same lock as update, or an update that already read the old state puts
   # the cleared streak back when it writes.
   printf 'k\t1\t2026-03-03\t2026-03-03\tHeld?\n' > "$st"
-  mkdir "$st.lock"
+  hold_flock "$st.flock"; local holder=$HOLD_PID
   # AUTODREAM_QUESTION_LOCK_WAIT=1: the default is 15 one-second tries, and this case and the next
   # each held a lock on purpose for all of them (32 of the suite's seconds, one test in 46).
   local t0=$SECONDS
   AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" bash "$QS" clear all >/dev/null 2>&1; local rc=$?
   local waited=$((SECONDS - t0))
-  rmdir "$st.lock" 2>/dev/null
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
   assert_eq "$rc" "1" "clear fails while an update holds the lock"
   [ "$waited" -le 6 ] && ok "and gives up after the configured wait, not the default 15 tries (${waited}s)" || no "and gives up after the configured wait, not the default 15 tries (took ${waited}s)"
   assert_eq "$(streak_rows "$st")" "1" "and leaves the state for that update"
@@ -7799,9 +7820,9 @@ test_question_streaks_state_lives_with_the_install(){
   # An EMPTY board is not a reason to skip the lock: an update holding it may be about to
   # write the first streak, which clear would then report as cleared (Codex review of 4eea84d).
   : > "$st"
-  mkdir "$st.lock"
+  hold_flock "$st.flock"; holder=$HOLD_PID
   AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" bash "$QS" clear all >/dev/null 2>&1; rc=$?
-  rmdir "$st.lock" 2>/dev/null
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
   assert_eq "$rc" "1" "clear on an empty board still waits for the lock and fails while it is held"
 
   # A state file that exists but cannot be read is not an empty board. Reading it as empty
@@ -8010,9 +8031,164 @@ test_question_streaks_reruns_and_mismatch(){
   rm -rf "$root"
 }
 
+test_question_streaks_lock_is_a_kernel_flock(){
+  echo "# question streaks: the lock is an flock; a live holder keeps it, a dead one loses it at once (#192)"
+  command -v python3 >/dev/null 2>&1 || { echo "  skip - python3 not available"; return 0; }
+  local root; root=$(setup_env)
+  local QS="$REPO/bin/question-streaks.sh"
+  [ -x "$QS" ] || { no "question-streaks.sh executable"; return 0; }
+  local st="$root/own.tsv" lk="$root/own.tsv.flock" out rc t0
+  qs(){ AUTODREAM_QUESTION_LOCK_WAIT="${QS_WAIT:-1}" AUTODREAM_QUESTION_STATE="$st" AUTODREAM_NOTIFY_DRYRUN=1 /bin/bash "$QS" "$@" 2>&1; }
+  local body; body=$(printf '## Open questions for the user\n\n1. **Owned?** body\n\n<!-- autodream:open-questions=1 -->\n')
+  local d; for d in 2026-04-01 2026-04-02 2026-04-03; do printf '%s\n' "$body" > "$root/$d.md"; done
+  qs update "$root/2026-04-01.md" >/dev/null
+  cp "$st" "$root/own.before"
+
+  # 1. A live holder keeps the lock however old its lock file looks. The old mkdir lock was reclaimed by age.
+  hold_flock "$lk"; local holder=$HOLD_PID
+  touch -t 200001010000 "$lk"
+  out=$(qs update "$root/2026-04-02.md"); rc=$?
+  assert_eq "$rc" "0" "update beside a live holder exits 0"
+  case "$out" in *"another run holds"*) ok "and skips loudly" ;; *) no "and skips loudly (got: $out)" ;; esac
+  cmp -s "$st" "$root/own.before" && ok "and the state is untouched" || no "and the state is untouched"
+  out=$(qs clear all); rc=$?
+  assert_eq "$rc" "1" "clear beside a live holder fails"
+  case "$out" in *"FAILED to clear: another run holds"*) ok "with its message unchanged" ;; *) no "with its message unchanged (got: $out)" ;; esac
+  t0=$SECONDS
+  out=$(QS_WAIT=0 qs update "$root/2026-04-02.md")
+  [ $((SECONDS - t0)) -le 2 ] && ok "a zero-second wait returns at once" || no "a zero-second wait took $((SECONDS - t0))s"
+  case "$out" in *"another run holds"*) ok "with the skip message" ;; *) no "with the skip message (got: $out)" ;; esac
+
+  # 2. A holder killed with SIGKILL loses the lock at once: no age to wait out, nothing to reclaim.
+  kill -9 "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+  t0=$SECONDS
+  out=$(qs update "$root/2026-04-02.md")
+  case "$out" in *"1 question(s) in 2026-04-02"*) ok "after the holder is killed the next update runs" ;; *) no "after the holder is killed the next update runs (got: $out)" ;; esac
+  [ $((SECONDS - t0)) -le 3 ] && ok "at once, not after an age bound" || no "took $((SECONDS - t0))s"
+  flock_free "$lk" && ok "and releases the lock when it finishes" || no "and releases the lock when it finishes"
+  case "$out" in *"lost the lock"*|*"no longer ours"*) no "a clean update does not claim it lost the lock" ;; *) ok "a clean update does not claim it lost the lock" ;; esac
+
+  # 3. The script itself is the holder. A shim mktemp stalls it inside its critical section: from outside the
+  # lock is taken, clear is refused, and the state is not touched.
+  mkdir -p "$root/shim"
+  local real_mktemp; real_mktemp=$(command -v mktemp)
+  # shellcheck disable=SC2016 # the dollar signs belong to the shim
+  printf '#!/bin/sh\ncase "$*" in *.tsv.XXXXXX) echo $$ > "$SHIM_READY"; exec sleep 600 ;; esac\nexec "%s" "$@"\n' "$real_mktemp" > "$root/shim/mktemp"
+  chmod +x "$root/shim/mktemp"
+  cp "$st" "$root/own.before"
+  rm -f "$root/ready"
+  ( PATH="$root/shim:$PATH" SHIM_READY="$root/ready" AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" AUTODREAM_NOTIFY_DRYRUN=1 \
+      /bin/bash "$QS" update "$root/2026-04-03.md" >/dev/null 2>&1 ) &
+  local upid=$!
+  local i=0; while [ ! -s "$root/ready" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -s "$root/ready" ] && ok "the update is stalled inside its critical section" || no "the update never reached its critical section"
+  flock_free "$lk" && no "the running update holds the lock" || ok "the running update holds the lock"
+  out=$(qs clear all); rc=$?
+  assert_eq "$rc" "1" "clear is refused while an update is mid-write"
+  cmp -s "$st" "$root/own.before" && ok "and the state is untouched" || no "and the state is untouched"
+  kill "$(cat "$root/ready" 2>/dev/null)" 2>/dev/null; kill "$upid" 2>/dev/null; wait "$upid" 2>/dev/null
+  rm -rf "$root/shim"
+
+  # 4. A child that outlives the holder must not keep the lock: the banner runs with fd 9 closed. An osascript shim
+  # stalls the banner; killing the script leaves the shim running and the lock free.
+  mkdir -p "$root/shim2"
+  printf '#!/bin/sh\necho $$ > "$SHIM_PID"\nexec sleep 600\n' > "$root/shim2/osascript"; chmod +x "$root/shim2/osascript"
+  rm -f "$root/ospid"
+  printf '%s\n' "$body" > "$root/2026-04-04.md"
+  ( PATH="$root/shim2:$PATH" SHIM_PID="$root/ospid" AUTODREAM_QUESTION_ESCALATE_AT=1 AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" \
+      /bin/bash "$QS" update "$root/2026-04-04.md" >/dev/null 2>&1 ) &
+  upid=$!
+  i=0; while [ ! -s "$root/ospid" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -s "$root/ospid" ] && ok "the banner is stalled in osascript" || no "the banner never reached osascript"
+  kill -9 "$upid" 2>/dev/null; wait "$upid" 2>/dev/null
+  flock_free "$lk" && ok "a killed update leaves no lock behind even with osascript still running" || no "osascript kept the lock after the update was killed"
+  kill "$(cat "$root/ospid" 2>/dev/null)" 2>/dev/null; rm -rf "$root/shim2"
+
+  # 5. A lock path that cannot be opened is a loud permanent refusal, not a wait and not a held lock.
+  rm -f "$lk"; mkdir "$lk"
+  cp "$st" "$root/own.before"
+  t0=$SECONDS
+  out=$(qs update "$root/2026-04-04.md"); rc=$?
+  assert_eq "$rc" "0" "update with an unopenable lock path exits 0"
+  case "$out" in *"cannot lock"*) ok "and says it cannot lock" ;; *) no "and says it cannot lock (got: $out)" ;; esac
+  [ $((SECONDS - t0)) -le 2 ] && ok "without waiting out the deadline" || no "waited $((SECONDS - t0))s"
+  out=$(qs clear all); rc=$?
+  assert_eq "$rc" "1" "clear with an unopenable lock path fails"
+  [ -d "$lk" ] && ok "and the directory is untouched" || no "the directory at the lock path was removed"
+  cmp -s "$st" "$root/own.before" && ok "and the state is untouched" || no "and the state is untouched"
+  rmdir "$lk"
+
+  # 6. An older version's mkdir lock: a young directory blocks, an old one is ignored and left in place.
+  mkdir "$st.lock"
+  out=$(qs update "$root/2026-04-04.md")
+  case "$out" in *"another run holds"*) ok "a young older-version lock directory blocks" ;; *) no "a young older-version lock directory blocks (got: $out)" ;; esac
+  t0=$SECONDS; out=$(QS_WAIT=0 qs update "$root/2026-04-04.md")
+  [ $((SECONDS - t0)) -le 2 ] && ok "and a zero-second wait returns at once" || no "a zero-second wait took $((SECONDS - t0))s"
+  flock_free "$lk" && ok "the flock is released after a refusal" || no "the flock stayed held after a refusal"
+  touch -t 200001010000 "$st.lock"
+  out=$(qs update "$root/2026-04-04.md")
+  case "$out" in *"another run holds"*) no "an old older-version lock directory is ignored (got: $out)" ;; *) ok "an old older-version lock directory is ignored" ;; esac
+  [ -d "$st.lock" ] && ok "and never removed" || no "and was removed"
+  rmdir "$st.lock"
+
+  # 6b. An older version's lock path that cannot be read (a symlink loop) is a permanent refusal that says so,
+  # not a live older writer: a quiet skip every night would freeze the streaks with no banner.
+  ln -s "$(basename "$st.lock")" "$st.lock"
+  cp "$st" "$root/own.before"
+  out=$(qs update "$root/2026-04-04.md"); rc=$?
+  assert_eq "$rc" "0" "update with an unreadable older-version lock path exits 0"
+  case "$out" in *"cannot lock"*) ok "and reports cannot lock, not a routine hold" ;; *) no "and reports cannot lock (got: $out)" ;; esac
+  case "$out" in *"banner"*) ok "and attempts a banner" ;; *) no "and attempts a banner (got: $out)" ;; esac
+  out=$(qs clear all); rc=$?
+  assert_eq "$rc" "1" "clear with an unreadable older-version lock path fails"
+  cmp -s "$st" "$root/own.before" && ok "and the state is untouched" || no "and the state is untouched"
+  rm -f "$st.lock"
+
+  # 7. A missing python3 is loud and permanent: update skips with the reason and a banner is attempted, clear fails.
+  mkdir -p "$root/bare"
+  local t
+  for t in bash sh awk sed grep sort tail head tr cut wc cat cp mv rm mkdir mktemp dirname basename readlink date stat shasum env uname touch printf ls; do
+    local tp; tp=$(command -v "$t" 2>/dev/null) && [ -x "$tp" ] && ln -sf "$tp" "$root/bare/$t"
+  done
+  cp "$st" "$root/own.before"
+  out=$(PATH="$root/bare" AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" AUTODREAM_NOTIFY_DRYRUN=1 /bin/bash "$QS" update "$root/2026-04-04.md" 2>&1); rc=$?
+  assert_eq "$rc" "0" "update without python3 exits 0"
+  case "$out" in *"python3 is required"*) ok "and says why" ;; *) no "and says why (got: $out)" ;; esac
+  case "$out" in *"no banner"*|*"posted banner"*|*"banner"*) ok "and a banner is attempted for a permanent refusal" ;; *) no "and a banner is attempted for a permanent refusal (got: $out)" ;; esac
+  out=$(PATH="$root/bare" AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" /bin/bash "$QS" clear all 2>&1); rc=$?
+  assert_eq "$rc" "1" "clear without python3 fails"
+  cmp -s "$st" "$root/own.before" && ok "and the state is untouched" || no "and the state is untouched"
+  # A python3 that fails, or exits with a number the lock code once used for a holder, is not a held lock.
+  mkdir -p "$root/badpy"
+  local code
+  for code in 1 7 11 15; do
+    printf '#!/bin/sh\nexit %s\n' "$code" > "$root/badpy/python3"; chmod +x "$root/badpy/python3"
+    out=$(PATH="$root/badpy:$PATH" AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" AUTODREAM_NOTIFY_DRYRUN=1 /bin/bash "$QS" update "$root/2026-04-04.md" 2>&1)
+    case "$out" in *"cannot lock"*) ok "a python3 that exits $code is reported as cannot lock, not as a held lock" ;; *) no "a python3 that exits $code is reported as cannot lock (got: $out)" ;; esac
+  done
+  # A FIFO at the lock path would block the open before any deadline exists.
+  rm -f "$lk"; mkfifo "$lk" 2>/dev/null
+  t0=$SECONDS
+  out=$(QS_WAIT=0 qs update "$root/2026-04-04.md")
+  [ $((SECONDS - t0)) -le 2 ] && ok "a FIFO at the lock path is refused at once, not blocked on" || no "a FIFO at the lock path blocked for $((SECONDS - t0))s"
+  case "$out" in *"cannot lock"*) ok "and reported as cannot lock" ;; *) no "and reported as cannot lock (got: $out)" ;; esac
+  rm -f "$lk"
+
+  # 8. A second acquire in one process is refused and does not drop the first lock.
+  out=$( ( . "$REPO/bin/lib-flock.sh"; flock_acquire "$root/dbl.flock" 0; first=$?; flock_acquire "$root/dbl.flock" 0; second=$?
+           flock_free_probe=$(python3 -c 'import fcntl,sys
+f=open(sys.argv[1],"a")
+try: fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB); print("free")
+except BlockingIOError: print("held")' "$root/dbl.flock")
+           echo "$first $second $flock_free_probe" ) )
+  assert_eq "$out" "0 4 held" "a second flock_acquire in one process is refused and the first lock stays held"
+  rm -rf "$root"
+}
+
 _run test_question_streaks
 _run test_question_streaks_reruns_and_mismatch
 _run test_question_streaks_state_lives_with_the_install
+_run test_question_streaks_lock_is_a_kernel_flock
 
 # ---- L2 attempt diagnostics (issue 42): a signal-shaped L2 death leaves evidence ----
 # Exit 143 on the aggregator was seen on 2026-08-01, 08-31, 09-02, 09-04, 09-19 and 10-02 with
