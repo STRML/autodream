@@ -70,9 +70,6 @@ eq "$closed_out" "rc=0" "tmo without a timeout binary still runs when the caller
 fallback_err=$(PATH="$nt" /bin/bash -c '. "$1"; tmo 5 /bin/bash -c '\''echo child-error >&2; exit 7'\''; rc=$?; echo caller-error >&2; exit "$rc"' _ "$REPO/bin/portable.sh" 2>&1) && fallback_rc=0 || fallback_rc=$?
 eq "$fallback_rc" 7 "fallback preserves a failing command status"
 eq "$fallback_err" "$(printf 'child-error\ncaller-error')" "fallback preserves child and caller stderr"
-# The watchdog's sleep must end with the command, not run on for the whole bound.
-# A sleep shim that records its pid and then becomes the real sleep, so the test can ask kill -0
-# about it instead of reading a process table (pgrep and ps are denied in some sandboxes).
 sp_dir=$(mktemp -d "${TMPDIR:-/tmp}/tmo-sp.XXXXXX")
 real_sleep=$(command -v sleep)
 printf '#!/bin/bash\necho $$ > "%s/pid"\nexec "%s" "$@"\n' "$sp_dir" "$real_sleep" > "$sp_dir/sleep"

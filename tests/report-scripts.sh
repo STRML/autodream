@@ -1,14 +1,4 @@
 #!/bin/bash
-# Tests for bin/report-scripts.sh, the one collector behind every "run this command for me" operator note.
-#
-# L2 has Read and Glob only, so a note that asks for a command's output used to fail silently. The
-# collector runs each allowlisted command before L2 and writes the result where L2 can read it. What
-# matters here is the failure matrix, because the whole point is that a failure is content, never
-# silence and never an aborted run: a missing script, a non-zero exit, a timeout and a bad conf line
-# each still produce a file and an index row.
-#
-# Usage:  tests/report-scripts.sh
-# Exit:   0 if every assertion passes, 1 otherwise.
 
 set -u
 
@@ -21,9 +11,6 @@ BIN="$REPO/bin/report-scripts.sh"
 pass=0; fail=0
 ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
 no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
-# A check that could not run is not a passed assertion. It prints `skip - <reason>`, counts nothing as
-# passed, and the totals line carries `skipped: N`, which run-all.sh repeats beside the suite's count, so
-# a CI log shows ran (0 skipped) against skipped.
 skipped=0
 skip(){ printf '  skip - %s\n' "$1"; skipped=$((skipped + 1)); }
 CHILDKILL_SKIP="child-kill: pgrep cannot read the process table here (the sandbox); CI and launchd can"
@@ -33,7 +20,6 @@ assert_grep(){     grep -q -- "$2" "$1" 2>/dev/null && ok "$3" || no "$3 (no /$2
 assert_nogrep(){   grep -q -- "$2" "$1" 2>/dev/null && no "$3 (/$2/ unexpectedly in $1)" || ok "$3"; }
 assert_eq(){       [ "$1" = "$2" ] && ok "$3" || no "$3 (got [$1] want [$2])"; }
 
-# One sandbox per case: HOME, AUTODREAM_DIR (where the conf lives) and a findings dir.
 new_case(){ # $1=name -> sets C, F, CONF, SCRIPTS
   C="$SUITE_TMP/$1"
   mkdir -p "$C/home" "$C/ad" "$C/f" "$C/scripts"
@@ -325,8 +311,6 @@ mk_script "$SCRIPTS/quick.sh" <<'SH'
 echo quick
 SH
 printf 'quick %s\n' "$SCRIPTS/quick.sh" > "$CONF"
-# A sleep shim that records its pid and then becomes the real sleep: kill -0 asks about it without
-# a process table (pgrep and ps are denied in some sandboxes).
 SPD="$C/spshim"; mkdir -p "$SPD"
 printf '#!/bin/bash\necho $$ > "%s/pid"\nexec /bin/sleep "$@"\n' "$SPD" > "$SPD/sleep"; chmod +x "$SPD/sleep"
 PATH="$SPD:$PATH" AUTODREAM_REPORT_TIMEOUT_BIN="" TMO=137 KG=5 collect
@@ -506,9 +490,6 @@ SH
 long=$(head -c 1200 /dev/zero | tr '\0' 'a')
 printf 'p %s %s\n' "$SCRIPTS/p.sh" "$long" > "$CONF"
 HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" snapshot > "$C/snap" 2> /dev/null
-# SIGXFSZ ignored and a 1 KB file limit: the report's header line (the command is 1.2 KB) cannot be
-# written, while the short index row for a failed write can. The old code wrapped every write in one
-# brace group, whose status is its last command, and recorded an ok row for the report that was not there.
 ( trap '' XFSZ; ulimit -f 1; HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" collect "$F" "$C/snap" > "$C/collect.out" 2> "$C/collect.err" )
 assert_eq "$?" "1" "a report that cannot be written makes collect exit 1"
 assert_eq "$(row p)" "write-failed" "and its index row says write-failed"

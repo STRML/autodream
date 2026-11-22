@@ -3983,9 +3983,6 @@ if [ -z "$_list" ]; then
   echo "cc-autodream integration tests (mock claude)"
   echo
 fi
-# ---- Report scripts: allowlisted commands an operator note asked for, run before L2 ----
-# The seam under test is run.sh calling bin/report-scripts.sh and the result landing in the findings
-# dir under the names PROMPT.md reads. bin/report-scripts.sh's own matrix is tests/report-scripts.sh.
 test_report_scripts_land_in_the_findings_dir_and_a_failure_is_content(){
   echo "# report scripts: a run writes report-<name>.md per entry; a failing one is content, the report still lands"
   local root; root=$(setup_env); mk_session "$root" sess1
@@ -4018,7 +4015,6 @@ test_report_scripts_a_broken_or_missing_collector_never_aborts_the_run(){
   local root; root=$(setup_env); mk_session "$root" sess1
   printf '#!/bin/bash\nexit 1\n' > "$root/collector.sh"; chmod +x "$root/collector.sh"
   ln -s "$REPO/bin/portable.sh" "$root/portable.sh"
-  # A forced rerun keeps the findings dir: the earlier run's files must not survive a failed collect.
   mkdir -p "$(fdir "$root")"; echo stale > "$(fdir "$root")/report-old.md"; echo stale > "$(fdir "$root")/report-index.txt"
   AUTODREAM_REPORTS_BIN="$root/collector.sh" run_dream "$root"
   assert_file "$root/dreams/$DATE.md" "the report lands when the collector exits 1"
@@ -4043,7 +4039,6 @@ test_report_scripts_a_conf_rewritten_after_the_snapshot_runs_nothing_new(){
   printf '#!/bin/bash\ntouch "%s/evil-ran"\n' "$root" > "$root/rs/evil.sh"
   chmod +x "$root/rs/good.sh" "$root/rs/evil.sh"
   printf 'good %s\n' "$root/rs/good.sh" > "$root/autodream/report-scripts.conf"
-  # Stands in for the L1 worker: rewrite the conf and the good script after the snapshot, before collect.
   cat > "$root/tamper.sh" <<EOF
 #!/bin/bash
 if [ "\$1" = collect ]; then
@@ -4102,7 +4097,6 @@ test_report_scripts_a_file_that_cannot_be_hashed_after_l1_is_unavailable_not_unc
   echo "# report scripts: a failed fingerprint is never read as unchanged, even when the rows it did print match"
   local root f; root=$(setup_env); mk_session "$root" sess1; rs_forge_setup "$root"
   f=$(fdir "$root")
-  # report-z.md sorts after the collected files, so the rows before it hash and match; shasum then fails on it.
   FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_DIRS="$f/report-z.md" run_dream "$root"
   assert_grep "$f/report-index.txt" '^# report-scripts: unavailable' "the index says unavailable"
   assert_no_file "$f/report-good.md" "and the collected report file is gone"
@@ -4150,8 +4144,6 @@ test_report_scripts_a_collector_changed_after_the_run_started_is_not_executed(){
   echo "# report scripts: the collector is hashed before L1 and checked again, so a worker that rewrites it gets nothing run"
   local root; root=$(setup_env); mk_session "$root" sess1
   ln -s "$REPO/bin/portable.sh" "$root/portable.sh"
-  # A stand-in collector that rewrites itself during `snapshot`, which run.sh calls after it has
-  # fingerprinted the file: what an L1 worker with Write could do before the collector starts.
   cat > "$root/collector.sh" <<EOF
 #!/bin/bash
 case "\$1" in
@@ -4175,10 +4167,6 @@ EOF
 test_report_scripts_earlier_files_that_cannot_be_cleared_stop_the_run(){
   echo "# report scripts: stale files from an earlier run that cannot be removed stop the run instead of reaching L2"
   local root; root=$(setup_env); mk_session "$root" sess1
-  # A stale index that nothing can replace or remove: an rm and an mv that refuse it, so the collector
-  # cannot write the new index and the cleanup cannot clear the old one. (The cleanup uses rm -rf, so a
-  # planted directory with a report name no longer works as the unremovable thing, and a read-only
-  # findings dir would stop the run long before this seam.)
   mkdir -p "$(fdir "$root")"
   printf '# stale index\n' > "$(fdir "$root")/report-index.txt"
   mkdir -p "$root/shim-rm"
@@ -7537,8 +7525,6 @@ for _suite in $_suites; do
     printf '%s\n' "$_out" | grep 'FAIL' | head -5
     [ -n "$_f" ] && [ "$_f" -ne 0 ] || fail=$((fail + 1))
   else
-    # A suite whose totals carry `skipped: N` says how many checks could not run, and its skip lines
-    # follow, so a CI log shows ran against skipped. A suite that prints no such total is unchanged.
     _sk=$(printf '%s\n' "$_out" | sed -n 's/^passed:.*skipped: *\([0-9][0-9]*\).*/\1/p' | tail -1)
     if [ -n "$_sk" ]; then
       printf '  ok   - unit suite %-18s (%s assertions, %s skipped)\n' "$_suite" "${_p:-0}" "$_sk"
