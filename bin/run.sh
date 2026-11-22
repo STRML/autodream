@@ -5396,11 +5396,17 @@ PY
     L2_COMPLETE=0
     if report_has_sentinel "$L2_STDOUT"; then
       write_session_cwds "$FINDINGS_DIR" || log "WARNING: could not write session-cwds.tsv; Lately will fall back to project buckets"
-      if { report_body "$L2_STDOUT" && remote_short_line; } > "$REPORT_PATH.tmp" && mv "$REPORT_PATH.tmp" "$REPORT_PATH"; then
+      # A record line the model wrote into its own body is dropped: only the runner states which
+      # hosts a report did not read, and the scan takes the last record line it finds, so one in
+      # the body could become a date's record when remote sync was off and the runner wrote none.
+      if report_body "$L2_STDOUT" > "$REPORT_PATH.body" \
+         && { awk '!/^<!-- autodream:remote-short=.* -->$/' "$REPORT_PATH.body"; remote_short_line; } > "$REPORT_PATH.tmp" \
+         && mv "$REPORT_PATH.tmp" "$REPORT_PATH"; then
         L2_COMPLETE=1
       else
         log "WARNING: could not stage the sentinel-stripped report at $REPORT_PATH"
       fi
+      rm -f "$REPORT_PATH.body"
     elif [ -s "$L2_STDOUT" ]; then
       log "WARNING: L2 stdout carried no AUTODREAM_REPORT_END sentinel; keeping the whole capture as a degraded report (incomplete, will retry)"
       cat "$L2_STDOUT" > "$REPORT_PATH.tmp" && mv "$REPORT_PATH.tmp" "$REPORT_PATH" 2>/dev/null || true

@@ -10513,6 +10513,20 @@ test_remote_sync_a_stub_that_cannot_be_published_fails_the_run(){
   rm -rf "$root"
 }
 
+test_remote_sync_a_record_line_the_model_writes_is_dropped(){
+  echo "# remote sync: a record line the model writes into its own report body never becomes the date's record"
+  local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
+  MOCK_MODE=l2_record_in_body rs_run "$root"
+  assert_nogrep "$root/dreams/$DATE.md" 'remote-short=forged' "with remote sync off the forged line is gone"
+  assert_eq "$(grep -c '^<!-- autodream:remote-short=' "$root/dreams/$DATE.md")" "0" "and the runner wrote none, since there was nothing to record"
+  MOCK_MODE=l2_record_in_body AUTODREAM_FORCE=1 AUTODREAM_REMOTE_ROOTS="studio2=studio2.invalid:$root/studio" rs_run "$root"
+  assert_nogrep "$root/dreams/$DATE.md" 'remote-short=forged' "with remote sync on the forged line is gone too"
+  assert_eq "$(grep -c '^<!-- autodream:remote-short=' "$root/dreams/$DATE.md")" "1" "and exactly one record line stands, the runner's"
+  assert_eq "$(rs_record "$root" "$DATE")" '<!-- autodream:remote-short= -->' "which says every host was read"
+  assert_no_file "$root/dreams/$DATE.md.body" "and the staging file is gone"
+  rm -rf "$root"
+}
+
 test_remote_sync_rebuild_with_remote_sync_off_keeps_the_record(){
   echo "# remote sync: a rebuild with remote sync off keeps the record of the report it replaces"
   local root; root=$(setup_env); mk_session "$root" s1; rs_env "$root"
@@ -10724,6 +10738,7 @@ _run test_remote_sync_rebuild_with_fewer_hosts_keeps_the_record_of_the_one_it_dr
 _run test_remote_sync_failed_rebuild_with_fewer_hosts_keeps_the_dropped_host_for_the_retry
 _run test_remote_sync_an_older_moved_aside_copy_is_ignored_while_a_report_stands
 _run test_remote_sync_a_stub_that_cannot_be_published_fails_the_run
+_run test_remote_sync_a_record_line_the_model_writes_is_dropped
 _run test_remote_sync_rebuild_with_remote_sync_off_keeps_the_record
 _run test_remote_sync_incomplete_enumeration_marks_every_host_short
 _run test_remote_sync_prompt_names_short_dates_and_the_rebuild_command
