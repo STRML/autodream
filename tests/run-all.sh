@@ -3703,14 +3703,62 @@ test_run_lock_an_older_runner_holding_the_directory_is_honored(){
 }
 
 test_run_lock_a_stale_directory_that_cannot_be_written_is_left_as_found(){
-  echo "# the run lock: metadata that cannot be written is reported as cannot-lock and the stale directory is left as found (#242)"
+  echo "# the run lock: metadata that cannot be written is cannot-lock, nothing in the stale directory changes and release leaves it (#242)"
   [ "$(id -u)" != 0 ] || { echo "  skip - root can write any file"; return 0; }
   local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
   local lk="$root/autodream/locks/x.lock" dead out
   true & dead=$!; wait "$dead" 2>/dev/null
-  mkdir -p "$lk"; printf '%s\n' "$dead" > "$lk/pid"; : > "$lk/start"; chmod 444 "$lk/start"
-  out=$(LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?; cat "$LK/pid"')
-  assert_eq "$(printf '%s' "$out" | tr '\n' ' ')" "rc=3 $dead" "it reports cannot-lock, and the old pid is still there"
+  mkdir -p "$lk"; printf '%s\n' "$dead" > "$lk/pid"; printf 'Mon Jan  1 00:00:00 2018\n' > "$lk/start"; chmod 444 "$lk/pid"
+  out=$(LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"; cat "$LK/pid" "$LK/start"')
+  assert_eq "$(printf '%s' "$out" | tr '\n' '|')" "rc=3|$dead|Mon Jan  1 00:00:00 2018" "cannot-lock, and neither file changed, even the writable one, and release kept both"
+  rm -rf "$root"
+}
+
+test_run_lock_a_lock_path_that_is_a_file_or_a_symlink_is_never_written_through(){
+  echo "# the run lock: a lock path that is a regular file or a symlink is cannot-lock, and release leaves it (#242)"
+  local root; root=$(setup_env); mkdir -p "$root/autodream/locks" "$root/target"
+  local lk="$root/autodream/locks/x.lock" dead out
+  true & dead=$!; wait "$dead" 2>/dev/null
+  printf '%s\n' "$dead" > "$root/target/pid"; printf 'old\n' > "$root/target/start"
+  ln -s "$root/target" "$lk"
+  out=$(LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"; [ -L "$LK" ] && echo link-kept')
+  assert_eq "$(printf '%s' "$out" | tr '\n' ' ')" "rc=3 link-kept" "a symlink is not followed and not removed"
+  assert_eq "$(cat "$root/target/pid" "$root/target/start" | tr '\n' ' ')" "$dead old " "and its target's files are unchanged"
+  rm -f "$lk"; printf 'x\n' > "$lk"
+  out=$(LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"; [ -f "$LK" ] && echo file-kept')
+  assert_eq "$(printf '%s' "$out" | tr '\n' ' ')" "rc=3 file-kept" "a regular file is cannot-lock and survives release"
+  rm -rf "$root"
+}
+
+test_run_lock_a_pid_of_zero_is_not_a_holder(){
+  echo "# the run lock: pid 0 in an old directory is no process, so the directory is taken over (#242)"
+  local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
+  local lk="$root/autodream/locks/x.lock" out
+  mkdir -p "$lk"; printf '0\n' > "$lk/pid"; touch -t 202001010000 "$lk"
+  out=$(LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"')
+  assert_eq "$out" "rc=0" "kill -0 0 would have read the process group as alive"
+  rm -rf "$root"
+}
+
+test_run_lock_a_failed_probe_is_not_a_dead_holder(){
+  echo "# the run lock: a pid that kill and ps both fail to see still reads as held, never as dead (#242)"
+  local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
+  local lk="$root/autodream/locks/x.lock" out
+  mkdir -p "$lk"; printf '1\n' > "$lk/pid"
+  out=$(LK="$lk" lock_fn "$root/autodream" 'kill(){ [ "${2:-}" = 1 ] && return 1; builtin kill "$@"; }; ps(){ return 1; }; acquire_lock "$LK" 0; echo rc=$?')
+  assert_eq "$out" "rc=1" "pid 1 belongs to another user: held although both probes failed"
+  rm -rf "$root"
+}
+
+test_run_lock_the_pin_sweep_reads_an_untraversable_locks_directory_as_held(){
+  echo "# the run lock: a locks directory the sweep cannot enter is a lock it cannot prove free (#242)"
+  [ "$(id -u)" != 0 ] || { echo "  skip - root can enter any directory"; return 0; }
+  local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
+  local out
+  chmod 000 "$root/autodream/locks"
+  out=$(LK="$root/autodream/locks/run-2019-12-30.lock" lock_fn "$root/autodream" 'lock_is_held "$LK" && echo held || echo free')
+  chmod 755 "$root/autodream/locks"
+  assert_eq "$out" "held" "an open that fails for any reason but a missing file is held"
   rm -rf "$root"
 }
 
@@ -5043,6 +5091,10 @@ _run test_run_lock_a_holder_does_not_outlive_a_dead_owner
 _run test_run_lock_release_ignores_a_directory_it_never_acquired
 _run test_run_lock_an_older_runner_holding_the_directory_is_honored
 _run test_run_lock_a_stale_directory_that_cannot_be_written_is_left_as_found
+_run test_run_lock_a_lock_path_that_is_a_file_or_a_symlink_is_never_written_through
+_run test_run_lock_a_pid_of_zero_is_not_a_holder
+_run test_run_lock_a_failed_probe_is_not_a_dead_holder
+_run test_run_lock_the_pin_sweep_reads_an_untraversable_locks_directory_as_held
 _run test_run_lock_a_holder_follows_the_subshell_that_acquired
 _run test_run_lock_a_young_pidless_directory_is_never_moved
 _run test_run_lock_a_directory_an_older_runner_is_still_creating_is_held

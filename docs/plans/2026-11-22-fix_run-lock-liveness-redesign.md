@@ -62,6 +62,19 @@ A read-only review of this plan found three things, folded in:
 | Older runner already running at the upgrade | its complete directory reads as held until it ends |
 | Older-code process starts after the upgrade, or is inside its reclaim loop at the link | not covered (see above) |
 
+## Round 5 findings, by class
+
+Round 5 was the first full review of the redesign. It held the design and found six places where the code did not do what the matrix above says:
+
+| Finding | Class | Fix |
+|---|---|---|
+| Release deleted a lock path the run had not made (a file, or a stale directory with contents) | Deleting unowned state | Release removes only its own `pid` and `start` and then `rmdir`s; a lock that returned cannot-lock is released without touching the path |
+| A symlink at the lock path was written through | Following an unvalidated path | A symlink or a regular file is cannot-lock before any write |
+| A failed `pid` write left `start` already replaced | Partial update | Every file is checked writable before the first write |
+| `kill` EPERM plus a failing `ps` read a live older holder as dead | An indeterminate probe read as death | Liveness is `os.kill(pid, 0)` in python: only "no such process" is dead |
+| The pin sweep read an untraversable locks directory as idle | Fail-open probe | The sweep opens the flock file and reads anything but "no such file" as held |
+| A pid of 0 read as a live process group | Invalid pid accepted | A pid that is 0, empty, non-numeric or has a leading zero is no pid |
+
 ## Tests
 
 Red first against the current branch head, then green:

@@ -2004,12 +2004,24 @@ while owner_alive():
 
 lock_dir_young() { [ -n "$(find "$1" -maxdepth 0 -mmin -1 2>/dev/null)" ]; }
 
+lock_pid_alive() {
+  local rc=0
+  python3 -c 'import os, sys
+try:
+    os.kill(int(sys.argv[1]), 0)
+except ProcessLookupError:
+    sys.exit(1)
+except Exception:
+    pass' "$1" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 1 ]
+}
+
 lock_names_live_run() {
   local pid start now
   [ -d "$1" ] || return 1
   pid=$(cat "$1/pid" 2>/dev/null) || pid=""
-  case "$pid" in ''|*[!0-9]*) lock_dir_young "$1"; return ;; esac
-  kill -0 "$pid" 2>/dev/null || ps -p "$pid" >/dev/null 2>&1 || return 1
+  case "$pid" in ''|*[!0-9]*|0*) lock_dir_young "$1"; return ;; esac
+  lock_pid_alive "$pid" || return 1
   start=$(cat "$1/start" 2>/dev/null) || start=""
   [ -n "$start" ] || return 0
   now=$(proc_start "$pid")
@@ -2055,7 +2067,11 @@ acquire_lock() {
     lock_stop_holder "$holder"
     return 1
   fi
-  LOCK_HOLDERS="$LOCK_HOLDERS$dir=$holder"$'\n'
+  if [ "$rc" -eq 0 ]; then
+    LOCK_HOLDERS="$LOCK_HOLDERS$dir=$holder"$'\n'
+  else
+    LOCK_HOLDERS="$LOCK_HOLDERS$dir=n$holder"$'\n'
+  fi
   return "$rc"
 }
 
@@ -2070,24 +2086,38 @@ lock_take_dir() {
     lock_holder_name "$dir"
     return 1
   fi
+  if [ -L "$dir" ] || { [ -e "$dir" ] && [ ! -d "$dir" ]; }; then
+    return 3
+  fi
   if [ ! -e "$dir" ] && ! mkdir "$dir" 2>/dev/null; then
     [ -d "$dir" ] || return 3
     lock_holder_name "$dir"
     return 1
   fi
+  lock_meta_writable "$dir" || return 3
   { proc_start "$owner" > "$dir/start" && printf '%s\n' "$owner" > "$dir/pid"; } 2>/dev/null || return 3
   return 0
 }
 
+lock_meta_writable() {
+  [ -w "$1" ] || return 1
+  [ ! -e "$1/start" ] || [ -w "$1/start" ] || return 1
+  [ ! -e "$1/pid" ] || [ -w "$1/pid" ]
+}
+
 release_lock() {
-  local dir="$1" holder="" rest="" line
+  local dir="$1" holder="" rest="" line meta=1
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     if [ "${line%=*}" = "$dir" ]; then holder="${line##*=}"; else rest="$rest$line"$'\n'; fi
   done <<< "$LOCK_HOLDERS"
   [ -n "$holder" ] || return 0
   LOCK_HOLDERS="$rest"
-  rm -rf "$dir"
+  case "$holder" in n*) meta=0; holder="${holder#n}" ;; esac
+  if [ "$meta" -eq 1 ]; then
+    rm -f "$dir/pid" "$dir/start"
+    rmdir "$dir" 2>/dev/null || true
+  fi
   lock_stop_holder "$holder"
   return 0
 }
@@ -2095,16 +2125,21 @@ release_lock() {
 lock_is_held() {
   local flk="${1%.lock}.flock" word
   command -v python3 >/dev/null 2>&1 || return 0
-  if [ -e "$flk" ]; then
-    word=$(python3 -c 'import fcntl, sys
+  word=$(python3 -c 'import fcntl, sys
 try:
     f = open(sys.argv[1], "r")
+except FileNotFoundError:
+    print("absent")
+    sys.exit(0)
+except OSError:
+    print("held")
+    sys.exit(0)
+try:
     fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     print("free")
-except BlockingIOError:
+except OSError:
     print("held")' "$flk" 2>/dev/null) || word=""
-    [ "$word" = free ] || return 0
-  fi
+  case "$word" in absent|free) ;; *) return 0 ;; esac
   lock_names_live_run "$1"
 }
 
