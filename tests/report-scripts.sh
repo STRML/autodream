@@ -548,10 +548,29 @@ SH
 long=$(head -c 1200 /dev/zero | tr '\0' 'a')
 printf 'p %s %s\n' "$SCRIPTS/p.sh" "$long" > "$CONF"
 HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" snapshot > "$C/snap" 2> /dev/null
-( trap '' XFSZ; ulimit -f 1; HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" collect "$F" "$C/snap" > "$C/collect.out" 2> "$C/collect.err" )
-partial_rc=$?
-assert_eq "$partial_rc" "1" "a report that cannot be written makes collect exit 1"
+mkdir "$F/.report-p.tmp"
+HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" collect "$F" "$C/snap" > "$C/collect.out" 2> "$C/collect.err"
+assert_eq "$?" "1" "a report that cannot be written makes collect exit 1"
 assert_eq "$(row p)" "write-failed" "and its index row says write-failed"
+
+echo "# the same contract through a size limit, only where this host enforces the limit on the header write"
+new_case partial_ulimit
+mk_script "$SCRIPTS/p.sh" <<'SH'
+#!/bin/bash
+echo hi
+SH
+printf 'p %s %s\n' "$SCRIPTS/p.sh" "$long" > "$CONF"
+HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" snapshot > "$C/snap" 2> /dev/null
+probe="$C/ulimit-probe"
+( trap '' XFSZ; ulimit -f 1; printf '%01200d' 0 > "$probe" ) 2> /dev/null
+probe_size=$(wc -c < "$probe" 2> /dev/null | tr -d ' ')
+if [ "${probe_size:-0}" -ge 1200 ]; then
+  skip "ulimit -f 1 did not stop a 1200-byte write here (probe wrote ${probe_size} bytes; macOS does not enforce it on every write), so the size-limit variant of write-failed is not asserted"
+else
+  ( trap '' XFSZ; ulimit -f 1; HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" collect "$F" "$C/snap" > "$C/collect.out" 2> "$C/collect.err" )
+  assert_eq "$?" "1" "a report cut off by a size limit makes collect exit 1"
+  assert_eq "$(row p)" "write-failed" "and its index row says write-failed"
+fi
 
 echo "# a report that cannot be written is a loud failure, not an ok row"
 new_case wfail
