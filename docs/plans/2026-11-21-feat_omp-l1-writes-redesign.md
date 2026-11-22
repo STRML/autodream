@@ -93,11 +93,12 @@ nothing and a deferral names nothing.
 **F. A diagnostic that needed the thing it diagnoses.**
 `--measure` seeded state it never used. It no longer does.
 
-**H. Inherited configuration that bypasses a safeguard.** `NO_ADVISOR_CFG` replaces the overlay that turns
-the memory backend off. Rule: a replacement overlay is used only if `memory.backend` is off (read from the top-level `memory:`
-block, every backend line there off), and an argv verb fails (exit 2) rather than run without the
-safeguard. All four verbs (worker, linker, warmup, L2) go through
-one function, `overlay_cfg`.
+**H. Inherited configuration that bypasses a safeguard.** `NO_ADVISOR_CFG` replaced the overlay that turns
+the memory backend off. Two rounds each found a way past a hand-written check of the replacement (a grep, then
+a block-aware awk), so the check was the wrong tool: proving a YAML file keeps memory off takes a YAML parser.
+Rule: the seam is gone. Every headless omp call (worker, linker, warmup, L2) passes the shipped
+`adapters/omp/l1-no-advisor.yml`, and `NO_ADVISOR_CFG` is ignored (a test pins that for all four verbs). Nothing
+in the repo used the override but the tests and the threads probe.
 
 **I. Setup for an execution path that will not run.** Setup prepared every engine in the source map, so a
 retry after L2 failed, with every finding already cached, fatalled over an unreadable omp database no worker
