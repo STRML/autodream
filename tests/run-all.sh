@@ -3075,6 +3075,15 @@ test_l1_answers_are_staged_then_copied(){
   assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: no$' "run-stats says the workers were not confined"
   assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_reason: disabled (AUTODREAM_L1_CONFINE=0)$' "and why"
   assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_tool: none$' "with no tool named"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_extra: none$' "and no operator additions to the write list"
+  rm -rf "$root"
+}
+
+test_l1_confine_extra_is_in_run_stats(){
+  echo "# L1 confinement: a widened write list is visible in run-stats"
+  local root; root=$(setup_env); mk_session "$root" s1
+  AUTODREAM_L1_WRITES_EXTRA="/extra/one:/extra/two*" run_dream "$root"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_extra: /extra/one:/extra/two\*$' "the operator's extra paths are named"
   rm -rf "$root"
 }
 
@@ -4271,6 +4280,7 @@ _run test_idempotency_guard_needs_a_complete_report
 _run test_run_lock_is_per_date_and_live_holders_win
 _run test_l1_answers_are_staged_then_copied
 _run test_l1_confine_degrades_loudly_when_the_tool_rejects_the_profile
+_run test_l1_confine_extra_is_in_run_stats
 _run test_l1_confine_off_is_silent_and_a_working_tool_is_reported
 _run test_l1_forged_writes_are_refused_when_confined
 _run test_l1_symlink_answer_is_not_read

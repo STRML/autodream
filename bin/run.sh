@@ -3101,6 +3101,8 @@ l1_confine_stat_lines() {
   printf 'l1_confined: %s\n' "$L1_CONFINED"
   printf 'l1_confine_tool: %s\n' "$L1_CONFINE_USING"
   printf 'l1_confine_reason: %s\n' "$L1_CONFINE_REASON"
+  # What an operator added to the claude write list (AUTODREAM_L1_WRITES_EXTRA), so a widened sandbox does not read like the default one.
+  printf 'l1_confine_extra: %s\n' "${AUTODREAM_L1_WRITES_EXTRA:-none}"
   # bwrap binds existing paths, so a prefix rule (a trailing *) covers the files that exist and not one
   # created later; sandbox-exec has no such limit.
   [ "$L1_CONFINE_USING" != bwrap ] || printf 'l1_confine_note: bwrap prefix rules bind existing files only\n'
