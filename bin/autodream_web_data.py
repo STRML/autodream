@@ -74,8 +74,6 @@ def read_categories(path):
 
 
 def run_enumerated(directory):
-    # fatal_exit writes run-stats with a `fatal:` line before any enumeration, so only a run-stats
-    # file that says so excuses a missing worklist. One that will not read proves nothing.
     try:
         lines = (directory / 'run-stats.txt').read_bytes().splitlines()
     except OSError:
@@ -95,13 +93,22 @@ def night_sessions(directory, unreadable):
     found = {path.name[:-len('.json')] for path in directory.glob('*.json')
              if FINDING.fullmatch(path.name)}
     if not worklist.exists() and run_enumerated(directory):
-        # A run that got as far as enumeration wrote run-stats and a worklist: its absence is damage.
-        # Without a worklist no rebuild has left stale sidecars, so a sidecar with no findings
-        # is a session still pending, and leaving it out would read the night as complete.
         unreadable.add('sessions.txt')
         found.update(path.name[:-len('.stats.json')] for path in directory.glob('*.stats.json')
                      if re.fullmatch(r'[0-9a-f]{12}\.stats\.json', path.name))
     return sorted(found)
+
+
+def nesting_flags(stats):
+    return [stats[key] for key in ('nested', 'isSidechain') if key in stats]
+
+
+def is_nested(flags):
+    return any(flag is True for flag in flags)
+
+
+def nesting_measured(flags):
+    return bool(flags) and all(type(flag) is bool for flag in flags)
 
 
 def pending_is_nested(sidecar):
@@ -109,7 +116,7 @@ def pending_is_nested(sidecar):
         stats = json.loads(sidecar.read_text(encoding='utf-8'))
     except (OSError, ValueError):
         return False
-    return isinstance(stats, dict) and any(stats.get(key) is True for key in ('nested', 'isSidechain'))
+    return isinstance(stats, dict) and is_nested(nesting_flags(stats))
 
 
 def build_night_stats(date, directory):
@@ -133,10 +140,10 @@ def build_night_stats(date, directory):
             continue
         without_sidecar += not sidecar.exists()
         stats = read_object(sidecar, degraded, unreadable) if sidecar.exists() else {}
-        provenance = [stats[key] for key in ('nested', 'isSidechain') if key in stats]
-        if any(value is True for value in provenance):
+        flags = nesting_flags(stats)
+        if is_nested(flags):
             continue
-        known_top_level = bool(provenance) and all(type(value) is bool for value in provenance)
+        known_top_level = nesting_measured(flags)
         for key, source in (('user_messages', 'user_message_count'),
                             ('tool_calls', 'tool_call_count'), ('duration_minutes', 'duration_minutes')):
             activity[key].append(measurement(stats.get(source)) if known_top_level else None)
@@ -283,30 +290,28 @@ def text(value):
     return value if isinstance(value, str) and value.strip() else None
 
 
+def read_tsv_pairs(path, degraded, unreadable):
+    pairs = []
+    if not path.exists():
+        return pairs
+    try:
+        for row in path.read_text(encoding='utf-8').splitlines():
+            left, right = row.split('\t')
+            pairs.append((left, right))
+    except (OSError, ValueError):
+        degraded.append(path.name)
+        unreadable.add(path.name)
+    return pairs
+
+
 def build_night_summary(date, paths):
     directory = Path(paths['findings_dir'])
     degraded = []
     unreadable = set()
     mappings = {}
-    session_cwds = {}
-    mapping_file = directory / 'pin-projects.tsv'
-    if mapping_file.exists():
-        try:
-            for row in mapping_file.read_text(encoding='utf-8').splitlines():
-                project, cwd = row.split('\t')
-                mappings.setdefault(project, set()).add(cwd)
-        except (OSError, ValueError):
-            degraded.append('pin-projects.tsv')
-            unreadable.add('pin-projects.tsv')
-    session_cwds_file = directory / 'session-cwds.tsv'
-    if session_cwds_file.exists():
-        try:
-            for row in session_cwds_file.read_text(encoding='utf-8').splitlines():
-                session_hash, cwd = row.split('\t')
-                session_cwds[session_hash] = cwd
-        except (OSError, ValueError):
-            degraded.append('session-cwds.tsv')
-            unreadable.add('session-cwds.tsv')
+    for project, cwd in read_tsv_pairs(directory / 'pin-projects.tsv', degraded, unreadable):
+        mappings.setdefault(project, set()).add(cwd)
+    session_cwds = dict(read_tsv_pairs(directory / 'session-cwds.tsv', degraded, unreadable))
     projects = {}
     references = paths.get('thread_references', {})
     for path in sorted(directory.glob('*.json')):
@@ -317,10 +322,10 @@ def build_night_summary(date, paths):
             continue
         stats_path = path.with_name(path.stem + '.stats.json')
         stats = read_object(stats_path, degraded, unreadable)
-        provenance = [stats[key] for key in ('nested', 'isSidechain') if key in stats]
-        if any(value is True for value in provenance):
+        flags = nesting_flags(stats)
+        if is_nested(flags):
             continue
-        if not provenance or any(type(value) is not bool for value in provenance):
+        if not nesting_measured(flags):
             degraded.append(path.stem + ': nesting not measured')
             continue
         project = text(finding.get('project'))

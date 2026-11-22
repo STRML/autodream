@@ -24,7 +24,6 @@ import time
 import subprocess
 import sys
 import tempfile
-import threading
 import unittest
 from unittest import mock
 import urllib.error
@@ -35,7 +34,7 @@ import plistlib
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from loopback_http import ThreadingLoopbackHTTPServer
+from loopback_http import ThreadingLoopbackHTTPServer  # noqa: E402
 COMMAND = REPO / "bin/autodream-web"
 SERVER = REPO / "bin/autodream-web.py"
 EXPECTED_CSP = (
@@ -131,8 +130,6 @@ class WebTests(unittest.TestCase):
                 entries.append((str(path.relative_to(root)), "dir", None))
         return sorted(entries)
 
-    # Drives install.sh's launchd path, which needs macOS tools. Linux CI skips it; the macOS
-    # launchd workflow runs it, and tests/install-web-agent.sh covers the same rules there.
     @unittest.skipUnless(sys.platform == "darwin", "install.sh's launchd path runs on macOS only")
     def test_install_web_agent_ownership_and_options(self):
         result, _, launch_agents, calls, tools = self.run_install(str(self.root / "target"))
@@ -977,8 +974,8 @@ l1_chunks_elided threads_linked threads_unassigned threads_unmeasured""".split()
         self.assertIn("# Dream", dream["markdown"])
         old = json.loads(self.request("GET", "/api/dreams/2026-11-13", cookie=cookie).text)
         self.assertIsNone(old["open_questions"])
-        for date in ("2026-02-30", "../web-token", "%2e%2e%2fweb-token", "2026-11-14.md"):
-            self.assertEqual(self.request("GET", "/api/dreams/" + date, cookie=cookie).status, 400)
+        for bad in ("2026-02-30", "../web-token", "%2e%2e%2fweb-token", "2026-11-14.md"):
+            self.assertEqual(self.request("GET", "/api/dreams/" + bad, cookie=cookie).status, 400)
         self.assertEqual(self.request("GET", "/api/dreams/2026-11-12", cookie=cookie).status, 404)
         command = subprocess.run(["/bin/bash", str(REPO / "bin/report-format.sh"),
                                   "open-questions", str(dreams / "2026-11-14.md")],

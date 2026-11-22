@@ -21,7 +21,7 @@ import unittest
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from loopback_http import ThreadingLoopbackHTTPServer
+from loopback_http import ThreadingLoopbackHTTPServer  # noqa: E402
 
 
 def find_chrome():
@@ -46,29 +46,16 @@ def has_result(dom):
     return 'data-result=' in dom
 
 
-# (virtual-time budget in ms, subprocess deadline in seconds). --virtual-time-budget stops the
-# page when virtual time runs out, and a busy machine can reach that before the fetches the
-# checks wait for have returned; the headless process can also miss its deadline outright. Either
-# way the page never wrote data-result, which means unfinished, not failed (#202): try again with
-# more room and a fresh profile. A FAIL result is a real failure and is returned at once.
 CHROME_ATTEMPTS = ((1500, 25), (6000, 45), (20000, 60))
-# One budget for all Chrome time in this process. Per-attempt deadlines cannot be summed across
-# tests (a suite of 23 tests could spend 23 x 130s), so each attempt is clamped to what is left,
-# and tests/autodream-web.sh gives the process a deadline above this one: the suite then fails a
-# test with TimeoutExpired and still prints its counts, rather than being killed mid-run.
 SUITE_BUDGET = int(os.environ.get('ADWEB_BROWSER_BUDGET', '270'))
 SUITE_END = time.monotonic() + SUITE_BUDGET
 
 
-# A before_retry that restarts the live backend waits up to 30s for its origin line and 5s to stop
-# the old one, so a retry needs this much budget left before it may start.
 RESTART_RESERVE = 40
 
 
 def dump_dom(chrome, root, url, *, attempts=CHROME_ATTEMPTS, finished=has_result, before_retry=None,
              until=None, restart_reserve=RESTART_RESERVE):
-    # A retry must start from the state the first attempt started from: before_retry puts back
-    # anything the page's own run changed (a killed backend, a deleted single-use file).
     until = SUITE_END if until is None else until
     last = None
     for number, (budget, deadline) in enumerate(attempts):
@@ -277,8 +264,6 @@ document.body.dataset.result = 'PASS';
                 self.assertEqual(opened.returncode, 0, opened.stderr)
                 handoff = capture.read_text()
                 self.assertTrue(handoff.startswith('file://'), handoff)
-                # The server deletes the handoff on the first login, so every Chrome retry
-                # reads its own copy of the page instead of a file that is already gone.
                 copy = root / 'handoff-copy.html'
                 copy.write_bytes(Path(urllib.parse.unquote(urllib.parse.urlsplit(handoff).path)).read_bytes())
                 result = dump_dom(chrome, root, copy.as_uri(),
