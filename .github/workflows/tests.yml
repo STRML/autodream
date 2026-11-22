@@ -15,16 +15,18 @@ name: tests
 # Not all markdown is docs. The prompts and the adapters' triage.md and facts.md are code: the
 # suite asserts on what they say, and #175 changed only a prompt, skipped CI under a plain
 # '**.md' ignore, and left two tests red on main (#178). So the filter is `paths` with negations,
-# where the last matching pattern wins: everything, minus markdown, plus that markdown back again.
+# where the last matching pattern wins: everything, minus docs, plus that markdown back again.
 # `paths-ignore` cannot re-include, and an event cannot have both. Keep the two lists in step.
-# Nothing under docs/ or example/ is excluded by directory: the comment ratchet counts every tracked
-# script by extension or by shebang, and a path filter cannot see a shebang.
+# A script under docs/ or example/ that gains a comment in a docs-only PR starts no run; the
+# comment ratchet catches it on the next code PR (the cost trade, see docs/plans/2026-11-22-chore_comment-ratchet-redesign.md).
 on:
   push:
     branches: [main]
     paths:
       - '**'
       - '!**.md'
+      - '!docs/**'
+      - '!example/**'
       - '!LICENSE'
       - 'prompts/**'
       - 'adapters/**'
@@ -37,6 +39,8 @@ on:
     paths:
       - '**'
       - '!**.md'
+      - '!docs/**'
+      - '!example/**'
       - '!LICENSE'
       - 'prompts/**'
       - 'adapters/**'
