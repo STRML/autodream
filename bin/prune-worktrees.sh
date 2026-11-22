@@ -204,7 +204,9 @@ on_term() {
 }
 trap on_term TERM
 # bash runs a trap only after its foreground child exits, so the children are killed right after the TERM.
-( sleep $((BUDGET + KILL_SLACK)); kill -TERM $$; pkill -P $$ ) >/dev/null 2>&1 &
+( trap 'kill "${sp:-}" 2>/dev/null; exit 0' TERM
+  sleep $((BUDGET + KILL_SLACK)) & sp=$!; wait "$sp" || exit 0
+  kill -TERM $$; pkill -P $$ ) >/dev/null 2>&1 &
 WD=$!
 trap 'kill "$WD" 2>/dev/null' EXIT
 
