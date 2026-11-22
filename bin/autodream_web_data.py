@@ -74,8 +74,6 @@ def read_categories(path):
 
 
 def run_enumerated(directory):
-    # fatal_exit writes run-stats with a `fatal:` line before any enumeration, so only a run-stats
-    # file that says so excuses a missing worklist. One that will not read proves nothing.
     try:
         lines = (directory / 'run-stats.txt').read_bytes().splitlines()
     except OSError:
@@ -95,9 +93,6 @@ def night_sessions(directory, unreadable):
     found = {path.name[:-len('.json')] for path in directory.glob('*.json')
              if FINDING.fullmatch(path.name)}
     if not worklist.exists() and run_enumerated(directory):
-        # A run that got as far as enumeration wrote run-stats and a worklist: its absence is damage.
-        # Without a worklist no rebuild has left stale sidecars, so a sidecar with no findings
-        # is a session still pending, and leaving it out would read the night as complete.
         unreadable.add('sessions.txt')
         found.update(path.name[:-len('.stats.json')] for path in directory.glob('*.stats.json')
                      if re.fullmatch(r'[0-9a-f]{12}\.stats\.json', path.name))
