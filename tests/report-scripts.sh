@@ -29,6 +29,13 @@ collect(){ # runs the collector the way run.sh does; sets RC
   RC=$?
 }
 row(){ awk -F'\t' -v n="$1" '$1 == n { print $2 }' "$F/report-index.txt"; }
+PROCS_SKIP="process table: ps cannot list processes here (the sandbox); CI and launchd can"
+procs_probe_usable(){ ps axeww -o pid= > /dev/null 2>&1; }
+if ! procs_probe_usable && [ "${CI:-}" != true ]; then
+  skip "$PROCS_SKIP: every entry would be failed, so the whole suite is skipped"
+  echo "passed: 0   failed: 0   skipped: $skipped"
+  exit 0
+fi
 
 echo "# no conf: the index says so, nothing runs, exit 0"
 new_case noconf
@@ -349,6 +356,62 @@ if pgrep -P $$ > /dev/null 2>&1 || [ $? -le 1 ]; then
   else ok "the TERM-ignoring child was KILLed although its wrapper exited 0"; fi
 else skip "$CHILDKILL_SKIP (a TERM-ignoring child after a wrapper that exits 0)"; fi
 
+skip_unless_ci(){ if [ "${CI:-}" = true ]; then no "$1"; else skip "$1"; fi; }
+
+echo "# a command that exits while its background child runs on: the child is stopped and the row is failed"
+new_case orphan
+mk_script "$SCRIPTS/orphan.sh" <<SH
+#!/bin/bash
+( trap '' TERM; exec sh -c 'echo \$\$ > "\$1"; exec /bin/sleep 300' _ "$C/orphan.pid" ) &
+sleep 0.5
+exit 0
+SH
+printf 'orphan %s\n' "$SCRIPTS/orphan.sh" > "$CONF"
+if procs_probe_usable; then
+  KG=1 collect
+  leaked=$(cat "$C/orphan.pid" 2>/dev/null)
+  if [ -z "$leaked" ]; then no "the orphan's child started"
+  elif kill -0 "$leaked" 2>/dev/null; then no "a background child outlived the command that started it (pid $leaked)"; kill -KILL "$leaked" 2>/dev/null
+  else ok "the background child was stopped after its command exited"; fi
+  assert_eq "$(row orphan)" "failed" "a command that leaves a process behind is failed, not ok"
+  assert_grep "$F/report-orphan.md" 'left a background process running' "the report says what was left behind"
+  assert_eq "$RC" "0" "the collector itself still exits 0"
+else skip_unless_ci "$PROCS_SKIP (a background child after its command exits)"; fi
+
+echo "# a child that moves itself into its own process group is still found, through the marker in its environment"
+new_case pgrp
+mk_script "$SCRIPTS/pgrp.sh" <<SH
+#!/bin/bash
+set -m
+sleep 300 &
+echo \$! > "$C/pgrp.pid"
+set +m
+exit 0
+SH
+printf 'pgrp %s\n' "$SCRIPTS/pgrp.sh" > "$CONF"
+if procs_probe_usable; then
+  KG=1 collect
+  moved=$(cat "$C/pgrp.pid" 2>/dev/null)
+  if [ -z "$moved" ]; then no "the regrouped child started"
+  elif kill -0 "$moved" 2>/dev/null; then no "a child in its own process group outlived the command (pid $moved)"; kill -KILL "$moved" 2>/dev/null
+  else ok "a child in its own process group was stopped"; fi
+  assert_eq "$(row pgrp)" "failed" "and the row is failed"
+else skip_unless_ci "$PROCS_SKIP (a child in its own process group)"; fi
+
+echo "# a command that exits 0 and leaves nothing behind stays ok"
+new_case tidy
+mk_script "$SCRIPTS/tidy.sh" <<'SH'
+#!/bin/bash
+sleep 0.2 &
+wait
+echo done
+SH
+printf 'tidy %s\n' "$SCRIPTS/tidy.sh" > "$CONF"
+if procs_probe_usable; then
+  collect
+  assert_eq "$(row tidy)" "ok" "a command that reaps its own children is ok"
+else skip_unless_ci "$PROCS_SKIP (a clean command next to the leftover check)"; fi
+
 echo "# an unwritable findings dir is a loud failure, not a silent one"
 new_case nofind
 rc=0
@@ -485,9 +548,31 @@ SH
 long=$(head -c 1200 /dev/zero | tr '\0' 'a')
 printf 'p %s %s\n' "$SCRIPTS/p.sh" "$long" > "$CONF"
 HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" snapshot > "$C/snap" 2> /dev/null
-( trap '' XFSZ; ulimit -f 1; HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" collect "$F" "$C/snap" > "$C/collect.out" 2> "$C/collect.err" )
+mkdir "$F/.report-p.tmp"
+HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" collect "$F" "$C/snap" > "$C/collect.out" 2> "$C/collect.err"
 assert_eq "$?" "1" "a report that cannot be written makes collect exit 1"
 assert_eq "$(row p)" "write-failed" "and its index row says write-failed"
+
+echo "# the same contract through a size limit, only where this host enforces the limit on the header write"
+new_case partial_ulimit
+mk_script "$SCRIPTS/p.sh" <<'SH'
+#!/bin/bash
+echo hi
+SH
+printf 'p %s %s\n' "$SCRIPTS/p.sh" "$long" > "$CONF"
+HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" snapshot > "$C/snap" 2> /dev/null
+probe="$C/ulimit-probe"
+( trap '' XFSZ; ulimit -f 1; printf '%01200d' 0 > "$probe" ) 2> /dev/null
+probe_size=$(wc -c < "$probe" 2> /dev/null | tr -d ' ')
+if [ "${probe_size:-0}" -ge 1200 ]; then
+  skip "ulimit -f 1 did not stop a 1200-byte write here (probe wrote ${probe_size} bytes), so the size-limit variant of write-failed is not asserted"
+elif [ "$(uname -s)" != Linux ]; then
+  skip "ulimit -f is not enforced on every write path on $(uname -s): a macOS runner stopped the probe and still let the collector's header write through, so the size-limit variant of write-failed runs on Linux only"
+else
+  ( trap '' XFSZ; ulimit -f 1; HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" collect "$F" "$C/snap" > "$C/collect.out" 2> "$C/collect.err" )
+  assert_eq "$?" "1" "a report cut off by a size limit makes collect exit 1"
+  assert_eq "$(row p)" "write-failed" "and its index row says write-failed"
+fi
 
 echo "# a report that cannot be written is a loud failure, not an ok row"
 new_case wfail
