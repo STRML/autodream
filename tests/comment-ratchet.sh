@@ -201,12 +201,12 @@ counter_fixtures() {
   printf '%s\n' 's = """' '# data' '"""' '# real comment' > "$d/doc.py"
   eq "$(num "$d/doc.py")" 1 "a comment-looking line inside a python triple-quoted string is data"
   printf '%s\n' 'const t = `' '// inside a template' '`;' '// real comment' > "$d/tmpl.ts"
-  eq "$(num "$d/tmpl.ts")" 2 "a template literal line that starts with // is over-counted: every line is judged alone, so a new comment always adds one"
+  eq "$(num "$d/tmpl.ts")" 1 "a template literal line that starts with // is data, not a comment"
   printf '%s\n' 'const t = `' '/* data' '`;' '' > "$d/phantom-a.ts"
   printf '%s\n' 'const t = `' '/* data' '`;' '// real comment' > "$d/phantom-b.ts"
-  eq "$(num "$d/phantom-a.ts") $(num "$d/phantom-b.ts")" "1 2" "a /* inside a template opens nothing: a real comment added after it still raises the count"
+  eq "$(num "$d/phantom-a.ts") $(num "$d/phantom-b.ts")" "0 1" "a /* inside a template is data: it counts nothing and a real comment added after it counts one"
   printf '%s\n' '/**' ' * doc' ' */' 'const a = b' '  * c;' '// real comment' > "$d/block.ts"
-  eq "$(num "$d/block.ts")" 5 "a line that starts with * is counted whether or not a block is open"
+  eq "$(num "$d/block.ts")" 4 "a line that starts with * outside a block is code, not a comment"
   printf '%s\n' '/*' '*/' > "$d/block-a.ts"
   printf '%s\n' '/*' 'new comment' '*/' > "$d/block-b.ts"
   printf '%s\n' '/*' '' '*/' > "$d/block-c.ts"
@@ -218,8 +218,8 @@ counter_fixtures() {
   printf '%s\n' 'export const gitignore = `' 'node_modules/' '/*.log' '`;' 'export function a() {}' 'export function b() {}' '/**' ' * Writes the files.' ' */' > "$d/glob-base.ts"
   printf '%s\n' 'export const gitignore = `' 'node_modules/' '/*.log' '`;' 'export function a() {}' '/* new real comment */' 'export function b() {}' '/**' ' * Writes the files.' ' */' > "$d/glob-added.ts"
   eq "$(num "$d/glob-base.ts") $(num "$d/glob-added.ts")" "3 4" "a /*-glob line opens no block, so a real comment added after it raises the count"
-  printf '/*tight*/ const x = 1;\n/*.log\n' > "$d/tight.ts"
-  eq "$(num "$d/tight.ts")" 1 "a comment closed on its own line counts without a space after the opener, a glob does not"
+  printf '/*tight*/ const x = 1;\n' > "$d/tight.ts"
+  eq "$(num "$d/tight.ts")" 1 "a comment closed on its own line counts without a space after the opener"
   printf '\xef\xbb\xbf// first-line comment\n' > "$d/bom.ts"
   eq "$(num "$d/bom.ts")" 1 "a byte order mark does not hide a comment on the first line"
   printf '%s\n' 'const r = /[/*]/.test(v);' 'const o = {a: 1} / 2;' "const s = '// not a comment';" '// real comment' > "$d/midline.ts"
@@ -229,7 +229,7 @@ counter_fixtures() {
   printf '// one\r\n/* two\r\n * three\r\n */\r\n' > "$d/crlf.ts"
   eq "$(num "$d/crlf.ts")" 4 "CRLF line endings read the same"
   printf '%s\n' '/* never closed' ' still comment' > "$d/open.ts"
-  eq "$(num "$d/open.ts")" 1 "an unclosed block opens nothing, so only its first line counts and nothing after it is swallowed"
+  eq "$(fail_naming "$d/open.ts")" "1 1" "an unclosed block is a syntax error: the counter fails and names the file"
 
   printf '%s\n' '# pragmatism matters' '# shellcheck sourced from here' '# shellcheck disable=SC2086' '# shellcheck source=/dev/null' '# shellcheck shell=bash' > "$d/dir.sh"
   eq "$(num "$d/dir.sh")" 2 "shell: only the exact shellcheck disable=, source= and shell= forms are exempt"
@@ -240,6 +240,51 @@ counter_fixtures() {
 
   printf '%s\n' '// one' > "$d/types.d.ts"
   eq "$(num "$d/types.d.ts")" 1 "a declaration file is counted like any other"
+
+  printf '%s\n' 'const x = 1; /* opens after code' 'an unstarred body line' '*/' > "$d/after-a.ts"
+  printf '%s\n' 'const x = 1; /* opens after code' 'an unstarred body line' 'a new body line' '*/' > "$d/after-b.ts"
+  eq "$(num "$d/after-a.ts") $(num "$d/after-b.ts")" "2 3" "a block that opens after code counts its unstarred body lines, so one added inside it is seen"
+  printf '%s\n' '/*Copyright 2026' 'one body line' '*/' > "$d/tight-a.ts"
+  printf '%s\n' '/*Copyright 2026' 'one body line' 'two body lines' '*/' > "$d/tight-b.ts"
+  printf '%s\n' '/*eslint-env node' 'one body line' '*/' > "$d/tight-c.ts"
+  eq "$(num "$d/tight-a.ts") $(num "$d/tight-b.ts") $(num "$d/tight-c.ts")" "3 4 3" "a block opened with no space after /*, closed on a later line, counts every line, so a body line added inside it is seen"
+  printf '%s\n' 'const t = `' '/* data' 'more data' '*/' '`;' > "$d/data-a.ts"
+  printf '%s\n' 'const t = `' '/* data' '`;' > "$d/data-b.ts"
+  eq "$(num "$d/data-a.ts") $(num "$d/data-b.ts")" "0 0" "template literal data that looks like a block counts nothing, so deleting a data line leaves no slack for a real comment"
+  printf '%s\n' '<p>// shown as text</p>;' > "$d/jsx-text.tsx"
+  printf '%s\n' 'const el = (' '  <p>' '    // shown as text' '  </p>' ');' > "$d/jsx-text-b.tsx"
+  eq "$(num "$d/jsx-text.tsx") $(num "$d/jsx-text-b.tsx")" "0 0" "JSX text that starts with // is text, not a comment"
+  printf '%s\n' 'const x = ;' > "$d/syntax.ts"
+  eq "$(fail_naming "$d/syntax.ts")" "1 1" "a JS or TS file that will not parse fails and names the file"
+  printf '%s\n' 'const el = (' '  <div>' '    { /* spaced */ }' '    {  // spaced line' '    }' '  </div>' ');' > "$d/jsx-space.tsx"
+  eq "$(num "$d/jsx-space.tsx")" 2 "a JSX comment with whitespace after the brace is a comment line"
+  printf 'const a = 1;\xe2\x80\xa8// first\xe2\x80\xa8// second\xe2\x80\xa8' > "$d/sep.ts"
+  printf 'const a = 1;\xe2\x80\xa9// first\xe2\x80\xa9' > "$d/sep2.ts"
+  eq "$(num "$d/sep.ts") $(num "$d/sep2.ts")" "2 1" "U+2028 and U+2029 end a line like a newline"
+  printf '%s\n' 'import { a } from "./a.js";' '// real comment' 'export const b = a;' > "$d/esm.js"
+  eq "$(num "$d/esm.js")" 1 "a .js file written as an ES module is read"
+  printf '%s\n' 'const s = "\xff";' > "$d/bad-utf8.ts"
+  printf 'const s = "\xff";\n' > "$d/bad-utf8.ts"
+  eq "$(fail_naming "$d/bad-utf8.ts")" "1 1" "a file that is not valid UTF-8 fails and names the file"
+  printf '%s\n' '<!-- legacy' 'let x = 1;' > "$d/legacy.js"
+  eq "$(fail_naming "$d/legacy.js")" "1 1" "a script TypeScript cannot read, such as one with an HTML-like comment, fails and names the file"
+  printf '%s\n' 'function f() {' '  { /* trailing */ let x = 1; }' '}' > "$d/block.js"
+  eq "$(num "$d/block.js")" 0 "a comment after code inside a plain block brace is not a JSX comment line"
+  printf '%s\n' 'const x = 1; const x = 2;' > "$d/dup.js"
+  printf '%s\n' '// one' 'const x = 1; const x = 2;' > "$d/dup.jsx"
+  eq "$(num "$d/dup.js") $(num "$d/dup.jsx")" "0 1" "the counter reads comments only: a duplicate declaration is the linter's to reject, not the counter's"
+  printf '%s\n' 'const el = (' '  <p>/* shown' '  as text */</p>' ');' > "$d/jsx-text-block.jsx"
+  eq "$(num "$d/jsx-text-block.jsx")" 0 "JSX text that looks like a block comment is text, not a comment"
+  printf '%s\n' 'const el = (' '  <div>' '    { /* a comment */ value }' '  </div>' ');' > "$d/jsx-value.jsx"
+  eq "$(num "$d/jsx-value.jsx")" 1 "a JSX expression that starts a line with a comment before its value is a comment line"
+  COMMENT_COUNT_NODE="$d/no-such-node" bash "$COUNT" "$d/types.d.ts" > "$d/out" 2> "$d/err"
+  rc=$?
+  eq "$rc $(grep -c node "$d/err") $(wc -c < "$d/out" | tr -d ' ')" "1 1 0" "a missing node fails with a message and counts nothing"
+  mkdir -p "$d/bare/bin"
+  cp "$REPO/bin/comment-count.sh" "$REPO/bin/comment-count.py" "$REPO/bin/comment-count-js.mjs" "$d/bare/bin/"
+  bash "$d/bare/bin/comment-count.sh" "$d/types.d.ts" > "$d/out" 2> "$d/err"
+  rc=$?
+  eq "$rc $(grep -c 'npm ci' "$d/err") $(wc -c < "$d/out" | tr -d ' ')" "1 1 0" "a missing typescript module fails with a message that says npm ci and counts nothing"
 
   eq "$(bash "$COUNT" "$d/missing.sh" >/dev/null 2>&1; echo $?)" 1 "a file that does not exist is an error, not a zero"
   if not_root; then
@@ -430,6 +475,40 @@ failing_tool_fixtures() {
   fi
 }
 
+lint_is_the_grammar_judge_fixture() {
+  local d lint shape name rest text want out wrong=""
+  lint="$REPO/node_modules/.bin/oxlint"
+  [ -x "$lint" ] || { bad "oxlint is installed (npm ci)"; return; }
+  d=$(mktemp -d)
+  for shape in \
+    'dup.js|const x = 1; const x = 2;|has already been declared' \
+    'dup.jsx|const x = 1; const x = 2;|has already been declared' \
+    'dup.mjs|const x = 1; const x = 2;|has already been declared' \
+    'typed.js|const a: number = 1;|Missing initializer in const declaration'; do
+    name=${shape%%|*}; rest=${shape#*|}; text=${rest%%|*}; want=${rest#*|}
+    printf '%s\n' "$text" > "$d/$name"
+    out=$(cd "$d" && "$lint" -A all "$name" 2>&1)
+    case "$out" in *"$want"*) ;; *) wrong="$wrong $name" ;; esac
+  done
+  eq "$wrong" "" "oxlint reports a duplicate declaration in .js, .jsx and .mjs and TypeScript syntax in .js by name, the grammar the counter leaves to it"
+  rm -rf "$d"
+}
+
+lint_coverage_fixture() {
+  local lint args tracked linted missing
+  lint="$REPO/node_modules/.bin/oxlint"
+  [ -x "$lint" ] || { bad "oxlint is installed (npm ci)"; return; }
+  args=$(node -e 'const w = require(process.argv[1]).scripts.lint.split(/\s+/); process.stdout.write(w.slice(w.indexOf("oxlint") + 1).join("\n"))' "$REPO/package.json" 2>/dev/null) || { bad "read the lint script from package.json"; return; }
+  tracked=$(git -C "$REPO" ls-files '*.js' '*.mjs' '*.cjs' '*.jsx' '*.ts' '*.mts' '*.cts' '*.tsx') || { bad "list the tracked JS and TS files"; return; }
+  [ -n "$tracked" ] || { bad "the repo tracks JS or TS files"; return; }
+  linted=$(cd "$REPO" && "$lint" --debug=files $args 2>/dev/null) || { bad "oxlint listed the files the lint script selects"; return; }
+  [ -n "$linted" ] || { bad "oxlint listed at least one file"; return; }
+  tracked=$(printf '%s\n' "$tracked" | sort) || { bad "sort the tracked files"; return; }
+  linted=$(printf '%s\n' "$linted" | sort) || { bad "sort the linted files"; return; }
+  missing=$(comm -23 <(printf '%s\n' "$tracked") <(printf '%s\n' "$linted")) || { bad "compare the tracked and linted files"; return; }
+  eq "$(printf '%s' "$missing" | tr '\n' ' ')" "" "oxlint, run as the lint script runs it, selects every tracked JS and TS file"
+}
+
 counter_exit_fixtures() {
   local d
   d=$(mktemp -d)
@@ -480,6 +559,8 @@ ratchet() {
 
 if [ -z "${COMMENT_RATCHET_INNER:-}" ]; then
   counter_fixtures
+  lint_coverage_fixture
+  lint_is_the_grammar_judge_fixture
   enumeration_fixtures
   ratchet_fixtures
   failing_tool_fixtures

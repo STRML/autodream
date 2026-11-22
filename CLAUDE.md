@@ -35,6 +35,7 @@ AUTODREAM_FORCE=1 ~/.claude/autodream/run.sh 2026-05-29     # rebuild despite a 
 ## Test it
 
 ```bash
+npm ci                                                   # once, node 20+: the ratchet and the lint need typescript and oxlint
 TMPDIR=/tmp/adp1 /bin/bash tests/run-all.sh              # the whole suite, one shard
 TMPDIR=/tmp/adp1 /bin/bash tests/run-parallel.sh 4       # four shards on this machine
 RUNALL_SHARD=i/n RUNALL_LIST=1 bash tests/run-all.sh     # list what a shard would run
