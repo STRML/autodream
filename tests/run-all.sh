@@ -4618,6 +4618,22 @@ test_report_scripts_a_confined_worker_cannot_write_the_allowlist_or_a_listed_scr
   assert_grep "$(fdir "$root")/report-good.md" 'good ran' "and the entry ran"
   rm -rf "$root"
 }
+test_report_scripts_a_confined_omp_worker_cannot_write_the_allowlist_or_a_listed_script(){
+  echo "# report scripts: with omp's write profile an omp worker is confined too, and the residual on this host's engines is gone"
+  local root; root=$(setup_env); mk_omp_session "$root" aaaa >/dev/null; rs_forge_setup "$root"
+  FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_PATHS="$RS_CONF $RS_SCRIPT $RS_DEP" MOCK_FORGE_PAYLOAD='echo FORGED-RAN' AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+  assert_grep "$RS_CONF" 'FORGED-RAN' "unconfined, an omp worker rewrites the allowlist"
+  assert_grep "$RS_DEP" 'FORGED-RAN' "and a file a listed script sources"
+  rm -rf "$root"
+  if ! l1_confine_real; then echo "  skip - no working sandbox on this host: the omp refusals below are untested here"; return 0; fi
+  root=$(setup_env); mk_omp_session "$root" aaaa >/dev/null; rs_forge_setup "$root"
+  FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_PATHS="$RS_CONF $RS_SCRIPT $RS_DEP" MOCK_FORGE_PAYLOAD='echo FORGED-RAN' AUTODREAM_L1_CONFINE=1 AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined_omp: yes$' "run-stats reads omp confined"
+  assert_eq "$(cat "$RS_CONF")" "good $RS_SCRIPT" "confined, the allowlist is byte for byte what the operator wrote"
+  assert_nogrep "$RS_SCRIPT" 'FORGED-RAN' "the script it lists is unchanged"
+  assert_nogrep "$RS_DEP" 'FORGED-RAN' "and so is the file that script sources"
+  rm -rf "$root"
+}
 test_report_scripts_a_collector_changed_after_the_run_started_is_not_executed(){
   echo "# report scripts: the collector is hashed before L1 and checked again, so a worker that rewrites it gets nothing run"
   local root; root=$(setup_env); mk_session "$root" sess1
@@ -12108,6 +12124,7 @@ _run test_report_scripts_a_worker_that_rewrites_a_collected_report_file_is_repla
 _run test_report_scripts_a_file_that_cannot_be_hashed_after_l1_is_unavailable_not_unchanged
 _run test_report_scripts_untouched_files_keep_their_rows_through_l1
 _run test_report_scripts_a_confined_worker_cannot_write_the_allowlist_or_a_listed_script
+_run test_report_scripts_a_confined_omp_worker_cannot_write_the_allowlist_or_a_listed_script
 _run test_report_scripts_a_collector_changed_after_the_run_started_is_not_executed
 _run test_report_scripts_earlier_files_that_cannot_be_cleared_stop_the_run
 _run test_report_scripts_prompt_names_the_index_by_exact_path
