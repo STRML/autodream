@@ -3233,12 +3233,14 @@ test_l1_staging_failure_is_a_worker_failure_with_evidence(){
   AUTODREAM_L1_ROUNDS=1 run_dream "$root"
   chmod 700 "$root/autodream/staging" 2>/dev/null
   assert_grep "$(fdir "$root")/$h.json.err" 'could not make the staging directory' "the .err says the staging directory could not be made"
-  assert_grep "$(fdir "$root")/$h.json" 'worker exited without findings JSON after 1 rounds' "and the session is stubbed like any failed worker"
+  assert_no_file "$(fdir "$root")/$h.json" "and the session is not stubbed: a stub would fill its slot and let a report publish over work never done"
+  assert_no_file "$root/dreams/$DATE.md" "so the date is deferred, not reported"
+  assert_grep "$(fdir "$root")/l1-netdown.txt" " staging\$" "and the ledger says the runner could not set the worker up"
   rm -rf "$root"
 }
 
 test_l1_confine_names_the_engine_without_a_write_profile(){
-  echo "# L1 confinement: an engine whose adapter declares no write profile is reported unconfined"
+  echo "# L1 confinement: the write lists of the claude and omp adapters, and an unknown verb exits 2"
   local out
   # CLAUDE_CONFIG_DIR and the extras are the caller's, so the list is read with both unset.
   out=$(env -u CLAUDE_CONFIG_DIR -u AUTODREAM_L1_WRITES_EXTRA -u AUTODREAM_WORK_BUCKET bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1); local rc=$?
@@ -3260,8 +3262,15 @@ test_l1_confine_names_the_engine_without_a_write_profile(){
   assert_eq "$rc" "3" "a HOME that holds a newline is refused, not split"
   out=$(env -u CLAUDE_CONFIG_DIR AUTODREAM_L1_WRITES_EXTRA="$(printf '/ok\n/Users')" bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1); rc=$?
   assert_eq "$rc" "3" "and so is an extra entry that does"
-  bash "$REPO/adapters/omp/adapter.sh" l1-writes >/dev/null 2>&1; rc=$?
-  assert_eq "$rc" "2" "the omp adapter declares no write profile, so its workers stay unconfined and run-stats says so"
+  out=$(env -u AUTODREAM_L1_WRITES_EXTRA bash "$REPO/adapters/omp/adapter.sh" l1-writes 2>&1); rc=$?
+  assert_eq "$rc" "0" "the omp adapter answers l1-writes"
+  assert_eq "$out" "" "and its default is deny: nothing beyond the staging directory until a measurement says otherwise"
+  out=$(AUTODREAM_L1_WRITES_EXTRA="/extra/one:/extra/two*" bash "$REPO/adapters/omp/adapter.sh" l1-writes 2>&1)
+  case "$out" in *"/extra/one"*"/extra/two*"*) ok "an operator's AUTODREAM_L1_WRITES_EXTRA entries reach it, a trailing * kept" ;; *) no "omp AUTODREAM_L1_WRITES_EXTRA entries (got: $out)" ;; esac
+  out=$(AUTODREAM_L1_WRITES_EXTRA="$(printf '/ok\n/Users')" bash "$REPO/adapters/omp/adapter.sh" l1-writes 2>&1); rc=$?
+  assert_eq "$rc" "3" "an extra entry that holds a newline is refused, not split"
+  bash "$REPO/adapters/omp/adapter.sh" no-such-verb >/dev/null 2>&1; rc=$?
+  assert_eq "$rc" "2" "a verb an adapter does not have exits 2, which is what run.sh reads as no write profile"
 }
 
 # A sandbox-exec stand-in that passes the probe and confines nothing else: it makes the probe's
@@ -3287,6 +3296,31 @@ test_l1_confine_setup_stops_before_l1_when_an_engine_prefix_cannot_be_built(){
     assert_grep "$root/run.out" 'FATAL:' "[$extra] and the log says so"
     rm -rf "$root"
   done
+}
+
+test_l1_worker_setup_failure_defers_the_date_and_follows_no_planted_link(){
+  echo "# L1 confinement: a state setup that fails every attempt defers the date, and a symlink the worker left is never followed"
+  local root; root=$(setup_env); mk_session "$root" s1
+  local h; h=$(hash_of "$root/projects/proj-a/s1.jsonl")
+  fake_sandbox "$root"
+  cp -R "$REPO/adapters" "$root/adapters"; ln -s "$REPO/bin" "$root/bin"
+  printf 'precious\n' > "$root/victim"
+  # A claude adapter with a state verb that passes the setup dry run (a stage named .setup-*) and fails every
+  # attempt after it, planting a symlink at the old stderr path inside the stage first.
+  sed 's|^  l2-argv) |  l1-stage-env) case "$1" in *.setup-*) exit 0 ;; esac; ln -sf "$VICTIM" "$1/stage-env.err" 2>/dev/null; echo "no state dir" >\&2; exit 1 ;;\n\n  l2-argv) |' \
+    "$REPO/adapters/claude/adapter.sh" > "$root/adapters/claude/adapter.sh"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/notify.log"\n' "$root" > "$root/autodream/notify.sh"; chmod +x "$root/autodream/notify.sh"
+  VICTIM="$root/victim" PATH="$root/shim-sb:$PATH" ADAPTERS_ROOT="$root/adapters" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec run_dream "$root"
+  assert_eq "$(cat "$root/victim")" "precious" "the file the planted link pointed at is untouched across the retry"
+  assert_no_file "$(fdir "$root")/$h.json" "the session is not stubbed"
+  assert_no_file "$root/dreams/$DATE.md" "and no report is written over it"
+  assert_grep "$(fdir "$root")/l1-netdown.txt" " staging\$" "the ledger names the failure"
+  assert_grep "$(fdir "$root")/$h.json.err" 'could not be prepared in the stage' "the .err names what failed"
+  assert_grep "$root/run.out" 'FAIL [(]runner setup failed; no stub' "the worker's FAIL line parses and names the cause (the cause text once sat in a case inside a command substitution, which bash 3.2 rejects)"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^fatal: .*could not set up L1 workers' "run-stats carries the cause: a setup failure heals nothing by waiting, so it is a fatal and not an outage deferral"
+  assert_grep "$root/notify.log" 'could not set up L1 workers' "a banner is posted, because with no findings JSON unassembled_dates would never name the date"
+  [ "$(cat "$root/run.exit")" != 0 ] && ok "the run exits non-zero, so the date is retried" || no "the run exited 0"
+  rm -rf "$root"
 }
 
 test_l1_confine_setup_stops_when_a_protected_directory_cannot_be_listed(){
@@ -3315,14 +3349,26 @@ test_l1_confined_stat_is_partial_when_an_engine_runs_unconfined(){
   root=$(setup_env); mk_session "$root" s1; mk_omp_session "$root" aaaa >/dev/null
   fake_sandbox "$root"
   PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec run_dream_omp "$root"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: yes$' "claude and omp both have a write profile: yes"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined_omp: yes$' "the per-engine line names omp"
+  rm -rf "$root"
+  # An engine whose adapter has no l1-writes verb is the case the stat exists for: a copy of the adapters
+  # with omp's verb renamed away, handed to the runner through ADAPTERS_ROOT.
+  root=$(setup_env); mk_session "$root" s1; mk_omp_session "$root" aaaa >/dev/null
+  fake_sandbox "$root"
+  cp -R "$REPO/adapters" "$root/adapters"; ln -s "$REPO/bin" "$root/bin"
+  sed 's/^  l1-writes)/  l1-writes-renamed)/' "$REPO/adapters/omp/adapter.sh" > "$root/adapters/omp/adapter.sh"
+  PATH="$root/shim-sb:$PATH" ADAPTERS_ROOT="$root/adapters" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec run_dream_omp "$root"
   assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: partial$' "claude confined and omp not: partial"
   assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined_omp: no$' "the per-engine line names omp"
   assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_reason: .*omp' "and the reason names the engine"
   rm -rf "$root"
   root=$(setup_env); mk_omp_session "$root" aaaa >/dev/null
   fake_sandbox "$root"
-  PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
-  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: no$' "omp alone: no, although the sandbox works"
+  cp -R "$REPO/adapters" "$root/adapters"; ln -s "$REPO/bin" "$root/bin"
+  sed 's/^  l1-writes)/  l1-writes-renamed)/' "$REPO/adapters/omp/adapter.sh" > "$root/adapters/omp/adapter.sh"
+  PATH="$root/shim-sb:$PATH" ADAPTERS_ROOT="$root/adapters" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: no$' "omp alone with no profile: no, although the sandbox works"
   rm -rf "$root"
 }
 
@@ -3350,6 +3396,80 @@ test_l1_answer_is_moved_aside_before_it_is_tested(){
   MOCK_MODE=l1_symlink_answer MOCK_SYMLINK_TARGET="$root/secret.json" AUTODREAM_L1_ROUNDS=1 run_dream "$root"
   assert_no_file "$(fdir "$root")/$h.json.stage" "the rejected symlink is not left in the findings dir"
   assert_eq "$(cat "$root/secret.json")" '{"session_path":"SECRET","findings":[]}' "and its target is untouched"
+  rm -rf "$root"
+}
+
+test_l1_confined_omp_worker_runs_on_a_throwaway_home(){
+  echo "# L1 confinement: a confined omp worker gets a HOME inside its stage; a claude worker keeps its own"
+  local root; root=$(setup_env); mk_omp_session "$root" aaaa >/dev/null
+  mkdir -p "$root/home/.omp/agent"; printf 'k: v\n' > "$root/home/.omp/agent/config.yml"
+  fake_sandbox "$root"
+  PATH="$root/shim-sb:$PATH" MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+  assert_grep "$root/cap/l1-home.txt" "/autodream/staging/run-[0-9]*/.*/omp-home\$" "the omp worker's HOME is inside its staging directory"
+  assert_nogrep "$root/cap/l1-home.txt" "^$root/home\$" "and not the real one"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" s1
+  PATH="$root/shim-sb:$PATH" MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_CONFINE=0 run_dream "$root"
+  assert_nogrep "$root/cap/l1-home.txt" "omp-home" "an unconfined run does not move HOME"
+  rm -rf "$root"
+  root=$(setup_env); mk_omp_session "$root" aaaa >/dev/null
+  MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+  assert_nogrep "$root/cap/l1-home.txt" "omp-home" "an omp worker the sandbox does not cover keeps its HOME too: no seeding for nothing"
+  rm -rf "$root"
+}
+
+test_l1_omp_state_setup_is_checked_before_any_worker(){
+  echo "# L1 confinement: a state setup that cannot work stops the run, and an OAuth-only model leaves omp unconfined and says so"
+  local root h
+  root=$(setup_env); h=$(hash_of "$(mk_omp_session "$root" aaaa)")
+  mkdir -p "$root/home/.omp/agent"; : > "$root/home/.omp/agent/agent.db"; chmod 000 "$root/home/.omp/agent/agent.db"
+  if [ ! -r "$root/home/.omp/agent/agent.db" ]; then
+    fake_sandbox "$root"
+    PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+    chmod 600 "$root/home/.omp/agent/agent.db"
+    assert_no_file "$root/dreams/$DATE.md" "a database that cannot be snapshotted stops the run before L1: no report"
+    assert_no_file "$(fdir "$root")/$h.json" "and no stub"
+    assert_grep "$(fdir "$root")/run-stats.txt" '^fatal: .*state directory cannot be prepared' "and run-stats says why"
+  else
+    chmod 600 "$root/home/.omp/agent/agent.db"; echo "  skip - this user can read a mode 000 file"
+  fi
+  rm -rf "$root"
+  root=$(setup_env); mk_omp_session "$root" aaaa >/dev/null
+  mkdir -p "$root/home/.omp/agent"
+  python3 - "$root/home/.omp/agent" <<'PY'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1] + "/agent.db")
+c.execute("CREATE TABLE auth_credentials (id INTEGER PRIMARY KEY, provider TEXT, credential_type TEXT, data TEXT, disabled_cause TEXT)")
+c.execute("INSERT INTO auth_credentials (provider, credential_type, data) VALUES ('omp','oauth','r')")
+c.commit()
+PY
+  fake_sandbox "$root"
+  PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+  assert_file "$root/dreams/$DATE.md" "an OAuth-only model does not stop the night: the report is written"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined_omp: no$' "omp is reported unconfined"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined_omp_reason: .*OAuth only' "with the reason"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: no$' "and the top-level line says so"
+  rm -rf "$root"
+}
+
+test_l1_setup_prepares_only_engines_with_work_left(){
+  echo "# L1 confinement: a retry whose findings are all cached does not prepare an engine nothing will run"
+  local root h o
+  root=$(setup_env); o=$(mk_omp_session "$root" aaaa); h=$(hash_of "$o")
+  mkdir -p "$root/home/.omp/agent"; : > "$root/home/.omp/agent/agent.db"; chmod 000 "$root/home/.omp/agent/agent.db"
+  mkdir -p "$(fdir "$root")"
+  printf '{"session_path":"x","findings":[]}\n' > "$(fdir "$root")/$h.json"; printf 'runner\n' > "$(fdir "$root")/$h.json.served"
+  if [ ! -r "$root/home/.omp/agent/agent.db" ]; then
+    fake_sandbox "$root"
+    PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+    chmod 600 "$root/home/.omp/agent/agent.db"
+    assert_file "$root/dreams/$DATE.md" "an unreadable omp database does not stop L2 over findings that already exist"
+    assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: n/a$' "and run-stats says no confinement was needed"
+    assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_reason: no L1 work this run' "with the reason"
+    assert_grep "$root/run.out" 'engines that may not start this run: .*omp' "and the log names every engine as unable to start unconfined if a findings file vanishes before dispatch"
+  else
+    chmod 600 "$root/home/.omp/agent/agent.db"; echo "  skip - this user can read a mode 000 file"
+  fi
   rm -rf "$root"
 }
 
@@ -4439,6 +4559,7 @@ _run test_l1_confine_names_the_engine_without_a_write_profile
 _run test_l1_confine_setup_stops_before_l1_when_an_engine_prefix_cannot_be_built
 _run test_l1_answer_is_moved_aside_before_it_is_tested
 _run test_l1_confine_setup_stops_when_a_protected_directory_cannot_be_listed
+_run test_l1_worker_setup_failure_defers_the_date_and_follows_no_planted_link
 _run test_run_lock_is_reclaimed_from_a_dead_holder
 _run test_killed_run_temps_are_swept_at_the_start_of_the_next_run
 _run test_self_audit_stats
@@ -6932,6 +7053,9 @@ _run test_builtin_slash_commands_are_not_skill_invocations
 _run test_omp_adapter_is_opt_in
 _run test_l1_precheck_probes_the_l1_provider
 _run test_l1_confined_stat_is_partial_when_an_engine_runs_unconfined
+_run test_l1_confined_omp_worker_runs_on_a_throwaway_home
+_run test_l1_omp_state_setup_is_checked_before_any_worker
+_run test_l1_setup_prepares_only_engines_with_work_left
 _run test_worker_failure_probe_names_the_l1_provider
 _run test_one_dead_provider_does_not_hold_back_the_others
 _run test_omp_session_is_linearized_for_the_worker

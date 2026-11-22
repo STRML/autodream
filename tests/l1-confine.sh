@@ -191,6 +191,251 @@ out=$(AUTODREAM_L1_WRITES_EXTRA=/caller-override AUTODREAM_DIR="$D/nightly" HOME
 has "$out" "/caller-override" "one the caller exported wins over the config"
 lacks "$out" "/config-only" "and the config's value is not used beside it"
 
+echo "# the manual check can aim at another engine's adapter"
+out=$(env -u AUTODREAM_L1_WRITES_EXTRA AUTODREAM_DIR="$D/nightly" HOME="$D/home" bash "$RC" --engine omp --writes 2>&1)
+lacks "$out" "claude" "omp's write list is not claude's"
+has "$out" "/config-only" "and the nightly's extra, which is not engine-specific, reaches it"
+out=$(AUTODREAM_L1_WRITES_EXTRA=/omp-extra AUTODREAM_DIR="$D/nightly" HOME="$D/home" bash "$RC" --engine omp --writes 2>&1)
+has "$out" "/omp-extra" "an extra entry reaches omp's list"
+env AUTODREAM_DIR="$D/nightly" HOME="$D/home" bash "$RC" --engine no-such-engine --writes >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "2" "an engine with no adapter is refused"
+
+
+echo "# omp l1-stage-env: a throwaway state dir inside the stage, seeded from what the worker only reads"
+OA="$REPO/adapters/omp/adapter.sh"
+RH="$D/omphome"; mkdir -p "$RH/.omp/agent" "$RH/.omp/natives" "$RH/Library" "$D/ostage"
+printf 'k: v\n' > "$RH/.omp/agent/config.yml"; printf 'y: 1\n' > "$RH/.omp/agent/config.yaml"; printf 'm: 1\n' > "$RH/.omp/agent/models.yml"; printf '{}\n' > "$RH/.omp/agent/mcp.json"
+printf 'secret' > "$RH/.omp/agent/sessions-not-seeded"; printf 'x' > "$RH/.omp/agent/extensions-not-seeded"
+# agent.db is a live WAL database with an api key, an OAuth credential and one committed row that sits only in
+# the log; the connection stays open while the verb runs, as a live omp would.
+python3 - "$RH/.omp/agent" <<'PY' &
+import sqlite3, sys, time
+d = sys.argv[1]
+c = sqlite3.connect(d + "/agent.db"); c.execute("PRAGMA journal_mode=WAL"); c.execute("PRAGMA wal_autocheckpoint=0")
+c.execute("CREATE TABLE auth_credentials (id INTEGER PRIMARY KEY, provider TEXT, credential_type TEXT, data TEXT, disabled_cause TEXT DEFAULT NULL)")
+c.execute("INSERT INTO auth_credentials (provider, credential_type, data) VALUES ('neuralwatt','api_key','k1')")
+c.execute("INSERT INTO auth_credentials (provider, credential_type, data) VALUES ('openai-codex','oauth','refresh-1')")
+c.commit()
+c.execute("INSERT INTO auth_credentials (provider, credential_type, data) VALUES ('deepseek','api_key','only-in-the-log')"); c.commit()
+m = sqlite3.connect(d + "/models.db"); m.execute("CREATE TABLE m (x)"); m.execute("INSERT INTO m VALUES (1)"); m.commit(); m.close()
+open(d + "/ready", "w").close()
+time.sleep(30)
+PY
+holder=$!
+for _ in $(seq 1 50); do [ -e "$RH/.omp/agent/ready" ] && break; sleep 0.1; done
+out=$(env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" 2>"$D/err"); rc=$?
+assert_eq "$rc" "0" "the verb prepares the stage"
+assert_eq "$out" "HOME=$D/ostage/omp-home
+PI_CONFIG_DIR=.omp
+PI_CODING_AGENT_DIR=$D/ostage/omp-home/.omp/agent" "and names the throwaway HOME and pins both directory overrides to it"
+SA="$D/ostage/omp-home/.omp/agent"
+assert_eq "$(cat "$SA/config.yml" 2>/dev/null)" "k: v" "settings are seeded"
+assert_eq "$(cat "$SA/config.yaml" 2>/dev/null)" "y: 1" "and so is the .yaml spelling omp also reads"
+[ ! -e "$SA/sessions-not-seeded" ] && [ ! -e "$SA/extensions-not-seeded" ] && ok "and nothing else of the agent dir is" || no "the agent dir was copied wholesale"
+assert_eq "$(python3 -c "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute('select group_concat(provider) from auth_credentials order by id').fetchone()[0])" "$SA/agent.db")" "neuralwatt,deepseek" "the database copy is one consistent snapshot, the committed row that only the log holds included"
+assert_eq "$(python3 -c "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute('select count(*) from m').fetchone()[0])" "$SA/models.db")" "1" "so is the model catalogue"
+assert_eq "$(python3 -c "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute(\"select count(*) from auth_credentials where credential_type='oauth'\").fetchone()[0])" "$SA/agent.db")" "0" "the OAuth credential is left out of the worker's copy: a refresh there would rotate a token that dies with the stage"
+assert_eq "$(python3 -c "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute(\"select count(*) from auth_credentials where credential_type='oauth'\").fetchone()[0])" "$RH/.omp/agent/agent.db")" "1" "and the real database still holds it"
+kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+[ -L "$D/ostage/omp-home/Library" ] && [ -L "$D/ostage/omp-home/.omp/natives" ] && ok "Library and the native binaries are linked back" || no "Library or natives link missing"
+printf 'stale' > "$SA/left-by-the-last-attempt"
+env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>&1
+[ ! -e "$SA/left-by-the-last-attempt" ] && ok "a retry reseeds from a clean tree" || no "a retry kept the last attempt's files"
+env HOME="$RH" bash "$OA" l1-stage-env "$D/no-such-stage" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "1" "a stage that does not exist is a failure, not the no-such-verb exit"
+env HOME="$RH" bash "$REPO/adapters/claude/adapter.sh" l1-stage-env "$D/ostage" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "2" "claude has no such verb (exit 2), so its workers keep their own state"
+
+[ ! -e "$SA/mcp.json" ] && ok "mcp.json is not seeded: the worker starts no MCP server" || no "mcp.json was seeded"
+printf 'KEY=agent\n' > "$RH/.omp/agent/.env"; printf 'KEY=root\n' > "$RH/.omp/.env"; printf 'KEY=home\n' > "$RH/.env"
+env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>&1
+assert_eq "$(cat "$D/ostage/omp-home/.omp/agent/.env" 2>/dev/null)" "KEY=agent" "the agent dir's .env is seeded: a provider key may live there"
+assert_eq "$(cat "$D/ostage/omp-home/.omp/.env" 2>/dev/null)" "KEY=root" "and the config root's"
+assert_eq "$(cat "$D/ostage/omp-home/.env" 2>/dev/null)" "KEY=home" "and HOME's"
+# A worker's leftovers in the stage cannot redirect the verb: it builds beside the stage and renames in.
+ln -sfn "$D/realdir" "$D/ostage/omp-home"
+env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "0" "a symlink left where omp-home goes is removed, not followed"
+[ ! -L "$D/ostage/omp-home" ] && [ -d "$D/ostage/omp-home/.omp/agent" ] && ok "and the state directory is a real directory again" || no "omp-home is still a link"
+[ -z "$(ls "$D/realdir" | grep -v onefile)" ] && ok "and nothing was written through the link" || no "something was written through the link: $(ls "$D/realdir")"
+[ -z "$(ls "$D" | grep '^seed\.')" ] && ok "and no build directory is left behind" || no "a seed.* build directory was left beside the stage"
+has "$(cat "$REPO/adapters/omp/l1-no-advisor.yml")" 'backend: "off"' "the L1 overlay turns the memory backend off: no retain or consolidate into a store later sessions recall from"
+
+echo "# omp l1-stage-env: the overrides omp honors, and what it cannot model"
+mkdir -p "$D/otherhome/agentdir"; printf 'other: 1\n' > "$D/otherhome/agentdir/config.yml"
+out=$(env HOME="$RH" PI_CODING_AGENT_DIR="$D/otherhome/agentdir" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" 2>/dev/null)
+assert_eq "$(cat "$D/ostage/omp-home/.omp/agent/config.yml" 2>/dev/null)" "other: 1" "an inherited PI_CODING_AGENT_DIR is the source that is seeded"
+has "$out" "PI_CODING_AGENT_DIR=$D/ostage/omp-home/.omp/agent" "and is replaced by the stage's, so the worker cannot be pointed at the real tree"
+mkdir -p "$RH/.omp-alt/agent"; printf 'alt: 1\n' > "$RH/.omp-alt/agent/config.yml"
+out=$(env HOME="$RH" PI_CONFIG_DIR=.omp-alt bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" 2>/dev/null)
+assert_eq "$(cat "$D/ostage/omp-home/.omp-alt/agent/config.yml" 2>/dev/null)" "alt: 1" "a renamed config directory is seeded under the same name"
+has "$out" "PI_CONFIG_DIR=.omp-alt" "and kept"
+env HOME="$RH" PI_CONFIG_DIR=/etc bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>"$D/err"; rc=$?
+assert_eq "$rc" "1" "a PI_CONFIG_DIR that is not a plain name under HOME is refused"
+env HOME="$RH" PI_PROFILE=work bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "1" "the legacy PI_PROFILE is refused too"
+mkdir -p "$D/xdg/omp"
+for xv in XDG_DATA_HOME XDG_CACHE_HOME; do
+  env HOME="$RH" "$xv=$D/xdg" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>&1; rc=$?
+  assert_eq "$rc" "1" "$xv with an omp tree under it is refused"
+done
+for ov in OMP_WORKTREE_DIR OMP_JUDGMENT_CACHE_DB PI_NATIVES_DIR; do
+  env HOME="$RH" "$ov=/elsewhere" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>&1; rc=$?
+  assert_eq "$rc" "1" "$ov (a path override outside the seeded tree) is refused"
+done
+env HOME="$RH" OMP_PROFILE=work bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>"$D/err"; rc=$?
+assert_eq "$rc" "1" "a named profile is refused: its state is somewhere this seeding does not model"
+has "$(cat "$D/err")" "profile" "and the reason says so"
+mkdir -p "$D/lockedhome/.omp/agent"; chmod 000 "$D/lockedhome/.omp/agent"
+if [ ! -r "$D/lockedhome/.omp/agent" ]; then
+  env HOME="$D/lockedhome" bash "$OA" l1-stage-env "$D/ostage" >/dev/null 2>"$D/err"; rc=$?
+  assert_eq "$rc" "1" "an agent directory that exists but cannot be read is a failure, not an empty one"
+  has "$(cat "$D/err")" "cannot read" "with the reason"
+else
+  printf '  skip - this user can read a mode 000 directory\n'
+fi
+chmod 700 "$D/lockedhome/.omp/agent"
+mkdir -p "$D/freshhome"
+out=$(env HOME="$D/freshhome" bash "$OA" l1-stage-env "$D/ostage" 2>/dev/null); rc=$?
+assert_eq "$rc" "0" "a host with no omp state yet seeds nothing and succeeds"
+mkdir -p "$D/xdg/omp"
+env HOME="$RH" XDG_STATE_HOME="$D/xdg" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>"$D/err"; rc=$?
+assert_eq "$rc" "1" "an XDG directory that holds an omp tree is refused, on macOS as on Linux: omp keeps part of its state there"
+has "$(cat "$D/err")" "$D/xdg/omp" "and named"
+mkdir -p "$D/xdg-empty"
+env HOME="$RH" XDG_STATE_HOME="$D/xdg-empty" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "0" "an XDG variable with no omp tree under it changes nothing, as in omp"
+mkdir -p "$D/blocked/home/.omp"; chmod 000 "$D/blocked"
+if [ ! -x "$D/blocked" ]; then
+  env HOME="$D/blocked/home" bash "$OA" l1-stage-env "$D/ostage" >/dev/null 2>"$D/err"; rc=$?
+  assert_eq "$rc" "1" "an agent dir under a directory this user cannot search is not read as absent"
+  has "$(cat "$D/err")" "cannot tell whether" "with the reason"
+else
+  printf '  skip - this user can search a mode 000 directory\n'
+fi
+chmod 700 "$D/blocked"
+
+echo "# omp l1-stage-env: a path that cannot be reached is not an absent one"
+mkdir -p "$D/trihome/.omp/agent"
+ln -s "$D/nowhere/agent.db" "$D/trihome/.omp/agent/agent.db"
+env HOME="$D/trihome" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>"$D/err"; rc=$?
+assert_eq "$rc" "1" "an agent.db that is a dangling symlink refuses: a database that cannot be snapshotted is not an absent one"
+has "$(cat "$D/err")" "cannot tell whether" "with the reason"
+rm -f "$D/trihome/.omp/agent/agent.db"; ln -s "$D/nowhere/.env" "$D/trihome/.omp/agent/.env"
+env HOME="$D/trihome" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "1" "so does a .env that is one"
+rm -f "$D/trihome/.omp/agent/.env"; ln -s "$D/nowhere/xdg-omp" "$D/xdg-dangling-omp-parent" 2>/dev/null
+mkdir -p "$D/xdg-bad"; ln -s "$D/nowhere/x" "$D/xdg-bad/omp"
+env HOME="$D/trihome" XDG_STATE_HOME="$D/xdg-bad" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "1" "an XDG omp entry that cannot be followed refuses: omp may keep state there"
+
+echo "# omp l1-stage-env: a model whose only credential is OAuth"
+python3 - "$RH/.omp/agent" <<'PY'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1] + "/agent.db")
+c.execute("INSERT INTO auth_credentials (provider, credential_type, data) VALUES ('oauth-only-prov','oauth','r')")
+c.commit()
+PY
+env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "oauth-only-prov/some-model" >/dev/null 2>"$D/err"; rc=$?
+assert_eq "$rc" "4" "an OAuth-only provider exits 4, so the runner leaves that engine unconfined and says why"
+has "$(cat "$D/err")" "OAuth only" "with the reason"
+env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/some-model" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "0" "a provider with an api key seeds"
+env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "no-rows-prov/some-model" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "0" "so does one with no rows at all (its key comes from the environment)"
+env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "fuzzy-selector" >/dev/null 2>"$D/err"; rc=$?
+assert_eq "$rc" "4" "a selector with no provider (omp resolves it) is refused while any OAuth credential exists: it may be the one used"
+has "$(cat "$D/err")" "names no provider" "with the reason"
+env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "4" "and so is an empty model, which is how setup asks when a source resolved none"
+env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "0" "a call with no model argument (a worker's) decides nothing about the provider and still leaves the OAuth rows out"
+assert_eq "$(python3 -c "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute(\"select count(*) from auth_credentials where credential_type='oauth'\").fetchone()[0])" "$D/ostage/omp-home/.omp/agent/agent.db")" "0" "the worker copy holds no OAuth row"
+env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "OAUTH-ONLY-PROV/x" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "4" "a provider is compared without regard to case: the selector's spelling is not the credential's"
+mkdir -p "$D/apikeyhome/.omp/agent"
+python3 - "$D/apikeyhome/.omp/agent" <<'PY'
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1] + "/agent.db")
+c.execute("CREATE TABLE auth_credentials (id INTEGER PRIMARY KEY, provider TEXT, credential_type TEXT, data TEXT, disabled_cause TEXT DEFAULT NULL)")
+c.execute("INSERT INTO auth_credentials (provider, credential_type, data) VALUES ('neuralwatt','api_key','k')")
+c.execute("INSERT INTO auth_credentials (provider, credential_type, data, disabled_cause) VALUES ('old','oauth','r','revoked')")
+c.commit()
+PY
+env HOME="$D/apikeyhome" bash "$OA" l1-stage-env "$D/ostage" "fuzzy-selector" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "0" "a host with no live OAuth credential has nothing to lose: a bare selector passes"
+
+echo "# the real check's store comparison: a check that cannot look is not a pass, and a deletion is a change"
+# shellcheck source=/dev/null
+. "$HERE/lib-store-unchanged.sh"
+mkdir -p "$D/store/bank" "$D/store-target"; printf a > "$D/store/bank/mnemopi.db"; printf n > "$D/store-target/linked.db"
+ln -s "$D/store-target" "$D/store/via-link"
+msg=$(store_snapshot "$D/store" "$D/snap.before"); rc=$?
+assert_eq "$rc" "0" "a store snapshots"
+store_snapshot "$D/store" "$D/snap.same" >/dev/null; msg=$(store_unchanged "$D/snap.before" "$D/snap.same"); rc=$?
+assert_eq "$rc" "0" "an untouched store compares equal"
+sleep 1; printf b > "$D/store/bank/mnemopi.db"
+store_snapshot "$D/store" "$D/snap.mod" >/dev/null; msg=$(store_unchanged "$D/snap.before" "$D/snap.mod"); rc=$?
+assert_eq "$rc" "1" "a modified file is a change"
+has "$msg" "mnemopi.db" "and named"
+printf a > "$D/store/bank/mnemopi.db"
+store_snapshot "$D/store" "$D/snap.b2" >/dev/null
+rm -f "$D/store/bank/mnemopi.db"
+store_snapshot "$D/store" "$D/snap.del" >/dev/null; msg=$(store_unchanged "$D/snap.b2" "$D/snap.del"); rc=$?
+assert_eq "$rc" "1" "a deleted file is a change (a list of files newer than a marker cannot see it)"
+printf a > "$D/store/bank/mnemopi.db"; store_snapshot "$D/store" "$D/snap.b3" >/dev/null
+sleep 1; printf changed > "$D/store-target/linked.db"
+store_snapshot "$D/store" "$D/snap.link" >/dev/null; msg=$(store_unchanged "$D/snap.b3" "$D/snap.link"); rc=$?
+assert_eq "$rc" "1" "a file reached only through a symlinked directory below the root is watched"
+# The decision as the real check makes it.
+store_snapshot "$D/store" "$D/v.before" >/dev/null; vb=$?
+msg=$(store_verdict "$D/store" "$vb" "" "$D/v.before" "$D/v.after"); rc=$?
+assert_eq "$rc" "0" "verdict: an untouched store passes"
+mkdir -p "$D/vanish/bank"; printf a > "$D/vanish/bank/db"
+store_snapshot "$D/vanish" "$D/vv.before" >/dev/null; vb=$?
+rm -rf "$D/vanish"
+msg=$(store_verdict "$D/vanish" "$vb" "" "$D/vv.before" "$D/vv.after"); rc=$?
+assert_eq "$rc" "1" "verdict: a store that was there before the call and is gone after it fails, it does not skip"
+has "$msg" "could not be scanned after" "and says so"
+msg=$(store_verdict "$D/none-at-all" 2 "no store at x, nothing to compare" "$D/vn.before" "$D/vn.after"); rc=$?
+assert_eq "$rc" "2" "verdict: a store that was absent before the call skips"
+msg=$(store_verdict "$D/store" 1 "could not scan" "$D/vn.before" "$D/vn.after"); rc=$?
+assert_eq "$rc" "1" "verdict: a store that could not be scanned before the call fails"
+msg=$(store_snapshot "$D/no-such-store" "$D/snap.none"); rc=$?
+assert_eq "$rc" "2" "a store that does not exist is a skip, not a pass"
+has "$msg" "nothing to compare" "and says so"
+ln -s "$D/nowhere/at/all" "$D/dangling-store"
+msg=$(store_snapshot "$D/dangling-store" "$D/snap.dang"); rc=$?
+assert_eq "$rc" "1" "a store that is a dangling symlink cannot be told from an absent one, so it fails"
+mkdir -p "$D/lockedstore"; chmod 000 "$D/lockedstore"
+if [ ! -r "$D/lockedstore" ]; then
+  msg=$(store_snapshot "$D/lockedstore" "$D/snap.lock"); rc=$?
+  assert_eq "$rc" "1" "a store that cannot be scanned fails"
+  has "$msg" "could not scan" "and says why"
+  mkdir -p "$D/lockedparent/store"; chmod 000 "$D/lockedparent"
+  msg=$(store_snapshot "$D/lockedparent/store" "$D/snap.lockp"); rc=$?
+  assert_eq "$rc" "1" "a store under a directory this user cannot search is not read as absent"
+  chmod 700 "$D/lockedparent"
+else
+  printf '  skip - this user can read a mode 000 directory\n'
+fi
+chmod 700 "$D/lockedstore"
+
+echo "# path_state: present, absent, and cannot tell"
+# shellcheck source=/dev/null
+. "$REPO/bin/lib-path-state.sh"
+: > "$D/ps-file"; path_state "$D/ps-file"; assert_eq "$?" "0" "a file is present"
+path_state "$D/ps-none"; assert_eq "$?" "1" "a missing path under a searchable directory is absent"
+ln -s "$D/nowhere/x" "$D/ps-dangling"; path_state "$D/ps-dangling"; assert_eq "$?" "2" "a dangling symlink cannot be told from absent"
+mkdir -p "$D/ps-locked/inner"; : > "$D/ps-locked/inner/f"; ln -s "$D/ps-locked/inner/f" "$D/ps-link-into-locked"; chmod 000 "$D/ps-locked"
+if [ ! -x "$D/ps-locked" ]; then
+  path_state "$D/ps-link-into-locked"; assert_eq "$?" "2" "a symlink into an unsearchable directory cannot be told from absent"
+  path_state "$D/ps-locked/inner/f"; assert_eq "$?" "2" "a path under an unsearchable directory cannot be told from absent"
+else
+  printf '  skip - this user can search a mode 000 directory\n'
+fi
+chmod 700 "$D/ps-locked"
+
 echo "# real confinement (only where a sandbox works here)"
 real=$(env TMPDIR="$D" bash "$H" probe)
 if [ "$(verdict "$real")" != "yes" ]; then
