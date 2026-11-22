@@ -393,7 +393,7 @@ msg=$(store_verdict "$D/store" "$vb" "" "$D/v.before" "$D/v.after"); rc=$?
 assert_eq "$rc" "0" "verdict: an untouched store passes"
 mkdir -p "$D/vanish/bank"; printf a > "$D/vanish/bank/db"
 store_snapshot "$D/vanish" "$D/vv.before" >/dev/null; vb=$?
-/usr/bin/trash "$D/vanish"
+rm -rf "$D/vanish"
 msg=$(store_verdict "$D/vanish" "$vb" "" "$D/vv.before" "$D/vv.after"); rc=$?
 assert_eq "$rc" "1" "verdict: a store that was there before the call and is gone after it fails, it does not skip"
 has "$msg" "could not be scanned after" "and says so"
