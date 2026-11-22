@@ -111,11 +111,26 @@ transcripts over ssh before it scans:
 AUTODREAM_REMOTE_ROOTS="studio2=studio2:.claude/projects"
 ```
 
-Each entry is `label=ssh-target:path`, and several hosts are separated by spaces. The path
+Each entry is `label=ssh-target:path`, and several hosts are separated by spaces. A label is
+letters, digits, `.`, `_` and `-`; `invalid` and any name ending in `_cause` or `_last_ok` are
+reserved, because `run-stats.txt` builds its lines from the label. The path
 is relative to the remote home. The ssh login must work without a prompt (a key in the agent,
 or one with no passphrase), because launchd runs the job. A host that is asleep or unreachable
 costs only its own sessions. The report names it, and when every host fails a warning banner
-does too.
+does too. Hosts sync in parallel, so several unreachable hosts cost one timeout, not several.
+
+A night whose host was down is not retried: its report is already written, and the next night
+skips what it missed. The first night the host syncs again, the report lists the earlier dates
+(the last seven days) that were missing it, with the command for each,
+`autodream-now.sh <date> --force`. Nothing rebuilds by itself, because a rebuild replaces the
+report, including any triage decisions you wrote into it. A date drops off the list once a
+rebuild has delivered a report that read the host. The list comes from a line each report carries
+(`<!-- autodream:remote-short=studio2 -->`), so it is only as old as the reports.
+
+The local copy of each host's transcripts, `~/.claude/autodream/remote/<label>/projects`, is an
+archive and is never pruned, so it keeps transcripts the host has since deleted. Its transcript
+count and size are written to `run-stats.txt` every night (`remote_mirror_files_<label>`,
+`remote_mirror_bytes_<label>`), so you can read its growth before you decide to trim it.
 
 The schedule fires `run.sh` at 03:15 with morning catch-up triggers (06:15/09:15/12:15)
 in case the Mac was asleep; the idempotency guard makes all but the first a one-second

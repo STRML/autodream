@@ -2030,15 +2030,26 @@ REMOTE_SYNC_BAD=0      # entries that did not sync this run: failed or invalid
 REMOTE_SYNC_SHORT=0    # entries whose mirror may be short tonight: BAD plus partial and skipped_locked
 REMOTE_SYNC_FIRST_ERR=""
 REMOTE_SYNC_HELPER=""
+REMOTE_SYNCED_LABELS=" "   # labels whose sync was ok or partial this run, space-delimited
+REMOTE_SHORT_LABELS=" "    # real labels this run did not fully read (not ok): the next scan lists this date for them
+REMOTE_SHORT_QUESTIONS=""  # Open-questions items naming earlier dates a host missed (#230), for the stub report
+REMOTE_SHORT_QCOUNT=0      # how many items that is
+REMOTE_SHORT_UNREADABLE=0  # earlier nights the scan could not judge
+REMOTE_SYNC_NOTMP=0        # 1 when the per-run job dir could not be made, so no job was started
+REMOTE_MIRROR_UNKNOWN=0    # mirrors whose size could not be measured tonight
 remote_sync_stat() { REMOTE_SYNC_LINES="${REMOTE_SYNC_LINES}$1"$'\n'; }
 
-# $1=entry $2=key $3=why: an entry refused before any ssh.
+# $1=entry $2=key $3=why $4=real: an entry refused before any ssh. $4=real when the key is a real
+# label (an adapter that is off); a malformed, repeated or reserved entry has no label of its own
+# and takes the synthetic key `invalid`, so it never joins the short list. No label may be called
+# `invalid` or end in `_cause` or `_last_ok`, so those keys cannot be mistaken for a host.
 remote_sync_refuse() {
   log "WARNING: AUTODREAM_REMOTE_ROOTS entry '$1' refused ($3); it is not synced"
   remote_sync_stat "remote_sync_$2: invalid"
   remote_sync_stat "remote_sync_$2_cause: $3"
   REMOTE_SYNC_BAD=$((REMOTE_SYNC_BAD + 1))
   REMOTE_SYNC_SHORT=$((REMOTE_SYNC_SHORT + 1))
+  [ "${4:-}" != real ] || REMOTE_SHORT_LABELS="$REMOTE_SHORT_LABELS$2 "
   [ -n "$REMOTE_SYNC_FIRST_ERR" ] || REMOTE_SYNC_FIRST_ERR="$2: invalid ($3)"
 }
 
@@ -2072,22 +2083,59 @@ remote_sync_locked() {
   esac
 }
 
-# $1=label $2=target: sync one host under its lock, record its keys, add its mirror to the roots.
-remote_sync_one() {
-  local label="$1" spec="$2" dir="$AUTODREAM_DIR/remote/$1" lock="$AUTODREAM_DIR/locks/remote-$1.lock"
-  local mirror="$AUTODREAM_DIR/remote/$1/projects" status="" word cause="" last t0=$SECONDS
-  # remote_sync_locked runs inside $(...). $$ is still this run's pid there, so the lock it takes
-  # and releases is this run's.
+# $1=mirror -> "<files> <bytes>" of the *.jsonl transcripts in it. The mirror is an archive that is
+# never pruned (#228), so its size is measured every night and the growth shows in run-stats. wc -c
+# prints a "total" line per batch, which a transcript cannot match because its name ends in .jsonl.
+# A walk or a count that fails (an unreadable subdirectory, a file gone mid-count) prints
+# "unknown unknown": totals from whatever did get counted would read as a measured size.
+remote_mirror_size() {
+  [ -d "$1" ] || { echo "0 0"; return 0; }
+  local out
+  # A newline in a path would split wc's line for it into two records.
+  [ -z "$(find "$1" -name $'*\n*' -print -quit 2>/dev/null)" ] || { echo "unknown unknown"; return 0; }
+  out=$(set -o pipefail; find "$1" -type f -name '*.jsonl' -exec wc -c {} + 2>/dev/null \
+    | awk '$2 == "total" && NF == 2 { next } { f++; b += $1 } END { print f + 0, b + 0 }') \
+    || { echo "unknown unknown"; return 0; }
+  echo "$out"
+}
+
+# $1=label $2=target $3=file prefix: one host's sync, run as a background job (#229). It leaves its
+# answers in files because a job cannot set the parent's variables: <prefix>.status (the helper's
+# line), .secs and .mirror (the mirror's size). Each label has its own lock and mirror, so the jobs
+# share nothing. $$ is still this run's pid inside the job, so the lock it takes is this run's.
+remote_sync_job() {
+  local label="$1" mirror="$AUTODREAM_DIR/remote/$1/projects" t0=$SECONDS status=""
   if [ -z "$REMOTE_SYNC_HELPER" ]; then
     status="failed (remote-sync.sh not found)"
   else
-    status=$(remote_sync_locked "$label" "$spec" "$mirror" "$lock")
+    status=$(remote_sync_locked "$label" "$2" "$mirror" "$AUTODREAM_DIR/locks/remote-$label.lock")
   fi
-  [ -n "$status" ] || status="failed (remote-sync.sh printed nothing)"
+  { printf '%s\n' "$status" > "$3.status"
+    printf '%s\n' "$((SECONDS - t0))" > "$3.secs"
+    remote_mirror_size "$mirror" > "$3.mirror"; } 2>/dev/null
+}
+
+# $1=label $2=file prefix, empty when no job was started: read a finished job, record its keys, add
+# its mirror to the roots. An empty prefix reads nothing, so a failed job-dir allocation never turns
+# into a read of /0.status.
+remote_sync_finish() {
+  local label="$1" p="$2" dir="$AUTODREAM_DIR/remote/$1" status="" word cause="" last secs="" size=""
+  local mirror="$AUTODREAM_DIR/remote/$1/projects"
+  if [ -n "$p" ]; then
+    status=$(head -n 1 "$p.status" 2>/dev/null) || status=""
+    secs=$(head -n 1 "$p.secs" 2>/dev/null) || secs=""
+    size=$(cat "$p.mirror" 2>/dev/null) || size=""
+  fi
+  [ -n "$size" ] || size=$(remote_mirror_size "$mirror")
+  if [ -z "$status" ]; then
+    status="failed (remote-sync.sh printed nothing)"
+    [ "$REMOTE_SYNC_NOTMP" != 1 ] || status="failed (cannot make a job dir for the sync jobs)"
+  fi
   word=${status%% *}
   case "$status" in *" ("*")") cause=${status#* (}; cause=${cause%)} ;; esac
   case "$word" in
     ok|partial)
+      REMOTE_SYNCED_LABELS="$REMOTE_SYNCED_LABELS$label "
       if ! { mkdir -p "$dir" && printf '%s\n' "$(date +%Y-%m-%d)" > "$dir/last-ok.tmp.$$" \
              && mv -f "$dir/last-ok.tmp.$$" "$dir/last-ok"; } 2>/dev/null; then
         log "WARNING: remote sync $label: could not stamp $dir/last-ok"
@@ -2096,20 +2144,150 @@ remote_sync_one() {
     invalid) REMOTE_SYNC_BAD=$((REMOTE_SYNC_BAD + 1)) ;;
     *) word=failed; REMOTE_SYNC_BAD=$((REMOTE_SYNC_BAD + 1)) ;;
   esac
-  [ "$word" = ok ] || REMOTE_SYNC_SHORT=$((REMOTE_SYNC_SHORT + 1))
+  [ "$word" = ok ] || { REMOTE_SYNC_SHORT=$((REMOTE_SYNC_SHORT + 1)); REMOTE_SHORT_LABELS="$REMOTE_SHORT_LABELS$label "; }
   case "$word" in failed|invalid) [ -n "$REMOTE_SYNC_FIRST_ERR" ] || REMOTE_SYNC_FIRST_ERR="$label: ${cause:-$word}" ;; esac
   last=$(head -n 1 "$dir/last-ok" 2>/dev/null) || last=""
   remote_sync_stat "remote_sync_$label: $word"
   remote_sync_stat "remote_sync_${label}_cause: $cause"
   remote_sync_stat "remote_sync_${label}_last_ok: ${last:-never}"
-  log "remote sync $label: $status in $((SECONDS - t0))s"
+  case "$size" in unknown*) REMOTE_MIRROR_UNKNOWN=$((REMOTE_MIRROR_UNKNOWN + 1)) ;; esac
+  remote_sync_stat "remote_mirror_files_$label: ${size% *}"
+  remote_sync_stat "remote_mirror_bytes_$label: ${size#* }"
+  log "remote sync $label: $status in ${secs:-?}s"
   [ ! -d "$mirror" ] || SESSION_ROOTS="${SESSION_ROOTS:+$SESSION_ROOTS:}$mirror"
 }
 
+# A finished report stops every later trigger at the guard, and the next night's mtime lower bound
+# skips a transcript last written on the failed day, so a date whose host was down is never
+# retried (#230). Rebuilding it replaces a report the user may have triaged, so nothing rebuilds on
+# its own. Instead, a run whose sync worked looks back over the trailing week of reports and names
+# every date whose report did not fully read the same label, with the rebuild command.
+#
+# The record is a line inside the report, `<!-- autodream:remote-short=a,b -->`: the labels that
+# report did not fully read, empty when none. It is written in the same atomic write as the report
+# body (remote_short_line, called by the L2 writer and the stub), so the record and the report are
+# one file and cannot disagree. A run killed before it publishes, a rebuild that defers, and a
+# write that fails all leave the old report with its old record. An earlier design kept the record
+# in a second file and spent four review rounds on the orders in which the two could diverge.
+# A report with no such line was written with remote sync off (or before the record existed) and is
+# skipped. A night with a findings dir and no report (a rebuild that failed in L2 moved the old one
+# aside, and the next trigger rebuilds it) or a report that will not read is counted in
+# remote_short_scan_unreadable. Only labels configured tonight are listed.
+#
+# What a report did not fully read: every configured label whose sync was not ok (partial counts:
+# rsync 23 can leave a file uncopied, which the next sync copies with an old mtime that the next
+# day's lower bound skips); every configured label when the enumeration was incomplete, because the
+# roots that failed cannot be told apart from a mirror; and every label the report it replaces
+# listed that this run does not configure, so a rebuild with fewer hosts cannot erase them.
+REMOTE_SHORT_SCAN_DAYS=7
+REMOTE_PREV_SHORT=""   # the record of the report this run replaces, comma-separated
+
+# $1=report text -> its record, comma-separated and possibly empty; exit 1 when it has no record line.
+remote_report_record() {
+  local line
+  line=$(printf '%s\n' "$1" | grep '^<!-- autodream:remote-short=.* -->$') || return 1
+  line=${line##*$'\n'}
+  line=${line#'<!-- autodream:remote-short='}
+  printf '%s' "${line% -->}"
+}
+
+# The labels the report being written did not fully read, comma-separated.
+remote_short_labels() {
+  local l all="$REMOTE_SHORT_LABELS" out="" configured="$REMOTE_SYNCED_LABELS $REMOTE_SHORT_LABELS"
+  if [ $(( ${ROOTS_FAILED:-0} + ${ROOTS_UNAVAILABLE:-0} + ${PARTIAL_ROOTS:-0} )) -gt 0 ]; then all="$configured"; fi
+  for l in ${REMOTE_PREV_SHORT//,/ }; do
+    case " $configured " in *" $l "*) ;; *) all="$all $l" ;; esac
+  done
+  for l in $all; do
+    case ",$out," in *",$l,"*) ;; *) out="${out:+$out,}$l" ;; esac
+  done
+  printf '%s' "$out"
+}
+
+# The record line, or nothing when remote sync is off and the report it replaces has none to keep.
+remote_short_line() {
+  { [ -n "${AUTODREAM_REMOTE_ROOTS:-}" ] || [ -n "$REMOTE_PREV_SHORT" ]; } || return 0
+  printf '<!-- autodream:remote-short=%s -->\n' "$(remote_short_labels)"
+}
+
+remote_short_scan() {
+  local i k n=0 d report body rec label dates
+  local dnames=() drecs=()
+  REMOTE_SHORT_QUESTIONS=""; REMOTE_SHORT_QCOUNT=0; REMOTE_SHORT_UNREADABLE=0
+  i=$REMOTE_SHORT_SCAN_DAYS
+  while [ "$i" -ge 1 ]; do
+    d=$(pdate_shift "$TARGET_DATE" "-$i" d) || { REMOTE_SHORT_UNREADABLE=$((REMOTE_SHORT_UNREADABLE + 1)); i=$((i - 1)); continue; }
+    i=$((i - 1))
+    report="$DREAMS_DIR/$d.md"
+    if [ ! -e "$report" ]; then
+      [ ! -d "$AUTODREAM_DIR/findings/$d" ] || REMOTE_SHORT_UNREADABLE=$((REMOTE_SHORT_UNREADABLE + 1))
+      continue
+    fi
+    if ! body=$(cat "$report" 2>/dev/null); then
+      REMOTE_SHORT_UNREADABLE=$((REMOTE_SHORT_UNREADABLE + 1)); continue
+    fi
+    if rec=$(remote_report_record "$body"); then dnames[n]=$d; drecs[n]=$rec; n=$((n + 1)); fi
+  done
+  for label in $REMOTE_SYNCED_LABELS; do
+    dates=""; k=0
+    while [ "$k" -lt "$n" ]; do
+      case ",${drecs[k]}," in *",$label,"*) dates="${dates:+$dates }${dnames[k]}" ;; esac
+      k=$((k + 1))
+    done
+    remote_sync_stat "remote_short_dates_$label: ${dates:-none}"
+    [ -n "$dates" ] || continue
+    log "remote sync $label: earlier dates missing its sessions: $dates"
+    REMOTE_SHORT_QCOUNT=$((REMOTE_SHORT_QCOUNT + 1))
+    REMOTE_SHORT_QUESTIONS="${REMOTE_SHORT_QUESTIONS}${REMOTE_SHORT_QCOUNT}. **Rebuild the report dates missing $label sessions?**"$'\n'
+    REMOTE_SHORT_QUESTIONS="${REMOTE_SHORT_QUESTIONS}   - $label was not fully read on these dates and is syncing again, so those reports are missing its sessions. Nothing retries them."$'\n'
+    for d in $dates; do
+      REMOTE_SHORT_QUESTIONS="${REMOTE_SHORT_QUESTIONS}   - \`autodream-now.sh $d --force\`"$'\n'
+    done
+    REMOTE_SHORT_QUESTIONS="${REMOTE_SHORT_QUESTIONS}   - A rebuild replaces that date's report, including any \`## Triage decisions\` already written into it. Leave a date you have already triaged."$'\n'
+  done
+  remote_sync_stat "remote_short_scan_unreadable: $REMOTE_SHORT_UNREADABLE"
+}
+
+# Every moved-aside copy (<report>.stale-<epoch>) of this date's earlier reports, taken out of the
+# .stale-* glob once a report has been delivered in their place. A copy with a "## Triage decisions"
+# heading holds the user's own writing, so it is renamed to <report>.triaged-<epoch>, which the record
+# lookup never reads; every other copy is deleted. A copy that cannot be read is kept, not deleted.
+drop_stale_report_copies() {
+  local s rc keep
+  for s in "$REPORT_PATH".stale-*; do
+    [ -f "$s" ] || continue
+    grep -q '^## Triage decisions' "$s" 2>/dev/null && rc=0 || rc=$?
+    if [ "$rc" = 1 ]; then
+      rm -f "$s" || log "WARNING: could not remove the superseded report copy $s"
+      continue
+    fi
+    keep="$REPORT_PATH.triaged-${s##*.stale-}"
+    [ -e "$keep" ] && keep="$keep.$$"
+    mv "$s" "$keep" || log "WARNING: could not set aside the report copy $s that holds triage decisions"
+  done
+}
+
 sync_remote_roots() {
+  local prev f rec
+  REMOTE_PREV_SHORT=""
+  # The report this run replaces: the one at the path if it carries a record, else the newest
+  # moved-aside .stale-<epoch> copy that does. A rebuild that died in L2 moved the real report aside
+  # and may have left a capture with no record at the path, so a record-less file at the path is no
+  # reason to ignore the copy. Copies cannot resurface an old label: a delivered report (L2 or the
+  # stub) deletes every copy it supersedes, or renames one holding triage decisions to .triaged-*,
+  # so a copy still in the .stale-* glob means no report has been delivered since it was made.
+  if [ -f "$REPORT_PATH" ] && prev=$(cat "$REPORT_PATH" 2>/dev/null) && rec=$(remote_report_record "$prev"); then
+    REMOTE_PREV_SHORT=$rec
+  else
+    for f in "$REPORT_PATH".stale-*; do
+      [ -f "$f" ] && prev=$(cat "$f" 2>/dev/null) || continue
+      if rec=$(remote_report_record "$prev"); then REMOTE_PREV_SHORT=$rec; fi
+    done
+  fi
   if [ -z "${AUTODREAM_REMOTE_ROOTS:-}" ]; then remote_sync_stat "remote_sync: off"; return 0; fi
   remote_sync_stat "remote_sync: on"
-  local entries=() entry label seen=" "
+  local entries=() entry label seen=" " sdir="" n i
+  local kinds=() keys=() whys=() entrys=() pids=()
   REMOTE_SYNC_FIRST_ERR=""
   REMOTE_SYNC_HELPER=$(find_lib remote-sync.sh) || REMOTE_SYNC_HELPER=""
   # The mirrors are claude roots. With the claude adapter not enabled nothing would scan them, and
@@ -2117,21 +2295,62 @@ sync_remote_roots() {
   local claude_on=1
   resolve_enabled_adapters
   case " $ENABLED_ADAPTERS " in *" claude "*) ;; *) claude_on=0 ;; esac
+  # The job dir lives under the install, keyed by this run's pid, rather than in $TMPDIR: a run
+  # killed while it waits skips every cleanup, so the next run removes the dirs of dead pids here.
+  # A name is only ever this run's pid or an earlier run's, so a live run's dir is never touched.
+  local jobs="$AUTODREAM_DIR/remote-jobs" jd jp
+  if mkdir -p "$jobs" 2>/dev/null; then
+    for jd in "$jobs"/*; do
+      [ -d "$jd" ] || continue
+      jp=${jd##*/}
+      case "$jp" in ''|*[!0-9]*) continue ;; esac
+      kill -0 "$jp" 2>/dev/null || rm -rf "$jd"
+    done
+    rm -rf "${jobs:?}/$$"
+    mkdir "$jobs/$$" 2>/dev/null && sdir="$jobs/$$"
+  fi
+  [ -n "$sdir" ] || { REMOTE_SYNC_NOTMP=1; log "WARNING: remote sync: cannot make a job dir under $jobs, so no host is synced"; }
   read -r -a entries <<< "$AUTODREAM_REMOTE_ROOTS"
+  # Pass 1 validates and starts every sync at once. A host that is asleep costs ConnectTimeout and a
+  # stalled copy costs rsync's --timeout, so with several hosts down the waits overlap (#229).
   for entry in ${entries[@]+"${entries[@]}"}; do
     REMOTE_SYNC_TOTAL=$((REMOTE_SYNC_TOTAL + 1))
-    case "$entry" in *=*) label=${entry%%=*} ;; *) remote_sync_refuse "$entry" invalid "no label=target"; continue ;; esac
+    n=${#kinds[@]}; entrys[n]=$entry
+    case "$entry" in *=*) label=${entry%%=*} ;; *) kinds[n]=refuse; keys[n]=invalid; whys[n]="no label=target"; continue ;; esac
     case "$label" in
-      ''|.|..|*[!A-Za-z0-9._-]*) remote_sync_refuse "$entry" invalid "label must match [A-Za-z0-9._-]+"; continue ;;
+      ''|.|..|*[!A-Za-z0-9._-]*) kinds[n]=refuse; keys[n]=invalid; whys[n]="label must match [A-Za-z0-9._-]+"; continue ;;
+      # These names would print like another run-stats line (the refusal key, or the cause or
+      # last_ok line of a label), so no reader could tell the two apart. Refused here, ahead of the
+      # adapter check, so a reserved label never gets a key of its own.
+      invalid|*_cause|*_last_ok) kinds[n]=refuse; keys[n]=invalid; whys[n]="label $label is reserved (invalid, or ending in _cause or _last_ok)"; continue ;;
     esac
-    case "$seen" in *" $label "*) remote_sync_refuse "$entry" invalid "label $label is used twice"; continue ;; esac
+    case "$seen" in *" $label "*) kinds[n]=refuse; keys[n]=invalid; whys[n]="label $label is used twice"; continue ;; esac
     seen="$seen$label "
     if [ "$claude_on" = 0 ]; then
-      remote_sync_refuse "$entry" "$label" "the claude adapter is not enabled (AUTODREAM_ADAPTERS), so no mirror would be scanned"
+      kinds[n]=refuse-real; keys[n]=$label; whys[n]="the claude adapter is not enabled (AUTODREAM_ADAPTERS), so no mirror would be scanned"
       continue
     fi
-    remote_sync_one "$label" "${entry#*=}"
+    kinds[n]=sync; keys[n]=$label; pids[n]=""
+    if [ -n "$sdir" ]; then
+      remote_sync_job "$label" "${entry#*=}" "$sdir/$n" &
+      pids[n]=$!
+    fi
   done
+  # Pass 2 reads the results in config order, so run-stats and SESSION_ROOTS do not depend on which
+  # host answered first.
+  i=0
+  while [ "$i" -lt "${#kinds[@]}" ]; do
+    case "${kinds[i]}" in
+      refuse) remote_sync_refuse "${entrys[i]}" "${keys[i]}" "${whys[i]}" ;;
+      refuse-real) remote_sync_refuse "${entrys[i]}" "${keys[i]}" "${whys[i]}" real ;;
+      *)
+        [ -z "${pids[i]}" ] || wait "${pids[i]}" 2>/dev/null
+        remote_sync_finish "${keys[i]}" "${sdir:+$sdir/$i}" ;;
+    esac
+    i=$((i + 1))
+  done
+  [ -z "$sdir" ] || rm -rf "$sdir"
+  remote_short_scan
   log "session roots with remote mirrors: ${SESSION_ROOTS//:/, }"
   # Every host failing is a broken path (lost key, renamed host, no route), and the per-host lines
   # sit in run-stats.txt until the report, so it gets a banner of its own group. One failing does
@@ -4201,7 +4420,7 @@ run() {
       printf 'unassembled_dates: %s\n' "${UNASSEMBLED:-}"
     } > "$FINDINGS_DIR/run-stats.txt" 2>/dev/null || true
     printf '%s\n' "$THREADS_SUMMARY" >> "$FINDINGS_DIR/run-stats.txt" 2>/dev/null || true
-    cat > "$REPORT_PATH" <<EOF
+    cat > "$REPORT_PATH.tmp" <<EOF
 # Autodream — $TARGET_DATE
 
 No sessions were triaged on this date.
@@ -4241,20 +4460,36 @@ $( if [ "${ROOTS_FAILED:-0}" -gt 0 ] || [ "${ROOTS_UNAVAILABLE:-0}" -gt 0 ]; the
        "$RAW" "$EXCLUDED" "$SKIPPED_EMPTY" "$REJECTED_PATHS" "$HASH_COLLISIONS"
    fi )
 
+$( if [ "$REMOTE_SHORT_UNREADABLE" -gt 0 ]; then
+     # A night with nothing to triage skips L2, so this stub is the only place a failure of the
+     # historical scan itself (#230) can be said.
+     printf '%s earlier night(s) had no readable report, so whether a remote host missed them could not be checked. See remote_short_scan_unreadable in run-stats.txt.\n\n' "$REMOTE_SHORT_UNREADABLE"
+   fi
+   if [ "$REMOTE_MIRROR_UNKNOWN" -gt 0 ]; then
+     printf '%s remote mirror(s) could not be measured tonight (unknown in remote_mirror_files_* and remote_mirror_bytes_*), so the walk of them may have been incomplete.' "$REMOTE_MIRROR_UNKNOWN"
+   fi )
+
 (Generated $(date -u +%Y-%m-%dT%H:%M:%SZ))
 
 AUTODREAM_QUESTIONS_BEGIN
 ## Open questions for the user
 
-None; no sessions were triaged on this date.
+$( if [ "$REMOTE_SHORT_QCOUNT" -gt 0 ]; then
+     # The dates a remote host missed (#230) are a question here too, inside the block and counted,
+     # so the streak store sees it and escalates it instead of reading the night as question-free.
+     printf '%s' "$REMOTE_SHORT_QUESTIONS"
+   else
+     printf 'None; no sessions were triaged on this date.\n'
+   fi )
 
-<!-- autodream:open-questions=0 -->
+<!-- autodream:open-questions=$REMOTE_SHORT_QCOUNT -->
 AUTODREAM_QUESTIONS_END
+$(remote_short_line)
 EOF
-    # The status of the write above, kept for the outcome below: a stub that could not be opened for
-    # writing leaves the previous report in place, and that old file is complete, so report_complete
-    # alone would call it this run's delivery.
-    STUB_RC=$?
+    # The status of the write above, kept for the publish step and the outcome below: a stub that
+    # could not be opened for writing leaves the previous report in place, and that old file is
+    # complete, so report_complete alone would call it this run's delivery.
+    STUB_WRITTEN=$?
     if [ -s "$FINDINGS_DIR/dropped-threads.md" ]; then
       awk -v section="$FINDINGS_DIR/dropped-threads.md" '
         $0 == "AUTODREAM_QUESTIONS_BEGIN" {
@@ -4263,7 +4498,21 @@ EOF
           print ""
         }
         { print }
-      ' "$REPORT_PATH" > "$REPORT_PATH.threads" && mv "$REPORT_PATH.threads" "$REPORT_PATH"
+      ' "$REPORT_PATH.tmp" > "$REPORT_PATH.threads" && mv "$REPORT_PATH.threads" "$REPORT_PATH.tmp"
+    fi
+    # Published in one rename, like the L2 report: a write stopped after the questions block but
+    # before the record line (or anywhere else) leaves the old report, never a half stub that
+    # report_complete would accept without its record.
+    if [ "$STUB_WRITTEN" = 0 ] && mv -f "$REPORT_PATH.tmp" "$REPORT_PATH"; then
+      drop_stale_report_copies
+    else
+      rm -f "$REPORT_PATH.tmp" "$REPORT_PATH.threads"
+      # A run that could not publish its report has not done what it was asked, so it fails: the
+      # exit code is what the launchd job and a forced rebuild's caller see, and a report that was
+      # already at the path stays the old one.
+      log_fatal "could not publish the report for $TARGET_DATE (no sessions were triaged, and the stub could not be staged or renamed into place)"
+      fatal_exit
+      return 1
     fi
     # A question-free report still counts as a report. Without this the streak
     # store would keep yesterday's questions alive across an empty night, and a
@@ -4274,10 +4523,10 @@ EOF
       env AUTODREAM_DIR="$AUTODREAM_DIR" "$AUTODREAM_DIR/question-streaks.sh" update "$REPORT_PATH" "$FINDINGS_DIR" \
         || log "question-streaks returned non-zero (continuing)"
     fi
-    if [ "$STUB_RC" -eq 0 ] && report_complete; then
+    if [ "$STUB_WRITTEN" -eq 0 ] && report_complete; then
       write_run_outcome delivered
     else
-      log "WARNING: the stub report for $TARGET_DATE could not be written (exit $STUB_RC); not reporting it as delivered"
+      log "WARNING: the stub report for $TARGET_DATE could not be written (exit $STUB_WRITTEN); not reporting it as delivered"
     fi
     return 0
   fi
@@ -5366,11 +5615,17 @@ PY
     L2_COMPLETE=0
     if report_has_sentinel "$L2_STDOUT"; then
       write_session_cwds "$FINDINGS_DIR" || log "WARNING: could not write session-cwds.tsv; Lately will fall back to project buckets"
-      if report_body "$L2_STDOUT" > "$REPORT_PATH.tmp" && mv "$REPORT_PATH.tmp" "$REPORT_PATH"; then
+      # A record line the model wrote into its own body is dropped: only the runner states which
+      # hosts a report did not read, and the scan takes the last record line it finds, so one in
+      # the body could become a date's record when remote sync was off and the runner wrote none.
+      if report_body "$L2_STDOUT" > "$REPORT_PATH.body" \
+         && { awk '!/^<!-- autodream:remote-short=.* -->$/' "$REPORT_PATH.body" && remote_short_line; } > "$REPORT_PATH.tmp" \
+         && mv "$REPORT_PATH.tmp" "$REPORT_PATH"; then
         L2_COMPLETE=1
       else
         log "WARNING: could not stage the sentinel-stripped report at $REPORT_PATH"
       fi
+      rm -f "$REPORT_PATH.body"
     elif [ -s "$L2_STDOUT" ]; then
       log "WARNING: L2 stdout carried no AUTODREAM_REPORT_END sentinel; keeping the whole capture as a degraded report (incomplete, will retry)"
       cat "$L2_STDOUT" > "$REPORT_PATH.tmp" && mv "$REPORT_PATH.tmp" "$REPORT_PATH" 2>/dev/null || true
@@ -5455,6 +5710,11 @@ PY
       log "this run produced no complete report; the previous one for $TARGET_DATE is still at $STALE_REPORT"
     fi
   fi
+  # A delivered report also supersedes the moved-aside copies of earlier failed rebuilds, which the
+  # block above never reaches (it only knows the copy this run made). The remote-short record is
+  # read from a copy only while no report has been delivered since, so leaving them would let a
+  # label a later retry read come back.
+  if [ "${L2_DELIVERED:-0}" = 1 ] && report_complete; then drop_stale_report_copies; fi
 
   # Partials are prefixes of a report that now exists in full, so a complete report
   # supersedes every one of them for this date — including partials from earlier nights,
