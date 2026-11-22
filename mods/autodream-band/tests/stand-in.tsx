@@ -1,4 +1,3 @@
-/** Another plugin that also draws a row above the prompt, loaded before or after the one under test. */
 export const standIn = (tier: 'prepend' | 'append') => ({
   name: `stand-in-${tier}`,
   tier,

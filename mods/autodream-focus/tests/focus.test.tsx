@@ -6,28 +6,17 @@ const FILE = '/Users/x/.claude/autodream/tags.jsonl'
 const SCRIPT = '/Users/x/.claude/autodream/autodream-focus.sh'
 
 type Machine = {
-  /** what is in tags.jsonl when the session starts; absent means no file */
   file?: string
-  /** the file is there but reading it fails with this (not a missing file) */
   readError?: string
-  /** the writer script is not installed */
   noScript?: boolean
-  /** the writer exits 1 with this on stderr */
   writerFails?: string
-  /** extra environment the mod can see */
   env?: Record<string, string>
-  /** where the writer says the tags file is (it also reads the install's config, which the mod cannot); default: the usual place */
   tagsPath?: string
-  /** the writer cannot answer `path` */
   pathFails?: boolean
 }
 
 type Run = { argv: string[]; env: Record<string, string> | undefined }
 
-/**
- * The writer is autodream-focus.sh. The stand-in below does what it does to the file the mod reads (toggle a line by id), so the
- * buttons can be checked against what a press leaves on disk. The mod itself never writes: any fs.write is refused.
- */
 const world = (on: On, { file, readError, noScript = false, writerFails, env = {}, tagsPath = FILE, pathFails = false }: Machine = {}) => {
   mock.clock(on, { now: NOW })
   mock.env(on, { HOME: '/Users/x', ...env })
@@ -110,7 +99,6 @@ const reply = ($: any, requestId: string, text = 'The lockfile is stale.') =>
     props: { text, isFirstOfReply: true },
   })
 
-/** The button's own Box: hidden until hovered, or shown for good once tagged. */
 const shown = async (ui: any) => {
   const tree = JSON.stringify(await ui.drawn())
 

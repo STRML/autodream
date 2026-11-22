@@ -4,17 +4,14 @@ type Parsed = Omit<DreamReport, 'sections' | 'path'>
 
 const DATED = /^(\d{4}-\d{2}-\d{2})\.md$/
 
-/** A report carries `## Triage decisions` once review.sh or a triage session has worked through its questions. */
 export const isTriaged = (text: string): boolean => /^## Triage decisions/m.test(text)
 
-/** The newest YYYY-MM-DD.md among a directory's names; logs and backups are not reports. */
 export const latestReport = (names: readonly string[]): string | null =>
   names
     .filter(name => DATED.test(name))
     .sort()
     .pop() ?? null
 
-/** One section's body: the lines after its `## ` heading up to the next one. */
 const section = (text: string, heading: RegExp): string | null => {
   const lines = text.split('\n')
   const start = lines.findIndex(line => heading.test(line))
@@ -35,7 +32,6 @@ export const parseReport = (text: string): Parsed | null => {
   const patterns: DreamPattern[] = []
 
   for (const chunk of (section(text, /^## Top patterns/) ?? '').split(/^### /m).slice(1)) {
-    // Backticks are Markdown in the report and literal noise in a one-line band.
     const title = (chunk.split('\n')[0]?.trim() ?? '').replace(/`/g, '')
     const severity = /\*\*Severity\*\*:\s*(\w+)/i.exec(chunk)?.[1]?.toLowerCase() ?? 'unknown'
 
@@ -45,7 +41,6 @@ export const parseReport = (text: string): Parsed | null => {
   return { date, openQuestions: marker === undefined ? 0 : Number(marker), isTriaged: isTriaged(text), patterns }
 }
 
-/** Reports are nightly: a few days old is news, a week old is not. */
 export const isFresh = (date: string, nowMs: number, maxDays: number): boolean => {
   const [year = 0, month = 1, day = 1] = date.split('-').map(Number)
   const today = new Date(nowMs)
@@ -57,23 +52,13 @@ export const isFresh = (date: string, nowMs: number, maxDays: number): boolean =
   return age <= maxDays
 }
 
-/** PROMPT.md asks for high|medium|low; the shipped example report also uses critical, which is worse than high. */
 const WORTH_STOPPING_FOR = ['critical', 'high', 'medium']
 
-/**
- * The band is for reports worth stopping for: open questions, or a pattern of medium or higher severity. A report
- * that has been triaged is done, and one that was dismissed stays dismissed.
- */
 export const shouldShow = (report: Parsed, dismissed: string | null): boolean =>
   !report.isTriaged &&
   report.date !== dismissed &&
   (report.openQuestions > 0 || report.patterns.some(pattern => WORTH_STOPPING_FOR.includes(pattern.severity)))
 
-/**
- * The walk-through `review.sh` opens a session for, as a prompt for the session you are in. It mirrors
- * review.sh's system prompt (bin/review.sh) with two differences: the report is read rather than
- * inlined, and this session's own permission mode applies, not bypassPermissions.
- */
 export const triagePrompt = (date: string, path: string): string =>
   [
     `You are the morning autodream review partner. Triage the open questions from the ${date} autodream report with me, in this session.`,
@@ -95,28 +80,16 @@ export const triagePrompt = (date: string, path: string): string =>
     '- Be terse everywhere except the question restatement in step 1, which is always complete. One question, one decision, one action, then the next.',
   ].join('\n')
 
-/** One shell word, whatever is in it. */
 export const shellQuote = (text: string): string => `'${text.replace(/'/g, "'\\''")}'`
 
-/**
- * What gets typed into the new split: review.sh run inline there, so its triage session fills that split rather than
- * handing off to yet another cmux workspace.
- */
 export const triageCommandLine = (script: string, date: string, isForced: boolean): string =>
   `env AUTODREAM_TRIAGE_SURFACE=inline bash ${shellQuote(script)} ${isForced ? '--force ' : ''}${date}`
 
-/** The address of the split `cmux new-split` made, from what it printed: a short ref (surface:7) or a UUID. */
 export const surfaceRef = (stdout: string): string | null =>
   /\bsurface:\d+\b/.exec(stdout)?.[0] ?? /\b[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\b/i.exec(stdout)?.[0] ?? null
 
-/** The environment variables review.sh reads for its own locations; the mod reads the same ones. */
 export type AutodreamEnv = Partial<Record<'HOME' | 'AUTODREAM_DIR' | 'DREAMS_DIR' | 'CMUX_BIN', string | undefined>>
 
-/**
- * Where autodream's pieces are, resolved the way bin/review.sh resolves them: an exported variable wins, an empty one
- * counts as unset, and the defaults are the ones install.sh and review.sh use. A value set only in
- * `$AUTODREAM_DIR/config` is invisible here, so export it (or set it in Claude Code's environment) to move the mod too.
- */
 export const locations = (env: AutodreamEnv) => {
   const home = env.HOME ?? ''
 
@@ -127,10 +100,6 @@ export const locations = (env: AutodreamEnv) => {
   }
 }
 
-/**
- * The command that opens review.sh's own triage session in a cmux workspace: the surface and focus come from the
- * script's documented environment knobs, so nothing in the user's autodream config has to change.
- */
 export const cmuxTriage = (script: string, date: string, isForced: boolean) => ({
   argv: ['bash', script, ...(isForced ? ['--force'] : []), date],
   env: { AUTODREAM_TRIAGE_SURFACE: 'cmux', AUTODREAM_TRIAGE_FOCUS: 'true' },
@@ -139,7 +108,6 @@ export const cmuxTriage = (script: string, date: string, isForced: boolean) => (
 
 const WANTED = ['Top patterns', 'Open questions']
 
-/** What the pane draws: the sections that ask something of you, within a Markdown element's limit. */
 export const keySections = (text: string, limit: number): string => {
   const kept = text
     .split(/^(?=## )/m)

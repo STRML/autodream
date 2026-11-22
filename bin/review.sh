@@ -1,60 +1,51 @@
 #!/bin/bash
-# Open an interactive Claude session with the latest autodream report preloaded
-# and instructions to walk through the open questions one at a time.
-#
-# Usage: review.sh                  # opens latest report
-#        review.sh YYYY-MM-DD       # opens specific report
-#        review.sh --force [DATE]   # open even if there is nothing to triage
-#
-# A report with nothing to triage does not get a session. Most nights the
-# report has no open questions, and launching claude just to be told "nothing
-# to do" costs a full session's tokens to print one line. Instead we detect
-# that case here and print the line ourselves. The check is deliberately
-# conservative: anything we cannot classify launches the session, because a
-# false "nothing to do" silently swallows real questions, while a false launch
-# only wastes tokens. --force bypasses it.
-#
-# Where the triage session lands is controlled by AUTODREAM_TRIAGE_SURFACE
-# (set in $AUTODREAM_DIR/config, see config.example):
-#   inline  (default)  run the claude session right here in the current terminal
-#   cmux               launch it in its own cmux workspace
-#
-# Why this knob exists: launching review.sh as a shell script makes macOS route
-# it to whatever app is the default handler for public.shell-script (iTerm2 on
-# this host), so the triage kept opening in iTerm2. `cmux` gives it a dedicated
-# workspace instead. Env vars override the config file; config overrides defaults.
-#
-# The session runs on AUTODREAM_REVIEW_MODEL (default opus), passed as --model; a config
-# line or an environment variable of that name picks another.
 
 set -u
 
-_pp="$(dirname "${BASH_SOURCE[0]}")/portable.sh"
-# Installed copies are symlinks: a merge updates them before install.sh links a new helper.
-[ -r "$_pp" ] || _pp="$(dirname "$(readlink "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/portable.sh"
-# shellcheck source=/dev/null
-. "$_pp"
+usage(){
+  cat <<'EOF'
+Open an interactive Claude session with the latest autodream report preloaded
+and instructions to walk through the open questions one at a time.
 
-# The install symlinks the scripts INTO $AUTODREAM_DIR (install.sh), so on a
-# bare shell invocation with no env the script's own location IS the install
-# dir. This is what lets `review.sh <date>` run from a terminal without the
-# launchd plist's env: an install under another prefix (the omp-autodream one lived in
-# ~/.omp/agent/{autodream,dreams}) made the legacy ~/.claude/{autodream,dreams} defaults
-# fail every manual invocation with "could not locate" the report. Env still wins; the derived dir is
-# only trusted when it carries an install marker file (install.sh writes both).
-_src="${BASH_SOURCE[0]}"; _lib="$(dirname "$_src")/lib-install-dir.sh"
-# Installed copies are symlinks: a merge updates them before install.sh links a new helper.
-[ -r "$_lib" ] || _lib="$(dirname "$(readlink "$_src" 2>/dev/null || echo "$_src")")/lib-install-dir.sh"
-# shellcheck source=/dev/null
-. "$_lib"
+Usage: review.sh                  # opens latest report
+       review.sh YYYY-MM-DD       # opens specific report
+       review.sh --force [DATE]   # open even if there is nothing to triage
+
+A report with nothing to triage does not get a session. Most nights the
+report has no open questions, and launching claude just to be told "nothing
+to do" costs a full session's tokens to print one line. Instead we detect
+that case here and print the line ourselves. The check is deliberately
+conservative: anything we cannot classify launches the session, because a
+false "nothing to do" silently swallows real questions, while a false launch
+only wastes tokens. --force bypasses it.
+
+Where the triage session lands is controlled by AUTODREAM_TRIAGE_SURFACE
+(set in $AUTODREAM_DIR/config, see config.example):
+  inline  (default)  run the claude session right here in the current terminal
+  cmux               launch it in its own cmux workspace
+
+Why this knob exists: launching review.sh as a shell script makes macOS route
+it to whatever app is the default handler for public.shell-script (iTerm2 on
+this host), so the triage kept opening in iTerm2. `cmux` gives it a dedicated
+workspace instead. Env vars override the config file; config overrides defaults.
+
+The session runs on AUTODREAM_REVIEW_MODEL (default opus), passed as --model; a config
+line or an environment variable of that name picks another.
+EOF
+}
+
+_src="${BASH_SOURCE[0]}"
+source_sibling(){
+  local f; f="$(dirname "$_src")/$1"
+  [ -r "$f" ] || f="$(dirname "$(readlink "$_src" 2>/dev/null || echo "$_src")")/$1"
+  # shellcheck source=/dev/null
+  . "$f"
+}
+source_sibling portable.sh
+source_sibling lib-install-dir.sh
 resolve_install_dir "$_src" review.sh
-# The open-questions marker and the triaged heading are read by pending-triage.sh too.
-_rf="$(dirname "$_src")/report-format.sh"
-[ -r "$_rf" ] || _rf="$(dirname "$(readlink "$_src" 2>/dev/null || echo "$_src")")/report-format.sh"
-# shellcheck source=/dev/null
-. "$_rf"
+source_sibling report-format.sh
 
-# Load the config file first, then let any env-provided values win over it.
 __env_dreams="${DREAMS_DIR:-}"; __env_claude="${CLAUDE_BIN:-}"
 __env_surface="${AUTODREAM_TRIAGE_SURFACE:-}"; __env_cmux="${CMUX_BIN:-}"
 __env_focus="${AUTODREAM_TRIAGE_FOCUS:-}"; __env_model="${AUTODREAM_REVIEW_MODEL:-}"
@@ -68,16 +59,11 @@ CONFIG_FILE="${AUTODREAM_CONFIG:-$AUTODREAM_DIR/config}"
 [ -n "$__env_focus" ] && AUTODREAM_TRIAGE_FOCUS="$__env_focus"
 [ -n "$__env_model" ] && AUTODREAM_REVIEW_MODEL="$__env_model"
 
-# Reports live in the sibling of the install dir (~/.omp/agent/dreams here).
 DREAMS_DIR="${DREAMS_DIR:-$(dirname "$AUTODREAM_DIR")/dreams}"
 CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
 AUTODREAM_TRIAGE_SURFACE="${AUTODREAM_TRIAGE_SURFACE:-inline}"
-# The model the triage session runs on. Without --model it inherits the user's settings.json
-# default, which is not the model the triage was meant to run on.
 AUTODREAM_REVIEW_MODEL="${AUTODREAM_REVIEW_MODEL:-opus}"
 CMUX_BIN="${CMUX_BIN:-/Applications/cmux.app/Contents/Resources/bin/cmux}"
-# Whether the cmux triage workspace grabs focus on launch. Default false so a
-# nightly/background run does not yank you out of what you are doing.
 AUTODREAM_TRIAGE_FOCUS="${AUTODREAM_TRIAGE_FOCUS:-false}"
 [ "$AUTODREAM_TRIAGE_FOCUS" = "true" ] || AUTODREAM_TRIAGE_FOCUS="false"
 
@@ -86,16 +72,9 @@ POSITIONAL=""
 for arg in "$@"; do
   case "$arg" in
     --force|-f) FORCE=1 ;;
-    -h|--help)
-      # Print the header comment block verbatim: everything from line 2 until the
-      # first non-comment line. Derived rather than a line range, so growing the
-      # header cannot silently truncate --help mid-sentence.
-      awk 'NR==1{next} /^#/{sub(/^# ?/,""); print; next} {exit}' "$0"
-      exit 0 ;;
+    -h|--help) usage; exit 0 ;;
     -*) echo "review.sh: unknown option: $arg" >&2; exit 2 ;;
     *)
-      # One report per run. Silently triaging only the last of several dates
-      # would be a confusing way to lose a request.
       if [ -n "$POSITIONAL" ]; then
         echo "review.sh: expected one date, got '$POSITIONAL' and '$arg'" >&2
         exit 2
@@ -119,12 +98,6 @@ fi
 
 DATE=$(basename "$REPORT" .md)
 
-# Decisions have been written as both bullets and numbered lists across the
-# report history, so count either. Used only to flavour the notice text.
-report_triage_count(){
-  awk '/^## Triage decisions/{f=1;next} /^## /{f=0} f' "$1" | grep -cE '^([-*]|[0-9]+\.) '
-}
-
 skip_notice(){
   echo "autodream $DATE: $1"
   echo "  report:      $REPORT"
@@ -132,11 +105,8 @@ skip_notice(){
 }
 
 if [ "$FORCE" -eq 0 ]; then
-  # Triage state first: a report can be both empty and already worked through
-  # (an empty-day stub someone closed out), and "already triaged" is the more
-  # informative reason of the two.
   if report_is_triaged "$REPORT"; then
-    COUNT=$(report_triage_count "$REPORT" | tr -d ' ')
+    COUNT=$(report_decision_count "$REPORT" | tr -d ' ')
     if [ "$COUNT" -eq 1 ] 2>/dev/null; then
       skip_notice "already triaged (1 decision logged)."
     elif [ "$COUNT" -gt 1 ] 2>/dev/null; then
@@ -152,64 +122,22 @@ if [ "$FORCE" -eq 0 ]; then
   fi
 fi
 
-# Hand the triage session off to its own cmux workspace when configured. We do
-# this only after resolving + validating the report above, so a missing-report
-# error surfaces in this terminal rather than in a detached workspace. The new
-# workspace re-runs this script with the surface forced back to inline, so it
-# falls through to the normal `exec claude` below.
+marker_age(){ echo $(( $(date +%s) - $(pstat_mtime "$LAUNCH_MARKER" || date +%s) )); }
+
 if [ "$AUTODREAM_TRIAGE_SURFACE" = "cmux" ]; then
   CMUX="$CMUX_BIN"; [ -x "$CMUX" ] || CMUX=$(command -v cmux 2>/dev/null || true)
-  # Runtime cmux discovery does NOT depend on PATH: CMUX_BIN's default is the
-  # hardcoded /Applications bundle (config-load section above), so the launchd
-  # job's minimal env resolves cmux whenever install.sh's preflight accepted it.
-  # Config CMUX_BIN takes precedence (review.sh preserves it from the config);
-  # install.sh provisions the review job iff the same three-way resolution
-  # (config → PATH → default) finds an executable, so runtime can never diverge
-  # from install time.
   if [ -n "$CMUX" ] && [ -x "$CMUX" ]; then
-    # Same-day dedup for the review job's catch-up triggers (08:00/09:15/12:15/
-    # 15:30/18:15, provisioned by install.sh like the run job). Whichever trigger fires first
-    # after the report lands opens the workspace and stamps a confirmed marker;
-    # later triggers for the same date honor it instead of opening a second
-    # workspace on top of the first. --force bypasses the marker, so a
-    # deliberately relaunched triage still works.
-    #
-    # The marker binds to the REPORT's content digest (not just the date):
-    # rebuilding a date with AUTODREAM_FORCE=1 produces a new report, whose new
-    # digest invalidates the old marker and lets the popup re-trigger. The claim
-    # is atomic (mkdir, which fails if the dir already exists) so two
-    # overlapping triggers cannot both pass the check before either stamps.
     LOGS_DIR="$AUTODREAM_DIR/logs"
-    # Fail loudly if the logs dir can't be made: a subsequent claim-mkdir
-    # failure would otherwise be misreported as "another invocation" and
-    # silently drop triage.
     if ! mkdir -p "$LOGS_DIR"; then
       echo "review.sh: cannot create logs dir $LOGS_DIR" >&2
       exit 1
     fi
-    # Report identity key: a content digest, not mtime. mtime is
-    # seconds-resolution, so a same-second rebuild shares a marker and its
-    # triage is silently swallowed. The digest changes whenever the report
-    # content changes, which is exactly the rebuild signal. A missing shasum is
-    # a hard error (fail closed), never a silent regression to mtime — see the
-    # emptiness check below.
     REPORT_KEY=$(shasum -a 256 "$REPORT" 2>/dev/null | awk '{print $1}')
-    # The assignment's exit status is awk's (0 even on empty input), so a
-    # failing/missing shasum must be detected by emptiness, not rc — an empty
-    # key would collapse every report that day to the same marker. Fail CLOSED
-    # rather than regressing to seconds-resolution mtime: that would silently
-    # reintroduce the exact same-second collision the digest contract exists to
-    # prevent (executor 5.8). shasum ships with macOS; a host without it is a
-    # host that cannot run a content-bound review.
     if [ -z "$REPORT_KEY" ]; then
       echo "review.sh: shasum unavailable; cannot compute report digest, aborting triage" >&2
       exit 1
     fi
     LAUNCH_MARKER="$LOGS_DIR/review-launched-$DATE-$REPORT_KEY"
-    # Confirmation lives as a SIBLING file, not inside the claim dir: the
-    # stale-reap below uses `find -delete` (rmdir semantics), which silently
-    # fails on a non-empty dir. Kept separate, the claim dir stays empty and
-    # both names still match the review-launched-* prune glob.
     LAUNCH_CONFIRMED="$LAUNCH_MARKER.confirmed"
     if [ ! -f "$CLAUDE_BIN" ] || [ ! -x "$CLAUDE_BIN" ]; then
       echo "review.sh: claude binary not found or not executable ($CLAUDE_BIN); not launching triage workspace" >&2
@@ -217,27 +145,15 @@ if [ "$AUTODREAM_TRIAGE_SURFACE" = "cmux" ]; then
     fi
     CLAIM_GRACE=900
     CLAIMED_OWN=0
-    # Reap stale state so it cannot grow unbounded: claim dirs and confirmed
-    # tokens older than 14 days. `-delete` handles both the empty dir and its
-    # sibling file. Unconditional on --force: the force path is exactly the
-    # retry-after-failure route and must not be the one path that skips the
-    # forest cleanup (all three --force occasions leave the old claim in place).
     find "$LOGS_DIR" -maxdepth 1 -name 'review-launched-*' -mtime +14 -delete 2>/dev/null || true
     if [ "$FORCE" -eq 0 ]; then
-      # Already confirmed -> definitely launched. Skip.
       if [ -e "$LAUNCH_CONFIRMED" ]; then
         echo "review.sh: $DATE triage already launched for this report (marker $LAUNCH_CONFIRMED)"
         echo "  open anyway: $(basename "$0") --force $DATE"
         exit 0
       fi
-      # A claim dir with no confirmed token is either an in-flight launch or
-      # an abandoned one (the process died while cmux was blocked). Age
-      # bounds it: younger than CLAIM_GRACE is in-progress; older is a dead
-      # claim to reclaim, so a killed popup can never suppress triggers
-      # forever.
       if [ -d "$LAUNCH_MARKER" ]; then
-        MARKER_AGE=$(( $(date +%s) - $(pstat_mtime "$LAUNCH_MARKER" || echo "$(date +%s)") ))
-        if [ "$MARKER_AGE" -ge "$CLAIM_GRACE" ]; then
+        if [ "$(marker_age)" -ge "$CLAIM_GRACE" ]; then
           echo "review.sh: reclaiming abandoned claim $LAUNCH_MARKER"
           rmdir "$LAUNCH_MARKER" 2>/dev/null || true
         else
@@ -245,13 +161,6 @@ if [ "$AUTODREAM_TRIAGE_SURFACE" = "cmux" ]; then
           exit 0
         fi
       fi
-      # Atomic claim: mkdir fails if another invocation won the race. But a
-      # failed mkdir is ALSO what a read-only/space-full logs dir produces —
-      # reporting that as "in progress" and exiting 0 silently drops triage.
-      # `mkdir -p $LOGS_DIR` above does not catch an already-existing-but-
-      # unwritable dir, so distinguish the claim's mkdir outcomes: if the
-      # claim dir now exists it was a genuine race (exit 0); otherwise it is
-      # an I/O error (fail loudly).
       if ! mkdir "$LAUNCH_MARKER" 2>/dev/null; then
         if [ -d "$LAUNCH_MARKER" ]; then
           echo "review.sh: $DATE triage launch already in progress by another invocation"
@@ -262,87 +171,31 @@ if [ "$AUTODREAM_TRIAGE_SURFACE" = "cmux" ]; then
       fi
       CLAIMED_OWN=1
     fi
-    SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
-    # Workspace + tab are named after the triaged date (ISO, i.e. the report's
-    # own YYYY-MM-DD — the date of the questions being addressed, not today).
+    SELF="$(cd "$(dirname "$_src")" && pwd)/$(basename "$_src")"
     TAB_TITLE="$DATE Autodream Triage"
-    # Carry --force through: the workspace re-runs this script, and without it
-    # the inner run would re-check, decide there is nothing to triage, and exit
-    # immediately — leaving a workspace that dies on open.
     FORCE_ARG=""; [ "$FORCE" -eq 1 ] && FORCE_ARG=" --force"
     echo "review.sh: opening $DATE triage in a new cmux workspace (focus=$AUTODREAM_TRIAGE_FOCUS)"
-    # The workspace re-runs this script with the surface forced to inline so it
-    # falls through to the exec claude below. CLAUDE_CODE_DISABLE_TERMINAL_TITLE
-    # stops claude live-rewriting the tab title over our pinned date.
-    #
-    # The inner command is a shell string cmux will run, so every interpolated
-    # value is %q-quoted: paths (DREAMS_DIR, CLAUDE_BIN, SELF) and DATE may
-    # legitimately contain apostrophes (e.g. an install under /tmp/O'Brien),
-    # and an unquoted one would break the inner shell parse. $FORCE_ARG is
-    # generated here and can only be empty or " --force", so it stays literal.
     shq(){ printf '%q' "$1"; }
     INNER_CMD="env AUTODREAM_TRIAGE_SURFACE=inline CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 AUTODREAM_REVIEW_MODEL=$(shq "$AUTODREAM_REVIEW_MODEL") DREAMS_DIR=$(shq "$DREAMS_DIR") CLAUDE_BIN=$(shq "$CLAUDE_BIN") $(shq "$SELF") $(shq "$DATE")$FORCE_ARG"
     WS_OUT=$("$CMUX" workspace create \
-      --name "$DATE Autodream Triage" \
+      --name "$TAB_TITLE" \
       --cwd "$HOME" \
       --command "$INNER_CMD" \
       --focus "$AUTODREAM_TRIAGE_FOCUS" 2>&1)
     WS_RC=$?
     echo "$WS_OUT"
-    # A failed create must not be treated as a launch: release the claim so the
-    # next trigger retries, and exit non-zero so a scheduled job can't think the
-    # triage happened. Without the exit check, a cmux that fails but prints
-    # workspace-like output would also satisfy the ref parse below and latch a
-    # false marker.
     if [ "$WS_RC" -ne 0 ]; then
-      # Release the claim only if THIS process owns it, or if it is an
-      # abandoned one (older than the grace window). A --force run never
-      # claims, so it must not delete a LIVE claim acquired by a concurrent
-      # normal invocation whose cmux is still running (auditor 6.3 / executor
-      # 6.3) — but it still releases a stale claim left by a killed normal run
-      # (executor 5.2), so scheduled triggers don't stall on "in progress".
       if [ "$CLAIMED_OWN" -eq 1 ]; then
         rmdir "$LAUNCH_MARKER" 2>/dev/null || true
       elif [ -d "$LAUNCH_MARKER" ]; then
-        MARKER_AGE=$(( $(date +%s) - $(pstat_mtime "$LAUNCH_MARKER" || echo "$(date +%s)") ))
-        [ "$MARKER_AGE" -ge "$CLAIM_GRACE" ] && rmdir "$LAUNCH_MARKER" 2>/dev/null || true
+        [ "$(marker_age)" -ge "$CLAIM_GRACE" ] && rmdir "$LAUNCH_MARKER" 2>/dev/null || true
       fi
       echo "review.sh: cmux workspace create failed (exit $WS_RC); triage not opened" >&2
       exit 1
     fi
-    # cmux returned 0: per the tool's contract a workspace was created. Bind
-    # the confirmed token NOW — before any further parsing — so the dedup fact
-    # is durable regardless of what happens next (a kill between create and
-    # confirm, or a stdout format change). Age-based reclaim must never treat a
-    # created-but-unconfirmed launch as abandoned and spawn a second workspace.
-    # This is unconditional on the claim (a --force run skipped the claim mkdir
-    # but is still a real launch, and round-1 stamped on any successful create).
-    #
-    # Auditor race: a concurrent --force rebuild can replace $REPORT between
-    # our launch-time hash and the workspace actually reading it. We bind the
-    # confirmed token to the LAUNCH-TIME digest (REPORT_KEY) — the digest we
-    # decided to triage — never re-hash after create to chase the current file.
-    # The child reads the mutable path at spawn, so the parent cannot know
-    # which bytes it consumed; rewriting the token to a post-race digest (an
-    # earlier revision did this) could mark a report B "confirmed" when the
-    # workspace triaged the older A, silently swallowing B's new questions.
-    # Bound to A, a genuine B that the child did not read has no token of its
-    # its own and its own later trigger surfaces it — at worst a duplicate
-    # popup for a same-instant rebuild, never a lost triage.
-    # touch failure is warned, not fatal: the workspace IS created at this
-    # point; the unconfirmed claim (if any) is grace-bounded and the next
-    # trigger's reclaim would open a duplicate, so report it loudly but do not
-    # claim the launch failed.
     if ! touch "$LAUNCH_CONFIRMED"; then
       echo "review.sh: WARNING could not write confirmed token $LAUNCH_CONFIRMED" >&2
     fi
-    # Pin the tab title to the date. The shell sets a startup title (the cwd) a
-    # beat after creation, so rename a few times across that window; with claude's
-    # own title updates disabled above, the rename then holds. Detached + best
-    # effort so review.sh returns immediately and a failure never affects triage.
-    # WS_REF is cosmetic here — confirmation is already bound above — so an
-    # unparseable/absent ref (cmux stdout changed shape) only skips the title
-    # rename, never the launch.
     WS_REF=$(printf '%s\n' "$WS_OUT" | sed -n 's/.*\(workspace:[0-9][0-9]*\).*/\1/p' | head -1)
     if [ -n "$WS_REF" ]; then
       ( for _ in 1 2 3; do
@@ -353,14 +206,8 @@ if [ "$AUTODREAM_TRIAGE_SURFACE" = "cmux" ]; then
     exit 0
   fi
   if [ -t 0 ]; then
-    # Interactive manual run (terminal): falling through to the inline claude
-    # session below is right — the user is watching this terminal.
     echo "review.sh: cmux not found ($CMUX_BIN); falling back to inline triage" >&2
   else
-    # Non-interactive (the launchd review job, ssh, a script): a headless
-    # `exec claude` has no TTY to talk to — the session hangs or exits
-    # uselessly and the marker was never confirmed, so every trigger retries
-    # forever and no popup ever happens. Fail the trigger loudly instead.
     echo "review.sh: cmux not found ($CMUX_BIN) and stdin is not a TTY; aborting scheduled triage (no headless launch)" >&2
     exit 1
   fi
@@ -368,35 +215,6 @@ fi
 
 REPORT_BYTES=$(wc -c < "$REPORT" | tr -d ' ')
 
-# Triage needs the questions, not the report. Last night's findings can run to
-# 25KB of session narrative, and a body that reads like exploit development
-# (a night spent on TV firmware, sdb, root status, dlopen) makes the session
-# read as an offensive-security engagement to model providers' content
-# classifiers: on 2026-10-27 every launch of this script with the whole report
-# inlined was refused with "Opus 5.5's safeguards flagged this session ...
-# [cyber]", including a bare "go". The same report's open-questions section is
-# ~2KB of decision text, and passes. So inline the questions and point at the
-# file for anything deeper.
-# Triage needs the questions, not the report. Last night's findings can run to
-# 25KB of session narrative, and a body that reads like exploit development (a
-# night spent on TV firmware, sdb, root status, dlopen) makes the session read as
-# an offensive-security engagement to model providers' content classifiers: on
-# 2026-10-27 every launch of this script with the whole report inlined was
-# refused with "Opus 5.5's safeguards flagged this session ... [cyber]",
-# including a bare "go". The same report's questions section is ~2KB of decision
-# text and passes.
-#
-# Which text is "the questions section" is report-format.sh's contract, not this
-# script's: the section sits between AUTODREAM_QUESTIONS_BEGIN and
-# AUTODREAM_QUESTIONS_END, and report_questions() falls back to the old markdown
-# heading only for reports written before that block existed. Nothing here parses
-# markdown, so nothing here can disagree with notify.sh or question-streaks.sh
-# about where the section ends.
-#
-# The cap is all-or-nothing: a section that does not fit is not inlined at all
-# and the prompt points at the file. Splitting a section at a line, an item or a
-# fence and calling the remainder "the questions" is what asked the session to
-# recommend on half a question.
 QUESTIONS_CAP=12000
 QUESTIONS_TMP=$(mktemp -t autodream-questions.XXXXXX) || { echo "review.sh: mktemp failed; not launching triage" >&2; exit 1; }
 trap 'rm -f "$QUESTIONS_TMP"' EXIT
@@ -409,16 +227,11 @@ if [ "${QUESTIONS_BYTES:-0}" -gt "$QUESTIONS_CAP" ]; then
   : > "$QUESTIONS_TMP"
 fi
 
-# Build system prompt via tmpfile — heredocs inside $(...) get confused by
-# apostrophes in the body (parser treats them as quote pairs and a literal
-# `)` in the text prematurely closes the command substitution).
 SYSTEM_TMP=$(mktemp -t autodream-review.XXXXXX) || { echo "review.sh: mktemp failed; not launching triage" >&2; exit 1; }
 trap 'rm -f "$QUESTIONS_TMP" "$SYSTEM_TMP"' EXIT
 if [ "$TRUNCATED" -eq 1 ] && report_has_questions_block "$REPORT"; then
   QUESTIONS_INTRO="The open questions from the $DATE report are too long to quote here (${QUESTIONS_BYTES} bytes). Read them from $REPORT, between the $QUESTIONS_BEGIN and $QUESTIONS_END lines, before your first reply; nothing from that section is in this prompt."
 elif [ "$TRUNCATED" -eq 1 ]; then
-  # A pre-block report: point at the heading, because the sentinels it would be
-  # told to look for do not exist in it.
   QUESTIONS_INTRO="The open questions from the $DATE report are too long to quote here (${QUESTIONS_BYTES} bytes). Read them from $REPORT's \"## Open questions for the user\" section before your first reply; nothing from that section is in this prompt."
 else
   QUESTIONS_INTRO="The open questions from the $DATE report ($REPORT, $REPORT_BYTES bytes) are quoted in full below. Work from these. Do not read the whole report into context and never dump it back to the user; the wider report is on disk at that path if a question needs one specific number from it."
