@@ -1,4 +1,8 @@
 #!/bin/bash
+set -u
+
+usage() {
+  cat <<'EOF'
 # Find (and optionally delete) autodream's OWN session transcripts.
 #
 # Every `claude --print` worker autodream spawns used to persist its own session
@@ -22,75 +26,39 @@
 #
 # Env:
 #   PROJECTS_DIR   default $HOME/.claude/projects
+EOF
+}
 
-set -u
-
-# A session is autodream's own when its FIRST user turn is one of our inlined
-# prompts. Anchored to the start of the message content so a human session that
-# merely *discusses* autodream (mentions SESSION_PATH= mid-conversation) is NOT
-# matched. Covers both the current literal-path framing and the legacy KEY=value
-# framing from earlier runs, on either transcript shape:
-#   - Claude stores user content in a string:   {"type":"user",...,"content":"..."}
-#   - OMP stores an array of items:             {"type":"message","message":{"role":"user","content":[{"type":"text","text":"..."}]}}
-# The `(content":"|text":")` anchor matches both.
 SELF_RE='"(content":"|text":")(Session transcript to analyze \(literal absolute path\)|Findings directory to aggregate \(literal absolute path\)|SESSION_PATH=|FINDINGS_DIR=)'
 
-# The FIRST user-turn record, whichever shape the transcript uses. Claude persists user
-# turns as {"type":"user",...}; OMP as {"type":"message",...} with a message object whose
-# role is "user" (assistant and tool records never match). `-m1` stops at the first record
-# matching either shape, so callers always get the first user turn.
-first_user_turn() { # $1 = jsonl path -> first user-turn record line (or nothing)
+first_user_turn() {
   grep -m1 -E '"type":"user"|"type":"message".*"message":\{"role":"user"' "$1" 2>/dev/null
 }
 
-# Second vector: an orphan AI-title stub. Claude Code's async title generation writes
-# a one-line `{"type":"ai-title",...}` record into the worker's session bucket even
-# under --no-session-persistence (which only suppresses the full transcript). These
-# stubs carry NO conversation, so the first-user-turn rule above never catches them.
-# We match them by the model-generated title, which paraphrases our L1/L2 prompts
-# (e.g. "Analyze Claude session findings", "Triage coding session for findings",
-# "Aggregate daily findings into report"). Safety comes from REQUIRING the file to be
-# an orphan stub — no user turn anywhere. A real session is a single file containing
-# its title alongside its turns, so it always has a user turn and is never matched;
-# only headless calls that didn't persist a transcript leave a title-only orphan. And
-# we still demand the title describe session triage / findings aggregation, so a real
-# headless orphan about an unrelated task (e.g. "GCU Rush firmware development") is
-# spared. Tuned against the real backlog: catches the L1/L2 title variants, spares
-# terminal-tab-title stubs and unrelated work-session orphans.
-is_self_title() { # $1 = jsonl path → exit 0 if it's an autodream orphan title stub
-  first_user_turn "$1" | grep -q . && return 1   # has conversation → not an orphan
+is_self_title() {
+  first_user_turn "$1" | grep -q . && return 1
   local t
   t=$(sed -n 's/.*"aiTitle":"\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -1)
   [ -n "$t" ] || return 1
-  # L2 aggregator: aggregating per-session findings into the daily report
   printf '%s' "$t" | grep -qiE 'aggregate.*findings|findings.*(into|report)' && return 0
-  # L1 triage, "session triage … findings" phrasings (verb may follow the noun)
   printf '%s' "$t" | grep -qiE 'session triage|triage.*findings|findings.*extraction' && return 0
-  # L1 triage: a verb acting on a session/transcript, producing findings/triage/analysis
   printf '%s' "$t" | grep -qiE '(analyz|triag|process|review|debug).*(session|transcript)' \
     && printf '%s' "$t" | grep -qiE 'findings|transcript|triage|analysis|extract|emit|structured' \
     && return 0
   return 1
 }
 
-is_self() { # $1 = jsonl path → exit 0 if it's an autodream-generated session
+is_self() {
   first_user_turn "$1" | grep -qE "$SELF_RE" && return 0
   is_self_title "$1"
 }
 
-# ---- --is-self: single-file predicate, for the harness adapters ----
-# The adapter contract needs to ask "is this one of ours?" about ONE file, and
-# this script is the single source of truth for that question. Exposing the
-# predicate here rather than letting each adapter carry its own copy of the
-# marker list is the whole point: a marker added above must not have to be
-# remembered in a second place.
 if [ "${1:-}" = "--is-self" ]; then
   [ -n "${2:-}" ] || { echo "usage: $0 --is-self <session.jsonl>" >&2; exit 2; }
   is_self "$2" && exit 0
   exit 1
 fi
 
-# ---- --filter: stdin paths -> stdout the ones we should still triage ----
 if [ "${1:-}" = "--filter" ]; then
   while IFS= read -r f; do
     [ -n "$f" ] || continue
@@ -99,13 +67,12 @@ if [ "${1:-}" = "--filter" ]; then
   exit 0
 fi
 
-# ---- scan/list/delete ----
 DELETE=0; QUIET=0; SCAN_DIR=""
 for a in "$@"; do
   case "$a" in
     --delete) DELETE=1 ;;
     --quiet)  QUIET=1 ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
     -*) echo "unknown flag: $a" >&2; exit 2 ;;
     *) SCAN_DIR="$a" ;;
   esac
