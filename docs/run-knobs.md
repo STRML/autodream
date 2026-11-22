@@ -139,11 +139,24 @@ Environment overrides (all optional):
   AUTODREAM_XBOOKMARKS_BIN override the resolved x-bookmarks.sh path, authoritative
   AUTODREAM_REPORTS_BIN    override the resolved report-scripts.sh path, authoritative
                            (the allowlist is $AUTODREAM_DIR/report-scripts.conf; the knobs
-                           AUTODREAM_REPORT_TIMEOUT and AUTODREAM_REPORT_MAX_BYTES are in report-scripts.sh)
+                           AUTODREAM_REPORT_TIMEOUT (60), AUTODREAM_REPORT_MAX_BYTES (100000) and
+                           AUTODREAM_REPORT_KILL_GRACE (5) are read by report-scripts.sh)
   AUTODREAM_PRUNE_ROOTS    colon-separated dirs to search for repos whose finished
                            worktrees and branches are pruned     default: unset (off)
   AUTODREAM_PRUNE_BIN      override the resolved prune-worktrees.sh path, authoritative
-                           (the other AUTODREAM_PRUNE_* knobs are in prune-worktrees.sh)
+  AUTODREAM_PRUNE_GRACE_MIN    recent-edit window in minutes                  default 720
+  AUTODREAM_PRUNE_MAX          most removals in one run                       default 25
+  AUTODREAM_PRUNE_CLOSED_DAYS  how long a closed PR must have been closed     default 7
+  AUTODREAM_PRUNE_BUDGET_SEC   wall-clock budget for the whole run            default 1200
+  AUTODREAM_PRUNE_KILL_SLACK   seconds after the budget before a hard stop    default 120
+  AUTODREAM_PRUNE_CALL_SEC     timeout for one network call or trash          default 60
+  AUTODREAM_PRUNE_PROTECT      extra protected branch globs, colon-separated  default none
+  AUTODREAM_PRUNE_OPEN_LIMIT   open PRs read per repo; at the limit the repo
+                               is kept whole                                  default 200
+  AUTODREAM_PRUNE_TRASH        0 to delete with git instead of trash          default 1
+  AUTODREAM_PRUNE_LEDGER       append-only record of every removal
+                               default ~/.claude/autodream/prune-ledger.tsv
+  AUTODREAM_PRUNE_DRY_RUN      1 is the same as --dry-run
   AUTODREAM_TRIAGE_SUGGEST 0 turns off the "repos worth triaging" list  default: on
   AUTODREAM_TRIAGE_BIN     override the resolved triage-candidates.sh path, authoritative
                            (the other AUTODREAM_TRIAGE_* knobs are in triage-candidates.sh)

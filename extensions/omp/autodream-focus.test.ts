@@ -4,11 +4,6 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import autodreamFocus from "./autodream-focus";
 
-/**
- * The extension against a fake OMP API whose `exec` runs the REAL bin/autodream-focus.sh, so what is checked is the
- * whole path from `/focus` to the line in tags.jsonl. What it cannot check is OMP's own loader and key handling.
- */
-
 const CLI = resolve(import.meta.dir, "../../bin/autodream-focus.sh");
 
 const entry = (id: string, role: string, content: unknown) => ({ type: "message", id, message: { role, content } });

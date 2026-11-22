@@ -1,23 +1,4 @@
 #!/bin/bash
-# Prints `web` or `full` for a PR's changed paths.
-#
-#   .github/ci-scope.sh BASE HEAD    diff the two revisions (what tests.yml runs)
-#   .github/ci-scope.sh < paths      read changed paths, one per line
-#
-# The diff is --no-renames: plain --name-only reports a rename by its new path alone, so moving
-# bin/run.sh into web/ would read as a web-only change. The changed paths go to stderr.
-#
-# `web` means every path belongs to the web dashboard (or is prose markdown) and at least one is
-# web code, so tests.yml runs only tests/autodream-web.sh. Anything else prints `full`: a path with
-# no rule, a path this list has not been told about, no paths at all. A wrong `full` costs a few
-# minutes; a wrong `web` merges a change the suite would have caught. tests/ci-scope.sh pins it.
-#
-# Not web, on purpose:
-#   web/threads.*      bin/threads-render.py inlines them into the page run-all asserts on
-#   bin/autodream-web  the shell launcher install.sh links
-#   tests/autodream-web.sh, this file, any workflow: they change how tests run
-#   markdown under prompts/, adapters/ or skills/: the suites assert on what it says
-
 set -u
 
 if [ "$#" -eq 2 ]; then

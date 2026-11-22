@@ -1,39 +1,4 @@
 #!/bin/bash
-# Confine an L1 worker's writes to its own staging directory (#169).
-#
-# An L1 worker holds the Write tool, so until now it could write any path the user can: another
-# session's findings, a chunk answer before the runner checked it, a new *.json in the findings
-# dir, $AUTODREAM_DIR/config. No check on files in the findings dir can tell the runner's writes
-# from a worker's, so the access is what changes. The runner makes a staging directory per answer,
-# tells the worker to write its answer there, runs the engine under an OS sandbox that can write
-# only that directory (plus the narrow list of state paths the engine itself needs), and copies the
-# answer into the findings dir after the engine has exited. The staging directory itself is made by
-# run.sh; this helper builds the sandbox around it.
-#
-#   l1-confine.sh probe
-#       One line: "yes<TAB><tool>" or "no<TAB><reason>". Runs a real confined shell and checks it
-#       can write inside a staging directory and cannot write beside it, so a tool that accepts a
-#       profile and then confines nothing reads as "no". Always exits 0.
-#   l1-confine.sh engine-prefix <adapter.sh> <stage>
-#       The prefix for one engine: its writable paths come from `<adapter.sh> l1-writes`, so setup and
-#       every worker call build the same thing from the same list. Exits 1 with the reason when the
-#       adapter declares no write profile or a path in it is refused.
-#   l1-confine.sh prefix <stage> [writable-path ...]
-#       NUL-delimited argv to put in front of the engine command. A writable path is a directory
-#       (subpath), or a prefix when it ends in "*" (~/.claude.json and, under sandbox-exec, the temp
-#       files claude renames over it). L1_CONFINE_PROTECT (colon-separated) names paths the engine
-#       cannot write even when a writable path covers them: $AUTODREAM_DIR sits under ~/.claude on
-#       a default install. Under bwrap a prefix binds only the files that already match it.
-#
-# Every path that reaches a profile or a bind is checked first, whatever the tool: absolute, from the
-# characters a profile can hold (no glob, no quote), and a writable path is not a symlink itself (it would
-# grant its target). The staging directory is not a symlink and, when L1_STAGE_ROOT is set, resolves
-# under it. Globbing is off for the whole script; the one place a prefix rule needs it turns it on.
-#
-# L1_CONFINE_TOOL=sandbox-exec|bwrap picks a tool (default: sandbox-exec, then bwrap).
-#
-# The profile denies writes only. Reads, the network and process exec are unchanged: the engine
-# must read transcripts and reach its provider, and read access is not what #169 is about.
 set -u
 set -f
 
@@ -51,7 +16,6 @@ tool_for() {
 
 phys() { (cd "$1" 2>/dev/null && pwd -P); }
 
-# A path that goes into the profile text must not be able to close the string or add a rule.
 safe_path() {
   case "$1" in
     ""|*[!A-Za-z0-9._/@+~=,:\ -]*) return 1 ;;
@@ -59,11 +23,8 @@ safe_path() {
   return 0
 }
 
-# Resolve the part of a path that exists, so a symlinked parent (/tmp, /var, ~ on some hosts)
-# compares as the kernel sees it. A path that does not exist yet keeps its tail.
 resolve_path() {
   local p="$1" tail=""
-  # A regular file cannot be cd'd into: resolve its parent and keep its name.
   if [ -e "$p" ] && [ ! -d "$p" ]; then tail="/$(basename "$p")"; p=$(dirname "$p"); fi
   while [ ! -e "$p" ] && [ "$p" != "/" ] && [ "$p" != "." ]; do
     tail="/$(basename "$p")$tail"; p=$(dirname "$p")
@@ -71,15 +32,12 @@ resolve_path() {
   printf '%s%s' "$(phys "$p" || printf '%s' "$p")" "$tail"
 }
 
-# A path as the kernel sees it, checked again after resolving: a symlink can lead to a name that
-# the profile text cannot hold (a quote or a newline), which the check on the supplied path never saw.
 profile_path() { # $1=path -> the resolved path, or exit 1
   local r; r=$(resolve_path "$1")
   safe_path "$r" || { printf 'l1-confine: %s resolves to a path the profile cannot hold: %s\n' "$1" "$r" >&2; return 1; }
   printf '%s' "$r"
 }
 
-# What every path must satisfy before it can reach a profile or a bind (a message on stderr, exit 1).
 check_writable() { # $1=path as listed (a trailing * makes it a prefix)
   local p="${1%\*}"
   case "$p" in
@@ -155,10 +113,6 @@ emit_prefix() { # $1=tool $2=stage, rest: writable paths -> NUL-delimited argv
       printf '%s\0' "$(command -v sandbox-exec)" -p "$profile"
       ;;
     bwrap)
-      # A bind mount names an existing path, so a prefix rule binds the files that already match it
-      # (.claude.json itself, written in place) and cannot cover a temp file created later: the
-      # sandbox-exec profile can, bwrap cannot. A protected path is bound read-only after the state
-      # paths, and the stage last, so it wins inside a protected directory.
       printf '%s\0' "$(command -v bwrap)" --ro-bind / / --dev /dev --proc /proc --die-with-parent
       local f
       for p in "$@"; do
@@ -216,9 +170,6 @@ cmd_engine_prefix() { # $1=adapter.sh, $2=stage
     rm -f "$err"; return 1
   fi
   rm -f "$err"
-  # One path per line, split by IFS alone (globbing is off for the whole script): no here-string and
-  # no loop, so no temp file whose failure could leave an empty list behind. An adapter refuses to
-  # print a path that holds a newline, since a line is the only separator there is.
   local IFS=$'\n'
   # shellcheck disable=SC2086
   set -- $out

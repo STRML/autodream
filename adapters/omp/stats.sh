@@ -1,11 +1,4 @@
 #!/bin/bash
-# Deterministic, model-free session statistics sidecar for OMP sessions (adapters/omp).
-#
-# Reads either a raw OMP session or the linearized copy adapters/omp/linearize.sh writes;
-# the autodream_meta record the linearizer prepends is ignored by every count below and
-# supplies the advisor and nested flags, which the filename of a normalized temp copy
-# could not.
-
 set -u
 
 _pp="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/../../bin" && pwd)/portable.sh"
@@ -31,26 +24,13 @@ mtime=$(pstat_mtime "$transcript") || {
   exit 1
 }
 
-# The advisor flag. The linearizer records it in autodream_meta from the ORIGINAL file
-# name. A raw session falls back to its own name. `__advisor.jsonl` and
-# `__advisor-<name>.jsonl` are omp's reserved stems for a reviewer model that tails a
-# primary session: an observability record, not an agent session, with a read-only
-# toolset, so `Tool "bash" not available` is its normal shape. Its calls are toolCall content
-# blocks, not tool_execution_start records, and are counted from those below.
 case "$(basename "$transcript")" in
   __advisor.jsonl|__advisor-*.jsonl) is_advisor_name=true ;;
   *) is_advisor_name=false ;;
 esac
 
-# Provenance for a raw file: a child lives in a directory named after its parent's file, so
-# "my directory plus .jsonl is a file" identifies it exactly (the rule linearize.sh applies, from
-# the path and not the entries: an advisor child has no user turns and no session_init). A
-# linearized copy lives in the runner's work directory, where this is false, and the meta record
-# the linearizer wrote answers instead.
 nested_name=false
 if [ -f "$(dirname "$transcript").jsonl" ]; then nested_name=true; fi
-# A child whose parent file is gone is still a child: its directory is named like a session file
-# (<ISO stamp>_<id>) and a project bucket never is. The same rule as linearize.sh.
 case "$(basename "$(dirname "$transcript")")" in
   [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*Z_*) nested_name=true ;;
 esac
