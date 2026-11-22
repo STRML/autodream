@@ -1212,7 +1212,7 @@ lock_discard_dir() {
 lock_meta_writable() {
   local f
   [ -d "$1" ] && [ ! -L "$1" ] && [ -w "$1" ] || return 1
-  for f in "$1/start" "$1/pid" "$1/start.tmp" "$1/pid.tmp"; do
+  for f in "$1/start" "$1/pid"; do
     [ ! -L "$f" ] || return 1
     [ ! -e "$f" ] || { [ -f "$f" ] && [ -w "$f" ]; } || return 1
   done
@@ -1221,6 +1221,7 @@ lock_meta_writable() {
 lock_write_meta() {
   local dir="$1" owner="$2" start
   start=$(proc_start "$owner")
+  rm -f "$dir/start.tmp" "$dir/pid.tmp"
   if printf '%s\n' "$start" > "$dir/start.tmp" 2>/dev/null \
     && printf '%s\n' "$owner" > "$dir/pid.tmp" 2>/dev/null \
     && mv -f "$dir/start.tmp" "$dir/start" 2>/dev/null \

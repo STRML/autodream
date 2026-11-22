@@ -3406,17 +3406,20 @@ test_run_lock_metadata_of_the_wrong_type_is_refused_before_any_write(){
   rm -rf "$root"
 }
 
-test_run_lock_a_temp_that_is_a_symlink_is_refused_before_any_write(){
-  echo "# the run lock: a start.tmp or pid.tmp that is a symlink is cannot-lock, and nothing is written through it (#266)"
+test_run_lock_a_temp_that_is_a_link_is_replaced_and_never_written_through(){
+  echo "# the run lock: a start.tmp or pid.tmp left as a symlink or a hard link is replaced by a fresh file, and what it pointed at is untouched (#266)"
   local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
-  local lk="$root/autodream/locks/x.lock" dead out name
+  local lk="$root/autodream/locks/x.lock" dead out name kind
   true & dead=$!; wait "$dead" 2>/dev/null
   for name in start.tmp pid.tmp; do
-    rm -rf "$lk"; mkdir -p "$lk"; printf '%s\n' "$dead" > "$lk/pid"; printf 'Mon Jan  1 00:00:00 2018\n' > "$lk/start"
-    printf 'target\n' > "$root/target"; ln -s "$root/target" "$lk/$name"
-    out=$(LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"')
-    assert_eq "$out" "rc=3" "a $name that is a symlink is cannot-lock"
-    assert_eq "$(cat "$root/target")" "target" "and the file it points at is untouched"
+    for kind in symlink hardlink; do
+      rm -rf "$lk"; mkdir -p "$lk"; printf '%s\n' "$dead" > "$lk/pid"; printf 'Mon Jan  1 00:00:00 2018\n' > "$lk/start"
+      printf 'target\n' > "$root/target"
+      if [ "$kind" = symlink ]; then ln -s "$root/target" "$lk/$name"; else ln "$root/target" "$lk/$name"; fi
+      out=$(LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"')
+      assert_eq "$out" "rc=0" "a $kind named $name does not stop the takeover"
+      assert_eq "$(cat "$root/target")" "target" "and the file it pointed at is untouched"
+    done
   done
   rm -rf "$root"
 }
@@ -4707,7 +4710,7 @@ _run test_run_lock_a_stale_directory_that_cannot_be_written_is_left_as_found
 _run test_run_lock_release_leaves_a_directory_it_did_not_make
 _run test_run_lock_metadata_of_the_wrong_type_is_refused_before_any_write
 _run test_run_lock_a_failed_pid_rename_leaves_a_dead_pid_no_rollback_and_no_temp
-_run test_run_lock_a_temp_that_is_a_symlink_is_refused_before_any_write
+_run test_run_lock_a_temp_that_is_a_link_is_replaced_and_never_written_through
 _run test_run_lock_a_liveness_probe_that_fails_to_run_is_not_a_dead_holder
 _run test_run_lock_a_lock_path_that_is_a_file_or_a_symlink_is_never_written_through
 _run test_run_lock_a_pid_of_zero_is_not_a_holder
