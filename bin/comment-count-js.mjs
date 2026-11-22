@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { extname } from "node:path";
 
@@ -7,14 +6,6 @@ const DIRECTIVE = /^\s*(@ts-expect-error|@ts-ignore|oxlint-disable(?:-next-line|
 const KINDS = {
   ".js": "JS", ".mjs": "JS", ".cjs": "JS", ".jsx": "JSX",
   ".ts": "TS", ".mts": "TS", ".cts": "TS", ".tsx": "TSX",
-};
-
-const LEGACY_HTML_COMMENTS = new Set([".js", ".cjs"]);
-
-const NODE_MODES = {
-  ".js": [[], ["--input-type=module"]],
-  ".mjs": [["--input-type=module"]],
-  ".cjs": [["--input-type=commonjs"]],
 };
 
 function fail(code, message) {
@@ -33,63 +24,16 @@ const path = process.argv[2] || "";
 const kind = KINDS[extname(path)];
 if (!kind) fail(2, path + ": not a JS or TS extension");
 
-let source;
+let text;
 try {
-  source = new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(0));
+  text = new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(0));
 } catch {
   fail(2, path + ": not valid UTF-8");
 }
 
-function parse(code) {
-  const file = ts.createSourceFile(path, code, ts.ScriptTarget.Latest, true, ts.ScriptKind[kind]);
-  const host = {
-    getSourceFile: (name) => (name === path ? file : undefined),
-    getDefaultLibFileName: () => "lib.d.ts",
-    writeFile() {},
-    getCurrentDirectory: () => "/",
-    getDirectories: () => [],
-    fileExists: (name) => name === path,
-    readFile: () => undefined,
-    getCanonicalFileName: (name) => name,
-    useCaseSensitiveFileNames: () => true,
-    getNewLine: () => "\n",
-  };
-  const options = { allowJs: true, noResolve: true, noLib: true, jsx: ts.JsxEmit.Preserve };
-  const program = ts.createProgram([path], options, host);
-  return { file, diagnostics: program.getSyntacticDiagnostics(file) };
-}
-
-function nodeAccepts(args) {
-  return spawnSync(process.execPath, ["--check", ...args], { input: source, stdio: ["pipe", "ignore", "ignore"] }).status === 0;
-}
-
-const modes = NODE_MODES[extname(path)];
-if (modes && !modes.some(nodeAccepts)) fail(2, path + ": node --check rejects it as JavaScript");
-
-function legacyCommentAt(code, at) {
-  if (code.startsWith("<!--", at)) return at;
-  const closing = code[at] === ">" && /(?:^|[\n\r\u2028\u2029])[ \t]*--$/.test(code.slice(0, at));
-  return closing ? at - 2 : -1;
-}
-
-function neutralize(code) {
-  let current = code;
-  for (;;) {
-    const found = parse(current).diagnostics.map((d) => legacyCommentAt(current, d.start ?? -1)).filter((at) => at !== -1);
-    if (found.length === 0) return current;
-    for (const at of found) {
-      const width = current.startsWith("<!--", at) ? 4 : 3;
-      current = current.slice(0, at) + "//  ".slice(0, width) + current.slice(at + width);
-    }
-  }
-}
-
-let text = source;
-if (parse(text).diagnostics.length > 0 && LEGACY_HTML_COMMENTS.has(extname(path))) text = neutralize(source);
-const parsed = parse(text);
-const file = parsed.file;
-if (parsed.diagnostics.length > 0) {
-  const first = parsed.diagnostics[0];
+const file = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true, ts.ScriptKind[kind]);
+if (file.parseDiagnostics.length > 0) {
+  const first = file.parseDiagnostics[0];
   const where = file.getLineAndCharacterOfPosition(first.start ?? 0);
   fail(2, path + ":" + (where.line + 1) + ": typescript could not parse it (" + ts.flattenDiagnosticMessageText(first.messageText, " ") + ")");
 }
@@ -134,7 +78,7 @@ for (const line of text.split(/\r\n|[\n\r\u2028\u2029]/)) {
     const jsxAt = afterBrace === -1 ? -1 : at + 1 + afterBrace;
     const jsx = jsxAt !== -1 && jsxExpressionStarts.has(at) && comments.has(jsxAt);
     const here = jsx ? comments.get(jsxAt) : comments.get(at);
-    const exempt = here && here.kind === ts.SyntaxKind.SingleLineCommentTrivia && DIRECTIVE.test(source.slice(here.pos + 2, here.end));
+    const exempt = here && here.kind === ts.SyntaxKind.SingleLineCommentTrivia && DIRECTIVE.test(text.slice(here.pos + 2, here.end));
     if ((jsx || inComment(at)) && !exempt) count += 1;
   }
   offset += line.length + (text.startsWith("\r\n", offset + line.length) ? 2 : 1);
