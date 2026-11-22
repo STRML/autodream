@@ -22,6 +22,11 @@ unresolved_list=""; gated_list=""
 session_paths="$(jq -r -s '[ .[] | select(type == "object") | .session_path // empty ] | .[]' \
                    "$fdir"/*.json 2>/dev/null || true)"
 
+mark_unresolved() {
+  unresolved=$((unresolved + 1))
+  unresolved_list="${unresolved_list:+$unresolved_list,}$1"
+}
+
 for h in $hashes; do
   total=$((total + 1))
   f="$fdir/$h.json"
@@ -29,8 +34,7 @@ for h in $hashes; do
     if printf '%s\n' "$session_paths" | grep -qF "$h" 2>/dev/null; then
       by_path=$((by_path + 1))
     else
-      unresolved=$((unresolved + 1))
-      unresolved_list="${unresolved_list:+$unresolved_list,}$h"
+      mark_unresolved "$h"
     fi
     continue
   fi
@@ -42,8 +46,7 @@ for h in $hashes; do
       ;;
     ok) ;;
     *)
-      unresolved=$((unresolved + 1))
-      unresolved_list="${unresolved_list:+$unresolved_list,}$h"
+      mark_unresolved "$h"
       ;;
   esac
 done
