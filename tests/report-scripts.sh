@@ -349,6 +349,46 @@ if pgrep -P $$ > /dev/null 2>&1 || [ $? -le 1 ]; then
   else ok "the TERM-ignoring child was KILLed although its wrapper exited 0"; fi
 else skip "$CHILDKILL_SKIP (a TERM-ignoring child after a wrapper that exits 0)"; fi
 
+GROUPS_SKIP="process groups: this host cannot start a command in its own group or read pgid (the sandbox); CI and launchd can"
+groups_usable(){
+  local p g
+  ( set -m; sleep 30 & p=$!; set +m; g=$(ps -o pgid= -p "$p" 2>/dev/null | tr -d ' '); kill "$p" 2>/dev/null; [ -n "$g" ] && [ "$g" = "$p" ] ) 2>/dev/null
+}
+
+echo "# a command that exits while its background child runs on: the child is stopped and the row is failed"
+new_case orphan
+mk_script "$SCRIPTS/orphan.sh" <<SH
+#!/bin/bash
+( trap '' TERM; exec sh -c 'echo \$\$ > "\$1"; exec /bin/sleep 300' _ "$C/orphan.pid" ) &
+sleep 0.5
+exit 0
+SH
+printf 'orphan %s\n' "$SCRIPTS/orphan.sh" > "$CONF"
+if groups_usable; then
+  collect
+  leaked=$(cat "$C/orphan.pid" 2>/dev/null)
+  if [ -z "$leaked" ]; then no "the orphan's child started"
+  elif kill -0 "$leaked" 2>/dev/null; then no "a background child outlived the command that started it (pid $leaked)"; kill -KILL "$leaked" 2>/dev/null
+  else ok "the background child was stopped after its command exited"; fi
+  assert_eq "$(row orphan)" "failed" "a command that leaves a process behind is failed, not ok"
+  assert_grep "$F/report-orphan.md" 'left a background process running' "the report says what was left behind"
+  assert_eq "$RC" "0" "the collector itself still exits 0"
+else skip "$GROUPS_SKIP (a background child after its command exits)"; fi
+
+echo "# a command that exits 0 and leaves nothing behind stays ok"
+new_case tidy
+mk_script "$SCRIPTS/tidy.sh" <<'SH'
+#!/bin/bash
+sleep 0.2 &
+wait
+echo done
+SH
+printf 'tidy %s\n' "$SCRIPTS/tidy.sh" > "$CONF"
+if groups_usable; then
+  collect
+  assert_eq "$(row tidy)" "ok" "a command that reaps its own children is ok"
+else skip "$GROUPS_SKIP (a clean command next to the leftover check)"; fi
+
 echo "# an unwritable findings dir is a loud failure, not a silent one"
 new_case nofind
 rc=0
