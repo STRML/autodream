@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tokenize
@@ -25,6 +26,7 @@ JS_DIRECTIVE = re.compile(
 )
 
 REGEX_PRECEDERS = set("(,=:[!&|?{};+-*%<>~^")
+CONTROL_KEYWORDS = {"if", "while", "for", "with"}
 REGEX_KEYWORDS = {
     "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
     "throw", "case", "do", "else", "yield", "await",
@@ -186,8 +188,11 @@ class JsScanner:
         self.code_lines = set()
         self.comment_lines = {}
         self.prev = ""
+        self.prev2 = ""
         self.word = ""
         self.stack = []
+        self.parens = []
+        self.paren_is_control = False
 
     def peek(self, k=0):
         j = self.i + k
@@ -195,6 +200,18 @@ class JsScanner:
 
     def newline(self):
         self.line += 1
+
+    def break_length(self, at):
+        if self.text[at:at + 2] == "\r\n":
+            return 2
+        if self.text[at:at + 1] == "\n":
+            return 1
+        return 0
+
+    def set_prev(self, ch, word=""):
+        self.prev2 = self.prev
+        self.prev = ch
+        self.word = word
 
     def code(self):
         self.code_lines.add(self.line)
@@ -230,12 +247,11 @@ class JsScanner:
         while self.i < self.n:
             ch = self.text[self.i]
             if ch == "\\":
-                if self.peek(1) == "\n":
-                    self.i += 2
+                brk = self.break_length(self.i + 1)
+                self.i += 1 + (brk or 1)
+                if brk:
                     self.newline()
                     self.code()
-                else:
-                    self.i += 2
                 continue
             if ch == "\n":
                 return
@@ -248,9 +264,10 @@ class JsScanner:
         while self.i < self.n:
             ch = self.text[self.i]
             if ch == "\\":
-                if self.peek(1) == "\n":
+                brk = self.break_length(self.i + 1)
+                self.i += 1 + (brk or 1)
+                if brk:
                     self.newline()
-                self.i += 2
                 self.code()
                 continue
             if ch == "\n":
@@ -289,23 +306,34 @@ class JsScanner:
     def regex_allowed(self):
         if self.prev == "":
             return True
+        if self.prev == ")":
+            return self.paren_is_control
+        if self.prev == "}":
+            return True
+        if self.prev in "+-" and self.prev2 == self.prev:
+            return False
         if self.prev in REGEX_PRECEDERS:
             return True
         return self.word in REGEX_KEYWORDS
 
     def mark(self, ch):
         self.code()
+        in_word = bool(self.prev) and (self.prev.isalnum() or self.prev in "_$")
+        if ch == "(":
+            self.parens.append(in_word and self.word in CONTROL_KEYWORDS)
+        elif ch == ")":
+            self.paren_is_control = self.parens.pop() if self.parens else False
         if ch.isalnum() or ch in "_$":
-            self.word = self.word + ch if self.prev and (self.prev.isalnum() or self.prev in "_$") else ch
+            word = self.word + ch if in_word else ch
         else:
-            self.word = ""
-        self.prev = ch
+            word = ""
+        self.set_prev(ch, word)
 
     def run(self):
         in_template = False
         while self.i < self.n:
             if in_template:
-                self.prev, self.word = ("`" if self.template() else "{"), ""
+                self.set_prev("`" if self.template() else "{")
                 in_template = False
                 continue
             ch = self.text[self.i]
@@ -323,13 +351,13 @@ class JsScanner:
                 self.block_comment()
             elif ch in "'\"":
                 self.string(ch)
-                self.prev, self.word = ch, ""
+                self.set_prev(ch)
             elif ch == "`":
                 self.i += 1
                 in_template = True
             elif ch == "/" and self.regex_allowed():
                 self.regex()
-                self.prev, self.word = "/", ""
+                self.set_prev("/")
             elif ch == "#" and self.i == 0 and nxt == "!":
                 self.line_comment()
             else:
@@ -378,8 +406,23 @@ def tracked_files(repo):
     if run.returncode != 0:
         detail = run.stderr.decode("utf-8", "replace").strip()
         raise CountError("git ls-files failed in %s (%s)" % (repo, detail))
-    names = [name for name in run.stdout.decode("utf-8", "surrogateescape").split("\0") if name]
-    return [name for name in names if os.path.isfile(os.path.join(repo, name)) and not os.path.islink(os.path.join(repo, name))]
+    return [name for name in run.stdout.decode("utf-8", "surrogateescape").split("\0") if name]
+
+
+def stat_or_none(path, follow):
+    try:
+        return (os.stat if follow else os.lstat)(path)
+    except FileNotFoundError:
+        return None
+    except OSError as err:
+        raise CountError("%s: cannot stat (%s)" % (path, err.strerror or err))
+
+
+def is_countable_entry(path):
+    info = stat_or_none(path, False)
+    if info is not None and stat.S_ISLNK(info.st_mode):
+        info = stat_or_none(path, True)
+    return info is not None and stat.S_ISREG(info.st_mode)
 
 
 def usage():
@@ -417,6 +460,8 @@ def main(argv):
     failures = []
     for path in paths:
         try:
+            if not args and not is_countable_entry(path):
+                continue
             count = count_file(path)
         except CountError as err:
             failures.append(str(err))

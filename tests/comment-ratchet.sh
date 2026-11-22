@@ -200,6 +200,17 @@ counter_fixtures() {
   printf '%s\n' 'const r = /\/\/ not a comment/;' "const s = 'it'" '// real comment' > "$d/rx.ts"
   eq "$(num "$d/rx.ts")" 1 "slashes inside a regex literal are not a comment"
 
+  printf 'const x = "text\\\r\n// data\\\r\nend";\r\n// real comment\r\n' > "$d/crlf-string.ts"
+  eq "$(num "$d/crlf-string.ts")" 1 "a string continued with backslash and CRLF keeps its next line as data"
+  printf 'const t = `a\\\r\n// data\r\n`;\r\n// real comment\r\n' > "$d/crlf-template.ts"
+  eq "$(num "$d/crlf-template.ts")" 1 "a template literal with a backslash-CRLF keeps its next line as data"
+  printf '%s\n' 'if (ok) /[/*]/.test(v);' '// real comment' > "$d/rx-control.ts"
+  eq "$(num "$d/rx-control.ts")" 1 "a regex literal after the parenthesis of an if is a regex, not a block comment"
+  printf '%s\n' 'if (ok) {' '}' '/[/*]/.test(v);' '// real comment' > "$d/rx-block.ts"
+  eq "$(num "$d/rx-block.ts")" 1 "a regex literal at the start of a statement after a block is a regex"
+  printf '%s\n' 'const q = (a + b) / 2 / 3;' 'i++ / 2 / 4;' '// real comment' > "$d/div.ts"
+  eq "$(num "$d/div.ts")" 1 "division after a parenthesis or an increment is not a regex"
+
   printf '%s\n' '# pragmatism matters' '# shellcheck sourced from here' '# shellcheck disable=SC2086' '# shellcheck source=/dev/null' '# shellcheck shell=bash' > "$d/dir.sh"
   eq "$(num "$d/dir.sh")" 2 "shell: only the exact shellcheck disable=, source= and shell= forms are exempt"
   printf '%s\n' '# pragmatism matters' '# noqa' '# noqa: E501' '# pragma: no cover' '# type: ignore[attr-defined]' '# noqanother' > "$d/dir.py"
@@ -244,6 +255,31 @@ enumeration_fixtures() {
   rc=$?
   eq "$rc $(grep -c 'tab' "$fx/err")" "1 1" "a tab in a tracked path fails and names it instead of breaking the row format"
   rm -rf "$fx"
+
+  fx=$(mkrepo) || { bad "make a fixture repo"; return; }
+  printf '%s\n' '# one' > "$fx/notes.txt"
+  ln -s notes.txt "$fx/script.sh"
+  ln -s nowhere "$fx/dead.sh"
+  printf '%s\n' '# two' > "$fx/top.sh"
+  track "$fx"
+  bash "$COUNT" --repo "$fx" > "$fx/out" 2> "$fx/err"
+  rc=$?
+  eq "$rc $(tr '\t\n' ' ;' < "$fx/out")" "0 1 script.sh;1 top.sh;" "a tracked symlink to a file is counted, a dangling one is skipped"
+  rm -rf "$fx"
+
+  if not_root; then
+    fx=$(mkrepo) || { bad "make a fixture repo"; return; }
+    mkdir "$fx/sub"
+    printf '%s\n' '# one' > "$fx/sub/a.sh"
+    printf '%s\n' '# two' > "$fx/top.sh"
+    track "$fx"
+    chmod 000 "$fx/sub"
+    bash "$COUNT" --repo "$fx" > "$fx/out" 2> "$fx/err"
+    rc=$?
+    chmod 755 "$fx/sub"
+    eq "$rc $(grep -c 'sub/a.sh' "$fx/err") $(wc -c < "$fx/out" | tr -d ' ')" "1 1 0" "a tracked file whose directory cannot be searched fails and names it instead of being skipped"
+    rm -rf "$fx"
+  fi
 }
 
 baseline_fixture() {
