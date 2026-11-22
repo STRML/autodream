@@ -28,6 +28,9 @@ THREADS_TEST_TIMEOUT_BIN=$(command -v timeout 2>/dev/null || command -v gtimeout
 # Point every run at a path that does not exist; the pin tests override it with
 # tests/mock-shared-memory.sh.
 export SHARED_MEMORY_BIN="$HERE/no-such-shared-memory"
+# The mock engines write capture files wherever they like, so the suite runs L1 unconfined (#169); the
+# L1 confinement tests turn it on for the runs that need it.
+export AUTODREAM_L1_CONFINE=0
 # A developer's own remote roots must never reach a test run: the remote_sync tests set it themselves.
 unset AUTODREAM_REMOTE_ROOTS
 DATE=2020-01-02          # fixed target date; sessions are touched into this day
@@ -3080,6 +3083,164 @@ mk_lock(){ # $1=root $2=pid -> a lock directory held by that pid (with its real 
   ps -o lstart= -p "$2" 2>/dev/null | tr -s ' ' > "$d/start" || true
 }
 
+# ---- L1 write confinement (#169): staging, the copy, and the sandbox ----------------------------
+# Every test above runs with AUTODREAM_L1_CONFINE=0 (the suite exports it), so the mock engines can
+# write their capture files wherever they like; the answer still goes through a staging directory
+# and the runner's copy, which is what these tests pin. The ones that need a real sandbox run it only
+# where the probe says one works, and say so when they skip.
+l1_confine_real(){ [ "$(env TMPDIR="${TMPDIR:-/tmp}" bash "$REPO/bin/l1-confine.sh" probe 2>/dev/null | cut -f1)" = yes ]; }
+
+test_l1_answers_are_staged_then_copied(){
+  echo "# L1 confinement: the worker writes its answer in a staging directory and the runner copies it in"
+  local root; root=$(setup_env); mk_session "$root" s1
+  local h; h=$(hash_of "$root/projects/proj-a/s1.jsonl")
+  mkdir -p "$root/autodream/staging"
+  true & local dead=$!; wait "$dead" 2>/dev/null
+  mkdir -p "$root/autodream/staging/run-$dead/leftover" "$root/autodream/staging/run-$$/alive" "$root/autodream/staging/not-a-run"
+  MOCK_CAPTURE_DIR="$root/cap" run_dream "$root"
+  assert_grep "$root/cap/l1-stdin-$h.txt" "^Write your findings JSON to this literal absolute path: .*/autodream/staging/run-[0-9]*/$h\.$h\.json/$h\.json\$" "the prompt names a path under the run's staging directory, not the findings dir"
+  assert_nogrep "$root/cap/l1-stdin-$h.txt" "Write your findings JSON to this literal absolute path: .*/findings/" "and never the findings dir"
+  assert_file "$(fdir "$root")/$h.json" "the runner copied the answer into the findings dir"
+  assert_eq "$(jq -r '.outcome' "$(fdir "$root")/$h.json")" "fully_achieved" "and it is the worker's answer"
+  assert_eq "$(cat "$root/cap/l1-bucket-$h.txt" 2>/dev/null)" "yes" "the work bucket exists when the worker starts, so bwrap can bind it"
+  assert_file "$(fdir "$root")/$h.json.served" "with its served verdict beside it"
+  assert_no_file "$(fdir "$root")/$h.json.stage" "and no half-copied temp file"
+  assert_eq "$(ls -A "$root/autodream/staging/run-$$" 2>/dev/null | wc -l | tr -d ' ')" "1" "a live run's staging root is left alone"
+  assert_no_file "$root/autodream/staging/run-$dead" "a staging root whose run is gone is swept"
+  [ -d "$root/autodream/staging/not-a-run" ] && ok "and a directory that is not a run's is not touched" || no "and a directory that is not a run's is not touched"
+  assert_eq "$(ls "$root/autodream/staging" | grep -c '^run-[0-9]*$')" "1" "this run removed its own staging root when its rounds ended"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: no$' "run-stats says the workers were not confined"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_reason: disabled (AUTODREAM_L1_CONFINE=0)$' "and why"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_tool: none$' "with no tool named"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_extra: none$' "and no operator additions to the write list"
+  rm -rf "$root"
+}
+
+test_l1_confine_extra_is_in_run_stats(){
+  echo "# L1 confinement: a widened write list is visible in run-stats"
+  local root; root=$(setup_env); mk_session "$root" s1
+  AUTODREAM_L1_WRITES_EXTRA="/extra/one:/extra/two*" run_dream "$root"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_extra: /extra/one:/extra/two\*$' "the operator's extra paths are named"
+  rm -rf "$root"
+}
+
+test_l1_confine_degrades_loudly_when_the_tool_rejects_the_profile(){
+  echo "# L1 confinement: a sandbox tool that rejects the profile means an unconfined run that says so"
+  local root; root=$(setup_env); mk_session "$root" s1
+  local h; h=$(hash_of "$root/projects/proj-a/s1.jsonl")
+  mkdir -p "$root/shim-sb"
+  printf '#!/bin/sh\necho "sandbox-exec: profile rejected" >&2\nexit 65\n' > "$root/shim-sb/sandbox-exec"; chmod +x "$root/shim-sb/sandbox-exec"
+  PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec run_dream "$root"
+  assert_file "$(fdir "$root")/$h.json" "the night still triaged the session"
+  assert_file "$root/dreams/$DATE.md" "and wrote its report"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: no$' "run-stats says unconfined"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_reason: .*rejected' "with the tool's own reason"
+  assert_grep "$root/run.out" 'WARNING: L1 workers run unconfined' "and the log carries a WARNING"
+  rm -rf "$root"
+}
+
+test_l1_confine_off_is_silent_and_a_working_tool_is_reported(){
+  echo "# L1 confinement: the explicit off switch is not a warning; a working sandbox is reported as such"
+  local root; root=$(setup_env); mk_session "$root" s1
+  run_dream "$root"
+  assert_nogrep "$root/run.out" 'WARNING: L1 workers run unconfined' "AUTODREAM_L1_CONFINE=0 logs no warning"
+  rm -rf "$root"
+  if ! l1_confine_real; then echo "  skip - no working sandbox on this host"; return 0; fi
+  root=$(setup_env); mk_session "$root" s1
+  AUTODREAM_L1_CONFINE=1 run_dream "$root"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: yes$' "a host with a working sandbox reports l1_confined: yes"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_tool: [a-z][a-z-]*$' "and the tool"
+  assert_nogrep "$(fdir "$root")/run-stats.txt" '^l1_confine_tool: none$' "which is not none"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined_claude: yes$' "the claude engine is confined"
+  rm -rf "$root"
+}
+
+test_l1_forged_writes_are_refused_when_confined(){
+  echo "# L1 confinement: a worker cannot write outside staging (and could, before, which this proves)"
+  local root; root=$(setup_env); mk_session "$root" s1; mk_session "$root" s2
+  local h1 h2 cfg_before
+  h1=$(hash_of "$root/projects/proj-a/s1.jsonl"); h2=$(hash_of "$root/projects/proj-a/s2.jsonl")
+  printf '# original config\n' > "$root/autodream/config"
+  cfg_before=$(cat "$root/autodream/config")
+  # Unconfined first: the same hostile worker lands every write, so the next run's refusals mean something.
+  FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_HASHES="$h1 $h2" run_dream "$root"
+  assert_file "$(fdir "$root")/forged-new.json" "unconfined, a worker plants a new *.json in the findings dir"
+  assert_file "$root/autodream/forged-marker" "and a file under AUTODREAM_DIR"
+  assert_grep "$root/autodream/config" '# FORGED' "and edits the config the next run sources"
+  if [ "$(cat "$(fdir "$root")/$h1.json" "$(fdir "$root")/$h2.json" 2>/dev/null | grep -c FORGED)" -ge 1 ]; then
+    ok "and forges the other session's answer"
+  else
+    no "and forges the other session's answer"
+  fi
+  rm -rf "$root"
+  if ! l1_confine_real; then echo "  skip - no working sandbox on this host: the refusals below are untested here"; return 0; fi
+  root=$(setup_env); mk_session "$root" s1; mk_session "$root" s2
+  h1=$(hash_of "$root/projects/proj-a/s1.jsonl"); h2=$(hash_of "$root/projects/proj-a/s2.jsonl")
+  printf '# original config\n' > "$root/autodream/config"
+  FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_HASHES="$h1 $h2" AUTODREAM_L1_CONFINE=1 run_dream "$root"
+  assert_no_file "$(fdir "$root")/forged-new.json" "confined, no new *.json appears in the findings dir"
+  assert_no_file "$root/autodream/forged-marker" "and nothing is created under AUTODREAM_DIR"
+  assert_eq "$(cat "$root/autodream/config")" "$cfg_before" "and the config is unchanged"
+  assert_eq "$(jq -r .session_path "$(fdir "$root")/$h1.json")" "x" "session 1 keeps its own answer"
+  assert_eq "$(jq -r .session_path "$(fdir "$root")/$h2.json")" "x" "and session 2 keeps its own, not the forgery"
+  rm -rf "$root"
+}
+
+test_l1_work_bucket_is_wiped_before_l2(){
+  echo "# L1 confinement: the work bucket a worker may write is wiped when L1 ends, before L2 launches from it"
+  local root; root=$(setup_env); mk_session "$root" s1
+  MOCK_MODE=l1_plant_bucket MOCK_CAPTURE_DIR="$root/cap" run_dream "$root"
+  assert_file "$root/cap/l2-bucket.txt" "L2 ran and recorded what it found"
+  assert_eq "$(cat "$root/cap/l2-bucket.txt" 2>/dev/null)" "absent" "a file a worker left in the work bucket is gone by the time L2 starts"
+  rm -rf "$root"
+}
+
+test_l1_symlink_answer_is_not_read(){
+  echo "# L1 confinement: an answer path that is a symlink is not copied, and fails like any missing answer"
+  local root; root=$(setup_env); mk_session "$root" s1
+  local h; h=$(hash_of "$root/projects/proj-a/s1.jsonl")
+  printf '{"session_path":"SECRET","findings":[]}\n' > "$root/secret.json"
+  MOCK_MODE=l1_symlink_answer MOCK_SYMLINK_TARGET="$root/secret.json" AUTODREAM_L1_ROUNDS=1 run_dream "$root"
+  assert_nogrep "$(fdir "$root")/$h.json" 'SECRET' "what the symlink pointed at never reaches the findings dir"
+  assert_grep "$(fdir "$root")/$h.json" 'worker exited without findings JSON after 1 rounds' "the session gets the same stub as any worker that wrote nothing"
+  assert_grep "$(fdir "$root")/$h.json.err" 'the answer path was a symlink' "the evidence names the symlink"
+  assert_grep "$(fdir "$root")/$h.json.err" 'worker produced no findings JSON' "beside the usual no-answer line"
+  rm -rf "$root"
+}
+
+test_l1_staging_failure_is_a_worker_failure_with_evidence(){
+  echo "# L1 confinement: a staging directory that cannot be made fails the attempt and names why"
+  local root; root=$(setup_env); mk_session "$root" s1
+  local h; h=$(hash_of "$root/projects/proj-a/s1.jsonl")
+  mkdir -p "$root/autodream/staging"; chmod 500 "$root/autodream/staging"
+  AUTODREAM_L1_ROUNDS=1 run_dream "$root"
+  chmod 700 "$root/autodream/staging" 2>/dev/null
+  assert_grep "$(fdir "$root")/$h.json.err" 'could not make the staging directory' "the .err says the staging directory could not be made"
+  assert_grep "$(fdir "$root")/$h.json" 'worker exited without findings JSON after 1 rounds' "and the session is stubbed like any failed worker"
+  rm -rf "$root"
+}
+
+test_l1_confine_names_the_engine_without_a_write_profile(){
+  echo "# L1 confinement: an engine whose adapter declares no write profile is reported unconfined"
+  local out
+  # CLAUDE_CONFIG_DIR and the extras are the caller's, so the list is read with both unset.
+  out=$(env -u CLAUDE_CONFIG_DIR -u AUTODREAM_L1_WRITES_EXTRA -u AUTODREAM_WORK_BUCKET bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1); local rc=$?
+  assert_eq "$rc" "0" "the claude adapter answers l1-writes"
+  case "$out" in *"claude-cli-nodejs"*) ok "and lists the CLI cache" ;; *) no "and lists the CLI cache (got: $out)" ;; esac
+  case "$out" in *".claude.json"*|*"session-env"*|*"backups"*|*"/settings"*|*"/hooks"*|*"/skills"*|*"/plugins"*|*"/autodream"*) no "and none of the config, state or code a later session reads or runs (got: $out)" ;; *) ok "and none of the config, state or code a later session reads or runs" ;; esac
+  out=$(env -u CLAUDE_CONFIG_DIR AUTODREAM_L1_WRITES_EXTRA="/extra/one:/extra/two*" bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1)
+  case "$out" in *"/extra/one"*"/extra/two*"*) ok "an operator's AUTODREAM_L1_WRITES_EXTRA entries are added, a trailing * kept" ;; *) no "AUTODREAM_L1_WRITES_EXTRA entries are added (got: $out)" ;; esac
+  # A prefix that matches existing files must stay a prefix, not expand to them.
+  mkdir -p "$SUITE_TMP/globx"; : > "$SUITE_TMP/globx/a.json"; : > "$SUITE_TMP/globx/a.json.lock"
+  out=$(env -u CLAUDE_CONFIG_DIR AUTODREAM_L1_WRITES_EXTRA="$SUITE_TMP/globx/a.json*" bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1)
+  case "$out" in *"$SUITE_TMP/globx/a.json*"*) ok "an extra entry that matches files on disk stays a prefix" ;; *) no "an extra entry that matches files on disk stays a prefix (got: $out)" ;; esac
+  case "$out" in *"a.json.lock"*) no "and is not expanded to the files that match it" ;; *) ok "and is not expanded to the files that match it" ;; esac
+  out=$(env -u CLAUDE_CONFIG_DIR AUTODREAM_WORK_BUCKET=/work/bucket bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1)
+  case "$out" in *"/work/bucket"*) ok "the work bucket is writable when the runner names it" ;; *) no "the work bucket is writable when the runner names it (got: $out)" ;; esac
+  bash "$REPO/adapters/omp/adapter.sh" l1-writes >/dev/null 2>&1; rc=$?
+  assert_eq "$rc" "2" "the omp adapter declares no write profile, so its workers stay unconfined and run-stats says so"
+}
+
 test_run_lock_is_per_date_and_live_holders_win(){
   echo "# a second run for a date does not start while a live run holds the date's lock (#55)"
   local root; root=$(setup_env); mk_session "$root" sess1
@@ -4154,6 +4315,15 @@ _run test_l1_retry
 _run test_idempotency_guard
 _run test_idempotency_guard_needs_a_complete_report
 _run test_run_lock_is_per_date_and_live_holders_win
+_run test_l1_answers_are_staged_then_copied
+_run test_l1_confine_degrades_loudly_when_the_tool_rejects_the_profile
+_run test_l1_confine_extra_is_in_run_stats
+_run test_l1_confine_off_is_silent_and_a_working_tool_is_reported
+_run test_l1_forged_writes_are_refused_when_confined
+_run test_l1_symlink_answer_is_not_read
+_run test_l1_work_bucket_is_wiped_before_l2
+_run test_l1_staging_failure_is_a_worker_failure_with_evidence
+_run test_l1_confine_names_the_engine_without_a_write_profile
 _run test_run_lock_is_reclaimed_from_a_dead_holder
 _run test_killed_run_temps_are_swept_at_the_start_of_the_next_run
 _run test_self_audit_stats
@@ -7276,8 +7446,8 @@ test_chunking_is_off_when_the_knob_is_unset(){
   assert_grep "$fdu/run-stats.txt" 'l1_chunk_bytes: 0$' "unset means off: run-stats says 0"
   assert_grep "$rootu/cap/l1-read-$hu.txt" 'lines elided by autodream for size' "the worker read the head/tail slim"
   if cmp -s "$root0/cap/l1-read-$h0.txt" "$rootu/cap/l1-read-$hu.txt"; then ok "the transcript the worker read is byte for byte the one read with the knob at 0"; else no "the transcript the worker read is byte for byte the one read with the knob at 0"; fi
-  sed "s#$root0#R#g; s#$h0#H#g" "$root0/cap/l1-stdin-$h0.txt" > "$rootu/p0.txt"
-  sed "s#$rootu#R#g; s#$hu#H#g" "$rootu/cap/l1-stdin-$hu.txt" > "$rootu/pu.txt"
+  sed "s#$root0#R#g; s#$h0#H#g; s#/run-[0-9]*/#/run-N/#g" "$root0/cap/l1-stdin-$h0.txt" > "$rootu/p0.txt"
+  sed "s#$rootu#R#g; s#$hu#H#g; s#/run-[0-9]*/#/run-N/#g" "$rootu/cap/l1-stdin-$hu.txt" > "$rootu/pu.txt"
   diff "$rootu/p0.txt" "$rootu/pu.txt" > "$rootu/prompt.diff" 2>&1; if [ ! -s "$rootu/prompt.diff" ]; then ok "and so is the prompt it was given"; else no "and so is the prompt it was given ($(head -c 300 "$rootu/prompt.diff"))"; fi
   assert_eq "$(jq -S 'del(.session_path)' "$fdu/$hu.json" | sed "s#$hu#H#g")" "$(jq -S 'del(.session_path)' "$fd0/$h0.json" | sed "s#$h0#H#g")" "and so is the findings JSON"
   assert_no_file "$fdu/.chunks" "no chunk directory"
@@ -7712,7 +7882,7 @@ if [ -z "$_list" ]; then
 fi
 # The suites that drive launchd need plutil and launchctl, so they run on macOS only (CI runs
 # them in launchd.yml, when a launchd file changes).
-_suites="portable rollup lib-project preflight adapters adapter-claude adapter-omp adapter-contract threads-state slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux review-prompt notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt autodream-web shard ci-scope"
+_suites="portable rollup l1-confine lib-project preflight adapters adapter-claude adapter-omp adapter-contract threads-state slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux review-prompt notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt autodream-web shard ci-scope"
 [ "$(uname -s)" = Darwin ] && _suites="$_suites scheduler-label autodream-now install-review-agent install-web-agent install-dry-run install-dir install-skill"
 for _suite in $_suites; do
   _owns || continue
