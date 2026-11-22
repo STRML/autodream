@@ -8133,7 +8133,15 @@ for _suite in $_suites; do
     # count one rather than letting a crash read as green.
     [ -n "$_f" ] && [ "$_f" -ne 0 ] || fail=$((fail + 1))
   else
-    printf '  ok   - unit suite %-18s (%s assertions)\n' "$_suite" "${_p:-0}"
+    # A suite whose totals carry `skipped: N` says how many checks could not run, and its skip lines
+    # follow, so a CI log shows ran against skipped. A suite that prints no such total is unchanged.
+    _sk=$(printf '%s\n' "$_out" | sed -n 's/^passed:.*skipped: *\([0-9][0-9]*\).*/\1/p' | tail -1)
+    if [ -n "$_sk" ]; then
+      printf '  ok   - unit suite %-18s (%s assertions, %s skipped)\n' "$_suite" "${_p:-0}" "$_sk"
+      printf '%s\n' "$_out" | grep '^ *skip -' | head -10
+    else
+      printf '  ok   - unit suite %-18s (%s assertions)\n' "$_suite" "${_p:-0}"
+    fi
   fi
 done
 

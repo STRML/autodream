@@ -21,6 +21,12 @@ BIN="$REPO/bin/report-scripts.sh"
 pass=0; fail=0
 ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
 no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
+# A check that could not run is not a passed assertion. It prints `skip - <reason>`, counts nothing as
+# passed, and the totals line carries `skipped: N`, which run-all.sh repeats beside the suite's count, so
+# a CI log shows ran (0 skipped) against skipped.
+skipped=0
+skip(){ printf '  skip - %s\n' "$1"; skipped=$((skipped + 1)); }
+CHILDKILL_SKIP="child-kill: pgrep cannot read the process table here (the sandbox); CI and launchd can"
 assert_file(){     [ -f "$1" ] && ok "$2" || no "$2 (missing: $1)"; }
 assert_no_file(){  [ ! -e "$1" ] && ok "$2" || no "$2 (unexpected: $1)"; }
 assert_grep(){     grep -q -- "$2" "$1" 2>/dev/null && ok "$3" || no "$3 (no /$2/ in $1)"; }
@@ -173,7 +179,7 @@ if pgrep -P $$ > /dev/null 2>&1 || [ $? -le 1 ]; then
   kid=$(cat "$C/kid.pid" 2>/dev/null); gone=no
   for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$kid" 2>/dev/null || { gone=yes; break; }; sleep 0.3; done
   [ "$gone" = yes ] && ok "the command's child is gone after the timeout" || { no "the command's child (pid $kid) outlived the timeout"; kill "$kid" 2>/dev/null; }
-else ok "skipped, pgrep cannot read the process table here (the sandbox); CI and launchd can"; fi
+else skip "$CHILDKILL_SKIP (a timed-out command's own children)"; fi
 
 echo "# a byte cap with a leading zero is a number, not a bad octal"
 new_case octal
@@ -344,7 +350,7 @@ pgrep -P $$ > /dev/null 2>&1; if [ $? -le 1 ]; then
   if [ -z "$gpid" ]; then no "the grandchild started"
   elif kill -0 "$gpid" 2>/dev/null; then no "a TERM-ignoring grandchild outlived the timeout and the wrapper"; kill -KILL "$gpid" 2>/dev/null
   else ok "the grandchild was KILLed after the grace period"; fi
-else ok "grandchild check skipped, pgrep cannot read the process table here (the sandbox); CI and launchd can"; fi
+else skip "$CHILDKILL_SKIP (a TERM-ignoring grandchild after its wrapper dies)"; fi
 
 echo "# verifier-b's wrapper: it exits 0 on TERM while a TERM-ignoring child keeps running; the row is timeout and the child dies"
 new_case gchild0
@@ -362,7 +368,7 @@ if pgrep -P $$ > /dev/null 2>&1 || [ $? -le 1 ]; then
   if [ -z "$g0" ]; then no "the TERM-ignoring child started"
   elif kill -0 "$g0" 2>/dev/null; then no "the TERM-ignoring child outlived the wrapper's exit 0 and the grace period"; kill -KILL "$g0" 2>/dev/null
   else ok "the TERM-ignoring child was KILLed although its wrapper exited 0"; fi
-else ok "child check skipped, pgrep cannot read the process table here (the sandbox); CI and launchd can"; fi
+else skip "$CHILDKILL_SKIP (a TERM-ignoring child after a wrapper that exits 0)"; fi
 
 echo "# an unwritable findings dir is a loud failure, not a silent one"
 new_case nofind
@@ -546,5 +552,5 @@ PATH="$C/shim:$PATH" collect
 assert_eq "$RC" "1" "a failed copy of the rows into the index makes collect exit 1"
 
 echo
-echo "passed: $pass   failed: $fail"
+echo "passed: $pass   failed: $fail   skipped: $skipped"
 [ "$fail" -eq 0 ]
