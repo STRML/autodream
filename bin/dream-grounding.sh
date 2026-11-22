@@ -1,43 +1,4 @@
 #!/bin/bash
-# Ground the checkable claims in a finished report against this machine. Deterministic and
-# model-free: a fixed set of read-only checks run by the runner, written to one JSON file.
-#
-# Why it exists. The report is written by a model reading findings, and its claims about the
-# filesystem go stale or wrong: "skill X does not exist" when it lives under ~/.claude/skills
-# and the report only looked in the plugins dir, an allowlist key whose exact text was never
-# compared with settings.json, a commit SHA that was never resolved. The triage pass
-# (triage-dream.sh) hands the model THIS file as data, so it never needs a shell. The checks are
-# fixed here, in code, rather than left to a prompt that says "do not run anything that writes".
-#
-# Usage:
-#   dream-grounding.sh <report.md> <out.json> [pin-projects.tsv]
-#
-# The claims it recognizes, all taken from backticked spans in the report:
-#   skill      a span on a line that mentions "skill": present when an installed skill has
-#              that name (the part after a `plugin:` prefix counts)
-#   allowlist  a Tool(...) rule or an mcp__ tool name: present when permissions.allow in a
-#              settings file holds that exact string
-#   sha        a 7 to 40 hex span with a digit and a letter: present when `git cat-file`
-#              resolves it as a commit in one of the repos below
-# A 12-hex span is a findings hash, which citation-check.sh owns, so it is not a sha claim.
-#
-# Environment (all optional):
-#   AUTODREAM_SKILL_DIRS          colon list searched for */skills/<name>/SKILL.md
-#                                 default: $HOME/.claude/skills:$HOME/.claude/plugins
-#   AUTODREAM_SKILL_INVENTORY_FILE  file of skill names, one per line (a tab ends the name);
-#                                 triage-dream.sh fills it from each adapter's skills-inventory
-#   AUTODREAM_SETTINGS_FILES      colon list of settings JSON files
-#                                 default: $HOME/.claude/settings.json:$HOME/.claude/settings.local.json
-#   AUTODREAM_TRIAGE_REPOS        colon list of git repos a sha is looked up in, added to the
-#                                 working directories in pin-projects.tsv
-#   AUTODREAM_GROUNDING_MAX       claims kept                                          default: 100
-#
-# Output: {"report": ..., "skills_known": N, "allowlist_entries": N, "repos": [...], "truncated":
-# bool (more claims than AUTODREAM_GROUNDING_MAX; the rest were not checked), "claims":
-# [{"kind","claim","status","evidence","line"}]} with status present | absent | unknown.
-# `unknown` means the check could not run (no settings file, no repo), never "absent".
-#
-# Exit 0 whenever the check ran. Exit 2 when it could not (usage, unreadable report, no jq).
 set -uo pipefail
 
 report="${1:-}"; out="${2:-}"; pins="${3:-}"
@@ -52,7 +13,6 @@ MAX="${AUTODREAM_GROUNDING_MAX:-100}"
 case "$MAX" in ''|*[!0-9]*) MAX=100 ;; esac
 export GIT_OPTIONAL_LOCKS=0
 
-# ---- What exists on this machine ----
 skills=$(mktemp "${TMPDIR:-/tmp}/grounding-skills.XXXXXX") || exit 2
 claims=$(mktemp "${TMPDIR:-/tmp}/grounding-claims.XXXXXX") || exit 2
 trap 'rm -f "$skills" "$claims" "$out.tmp"' EXIT
@@ -61,8 +21,6 @@ skill_dirs="${AUTODREAM_SKILL_DIRS:-$HOME/.claude/skills:$HOME/.claude/plugins}"
 IFS=: read -r -a _dirs <<< "$skill_dirs"
 for d in ${_dirs[@]+"${_dirs[@]}"}; do
   [ -d "$d" ] || continue
-  # -L: a skill linked in from elsewhere is still installed. The depth bound keeps a plugin
-  # cache with many versions from turning this into a crawl.
   find -L "$d" -maxdepth 7 -name SKILL.md -path '*/skills/*' -print 2>/dev/null \
     | while IFS= read -r f; do basename "$(dirname "$f")"; done
 done >> "$skills"
@@ -96,7 +54,6 @@ while IFS= read -r r; do
   git_repos="$git_repos$r"$'\n'
 done <<< "$(printf '%s\n' "$repos" | sort -u)"
 
-# ---- Claims: one row per backticked span, "<line>\t<line mentions skill>\t<span>" ----
 spans=$(awk '
   { s = $0; sk = (tolower($0) ~ /skill/) ? 1 : 0
     while (match(s, /`[^`]+`/)) {
@@ -105,12 +62,12 @@ spans=$(awk '
       s = substr(s, RSTART + RLENGTH)
     } }' "$report")
 
-emit() { # kind claim status evidence line
+emit() {
   jq -nc --arg k "$1" --arg c "$2" --arg s "$3" --arg e "$4" --argjson l "$5" \
     '{kind:$k, claim:$c, status:$s, evidence:$e, line:$l}' >> "$claims"
 }
 
-check_skill() { # $1=name $2=line
+check_skill() {
   local name="$1" bare="${1##*:}"
   if [ "$skills_known" -eq 0 ]; then
     emit skill "$name" unknown "no installed skill could be listed (searched: $skill_dirs, and the adapters' inventories)" "$2"
@@ -121,7 +78,7 @@ check_skill() { # $1=name $2=line
   fi
 }
 
-check_allow() { # $1=key $2=line
+check_allow() {
   if [ "$allow_files" -eq 0 ]; then
     emit allowlist "$1" unknown "no readable settings file with a permissions block among: $settings_files" "$2"
   elif printf '%s\n' "$allow" | grep -qxF -- "$1"; then
@@ -131,7 +88,7 @@ check_allow() { # $1=key $2=line
   fi
 }
 
-check_sha() { # $1=sha $2=line
+check_sha() {
   local r subj
   if [ -z "$git_repos" ]; then
     emit sha "$1" unknown "no git repository to look in (set AUTODREAM_TRIAGE_REPOS)" "$2"
@@ -147,7 +104,7 @@ check_sha() { # $1=sha $2=line
   emit sha "$1" absent "not resolved as a unique commit in any of: $(printf '%s' "$git_repos" | tr '\n' ' ')" "$2"
 }
 
-classify() { # $1=line $2=mentions-skill $3=span
+classify() {
   local tok="$3"
   case "$tok" in
     Bash\(*\)|Read\(*\)|Edit\(*\)|Write\(*\)|WebFetch\(*\)|mcp__*) check_allow "$tok" "$1"; return ;;
@@ -168,7 +125,6 @@ n=0
 truncated=false
 while IFS=$'\t' read -r line sk tok; do
   [ -n "$tok" ] || continue
-  # A span quoted many times is one claim, at its first line.
   case "$seen" in *$'\n'"$tok"$'\n'*) continue ;; esac
   seen="$seen$tok"$'\n'
   [ "$n" -lt "$MAX" ] || { truncated=true; break; }

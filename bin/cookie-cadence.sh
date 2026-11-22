@@ -1,49 +1,47 @@
 #!/bin/bash
-# Issue #39 measurement: how long does a pasted X auth_token/ct0 pair actually last?
-#
-# The bookmark fetcher authenticates with cookies the user pastes by hand. Nobody knows
-# whether re-pasting is a monthly chore or a yearly one, and that number decides whether
-# automating the capture is worth its moving parts.
-#
-# Every night already leaves the evidence behind: findings/<date>/x-bookmarks.md carries a
-# `# x-bookmarks: fetch failed — ...` header when the fetch broke, and names expired
-# cookies specifically. This walks those files in date order and reports how many days ran
-# between the first working night after a paste and the first night the cookies were
-# rejected.
-#
-# It reads only artifacts. No model calls, no network, no credentials. Safe to re-run.
-#
-# Usage:
-#   cookie-cadence.sh                       # every dated dir under the findings root
-#   cookie-cadence.sh --days 30             # trailing 30
-#   cookie-cadence.sh --quiet               # summary only, no per-date table
-#
-# Environment:
-#   AUTODREAM_DIR  default: $HOME/.claude/autodream
-
 set -u
 
 _pp="$(dirname "${BASH_SOURCE[0]}")/portable.sh"
-# Installed copies are symlinks: a merge updates them before install.sh links a new helper.
 [ -r "$_pp" ] || _pp="$(dirname "$(readlink "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/portable.sh"
 # shellcheck source=/dev/null
 . "$_pp"
 
+usage() {
+  cat <<'EOF'
+Issue #39 measurement: how long does a pasted X auth_token/ct0 pair actually last?
+
+The bookmark fetcher authenticates with cookies the user pastes by hand. Whether re-pasting
+is a monthly chore or a yearly one decides whether automating the capture is worth its
+moving parts.
+
+Walks findings/<date>/x-bookmarks.md in date order and reports how many days ran between
+the first working night after a paste and the first night the cookies were rejected.
+
+Reads artifacts only: no model calls, no network, no credentials. Safe to re-run.
+
+Usage:
+  cookie-cadence.sh                       every dated dir under the findings root
+  cookie-cadence.sh --days 30             trailing 30
+  cookie-cadence.sh --quiet               summary only, no per-date table
+
+Environment:
+  AUTODREAM_DIR  default: $HOME/.claude/autodream
+EOF
+}
+
 AUTODREAM_DIR="${AUTODREAM_DIR:-$HOME/.claude/autodream}"
-DAYS=0            # 0 = no limit
+DAYS=0
 QUIET=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    # Validate rather than defaulting a missing value, for the same reason
-    # oversized-gate.sh does: a bare `--days` used to leave the shift refusing to shift.
     --days)
       [ "$#" -ge 2 ] || { echo "--days needs a value" >&2; exit 2; }
       case "$2" in ''|*[!0-9]*) echo "--days needs a positive integer, got: $2" >&2; exit 2 ;; esac
       [ "$2" -gt 0 ] || { echo "--days needs a positive integer, got: $2" >&2; exit 2; }
       DAYS="$2"; shift 2 ;;
     --quiet) QUIET=1; shift ;;
-    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -63,25 +61,20 @@ fi
 
 epoch_of() { pdate_epoch "$1"; }
 
-days_between() { # $1 earlier date, $2 later date -> whole days, or empty if unparseable
+days_between() {
   local a b
   a=$(epoch_of "$1"); b=$(epoch_of "$2")
   [ -n "$a" ] && [ -n "$b" ] || return 0
   echo $(( (b - a) / 86400 ))
 }
 
-# Four outcomes worth telling apart. Only `auth` ends a credential's life; a network
-# failure or a missing jq says nothing about the cookies and must not be counted as an
-# expiry, or the cadence comes out far shorter than it really is.
-classify() { # $1 path to x-bookmarks.md -> ok | auth | other | none | absent
+classify() {
   local f="$1" head
   [ -r "$f" ] || { echo absent; return; }
   head=$(head -n 1 "$f" 2>/dev/null)
   case "$head" in
     '# x-bookmarks: not configured'*) echo none ;;
     '# x-bookmarks: fetch failed'*)
-      # The fetcher names expired cookies in two ways: the 401/403 rejection and the
-      # login page it gets served instead of JSON. Both say the same thing.
       case "$head" in
         *'cookies are expired'*|*'expired or invalid'*) echo auth ;;
         *) echo other ;;
@@ -93,10 +86,7 @@ classify() { # $1 path to x-bookmarks.md -> ok | auth | other | none | absent
 
 [ "$QUIET" -eq 1 ] || printf '%-12s %-8s  %s\n' DATE STATUS DETAIL
 
-# A credential's life runs from the first working night to the first rejected one. Dates
-# with no run, or a run whose fetch broke for an unrelated reason, neither start nor end a
-# life — they are simply nights that measured nothing.
-LIVES=()            # completed lifetimes, "start:end:days"
+LIVES=()
 run_start=""
 last_ok=""
 observed_auth=0
@@ -151,16 +141,12 @@ else
   echo "No expiry has been observed yet."
 fi
 
-# The current run is right-censored: the cookies are still alive, so its length is a lower
-# bound on a lifetime, not a lifetime. Reporting it as one would understate the cadence,
-# which is the exact error that makes a yearly chore look monthly.
 if [ -n "$run_start" ] && [ -n "$last_ok" ]; then
   span=$(days_between "$run_start" "$last_ok")
   printf 'Current credentials have worked since %s, %s day(s) and counting (a lower bound, not a lifetime).\n' \
     "$run_start" "${span:-?}"
 fi
 
-# The file's mtime is the last paste. Its contents are never read.
 CREDS_FILE="$AUTODREAM_DIR/x-credentials"
 if [ -f "$CREDS_FILE" ]; then
   pasted=$(date -r "$CREDS_FILE" '+%Y-%m-%d' 2>/dev/null)
