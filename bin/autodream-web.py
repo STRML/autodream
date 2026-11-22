@@ -101,7 +101,6 @@ THREAD_ACTIONS = {
     "move-idea": lambda ident: ["move", ident, "idea"],
     "move-done": lambda ident: ["move", ident, "done"],
 }
-PRE_RECORD_PORT = 8765
 
 
 def verify_service(port, token):
@@ -437,10 +436,8 @@ def main():
         parser.error("port must be between 0 and 65535")
     if args.command == "open":
         token = load_or_create_token(install / "web-token")
-        candidates = list(dict.fromkeys((port, PRE_RECORD_PORT)))
-        port = next((candidate for candidate in candidates if verify_service(candidate, token)), None)
-        if port is None:
-            print(f"autodream-web: port {candidates[0]} is not this autodream-web", file=sys.stderr)
+        if not verify_service(port, token):
+            print(f"autodream-web: port {port} is not this autodream-web", file=sys.stderr)
             return 1
         url = f"http://127.0.0.1:{port}/login?t={token}"
         if args.print_url:
