@@ -53,9 +53,34 @@ settle_tree() {
   for p in $(cat "$1" 2>/dev/null); do kill -s KILL "$p" 2>/dev/null || true; done
 }
 
+reap_group() {
+  local g="$1" leftflag="$2" i=0 limit=$((KILL_GRACE * 10))
+  kill -s 0 -- "-$g" 2>/dev/null || return 0
+  printf 'stopped\n' > "$leftflag"
+  kill -s TERM -- "-$g" 2>/dev/null || true
+  while [ "$i" -lt "$limit" ]; do
+    kill -s 0 -- "-$g" 2>/dev/null || return 0
+    sleep 0.1; i=$((i + 1))
+  done
+  kill -s KILL -- "-$g" 2>/dev/null || true
+  sleep 0.2
+  if kill -s 0 -- "-$g" 2>/dev/null; then printf 'alive\n' > "$leftflag"; fi
+}
+
+leftover_reason() {
+  local rc="$1" leftflag="$2"
+  if [ "$(cat "$leftflag" 2>/dev/null)" = alive ]; then
+    printf 'FAILED: left a background process running after exit %s and it could not be stopped' "$rc"
+  else
+    printf 'FAILED: left a background process running after exit %s; it was stopped' "$rc"
+  fi
+}
+
 run_bounded() {
-  local secs="$1" flag="$2" pid wd rc; shift 2
+  local secs="$1" flag="$2" leftflag="$3" pid wd rc; shift 3
+  set -m
   "$@" & pid=$!
+  set +m
   ( trap 'kill "${sp:-}" 2>/dev/null; exit 0' TERM
     sleep "$secs" & sp=$!; wait "$sp" || exit 0
     tree=$(tree_pids "$pid")
@@ -66,6 +91,7 @@ run_bounded() {
   wait "$pid"; rc=$?
   kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
   if [ -s "$flag" ]; then settle_tree "$flag"; fi
+  reap_group "$pid" "$leftflag"
   return "$rc"
 }
 
@@ -109,7 +135,7 @@ collect() {
   find "$fdir" -maxdepth 1 \( -name 'report-*.md' -o -name report-index.txt \) -exec rm -f {} + \
     || { echo "report-scripts: could not remove the earlier report files in $fdir" >&2; rm -rf "$work"; return 1; }
 
-  local rows="$work/rows" n=0 line want lineno=0 name path cmd_text rc reason status out err lname wfail=0 now tflag
+  local rows="$work/rows" n=0 line want lineno=0 name path cmd_text rc reason status out err lname wfail=0 now tflag lflag
   local -a words args
   : > "$rows"
   local seen=" "
@@ -171,12 +197,15 @@ collect() {
       fi
 
       tflag="$work/timeout.$n"; : > "$tflag"
-      ( ulimit -f "$FILE_LIMIT_KB" 2>/dev/null; cd "$HOME" 2>/dev/null || cd /; run_bounded "$TIMEOUT_S" "$tflag" "$path" ${args[@]+"${args[@]}"} ) < /dev/null > "$out" 2> "$err"
+      lflag="$work/left.$n"; : > "$lflag"
+      ( ulimit -f "$FILE_LIMIT_KB" 2>/dev/null; cd "$HOME" 2>/dev/null || cd /; run_bounded "$TIMEOUT_S" "$tflag" "$lflag" "$path" ${args[@]+"${args[@]}"} ) < /dev/null > "$out" 2> "$err"
       rc=$?
       if [ -s "$tflag" ]; then
         status=timeout; reason="FAILED: timed out after ${TIMEOUT_S}s and was stopped (exit $rc)"
       elif [ "$rc" -eq 153 ]; then
         status=failed; reason="FAILED: output exceeded the ${FILE_LIMIT_KB} KB per-file limit and was stopped (exit 153, SIGXFSZ)"
+      elif [ -s "$lflag" ]; then
+        status=failed; reason=$(leftover_reason "$rc" "$lflag")
       elif [ "$rc" -ne 0 ]; then
         status=failed; reason="FAILED: exited $rc"
       fi
