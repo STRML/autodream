@@ -457,7 +457,7 @@ going after you disconnect:
 ```bash
 ~/.claude/autodream/autodream-now.sh                    # yesterday, right now
 ~/.claude/autodream/autodream-now.sh 2026-05-29 --force # a specific date, rebuild
-~/.claude/autodream/autodream-now.sh 2026-05-29 --watch # follow the log until the report lands
+~/.claude/autodream/autodream-now.sh 2026-05-29 --watch # follow the log; exits 1 if the run ends without a report
 ```
 
 ## How it works (short version)
@@ -585,6 +585,8 @@ the full history. Keep that operation separate from facet-only backfill.
   adapter must agree on
 - `bin/l1-confine.sh` — the OS sandbox each L1 worker runs under, so it can write
   only its own staging directory → `CLAUDE.md`, "A worker writes only its staging directory"
+- `bin/lib-flock.sh` — the flock `question-streaks.sh` and `threads.sh` take on their state
+  files, so a dead holder frees the lock with no reclaim
 - `bin/preflight.sh` — the shared-dependency gate, run before anything is enumerated
 
 For the internals — data flow, file map, state layout, environment overrides, the

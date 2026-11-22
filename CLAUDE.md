@@ -224,7 +224,7 @@ run.sh handles it with:
 - **L1 retry loop** (`dispatch_l1` + `l1_missing_count`): re-dispatches only the sessions still missing a findings JSON, up to `AUTODREAM_L1_ROUNDS` (5), calling `wait_for_network` between rounds. The worker is idempotent, so retries are cheap.
 - **L2 retry loop**: retries the aggregator up to `AUTODREAM_L2_ATTEMPTS` (3) until `$REPORT_PATH` is non-empty.
 - **Idempotency guard**: at the top of `run()`, if a finished report exists for the date it exits in a second (`AUTODREAM_FORCE=1` to rebuild). Finished means the open-questions marker is present (or the date predates `AUTODREAM_MARKER_EPOCH`); a marker-less report is moved aside and rebuilt (#111). This is what makes multiple launchd catch-up triggers safe.
-- **Per-date run lock** (#55): `run()` takes `$AUTODREAM_DIR/locks/run-<date>.lock` (a `mkdir`, with the owner's pid and start time inside) before touching the findings dir, because launchd serialises a label only against itself and `autodream-now.sh` uses another. A live holder makes the second run log and exit 0; a dead holder (a killed run, the normal failure here) or a reused pid is reclaimed.
+- **Per-date run lock** (#55): `run()` takes `$AUTODREAM_DIR/locks/run-<date>.lock` (a `mkdir`, with the owner's pid and start time inside) before touching the findings dir, because launchd serialises a label only against itself and `autodream-now.sh` uses another. A live holder makes the second run log and exit 0; a dead holder (a killed run, the normal failure here) or a reused pid is reclaimed. This lock stays a reclaimable mkdir lock; the three defects it still carries are https://github.com/STRML/autodream/issues/242, and `question-streaks.sh` and `threads.sh` do not use it (see "Open questions that never get answered").
 - The plist example schedules several morning triggers (03:15/06:15/09:15/12:15) so a failed-overnight date gets retried on later wakes; the guard no-ops the rest.
 
 `net_up` checks reachability of `api.anthropic.com` (any HTTP code beats `000`). Disable the wait with `AUTODREAM_NETCHECK=0` (tests set this).
@@ -550,13 +550,13 @@ A full run routinely exceeds 10 minutes, so launching `run.sh` from a foreground
 ```
 ~/.claude/autodream/autodream-now.sh                  # yesterday, now
 ~/.claude/autodream/autodream-now.sh 2026-05-29 --force   # specific date, rebuild
-~/.claude/autodream/autodream-now.sh 2026-05-29 --watch   # tail run log until report lands
+~/.claude/autodream/autodream-now.sh 2026-05-29 --watch   # tail this run's log; exit 0 on a complete report, 1 if the run ends without one
 ~/.claude/autodream/autodream-now.sh 2026-05-29 --dry-run # print plist + commands, run nothing
 ```
 
-How it works: it writes a transient one-shot LaunchAgent (`<base-label>.ondemand`, `RunAtLoad`) into `$AUTODREAM_DIR`, `bootout`s any prior instance, then `bootstrap`s it so launchd runs `run.sh <date>` once and the job exits. `RunAtLoad` is the *only* trigger — it deliberately does not also `kickstart`, or a fast run (e.g. the idempotency no-op) would fire twice. It never touches the scheduled nightly job. Everything is auto-detected: it resolves its own symlink to find `run.sh`, picks the scheduled plist whose `ProgramArguments` reference `run.sh` (not the sibling `*-review` job) to borrow its label namespace, and detects uid + the `claude`/`git` dirs for the agent's PATH — so it is not specific to one user or host. It refuses to launch while the label holds a live pid (`launchctl print` shows `pid =`): every on-demand run shares the one label, so the `bootout` would kill the in-flight run (#78). Wait for it, or `launchctl bootout` it yourself. The default date is computed with plain `date -v-1d`, exactly like run.sh (no TZ override). `--force` maps to `AUTODREAM_FORCE=1`; the caller's `AUTODREAM_DIR`/`DREAMS_DIR` are passed through. Progress is in `$AUTODREAM_DIR/logs/run-<date>.log`; the agent's own stdout/stderr go to `logs/ondemand.{out,err}.log`.
+How it works: it writes a transient one-shot LaunchAgent (`<base-label>.ondemand`, `RunAtLoad`) into `$AUTODREAM_DIR`, `bootout`s any prior instance, then `bootstrap`s it so launchd runs `run.sh <date>` once and the job exits. `RunAtLoad` is the *only* trigger — it deliberately does not also `kickstart`, or a fast run (e.g. the idempotency no-op) would fire twice. It never touches the scheduled nightly job. Everything is auto-detected: it resolves its own symlink to find `run.sh`, picks the scheduled plist whose `ProgramArguments` reference `run.sh` (not the sibling `*-review` job) to borrow its label namespace, and detects uid + the `claude`/`git` dirs for the agent's PATH — so it is not specific to one user or host. It refuses to launch while the label holds a live pid (`launchctl print` shows `pid =`): every on-demand run shares the one label, so the `bootout` would kill the in-flight run (#78). Wait for it, or `launchctl bootout` it yourself. The default date is computed with plain `date -v-1d`, exactly like run.sh (no TZ override). `--force` maps to `AUTODREAM_FORCE=1`; the caller's `AUTODREAM_DIR`/`DREAMS_DIR` are passed through. Every other variable comes from the scheduled job's own `EnvironmentVariables` (`scheduler-label.sh --plist` finds the job this install owns), never from the caller's shell: a host whose nightly runs on a non-default Claude profile sets `CLAUDE_CONFIG_DIR` there, and a one-shot built from PATH alone ran the CLI logged out, so every L2 attempt wrote "Not logged in". The caller's shell is skipped on purpose, because a terminal inside another Claude profile would bill that login. The plist is written mode 600, since it now carries that environment. `--watch` judges the report with `report_finishes()` and only for a file this run wrote, and stops when launchd shows the job ran and holds no process; the old `-s` test said "ready" for the degraded capture run.sh keeps between L2 attempts. Progress is in `$AUTODREAM_DIR/logs/run-<date>.log`; the agent's own stdout/stderr go to `logs/ondemand.{out,err}.log`.
 
-When you (the agent) need to kick off a run, prefer this over a background Bash task — fire it, then poll `dreams/<date>.md` instead of holding a long task open.
+When you (the agent) need to kick off a run, prefer this over a background Bash task — fire it, then poll `dreams/<date>.md` instead of holding a long task open. A non-empty file is not a finished one: check for the `autodream:open-questions=` marker (`report_finishes`), and while a run is going even that is not enough, because between L2 attempts `run.sh` keeps a capture with the marker and the questions block but no `AUTODREAM_REPORT_END` sentinel at the report path (a killed run leaves it there). `--watch` therefore asks the runner instead of inferring: `autodream-now.sh` puts a per-launch `AUTODREAM_RUN_TOKEN` in the one-shot plist, `run.sh` appends `<token> delivered` (a validated report, the no-sessions stub included) or `<token> noop` (the idempotency guard left a finished report alone) to `logs/run-<date>.outcome`, and `--watch` exits 0 on one of those and 1 when the job has finished without one. A log line, a report's mtime (whole seconds) and a completeness predicate evaluated in the watcher (another questions epoch; the runner also accepts a legacy report with no marker) were each tried and each gave a wrong answer. The one-shot copies the scheduled job's `EnvironmentVariables` and refuses to launch (exit 65) when it cannot read them, because launching without them is the logged-out run this exists to prevent; values keep their trailing newlines, and `jq` is looked up on the job's own PATH first.
 
 ## Local web dashboard
 
@@ -779,8 +779,21 @@ after the suite was green. Four are why the file reads as it does now:
   now — otherwise a question reappearing two reports later was called consecutive.
 - **Concurrency could lose an increment.** The scheduled nightly and `autodream-now.sh`
   carry different launchd labels, so one-instance-per-label does not keep them apart. The
-  read-modify-write takes an atomic `mkdir` lock, reclaims a stale one by age, and SKIPS
-  rather than blocks when it cannot get it.
+  read-modify-write takes an `flock(2)` on `$STATE.flock` (`bin/lib-flock.sh`, the lock `threads.sh`
+  uses), and SKIPS rather than blocks when it cannot get it. It was a mkdir lock that contenders
+  reclaimed by age and then by pid, and a shell cannot make "judge the holder gone, then take its
+  lock" atomic: a holder that stalled past 120 s lost the lock to a second writer and its release
+  removed the second writer's (#192), and four gate rounds on the fix each found another interleaving
+  (`docs/plans/2026-11-21-fix_question-streaks-lock-owner-redesign.md`). The kernel drops an flock when
+  its holder ends, so nothing is judged, reclaimed or put back, and a live holder keeps it however long
+  it takes. Distinct outcomes: held (skip, exit 0 for `update`, exit 1 for `clear`), cannot lock and no
+  python3 (permanent: `update` skips with the reason and posts a banner, because skipping every night
+  looks like a quiet week), a double acquire in one process (refused: a second `exec 9>>` would drop the
+  first lock). An older version's mkdir lock at `$STATE.lock` is honored while younger than 300 s, checked
+  inside the same deadline loop, and never removed (one whose state cannot be read, such as a symlink loop, is
+  cannot-lock: permanent, banner): the one age judgment left. Children that can outlive
+  the holder run with fd 9 closed (the banner's `osascript` does), or they would keep the lock alive after
+  a kill.
 - **A parser breakage only wrote to the run log.** That is this feature's own failure mode
   one level up: every streak silently frozen, no escalation ever again, indistinguishable
   from a quiet week. A mismatch now posts a banner saying the escalation is down.
