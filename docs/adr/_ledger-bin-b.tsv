@@ -145,7 +145,7 @@ bin/session-window.sh	94	decision	docs/adr/bin-b-session-window-slice-keeps-raw-
 bin/session-window.sh	105	decision	docs/adr/bin-b-session-window-slice-keeps-raw-lines.md
 bin/session-window.sh	138	decision	docs/adr/bin-b-session-window-day-file-is-atomic.md
 bin/session-window.sh	149	decision	docs/adr/bin-b-session-window-day-file-is-atomic.md
-bin/slim-transcript.sh	2	tautology	-
+bin/slim-transcript.sh	2	decision	docs/adr/bin-b-slim-transcript-lossy-read.md
 bin/slim-transcript.sh	28	stale	-
 bin/slim-transcript.sh	32	decision	docs/adr/bin-b-slim-transcript-output-is-private.md
 bin/slim-transcript.sh	49	decision	docs/adr/bin-b-slim-transcript-output-is-private.md
@@ -204,7 +204,7 @@ bin/vault-notes.sh	78	decision	docs/adr/bin-b-vault-install-dir-and-config-like-
 bin/vault-notes.sh	86	tautology	-
 bin/vault-notes.sh	92	decision	docs/adr/bin-b-vault-install-dir-and-config-like-run-sh.md
 bin/vault-notes.sh	123	tautology	-
-bin/vault-notes.sh	125	stale	-
+bin/vault-notes.sh	125	decision	docs/adr/bin-b-vault-grep-count-trap.md
 bin/vault-notes.sh	133	tautology	-
 bin/vault-notes.sh	140	decision	docs/adr/bin-b-vault-icloud-materialize.md
 bin/vault-notes.sh	147	decision	docs/adr/bin-b-vault-icloud-materialize.md
