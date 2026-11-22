@@ -28,6 +28,7 @@ on:
       - 'tests/scheduler-label.sh'
       - 'tests/autodream-now.sh'
       - 'tests/portable.sh'
+      - 'tests/lib-assert.sh'
       - 'skills/autodream/SKILL.md'
       - '.github/workflows/launchd.yml'
   pull_request:
@@ -45,6 +46,7 @@ on:
       - 'tests/scheduler-label.sh'
       - 'tests/autodream-now.sh'
       - 'tests/portable.sh'
+      - 'tests/lib-assert.sh'
       - 'skills/autodream/SKILL.md'
       - '.github/workflows/launchd.yml'
   schedule:
