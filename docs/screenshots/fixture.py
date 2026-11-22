@@ -34,7 +34,6 @@ REPOS = {
     'mlx': HOME + '/git/oss/mlx-serve',
 }
 
-# (days ago, repo, goal, outcome, user messages, tool calls, minutes)
 SESSIONS = [
     (0, 'rgl', 'Stop a compacted layout jumping when an item is dropped from outside the grid',
      'fully_achieved', 14, 96, 52),
@@ -77,8 +76,6 @@ THREADS = [
     ('dream', 'Lately as a compact table', 'mostly_achieved', 'done'),
 ]
 
-# Threads whose sessions predate the findings above: (repo, title, kind, status, days ago, outcome).
-# Unfinished work older than seven days reads as Dropped.
 OLDER_THREADS = [
     ('rgl', 'Keep placeholder size stable while dragging between breakpoints', 'work', 'open', 12,
      'partially_achieved'),

@@ -1,97 +1,7 @@
 #!/usr/bin/env bash
-# prune-worktrees.sh - remove git worktrees and branches whose work has landed.
-#
-# Sessions leave worktrees under <repo>/.claude/worktrees/ and <repo>/.worktrees/, and
-# branches on the remote, long after the PR merged. This runs in the nightly pipeline and
-# clears the ones that are provably finished. It deletes branches on a remote, so the bar is
-# proof, not a guess: when any check is unclear the item stays and the report says why. A
-# wrong keep costs one more night. A wrong delete cannot be undone.
-#
-# WHAT COUNTS AS FINISHED
-#
-# A branch is finished when one of these holds, and no keep rule below applies:
-#   * a PR from this repo into the default branch is MERGED and the PR's head commit is the
-#     branch tip (a squash merge counts, and local commits made after the merge do not);
-#   * a PR from this repo is CLOSED unmerged at least AUTODREAM_PRUNE_CLOSED_DAYS ago, its
-#     head commit is the branch tip, and the tip is on the remote (GitHub keeps
-#     refs/pull/N/head, so that commit stays recoverable);
-#   * the repo has no remote at all and the tip is an ancestor of the default branch, is not
-#     the default branch's own tip, and the branch has more than its creation in its reflog.
-# A repo whose origin is not on GitHub is never pruned: there is no proof source for it.
-#
-# WHAT IS KEPT, WHATEVER ELSE IS TRUE
-#
-#   open-pr          a PR for the branch is open
-#   base-of-open-pr  an open PR targets the branch
-#   base-of-pr       a PR, open or not, has ever targeted the branch (a long-lived branch)
-#   dirty            uncommitted or untracked files in the worktree
-#   recent           a file in the worktree or its gitdir changed inside the grace window
-#                    (default 12 hours), which also covers a session still running there
-#   rebase-or-bisect a rebase or bisect is in progress in the worktree
-#   locked           `git worktree lock`
-#   protected        main, master, develop, dev, development, trunk, staging, stage,
-#                    production, prod, next, canary, gh-pages, release*, v<digit>*, the
-#                    default branch, and AUTODREAM_PRUNE_PROTECT (colon-separated globs)
-#   submodules       the worktree has a .gitmodules
-#   ignored-files    ignored files other than build output, and no Trash to put them in
-#   trash-failed     `trash` exists and failed, so the directory is not deleted for good
-#   unmanaged-path   a worktree outside .claude/worktrees and .worktrees
-#   gh-unavailable   gh is missing, logged out, or failed for the repo, or the open-PR list
-#                    hit its limit, so there is no proof
-#   time-budget      AUTODREAM_PRUNE_BUDGET_SEC ran out
-#   cap              AUTODREAM_PRUNE_MAX removals already happened this run
-#
-# THE LEDGER: NO REMOVAL WITHOUT A RECORD
-#
-# Every real run appends to one file that is never rewritten, AUTODREAM_PRUNE_LEDGER (default
-# ~/.claude/autodream/prune-ledger.tsv). Per removal it writes an `intent` line BEFORE it touches
-# anything, then one line per step, then `complete`. A run opens with `run-start` and closes with
-# `run-end`. Columns: time (UTC), run id, event, repo, owner/repo, branch, local tip, remote tip
-# before the delete, worktree path, detail (the proof: PR URL, state, head, base), recover.
-# The `recover` column holds the exact commands that put the branch back, local and remote:
-#     git -C <repo> branch <branch> <tip> ; git -C <repo> push origin <tip>:refs/heads/<branch>
-# The commit objects stay in the repo until git gc, so the commands work after a deletion. A
-# worktree directory is in the Trash under its own name. If the ledger cannot be written, nothing
-# is removed ("no log, no delete"). A dry run writes nothing to it.
-#
-# NO CALL CAN HANG THE NIGHT
-#
-# Every network call and `trash` runs under a timeout (AUTODREAM_PRUNE_CALL_SEC), through
-# timeout, gtimeout, or a built-in watchdog when neither exists. A hard cap covers the rest:
-# AUTODREAM_PRUNE_BUDGET_SEC plus AUTODREAM_PRUNE_KILL_SLACK seconds after the start, the
-# script stops its children, writes the report and exits 0.
-#
-# The remote branch is deleted by a push that names the proven commit as the lease
-# (`--force-with-lease=refs/heads/<b>:<tip>`), so a push that landed after the fetch makes
-# GitHub refuse the delete. No branch name is ever put in a URL.
-#
-# The worktree directory goes to the Trash (it may hold ignored files such as .env).
-#
-# Usage:
-#   prune-worktrees.sh [--dry-run] <out-dir>
-#     writes <out-dir>/worktree-prune.tsv (action, repo, branch, path, reason) and
-#     worktree-prune.md, and prints one summary line. Always exits 0 once it has an
-#     out-dir, because a pruning problem must not cost the night's report.
-#
-# Config (env; run.sh sources ~/.claude/autodream/config with `set -a` first):
-#   AUTODREAM_PRUNE_ROOTS        colon-separated directories to search for repos (depth 3).
-#                                Unset or empty: do nothing. This is the opt-in.
-#   AUTODREAM_PRUNE_GRACE_MIN    recent-edit window in minutes                  default 720
-#   AUTODREAM_PRUNE_MAX          most removals in one run                       default 25
-#   AUTODREAM_PRUNE_CLOSED_DAYS  how long a closed PR must have been closed     default 7
-#   AUTODREAM_PRUNE_BUDGET_SEC   wall-clock budget for the whole run            default 1200
-#   AUTODREAM_PRUNE_KILL_SLACK   seconds after the budget before a hard stop     default 120
-#   AUTODREAM_PRUNE_CALL_SEC     timeout for one network call or trash           default 60
-#   AUTODREAM_PRUNE_PROTECT      extra protected branch globs, colon-separated  default none
-#   AUTODREAM_PRUNE_OPEN_LIMIT   open PRs read per repo; at the limit the repo
-#                                is kept whole                                  default 200
-#   AUTODREAM_PRUNE_TRASH        0 to delete with git instead of trash          default 1
-#   AUTODREAM_PRUNE_LEDGER       append-only record of every removal           default ~/.claude/autodream/prune-ledger.tsv
-#   AUTODREAM_PRUNE_DRY_RUN      1 is the same as --dry-run
 set -uo pipefail
 
 _pp="$(dirname "${BASH_SOURCE[0]}")/portable.sh"
-# Installed copies are symlinks: a merge updates them before install.sh links a new helper.
 [ -r "$_pp" ] || _pp="$(dirname "$(readlink "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/portable.sh"
 # shellcheck source=/dev/null
 . "$_pp"
@@ -112,8 +22,6 @@ CALL_SEC=${AUTODREAM_PRUNE_CALL_SEC:-60}
 KILL_SLACK=${AUTODREAM_PRUNE_KILL_SLACK:-120}
 for _v in GRACE MAXN CLOSED_DAYS BUDGET OPEN_LIMIT CALL_SEC KILL_SLACK; do _p_is_int "${!_v}" || { echo "prune: $_v must be a whole number" >&2; exit 0; }; done
 
-# A network call that waits for a password or a dead host would stall the nightly run.
-# Without a tty (launchd) ssh and git cannot prompt either. Slow transfers abort on their own.
 export GIT_TERMINAL_PROMPT=0 GH_PROMPT_DISABLED=1
 export GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=$CALL_SEC
 
@@ -134,8 +42,6 @@ IFS=: read -r -a PROTECT <<< "$PROTECT_DEFAULT:${AUTODREAM_PRUNE_PROTECT:-}"
 
 budget_ok() { [ "$SECONDS" -lt "$BUDGET" ]; }
 
-# ledger EVENT REPO SLUG BRANCH TIP REMOTE_TIP WORKTREE DETAIL RECOVER - one append, a failure returns 1.
-# A tab or newline inside a field would shift the columns, so both become spaces.
 ledger() {
   [ "$DRY" = 1 ] && return 0
   local f out="" sep=""
@@ -146,18 +52,14 @@ ledger() {
   printf '%s\n' "$out" >> "$LEDGER" 2>/dev/null
 }
 
-# shq STRING -> STRING in single quotes. Unlike printf %q this never prints $'..', which fish cannot read.
 shq() { printf "'%s'" "$(printf '%s' "$1" | LC_ALL=C sed "s/'/'\\\\''/g")"; }
 
-# recover_cmds REPO BRANCH TIP REMOTE_TIP -> the commands that restore the local branch, and the
-# remote branch when it existed. They work in bash, zsh and fish.
 recover_cmds() {
   local r b; r=$(shq "$1"); b=$(shq "$2")
   printf 'git -C %s branch %s %s' "$r" "$b" "$3"
   [ -z "$4" ] || printf ' ; git -C %s push origin %s:refs/heads/%s' "$r" "$3" "$b"
 }
 
-# lstep ... -> ledger, remembering a failed append so the report can say the record is incomplete
 lstep() { ledger "$@" || LBAD=1; }
 
 if [ "$DRY" != 1 ]; then
@@ -191,8 +93,6 @@ finish() {
   printf 'prune: removed=%s kept=%s skipped=%s%s\n' "$N_REMOVED" "$N_KEPT" "$N_SKIPPED" "$([ "$DRY" = 1 ] && echo ' (dry run)')"
 }
 
-# The whole run has a hard cap no hung child can outlast: the budget plus a slack. The watchdog
-# sends TERM to this shell, the trap kills the children, writes the report and exits 0.
 on_term() {
   pkill -P $$ 2>/dev/null
   if [ -n "$CUR_REPO" ] && [ "$LEDGER_OK" = 1 ]; then
@@ -203,7 +103,6 @@ on_term() {
   exit 0
 }
 trap on_term TERM
-# bash runs a trap only after its foreground child exits, so the children are killed right after the TERM.
 ( trap 'kill "${sp:-}" 2>/dev/null; exit 0' TERM
   sleep $((BUDGET + KILL_SLACK)) & sp=$!; wait "$sp" || exit 0
   kill -TERM $$; pkill -P $$ ) >/dev/null 2>&1 &
@@ -216,13 +115,9 @@ if command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 && tmo "$CALL_
 USE_TRASH=0
 if [ "${AUTODREAM_PRUNE_TRASH:-1}" = 1 ] && command -v trash >/dev/null 2>&1; then USE_TRASH=1; fi
 
-
-# ---- per-repo facts ------------------------------------------------------------------------
-
 default_facts() { # sets DEF_NAME DEF_REF DEF_TIP for repo $1; DEF_NAME is empty when unknown
   local repo=$1 b
   DEF_NAME=$(git -C "$repo" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null) || DEF_NAME=""
-  # Ask the remote every night: a renamed default branch leaves origin/HEAD pointing at the old name.
   if git -C "$repo" remote get-url origin >/dev/null 2>&1; then
     tmo "$CALL_SEC" git -C "$repo" remote set-head origin -a >/dev/null 2>&1
     DEF_NAME=$(git -C "$repo" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null) || DEF_NAME=""
@@ -266,9 +161,6 @@ load_open_prs() { # slug -> OPEN_HEADS OPEN_BASES REPO_GH_OK
 
 in_list() { printf '%s\n' "$2" | grep -qxF -- "$1"; }
 
-# ---- the proof -------------------------------------------------------------------------------
-
-# judge REPO SLUG BRANCH TIP -> VERDICT=finished|keep, WHY
 judge() {
   local repo=$1 slug=$2 br=$3 tip=$4 json rsha closed based
   VERDICT=keep; WHY="no proof the work landed"; PROOF=""
@@ -302,14 +194,10 @@ judge() {
     PROOF=$(printf '%s' "$json" | jq -r --arg t "$tip" '[.[] | select(.state == "CLOSED" and .headRefOid == $t)][0] | "PR \(.url) CLOSED head=\(.headRefOid) base=\(.baseRefName) closedAt=\(.closedAt); remote tip equals the local tip"')
   fi
   [ "$VERDICT" = finished ] || return 0
-  # Either proof: a branch that other PRs have targeted is a long-lived branch, and deleting it
-  # on the remote would close those PRs. An error in the lookup keeps the branch.
   based=$(tmo "$CALL_SEC" gh pr list -R "$slug" --base "$br" --state all --limit 1 --json number 2>/dev/null) \
     && [ "$(printf '%s' "$based" | jq length 2>/dev/null)" = 0 ] || { VERDICT=keep; WHY="base-of-pr: a PR has targeted this branch"; }
   return 0
 }
-
-# ---- removal ---------------------------------------------------------------------------------
 
 delete_remote() { # repo slug branch tip -> REMOTE_NOTE
   local repo=$1 slug=$2 br=$3 tip=$4 rsha
@@ -341,7 +229,6 @@ drop_worktree() { # repo path -> 0 when the directory is gone and git forgot it
   return 1
 }
 
-# remove_item REPO SLUG BRANCH TIP PATH WHY - PATH or BRANCH may be empty. PROOF holds the evidence.
 remove_item() {
   local repo=$1 slug=$2 br=$3 tip=$4 path=$5 why=$6 note="" rsha="" rec="" detail pin dd
   LBAD=""
@@ -352,14 +239,10 @@ remove_item() {
   [ -z "$br" ] || rsha=$(git -C "$repo" rev-parse -q --verify "refs/remotes/origin/$br" 2>/dev/null) || rsha=""
   if [ -n "$br" ]; then rec=$(recover_cmds "$repo" "$br" "$tip" "$rsha"); pin="refs/prune-ledger/$RUN_ID/$br"
   else rec="detached worktree: no branch; the commit is $tip"; pin="refs/prune-ledger/$RUN_ID/detached-$(basename "$path")"; fi
-  # Pin first. After the branch and the worktree are gone, nothing else keeps a squash-merged tip
-  # reachable, and git gc would prune it and break the recover commands. The pin is never removed.
-  # The empty old value makes the pin create-only: an existing pin of the same name is never overwritten.
   if ! git -C "$repo" update-ref "$pin" "$tip" "" 2>/dev/null; then
     ledger pin-failed "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "could not create $pin; nothing was changed" ""
     row kept "$repo" "$br" "$path" "pin-failed: no safe undo, no delete"; return 0
   fi
-  # Write-ahead: the intent is on disk before the first change.
   if ! ledger intent "$repo" "$slug" "$br" "$tip" "$rsha" "$path" "$why | proof: $PROOF | commit held by $pin" "$rec"; then
     git -C "$repo" update-ref -d "$pin" 2>/dev/null   # nothing was changed, so the pin is not needed
     row kept "$repo" "$br" "$path" "ledger-write-failed: no log, no delete"; return 0
@@ -393,8 +276,6 @@ remove_item() {
   CUR_REPO=""
   row removed "$repo" "$br" "$path" "$why$note"
 }
-
-# ---- the sweep -------------------------------------------------------------------------------
 
 recent_edit() { # worktree path -> 0 when anything in it or its gitdir changed inside the window
   local path=$1 gd hit
@@ -531,8 +412,6 @@ if [ -n "$ROOTS" ]; then
     find "$root" -maxdepth 3 -name .git -type d 2>/dev/null
   done | while IFS= read -r g; do dirname "$g"; done | sort -u > "$repos"
   while IFS= read -r repo; do
-    # git prints physical worktree paths, so the repo path must be physical too or the
-    # managed-path check rejects every worktree under a symlinked parent (/tmp, iCloud).
     [ -n "$repo" ] && repo=$(cd -P "$repo" 2>/dev/null && pwd -P) && sweep_repo "$repo"
   done < "$repos"
   rm -f "$repos"
