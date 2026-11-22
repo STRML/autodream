@@ -4910,7 +4910,7 @@ test_multiroot_triages_alt_root(){
 }
 
 test_multiroot_heldout_and_dedup(){
-  echo "# multi-root: undecided dirs are held out (flagged, not triaged); a file reachable via symlink from two roots is triaged once"
+  echo "# multi-root: undecided dirs are held out (flagged, not triaged); a symlink to a transcript in another root is not followed, so the target is listed once"
   local root; root=$(setup_env_altroot)
   decide_index "$root" "$root/home/.claude-ds4/projects"
   mkdir -p "$root/home/.claude-sigint/projects/proj-a"
@@ -4923,9 +4923,20 @@ test_multiroot_heldout_and_dedup(){
   assert_grep "$fdir/unindexed-roots.txt" "$root/home/.claude-sigint/projects" "the undecided sigint dir is flagged"
   assert_nogrep "$fdir/sessions.txt.raw" "$root/home/.claude-sigint/projects/proj-a/s9.jsonl" "the undecided sigint session is NOT triaged"
   local n; n=$(grep -c "$root/home/.claude/projects/proj-a/s2.jsonl" "$fdir/sessions.txt.raw")
-  assert_eq "$n" "1" "the symlinked path appears once in sessions.txt.raw"
+  assert_eq "$n" "1" "the target appears once in sessions.txt.raw, and the symlink in the other root added nothing"
   local p; p=$(printf '%s' "$root/home/.claude/projects/proj-a/s2.jsonl" | shasum | cut -c1-12)
   assert_file "$fdir/$p.json" "the one overlapping session has a findings JSON"
+  rm -rf "$root"
+}
+
+test_a_transcript_under_two_session_roots_is_listed_once(){
+  echo "# roots: one transcript reached through a root listed twice and a root nested inside another is in the worklist once"
+  local root; root=$(setup_env)
+  mk_session "$root" s1
+  SESSION_ROOTS="$root/projects:$root/projects:$root/projects/proj-a" run_dream "$root"
+  local raw="$root/autodream/findings/$DATE/sessions.txt.raw"
+  assert_eq "$(grep -cxF "$root/projects/proj-a/s1.jsonl" "$raw")" "1" "the path is in sessions.txt.raw once, from three overlapping roots"
+  assert_eq "$(grep -c . "$raw")" "1" "and nothing else is"
   rm -rf "$root"
 }
 
@@ -6901,6 +6912,7 @@ _run test_pins_l1_cannot_widen_the_worklist
 _run test_no_markdown_memory_writer_remains
 _run test_multiroot_triages_alt_root
 _run test_multiroot_heldout_and_dedup
+_run test_a_transcript_under_two_session_roots_is_listed_once
 _run test_multiroot_flags_unindexed
 _run test_rootprobe_remembers_choice
 _run test_rootprobe_no_write_mode_flags_but_does_not_write
