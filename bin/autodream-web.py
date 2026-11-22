@@ -299,8 +299,7 @@ class AutodreamHandler(BaseHTTPRequestHandler):
             else:
                 self.respond(404, "Not found\n")
                 return
-            self.respond(200, json.dumps(data, allow_nan=False),
-                         content_type="application/json; charset=utf-8")
+            self.respond_json(200, data)
         except ValueError:
             self.respond(400, "Invalid request\n")
         except FileNotFoundError:
