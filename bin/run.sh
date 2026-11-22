@@ -133,6 +133,9 @@
 #                        inbox note surface + report publishing       default: unset (off)
 #   AUTODREAM_VAULT_BIN  override the resolved vault-notes.sh path, authoritative
 #   AUTODREAM_XBOOKMARKS_BIN override the resolved x-bookmarks.sh path, authoritative
+#   AUTODREAM_REPORTS_BIN    override the resolved report-scripts.sh path, authoritative
+#                            (the allowlist is $AUTODREAM_DIR/report-scripts.conf; the knobs
+#                            AUTODREAM_REPORT_TIMEOUT and AUTODREAM_REPORT_MAX_BYTES are in report-scripts.sh)
 #   AUTODREAM_PRUNE_ROOTS    colon-separated dirs to search for repos whose finished
 #                            worktrees and branches are pruned     default: unset (off)
 #   AUTODREAM_PRUNE_BIN      override the resolved prune-worktrees.sh path, authoritative
@@ -414,6 +417,14 @@ if [ -n "${AUTODREAM_XBOOKMARKS_BIN:-}" ]; then
 else
   XBOOKMARKS="$SCRIPT_DIR/x-bookmarks.sh"
   [ -x "$XBOOKMARKS" ] || XBOOKMARKS="$AUTODREAM_DIR/x-bookmarks.sh"
+fi
+# Report-script collector: runs the allowlisted commands operator notes ask for, because L2 has
+# Read and Glob only. A missing conf means no reports. Override is authoritative, as above.
+if [ -n "${AUTODREAM_REPORTS_BIN:-}" ]; then
+  REPORT_SCRIPTS="$AUTODREAM_REPORTS_BIN"
+else
+  REPORT_SCRIPTS="$SCRIPT_DIR/report-scripts.sh"
+  [ -x "$REPORT_SCRIPTS" ] || REPORT_SCRIPTS="$AUTODREAM_DIR/report-scripts.sh"
 fi
 # Worktree and branch pruner. Opt-in through AUTODREAM_PRUNE_ROOTS, so an install that
 # never sets it runs the helper as a no-op. Override is authoritative, as above.
@@ -4199,6 +4210,73 @@ unassembled_dates() {
     | sort | tail -n "$window")
   printf '%s|%s' "$out" "$legacy"
 }
+# The collector and the portable.sh it sources are code this run executes with the operator's
+# privileges, after L1 workers (which hold Write) have run. Their sha256 values are taken before
+# the first model call and checked again before the collector starts. Prints both hashes, one per
+# line, or fails when either file cannot be read or hashed (a failed hash is never "unchanged").
+report_collector_fingerprint() {
+  local f lib
+  lib="$(dirname "$REPORT_SCRIPTS")/portable.sh"
+  [ -r "$lib" ] || lib="$(dirname "$(readlink "$REPORT_SCRIPTS" 2>/dev/null || echo "$REPORT_SCRIPTS")")/portable.sh"
+  for f in "$REPORT_SCRIPTS" "$lib"; do
+    shasum -a 256 -- "$f" 2>/dev/null | cut -d' ' -f1 | grep -E '^[0-9a-f]{64}$' || return 1
+  done
+}
+
+# $1=a fingerprint function, $2=the fingerprint taken before. True only when the function succeeds
+# and prints the same thing. Comparing "$(fn)" directly discards fn's exit status, so a fingerprint
+# that printed the matching rows and then failed on the next file read as unchanged.
+fingerprint_unchanged() {
+  local now
+  [ -n "$2" ] || return 1
+  now=$("$1") || return 1
+  [ "$now" = "$2" ]
+}
+
+# What the collector wrote for L2 to read: the index and every report-<name>.md, one "name sha256"
+# line each, in name order. Fails when the directory cannot be entered or any file cannot be hashed,
+# so a failed hash is never "unchanged". The runner holds the output of the first call in memory and
+# compares it before L2, because a worker that is not confined can rewrite these files.
+report_output_fingerprint() {
+  local f h
+  cd "$FINDINGS_DIR" 2>/dev/null || return 1
+  for f in report-index.txt report-*.md; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    h=$(shasum -a 256 -- "$f" 2>/dev/null | cut -d' ' -f1) || return 1
+    printf '%s' "$h" | grep -Eq '^[0-9a-f]{64}$' || return 1
+    printf '%s %s\n' "$f" "$h"
+  done
+}
+
+# Whatever stops the collector from finishing must not leave an earlier run's report files in the
+# findings dir (a forced rerun keeps the directory): L2 would read the old index and answer a note
+# from output nobody collected tonight.
+# Returns 1 when the earlier files could not be removed or the new index not written: the caller
+# stops the run, because L2 would otherwise read last night's rows as tonight's.
+report_scripts_unavailable() { # $1=why
+  log "report scripts unavailable: $1"
+  # -rf: a worker that is not confined can plant a directory with a report name, and rm -f would
+  # leave it standing and stop the night over a file the runner is entitled to clear.
+  find "$FINDINGS_DIR" -maxdepth 1 \( -name 'report-*.md' -o -name report-index.txt \) -exec rm -rf {} + || return 1
+  printf '# report-scripts: unavailable (%s); nothing was collected\n' "$1" > "$FINDINGS_DIR/report-index.txt" || return 1
+}
+
+# Appends report_scripts (off, unavailable, or the entry count) and report_scripts_not_ok (the names
+# of the entries whose status is not ok, or none) to run-stats.txt, read from the index the collector
+# or report_scripts_unavailable just wrote. PROMPT.md reads the index only when an operator note asks
+# for a command, so an entry that fails every night would never reach the self-audit without these.
+report_scripts_stats() {
+  local idx="$FINDINGS_DIR/report-index.txt" first n names
+  first=$(sed -n 1p "$idx" 2>/dev/null)
+  case "$first" in
+    '# report-scripts: unavailable'*) n=unavailable ;;
+    '# report-scripts: none configured'*) n=off ;;
+    '# report-scripts: '[0-9]*' entries'*) n=${first#'# report-scripts: '}; n=${n%% *} ;;
+    *) n=unavailable ;;
+  esac
+  names=$(awk -F'\t' 'NR > 1 && $1 !~ /^#/ && $2 != "ok" { printf "%s%s", sep, $1; sep = "," }' "$idx" 2>/dev/null)
+  printf 'report_scripts: %s\nreport_scripts_not_ok: %s\n' "$n" "${names:-none}" >> "$FINDINGS_DIR/run-stats.txt"
+}
 
 run() {
   log "===== autodream start: $(date) ====="
@@ -4394,6 +4472,8 @@ run() {
   # Before the nothing-to-triage exit: a night with no sessions still owes the cleanup.
   sweep_killed_leftovers
   if [ "$COUNT" -eq 0 ]; then
+    # No L2 runs on this path, so no model reads a report file tonight: report scripts are not
+    # collected here, as operator notes and bookmarks are not.
     log "no sessions to triage; writing stub report and exiting"
     THREAD_SOURCE_ROWS=$(thread_source_rows "$(pdate_shift "$TARGET_DATE" -13 d)" "$TARGET_DATE" 2>/dev/null) || THREAD_SOURCE_ROWS=""
     THREADS_REFRESH_KEYS=""
@@ -4660,6 +4740,50 @@ EOF
       PINS_LEDGER_OK=0
     fi
   fi
+
+  # The report-script allowlist gets the same treatment, for a worse reason: the collector
+  # EXECUTES what the conf names. An L1 worker reads untrusted transcripts and holds the Write
+  # tool, so it could rewrite the conf (or a script the conf names) and have the collector run
+  # the result with this user's privileges. The conf and each script's sha256 are held here,
+  # before the first model call, and the collector runs only what this snapshot lists.
+  REPORT_SNAPSHOT=""
+  REPORT_COLLECTOR_FP=""
+  if [ -x "$REPORT_SCRIPTS" ]; then
+    REPORT_COLLECTOR_FP=$(report_collector_fingerprint) || REPORT_COLLECTOR_FP=""
+    REPORT_SNAPSHOT=$(AUTODREAM_DIR="$AUTODREAM_DIR" "$REPORT_SCRIPTS" snapshot 2>/dev/null) || REPORT_SNAPSHOT="#unavailable"
+  fi
+
+  # ---- Report scripts: collected HERE, before the first model call ----
+  # An operator note that asks for a command's output is answered from report-<name>.md and
+  # report-index.txt, because L2 cannot run anything. Each allowlisted entry in
+  # $AUTODREAM_DIR/report-scripts.conf runs with a timeout, and a failing one still writes its file
+  # with the failure as the content. A new report is a conf line, never a change to this file or the
+  # prompt. It runs from the snapshot above, never from the live conf.
+  # It runs before L1 on purpose. A worker with the Write tool that is not confined (omp has no write
+  # profile, and a host whose sandbox probe fails runs unconfined) can rewrite a script the conf names
+  # or any file such a script sources, and the script's own hash would still match. Nothing has run
+  # that could have done so yet. What a worker can still reach is the files this step wrote into the
+  # findings dir, so the runner hashes them here, holds the hashes in memory, and checks them again
+  # before L2 reads anything (below). A collector that cannot run costs a log line and an
+  # `unavailable` index; the run stops only when the earlier run's files cannot be cleared.
+  REPORT_SEAM_OK=1
+  REPORT_OUT_FP=""
+  if [ ! -x "$REPORT_SCRIPTS" ]; then
+    report_scripts_unavailable "report-scripts.sh not found at $REPORT_SCRIPTS" || REPORT_SEAM_OK=0
+  elif ! fingerprint_unchanged report_collector_fingerprint "$REPORT_COLLECTOR_FP"; then
+    report_scripts_unavailable "report-scripts.sh or portable.sh changed since the run started, or could not be hashed" || REPORT_SEAM_OK=0
+  else
+    REPORT_SNAPSHOT_FILE=$(mktemp "${TMPDIR:-/tmp}/report-snapshot.XXXXXX") \
+      && printf '%s\n' "${REPORT_SNAPSHOT:-#unavailable}" > "$REPORT_SNAPSHOT_FILE" \
+      && AUTODREAM_DIR="$AUTODREAM_DIR" "$REPORT_SCRIPTS" collect "$FINDINGS_DIR" "$REPORT_SNAPSHOT_FILE" \
+      || report_scripts_unavailable "report-script collection failed" || REPORT_SEAM_OK=0
+    rm -f "${REPORT_SNAPSHOT_FILE:-}"
+  fi
+  if [ "$REPORT_SEAM_OK" != 1 ]; then
+    log_fatal "cannot clear the earlier run's report files in $FINDINGS_DIR; refusing to let L2 read them as tonight's"
+    fatal_exit; return 1
+  fi
+  REPORT_OUT_FP=$(report_output_fingerprint) || REPORT_OUT_FP=""
 
   # ---- Layer 1: haiku triage, parallel, retried across sleep/network gaps ----
   # Lean-query env (claude-cells internal/claude/query.go pattern): keep subscription
@@ -5439,6 +5563,20 @@ PY
   else
     log "x-bookmarks.sh not found at $XBOOKMARKS; skipping bookmark collection"
   fi
+
+  # ---- Report scripts: were the files collected before L1 still the same? ----
+  # L1 workers that are not confined can write anywhere the user can, the findings dir included.
+  # What L2 reads for an operator note is report-index.txt and the report-<name>.md files it names,
+  # so any difference from the hashes the runner took right after collection (or a failure to hash
+  # them then) replaces them with an `unavailable` index. The earlier run's files are removed by the
+  # same call, and the run stops only if that cannot be done.
+  if ! fingerprint_unchanged report_output_fingerprint "$REPORT_OUT_FP"; then
+    report_scripts_unavailable "the report files changed after collection or could not be hashed (an L1 worker that is not confined can write here)" || {
+      log_fatal "cannot clear the report files in $FINDINGS_DIR after they changed; refusing to let L2 read them"
+      fatal_exit; return 1
+    }
+  fi
+  report_scripts_stats
 
   # ---- Was the queryId scraping walk actually exercised tonight? (#38) ----
   # The walk against X's JS bundle is the one part of the fetcher with no test, and the
