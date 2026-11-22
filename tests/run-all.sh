@@ -3105,6 +3105,11 @@ test_idempotency_guard_needs_a_complete_report(){
 
 lock_dir(){ printf '%s' "$1/autodream/locks/run-$DATE.lock"; }   # the per-date run lock for a root
 lock_flock(){ printf '%s' "$1/autodream/locks/run-$DATE.flock"; }   # the flock that decides who holds it
+lock_fn(){ # $1=autodream dir $2=shell snippet: run it in a fresh bash that has loaded run.sh's lock block
+  REPO_RUN="$RUN" /bin/bash -c 'set -u; log(){ :; }; AUTODREAM_DIR=$1; TARGET_DATE=x
+    eval "$(sed -n "/^RUN_LOCK=/,/^# ---- Remote session roots/p" "$REPO_RUN" | sed "\$d")"
+    eval "$2"' _ "$1" "$2"
+}
 mk_lock(){ # $1=root $2=pid -> a lock directory held by that pid (with its real start time when ps can say)
   local d; d=$(lock_dir "$1"); mkdir -p "$d"
   printf '%s\n' "$2" > "$d/pid"
@@ -3461,6 +3466,89 @@ test_run_lock_a_killed_run_frees_it_while_its_child_lives(){
   kill -0 "$child" 2>/dev/null && ok "while the child the run left behind is still alive" || no "the child died with the run, so this proved nothing"
   kill "$job" 2>/dev/null; wait "$job" 2>/dev/null
   while read -r p; do kill "$p" 2>/dev/null; done < "$pidfile"
+  rm -rf "$root"
+}
+
+test_run_lock_a_flock_file_this_user_cannot_open_is_held(){
+  echo "# the run lock: a flock file this user cannot open belongs to someone else, so the lock reads as held (#242)"
+  [ "$(id -u)" != 0 ] || { echo "  skip - root can open any file"; return 0; }
+  local root; root=$(setup_env); mk_session "$root" sess1
+  mkdir -p "$(dirname "$(lock_flock "$root")")"
+  : > "$(lock_flock "$root")"; chmod 000 "$(lock_flock "$root")"
+  run_dream "$root"
+  assert_grep "$root/run.out" 'holds the lock' "an unreadable flock file is reported as a live holder, not as a lock that cannot be made"
+  assert_no_file "$(fdir "$root")/sessions.txt" "so the run did not touch the findings dir"
+  rm -rf "$root"
+}
+
+test_run_lock_a_holder_does_not_outlive_a_dead_owner(){
+  echo "# the run lock: a holder started for an owner that is already gone exits at once and never takes the lock (#242)"
+  local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
+  local flk="$root/autodream/locks/x.flock" dead t0 took
+  true & dead=$!; wait "$dead" 2>/dev/null
+  hold_flock "$flk"
+  t0=$SECONDS
+  FLK="$flk" RES="$root/res.txt" DEAD="$dead" lock_fn "$root/autodream" 'python3 -c "$LOCK_HOLD_PY" "$FLK" "$RES" 8 "$DEAD"'
+  took=$((SECONDS - t0))
+  [ "$took" -lt 5 ] && ok "it left within $took seconds instead of waiting out the 8 second lock wait" || no "it waited $took seconds behind a busy lock for an owner that was gone"
+  kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
+  assert_no_file "$root/res.txt" "and it reported nothing"
+  flock_free "$flk" && ok "and it did not take the lock when the holder let go" || no "the dead owner's holder took the lock"
+  rm -rf "$root"
+}
+
+test_run_lock_release_ignores_a_directory_it_never_acquired(){
+  echo "# the run lock: a process that never took the lock does not remove or signal what a dead run left (#242)"
+  local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
+  local out
+  out=$(LK="$root/autodream/locks/x.lock" lock_fn "$root/autodream" 'mkdir -p "$LK"; printf "%s\n" "$$" > "$LK/pid"; release_lock "$LK"; [ -d "$LK" ] && echo kept || echo removed')
+  assert_eq "$out" "kept" "a directory naming this pid, left by a dead run that had it, is not removed by a process that never acquired it"
+  rm -rf "$root"
+}
+
+test_run_lock_an_older_runner_holding_the_directory_is_honored(){
+  echo "# the run lock: a runner from before the flock, alive and holding the directory, is not run beside (#242)"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  sleep 120 & local old=$!
+  mk_lock "$root" "$old"
+  run_dream "$root"
+  kill "$old" 2>/dev/null; wait "$old" 2>/dev/null
+  assert_grep "$root/run.out" 'holds the lock' "a live pid in a directory no flock backs is the old runner, so the run waits for it"
+  assert_no_file "$(fdir "$root")/sessions.txt" "it did not touch the findings dir"
+  rm -rf "$root"
+}
+
+test_run_lock_a_failed_metadata_write_is_not_a_taken_lock(){
+  echo "# the run lock: an acquire whose pid file cannot be written reports that it could not lock (#242)"
+  [ "$(id -u)" != 0 ] || { echo "  skip - root can write any file"; return 0; }
+  local root; root=$(setup_env); mk_session "$root" sess1
+  local dead; true & dead=$!; wait "$dead" 2>/dev/null
+  mkdir -p "$(lock_dir "$root")"; printf '%s\n' "$dead" > "$(lock_dir "$root")/pid"; chmod 444 "$(lock_dir "$root")/pid"
+  run_dream "$root"
+  assert_grep "$root/run.out" 'could not take the per-date lock' "the run says it went ahead without the lock"
+  assert_file "$root/dreams/$DATE.md" "and still produced its report"
+  rm -rf "$root"
+}
+
+test_run_lock_the_pin_sweep_reads_an_unprobeable_lock_as_held(){
+  echo "# the run lock: with no python3 and no flock file the pin sweep does not call the date idle (#242)"
+  local root; root=$(setup_env); mkdir -p "$root/autodream/locks" "$root/nopy"
+  local c out
+  for c in cat head tr ps mktemp find rm dirname; do ln -s "$(command -v "$c")" "$root/nopy/$c"; done
+  out=$(LK="$root/autodream/locks/run-2019-12-30.lock" NOPY="$root/nopy" lock_fn "$root/autodream" 'PATH="$NOPY"; lock_is_held "$LK" && echo held || echo free')
+  assert_eq "$out" "held" "a probe that cannot run is a lock that is held"
+  rm -rf "$root"
+}
+
+test_run_lock_a_killed_acquire_leaves_no_result_file_for_long(){
+  echo "# the run lock: result files a killed acquire left behind are swept, a fresh one is kept (#242)"
+  local root; root=$(setup_env); mk_session "$root" sess1
+  mkdir -p "$root/autodream/locks"
+  : > "$root/autodream/locks/.hold.OLDOLD"; touch -t 202001010000 "$root/autodream/locks/.hold.OLDOLD"
+  : > "$root/autodream/locks/.hold.NEWNEW"
+  run_dream "$root"
+  assert_no_file "$root/autodream/locks/.hold.OLDOLD" "a result file older than ten minutes is removed"
+  assert_file "$root/autodream/locks/.hold.NEWNEW" "one that could belong to a live acquire is kept"
   rm -rf "$root"
 }
 
@@ -4518,6 +4606,13 @@ _run test_run_lock_a_live_holder_of_another_user_is_still_held
 _run test_run_lock_a_live_holder_is_held_when_ps_cannot_report_its_start
 _run test_run_lock_a_holder_that_has_not_written_its_pid_is_held
 _run test_run_lock_a_killed_run_frees_it_while_its_child_lives
+_run test_run_lock_a_flock_file_this_user_cannot_open_is_held
+_run test_run_lock_a_holder_does_not_outlive_a_dead_owner
+_run test_run_lock_release_ignores_a_directory_it_never_acquired
+_run test_run_lock_an_older_runner_holding_the_directory_is_honored
+_run test_run_lock_a_failed_metadata_write_is_not_a_taken_lock
+_run test_run_lock_the_pin_sweep_reads_an_unprobeable_lock_as_held
+_run test_run_lock_a_killed_acquire_leaves_no_result_file_for_long
 _run test_killed_run_temps_are_swept_at_the_start_of_the_next_run
 _run test_self_audit_stats
 _run test_x_fetch_path_reaches_run_stats

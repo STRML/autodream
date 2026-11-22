@@ -1933,34 +1933,55 @@ sweep_stranded_pins() {
 # path. The second one's move-aside would even carry off the first one's report mid-build.
 # An flock(2) on <lock>.flock is the lock (#242). The kernel drops it when its holder ends, so
 # nothing judges a holder dead and nothing is reclaimed. The lock directory only reports: it holds
-# the owner's pid and process start time for the web dashboard and the holder's pid for release,
-# and it is removed on release. The flock file sits beside it and is never removed: a file
-# unlinked while a contender has it open lets two processes hold two inodes, and one kept inside
-# the directory would show every finished date as "starting" in the dashboard. The lock sits
-# outside the findings dir, so clearing a date's findings for a clean rebuild cannot release it
-# under a live run.
+# the owner's pid and process start time for the web dashboard, and it is removed on release. The
+# flock file sits beside it and is never removed: a file unlinked while a contender has it open
+# lets two processes hold two inodes, and one kept inside the directory would show every finished
+# date as "starting" in the dashboard. The lock sits outside the findings dir, so clearing a date's
+# findings for a clean rebuild cannot release it under a live run.
 #
 # The descriptor belongs to a small holder process, not to this shell, because every child of a
 # run (L1 workers, an engine, a banner, a sync job) would inherit it and could keep the date
-# locked after the run is killed. The holder exits when its parent does.
+# locked after the run is killed. The holder is handed its owner's pid, and leaves as soon as that
+# process is gone, whether it was waiting for the lock or holding it.
+#
+# A runner from before the flock holds only the directory, with its pid and start, so a directory
+# whose pid is alive and still has its recorded start is honored too (lock_names_live_run).
 RUN_LOCK="$AUTODREAM_DIR/locks/run-$TARGET_DATE.lock"
 LOCK_HOLDER=""
+LOCK_HOLDERS=""
 
 proc_start() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '; }
 
 LOCK_HOLD_PY='
 import fcntl, os, sys, time
-path, res, wait = sys.argv[1], sys.argv[2], float(sys.argv[3])
-owner = os.getppid()
+path, res, wait, owner = sys.argv[1], sys.argv[2], float(sys.argv[3]), int(sys.argv[4])
 
 def say(word):
     with open(res, "w") as out:
         out.write(word + "\n")
 
+def owner_alive():
+    try:
+        os.kill(owner, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
 try:
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    fd = os.open(path, os.O_RDONLY | os.O_CREAT, 0o644)
+except PermissionError:
+    say("held" if os.path.exists(path) else "error")
+    sys.exit(0)
+except OSError:
+    say("error")
+    sys.exit(0)
+try:
     end = time.monotonic() + wait
     while True:
+        if not owner_alive():
+            sys.exit(0)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             break
@@ -1974,31 +1995,47 @@ except SystemExit:
 except BaseException:
     say("error")
     sys.exit(0)
+if not owner_alive():
+    sys.exit(0)
 say("ok")
-while os.getppid() == owner:
+while owner_alive():
     time.sleep(0.25)
 '
 
-# End a holder and wait until its flock is gone. It is this shell's child when this shell took the
-# lock, so wait reaps it; otherwise (release from a parent, after a pipeline subshell ran the
-# run) it is polled.
-lock_stop_holder() { # $1=holder pid
-  local i=0
+# $1=lock dir -> 0 when its pid file names a live process that still has the start recorded beside
+# it: a runner from before the flock, which holds only the directory. A pid that cannot be
+# signalled still counts as alive (ps answers for any user's process), and a start that ps cannot
+# report counts as a match, so the judgment fails toward "held".
+lock_names_live_run() {
+  local pid start now
+  pid=$(cat "$1/pid" 2>/dev/null) || return 1
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || ps -p "$pid" >/dev/null 2>&1 || return 1
+  start=$(cat "$1/start" 2>/dev/null) || start=""
+  [ -n "$start" ] || return 0
+  now=$(proc_start "$pid")
+  [ -z "$now" ] || [ "$now" = "$start" ]
+}
+
+# End a holder this shell started, and wait until it is gone, so its flock is free when this returns.
+lock_stop_holder() { # $1=holder pid, a child of this shell
   kill "$1" 2>/dev/null || return 0
   wait "$1" 2>/dev/null || true
-  while kill -0 "$1" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
   return 0
 }
 
 # $1=lock dir $2=seconds to wait for a holder (default 0). 0 = taken, 1 = another run holds it (its
 # pid in LOCK_HOLDER, "unknown" when none is written), 3 = the lock cannot be made: the locks
-# directory is read-only, there is no python3 to take the flock, or the holder did not answer.
+# directory is read-only, there is no python3 to take the flock, the holder did not answer, or the
+# pid and start files could not be written.
 acquire_lock() {
-  local dir="$1" wait="${2:-0}" flk="${1%.lock}.flock" res holder verdict="" i=0 end
-  mkdir -p "$(dirname "$dir")" 2>/dev/null || return 3
+  local dir="$1" wait="${2:-0}" flk="${1%.lock}.flock" locks res holder verdict="" i=0 end
+  locks=$(dirname "$dir")
+  mkdir -p "$locks" 2>/dev/null || return 3
   command -v python3 >/dev/null 2>&1 || return 3
-  res=$(mktemp "$(dirname "$dir")/.hold.XXXXXX" 2>/dev/null) || return 3
-  python3 -c "$LOCK_HOLD_PY" "$flk" "$res" "$wait" </dev/null >/dev/null 2>&1 &
+  find "$locks" -maxdepth 1 -name '.hold.*' -mmin +10 -exec rm -f {} + 2>/dev/null || true
+  res=$(mktemp "$locks/.hold.XXXXXX" 2>/dev/null) || return 3
+  python3 -c "$LOCK_HOLD_PY" "$flk" "$res" "$wait" "$$" </dev/null >/dev/null 2>&1 &
   holder=$!
   end=$((SECONDS + wait + 10))
   until [ -s "$res" ]; do
@@ -2018,39 +2055,53 @@ acquire_lock() {
       return 1 ;;
     *) lock_stop_holder "$holder"; return 3 ;;
   esac
-  if ! mkdir -p "$dir" 2>/dev/null; then lock_stop_holder "$holder"; return 3; fi
-  printf '%s\n' "$holder" > "$dir/holder"
-  printf '%s\n' "$$" > "$dir/pid"
-  proc_start "$$" > "$dir/start"
+  if lock_names_live_run "$dir"; then
+    LOCK_HOLDER=$(cat "$dir/pid" 2>/dev/null) || LOCK_HOLDER="unknown"
+    lock_stop_holder "$holder"
+    return 1
+  fi
+  if ! { mkdir -p "$dir" && printf '%s\n' "$$" > "$dir/pid" && proc_start "$$" > "$dir/start"; } 2>/dev/null; then
+    lock_stop_holder "$holder"
+    return 3
+  fi
+  LOCK_HOLDERS="$LOCK_HOLDERS$dir=$holder"$'\n'
   return 0
 }
 
-# Only the owner removes the directory, and the holder goes last, so the lock is free when this
-# returns. A process that never took the lock (the EXIT trap of a run that found it held) has no
-# matching pid file and does nothing.
+# Only a process that took the lock releases it, and it knows that from its own record: a pid read
+# from a directory proves nothing once pids are reused. The directory goes first and the holder
+# last, so the lock is free when this returns. A run that found the lock held, or ran without it,
+# has no record and does nothing.
 release_lock() { # $1=lock dir
-  local holder
-  [ "$(cat "$1/pid" 2>/dev/null)" = "$$" ] || return 0
-  holder=$(cat "$1/holder" 2>/dev/null) || holder=""
-  rm -rf "$1"
-  [ -z "$holder" ] || lock_stop_holder "$holder"
+  local dir="$1" holder="" rest="" line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if [ "${line%=*}" = "$dir" ]; then holder="${line##*=}"; else rest="$rest$line"$'\n'; fi
+  done <<< "$LOCK_HOLDERS"
+  [ -n "$holder" ] || return 0
+  LOCK_HOLDERS="$rest"
+  rm -rf "$dir"
+  lock_stop_holder "$holder"
   return 0
 }
 
-# $1=lock dir -> 0 when its flock is held, or cannot be probed, 1 when it is free. The probe takes
-# the flock for a few milliseconds, which is why acquire_run_lock waits two seconds.
+# $1=lock dir -> 0 when the lock is held, or cannot be proven free, 1 when it is free. Without
+# python3 nothing can be proven. The probe takes the flock for a few milliseconds, which is why
+# acquire_run_lock waits two seconds.
 lock_is_held() {
   local flk="${1%.lock}.flock" word
-  [ -e "$flk" ] || return 1
   command -v python3 >/dev/null 2>&1 || return 0
-  word=$(python3 -c 'import fcntl, sys
+  if [ -e "$flk" ]; then
+    word=$(python3 -c 'import fcntl, sys
 try:
     f = open(sys.argv[1], "r")
     fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     print("free")
 except BlockingIOError:
     print("held")' "$flk" 2>/dev/null) || word=""
-  [ "$word" != free ]
+    [ "$word" = free ] || return 0
+  fi
+  lock_names_live_run "$1"
 }
 
 # 0 = taken, 1 = another live run holds it. A lock that cannot be taken at all does not stop the
@@ -2065,8 +2116,7 @@ acquire_run_lock() {
   esac
 }
 
-# This is also installed as the EXIT trap, which a run that never took the lock reaches too, and
-# which must not touch the holder's.
+# Installed as the EXIT trap inside run, and it does nothing in a process that never took the lock.
 release_run_lock() { release_lock "$RUN_LOCK"; }
 
 # ---- Remote session roots (#226) ----
@@ -4154,7 +4204,17 @@ unassembled_dates() {
   printf '%s|%s' "$out" "$legacy"
 }
 
+# run takes the per-date lock and must release it in the process that took it: an interactive run is
+# a pipeline element, so run executes in a subshell whose record the parent's EXIT trap cannot see.
 run() {
+  trap release_run_lock EXIT
+  run_body
+  local rc=$?
+  release_run_lock
+  return $rc
+}
+
+run_body() {
   log "===== autodream start: $(date) ====="
   log "runner: $RUNNER_COMMIT$([ "$RUNNER_DIRTY" = "yes" ] && echo " (dirty)")"
   log "target date: $TARGET_DATE"
@@ -5951,7 +6011,6 @@ PY
 # SIGPIPE covers the interactive path too, where tee is still worth having and a closed
 # terminal should cost the run its output rather than its life.
 trap '' PIPE
-trap release_run_lock EXIT
 if [ -t 1 ]; then
   run 2>&1 | tee -a "$RUN_LOG"
   exit "${PIPESTATUS[0]}"
