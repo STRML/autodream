@@ -565,7 +565,9 @@ probe="$C/ulimit-probe"
 ( trap '' XFSZ; ulimit -f 1; printf '%01200d' 0 > "$probe" ) 2> /dev/null
 probe_size=$(wc -c < "$probe" 2> /dev/null | tr -d ' ')
 if [ "${probe_size:-0}" -ge 1200 ]; then
-  skip "ulimit -f 1 did not stop a 1200-byte write here (probe wrote ${probe_size} bytes; macOS does not enforce it on every write), so the size-limit variant of write-failed is not asserted"
+  skip "ulimit -f 1 did not stop a 1200-byte write here (probe wrote ${probe_size} bytes), so the size-limit variant of write-failed is not asserted"
+elif [ "$(uname -s)" != Linux ]; then
+  skip "ulimit -f is not enforced on every write path on $(uname -s): a macOS runner stopped the probe and still let the collector's header write through, so the size-limit variant of write-failed runs on Linux only"
 else
   ( trap '' XFSZ; ulimit -f 1; HOME="$C/home" AUTODREAM_DIR="$C/ad" bash "$BIN" collect "$F" "$C/snap" > "$C/collect.out" 2> "$C/collect.err" )
   assert_eq "$?" "1" "a report cut off by a size limit makes collect exit 1"
