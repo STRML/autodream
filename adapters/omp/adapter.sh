@@ -16,6 +16,12 @@ set -u
 # physically, so ADIR is the real adapters/omp and BIN the real bin/.
 ADIR=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BIN=$(cd -P "$ADIR/../../bin" && pwd)
+# shellcheck source=/dev/null
+. "$BIN/lib-path-state.sh"
+
+# The overlay every headless omp call passes to --config. It is always the shipped file: it turns the
+# memory backend off, and a replacement hook would need a YAML parser here to prove it still does.
+OVERLAY="$ADIR/l1-no-advisor.yml"
 
 # Which omp runs. An explicit OMP_BIN wins, for pinning a build; then PATH; then the places
 # omp installs to, because a launchd job has a minimal PATH. On 2026-08-25 a 17.3.7-versus-
@@ -114,7 +120,7 @@ case "$cmd" in
       -p \
       --approval-mode yolo \
       --no-session \
-      --config "${NO_ADVISOR_CFG:-$ADIR/l1-no-advisor.yml}" \
+      --config "$OVERLAY" \
       --model "$1" \
       --tools=Read,Write \
       --append-system-prompt 'Headless triage worker. Read the session transcript and write exactly one findings JSON object, via the Write tool, to the literal output path given on line 2 of the prompt. Those paths are literal strings, not shell variables — never $-expand them. Print only the literal word done and exit.'
@@ -127,7 +133,7 @@ case "$cmd" in
       -p \
       --approval-mode=always-ask \
       --no-session \
-      --config "${NO_ADVISOR_CFG:-$ADIR/l1-no-advisor.yml}" \
+      --config "$OVERLAY" \
       --model "$1" \
       --tools= \
       --no-tools \
@@ -149,13 +155,126 @@ case "$cmd" in
       -p \
       --approval-mode yolo \
       --no-session \
-      --config "${NO_ADVISOR_CFG:-$ADIR/l1-no-advisor.yml}" \
+      --config "$OVERLAY" \
       --model "$1" \
       --append-system-prompt 'Reply with the single word ok and exit.'
     ;;
 
   l1-env) # -> KEY=VALUE lines the engine needs in its environment: none for omp
     :
+    ;;
+
+  l1-writes) # -> the paths an L1 worker may write besides its staging directory, one per line
+    # run.sh runs the worker under an OS sandbox that can write nothing else (#169, bin/l1-confine.sh).
+    # Default deny, as for claude, and the list stays empty: omp cannot run on an empty list by itself, so
+    # l1-stage-env gives each confined worker a throwaway HOME inside its stage and every omp write lands
+    # there. See docs/plans/2026-11-21-omp-l1-writes.md for the measurement. A host whose confined call
+    # still fails names the path in AUTODREAM_L1_WRITES_EXTRA (colon-separated, absolute, a trailing * is
+    # a prefix) and accepts that path's exposure.
+    nl_refuse() { case "$1" in *"
+"*) printf 'l1-writes: refusing a path that holds a newline\n' >&2; exit 3 ;; esac; printf '%s\n' "$1"; }
+    # Globbing off: an entry such as ~/x.json* must stay a prefix, not expand to the files that exist.
+    old_ifs=$IFS; IFS=:; set -f
+    for extra in ${AUTODREAM_L1_WRITES_EXTRA:-}; do [ -n "$extra" ] && nl_refuse "$extra"; done
+    set +f; IFS=$old_ifs
+    ;;
+
+  l1-stage-env) # $1=stage dir [$2=model] -> KEY=VALUE lines for one confined worker, after seeding a state dir inside the stage
+    # A confined omp call cannot run on an empty write list (bun's SQLite close dies on its first database
+    # write), and ~/.omp/agent holds the settings, extensions, rules and skills that a later interactive omp
+    # loads, so it cannot be allowed either. The worker gets a throwaway HOME inside its stage instead:
+    # omp resolves its whole state tree (agent dir, logs, run, cache) from HOME, so every write lands in
+    # the stage. Measured 2026-11-21 on a real host: tests/l1-confine-real.sh --engine omp, ALL PASS, and no
+    # write reached ~/.omp except the -shm of mnemopi banks (a live server mapping them, not the worker).
+    # mcp.json is deliberately not seeded: a worker holds Read and Write only, and an MCP server it started
+    # would be one more process outside the sandbox's reach to talk to.
+    # Seeded from what the worker only reads: settings (config and models, .yml or .yaml), the context files
+    # omp loads into its prompt, and one consistent SQLite snapshot of each database (seed-db.py, the backup
+    # API: a live database is not safe to copy file by file). The OAuth rows are left out of the copy, so a
+    # worker cannot rotate a refresh token that dies with its stage. Library is linked back so a keychain
+    # lookup for an api key still resolves, and so are the native binaries, read-only: a write through
+    # either link is refused by the sandbox like any other.
+    # The overrides omp honors for its directories are read here and written back explicitly, so an inherited
+    # one cannot point the worker at the real tree: PI_CODING_AGENT_DIR is the source and is replaced,
+    # PI_CONFIG_DIR names the directory under HOME. A named profile, or an XDG redirect on Linux or macOS, moves the
+    # state somewhere this seeding does not model, so those refuse instead of running on the wrong files.
+    err() { printf 'omp l1-stage-env: %s\n' "$1" >&2; exit 1; }
+    [ -n "${1:-}" ] && [ -d "$1" ] || err "needs the stage directory"
+    [ -z "${OMP_PROFILE:-}${PI_PROFILE:-}" ] || err "a named omp profile (OMP_PROFILE or PI_PROFILE) is not supported under confinement"
+    # omp redirects a directory category to $XDG_<CATEGORY>_HOME/omp on Linux and on macOS, but only when that
+    # directory exists, so the refusal is on the same condition and not on the variable alone.
+    for xv in "${XDG_DATA_HOME:-}" "${XDG_STATE_HOME:-}" "${XDG_CACHE_HOME:-}"; do
+      [ -n "$xv" ] || continue
+      path_state "$xv/omp"; xrc=$?
+      [ "$xrc" -ne 0 ] || err "$xv/omp exists, so omp keeps part of its state there instead of under HOME"
+      [ "$xrc" -ne 2 ] || err "cannot tell whether $xv/omp exists (an unreachable path), so cannot tell where omp keeps its state"
+    done
+    # Path overrides omp reads that point outside any tree this seeds (dirs.ts): refuse, as for a profile.
+    for ov in OMP_WORKTREE_DIR OMP_GITHUB_CACHE_DB OMP_COMMIT_CACHE_DB OMP_JUDGMENT_CACHE_DB OMP_AUTH_BROKER_SNAPSHOT_CACHE PI_NATIVES_DIR; do
+      [ -z "${!ov:-}" ] || err "$ov is set, so omp keeps part of its state where this seeding does not look"
+    done
+    cname="${PI_CONFIG_DIR:-.omp}"
+    case "$cname" in ""|/*|*..*) err "PI_CONFIG_DIR must be a plain directory name under HOME: $cname" ;; esac
+    osrc="${PI_CODING_AGENT_DIR:-${HOME:?}/$cname/agent}"
+    ohome="$1/omp-home"
+    case "$ohome" in *"
+"*) err "a stage path that holds a newline is refused" ;; esac
+    # Built in a directory of its own beside the stages and renamed into the stage at the end: this runs outside
+    # the sandbox, and every path inside a stage is chosen by the last worker that ran there (a read-only
+    # directory, a symlink at a seeded name, a database that is a link). Nothing below writes into the stage.
+    rm -rf "$ohome"
+    [ ! -e "$ohome" ] && [ ! -L "$ohome" ] || err "could not remove the previous state directory $ohome"
+    obuild=$(mktemp -d "$(dirname "$1")/seed.XXXXXX") || err "could not make a build directory beside the stage"
+    trap 'rm -rf "$obuild"' EXIT
+    odst="$obuild/$cname/agent"
+    mkdir -p "$odst" || err "could not make $odst"
+    # path_state has three answers: present, absent, and "cannot tell" (an unreachable path, a symlink into a
+    # directory this user cannot search). Only "absent" is believed to mean nothing there; "cannot tell" refuses.
+    path_state "$osrc"; src_state=$?
+    [ "$src_state" -ne 2 ] || err "cannot tell whether the agent directory $osrc exists (an unreachable path)"
+    if [ "$src_state" -eq 0 ]; then
+      { [ -d "$osrc" ] && [ -r "$osrc" ] && [ -x "$osrc" ]; } || err "cannot read the agent directory $osrc"
+      command -v python3 >/dev/null 2>&1 || err "python3 is needed to snapshot omp's databases"
+      for f in config.yml config.yaml models.yml models.yaml AGENTS.md APPEND_SYSTEM.md RULES.md kimi-device-id .env; do
+        path_state "$osrc/$f"; fst=$?
+        [ "$fst" -ne 2 ] || err "cannot tell whether $osrc/$f exists (an unreachable path)"
+        [ "$fst" -eq 0 ] || continue
+        cp "$osrc/$f" "$odst/$f" || err "could not copy $osrc/$f"
+      done
+      for f in agent.db models.db; do
+        path_state "$osrc/$f"; fst=$?
+        [ "$fst" -ne 2 ] || err "cannot tell whether $osrc/$f exists (an unreachable path): a database that cannot be snapshotted is not an absent one"
+        [ "$fst" -eq 0 ] || continue
+        if [ "$f" = agent.db ]; then
+          if [ "${2+set}" = set ]; then
+            oprov=""; case "$2" in */*) oprov="${2%%/*}" ;; esac
+            python3 "$ADIR/seed-db.py" "$osrc/$f" "$odst/$f" --drop-oauth --provider "$oprov"; orc=$?
+          else
+            python3 "$ADIR/seed-db.py" "$osrc/$f" "$odst/$f" --drop-oauth; orc=$?
+          fi
+          case "$orc" in
+            0) ;;
+            4) exit 4 ;;
+            *) err "could not snapshot $osrc/$f" ;;
+          esac
+        else
+          python3 "$ADIR/seed-db.py" "$osrc/$f" "$odst/$f" || err "could not snapshot $osrc/$f"
+        fi
+      done
+    fi
+    # omp also reads a .env at HOME and at the config root (utils/src/env.ts): a provider key may live there.
+    for f in "$HOME/.env" "$HOME/$cname/.env"; do
+      path_state "$f"; fst=$?
+      [ "$fst" -ne 2 ] || err "cannot tell whether $f exists (an unreachable path)"
+      [ "$fst" -eq 0 ] || continue
+      case "$f" in "$HOME/.env") cp "$f" "$obuild/.env" || err "could not copy $f" ;; *) cp "$f" "$obuild/$cname/.env" || err "could not copy $f" ;; esac
+    done
+    [ -e "$HOME/Library" ] && ln -s "$HOME/Library" "$obuild/Library"
+    [ -e "$HOME/$cname/natives" ] && ln -s "$HOME/$cname/natives" "$obuild/$cname/natives"
+    mv "$obuild" "$ohome" || err "could not move the state directory into the stage"
+    trap - EXIT
+    odst="$ohome/$cname/agent"
+    printf 'HOME=%s\nPI_CONFIG_DIR=%s\nPI_CODING_AGENT_DIR=%s\n' "$ohome" "$cname" "$odst"
     ;;
 
   l2-argv) # $1=model -> NUL-delimited argv for the L2 aggregator; the prompt arrives on stdin
@@ -170,7 +289,7 @@ case "$cmd" in
       -p \
       --approval-mode yolo \
       --no-session \
-      --config "${NO_ADVISOR_CFG:-$ADIR/l1-no-advisor.yml}" \
+      --config "$OVERLAY" \
       --model "$1" \
       --tools=Glob,Read \
       --append-system-prompt "$sysprompt"
