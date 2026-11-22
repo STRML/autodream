@@ -199,6 +199,8 @@ An open question that would take the user ten seconds to answer with "that alrea
 `<!-- autodream:open-questions=N -->`
 
 N is how many questions survived the triviality gate above. Count the questions you are actually asking the user to decide, not the notes you kept for context: a section that says "None that clear the triviality gate" followed by three explanatory bullets is `N=0`, because none of those bullets is a question. `review.sh` reads this marker to decide whether the morning triage session is worth opening at all, so an inflated N costs a pointless session and a deflated N silently buries a real question.
+
+**Every report ends with the whole block, whatever the night: one session, nothing to ask, or many questions.** With questions, list them and give their real count. With none, write the two sentinel lines, the `## Open questions for the user` heading, the one line `None that clear the triviality gate.` and the marker `<!-- autodream:open-questions=0 -->`. Never end the report on a question written as plain prose outside the block: the runner reads the report as truncated, discards it and runs you again.
 ```
 
 ### 2. Memory pins (high-confidence only)
