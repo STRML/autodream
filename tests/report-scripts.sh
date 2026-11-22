@@ -350,6 +350,7 @@ if pgrep -P $$ > /dev/null 2>&1 || [ $? -le 1 ]; then
 else skip "$CHILDKILL_SKIP (a TERM-ignoring child after a wrapper that exits 0)"; fi
 
 GROUPS_SKIP="process groups: this host cannot start a command in its own group or read pgid (the sandbox); CI and launchd can"
+skip_unless_ci(){ if [ "${CI:-}" = true ]; then no "$1"; else skip "$1"; fi; }
 groups_usable(){
   local p g
   ( set -m; sleep 30 & p=$!; set +m; g=$(ps -o pgid= -p "$p" 2>/dev/null | tr -d ' '); kill "$p" 2>/dev/null; [ -n "$g" ] && [ "$g" = "$p" ] ) 2>/dev/null
@@ -373,7 +374,7 @@ if groups_usable; then
   assert_eq "$(row orphan)" "failed" "a command that leaves a process behind is failed, not ok"
   assert_grep "$F/report-orphan.md" 'left a background process running' "the report says what was left behind"
   assert_eq "$RC" "0" "the collector itself still exits 0"
-else skip "$GROUPS_SKIP (a background child after its command exits)"; fi
+else skip_unless_ci "$GROUPS_SKIP (a background child after its command exits)"; fi
 
 echo "# a command that exits 0 and leaves nothing behind stays ok"
 new_case tidy
@@ -387,7 +388,7 @@ printf 'tidy %s\n' "$SCRIPTS/tidy.sh" > "$CONF"
 if groups_usable; then
   collect
   assert_eq "$(row tidy)" "ok" "a command that reaps its own children is ok"
-else skip "$GROUPS_SKIP (a clean command next to the leftover check)"; fi
+else skip_unless_ci "$GROUPS_SKIP (a clean command next to the leftover check)"; fi
 
 echo "# an unwritable findings dir is a loud failure, not a silent one"
 new_case nofind
