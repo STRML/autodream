@@ -2271,7 +2271,7 @@ test_warmup_works_for_an_adapter_with_no_environment(){
 import sys,re
 p=sys.argv[1]
 t=open(p).read()
-t=re.sub(r"  l1-env\) .*?\n    ;;\n","  l1-env) : ;;\n",t,count=1,flags=re.S)
+t=re.sub(r"  l1-env\).*?\n    ;;\n","  l1-env) : ;;\n",t,count=1,flags=re.S)
 open(p,"w").write(t)
 PY
   [ -z "$("$ad/claude/adapter.sh" l1-env)" ] || { no "precondition: the test adapter has an empty l1-env"; rm -rf "$root"; return; }
