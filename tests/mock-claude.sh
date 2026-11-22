@@ -277,6 +277,7 @@ if printf '%s' "$line1" | grep -q '^Session transcript'; then
     # The engine environment the dispatcher gave this worker, one NAME=value per line, so a test
     # can tell an adapter-provided variable from one inherited by accident.
     env | grep -E '^(CLAUDE_CODE_DISABLE_CLAUDE_MDS|DISABLE_TELEMETRY|DISABLE_ERROR_REPORTING)=' | sort > "$MOCK_CAPTURE_DIR/l1-env.txt"
+    printf '%s\n' "${HOME:-}" > "$MOCK_CAPTURE_DIR/l1-home.txt"
   fi
   out=$(printf '%s' "$line2" | sed 's/^Write your findings JSON to this literal absolute path: //')
   sess=$(printf '%s' "$line1" | sed 's/^Session transcript to analyze (literal absolute path): //')

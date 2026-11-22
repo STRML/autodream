@@ -160,21 +160,45 @@ case "$cmd" in
 
   l1-writes) # -> the paths an L1 worker may write besides its staging directory, one per line
     # run.sh runs the worker under an OS sandbox that can write nothing else (#169, bin/l1-confine.sh).
-    # Default deny, as for claude: a path is here only because a confined omp call needs it and writing it
-    # cannot make a later session run attacker code. omp keeps its agent state (settings, extensions,
-    # rules, skills, sessions) under ~/.omp, and a headless worker registers a client under
-    # ~/.omp/run/daemons (the live daemon's state), so the list is MEASURED, not guessed:
-    #   bash tests/l1-confine-real.sh --engine omp --measure     one unconfined call, what it writes
-    #   bash tests/l1-confine-real.sh --engine omp               the same call confined, default deny
-    # docs/plans/2026-11-21-omp-l1-writes.md has the table. A host whose confined call fails without
-    # something else names it in AUTODREAM_L1_WRITES_EXTRA (colon-separated, absolute, a trailing * is a
-    # prefix) and accepts that path's exposure.
+    # Default deny, as for claude, and the list stays empty: omp cannot run on an empty list by itself, so
+    # l1-stage-env gives each confined worker a throwaway HOME inside its stage and every omp write lands
+    # there. See docs/plans/2026-11-21-omp-l1-writes.md for the measurement. A host whose confined call
+    # still fails names the path in AUTODREAM_L1_WRITES_EXTRA (colon-separated, absolute, a trailing * is
+    # a prefix) and accepts that path's exposure.
     nl_refuse() { case "$1" in *"
 "*) printf 'l1-writes: refusing a path that holds a newline\n' >&2; exit 3 ;; esac; printf '%s\n' "$1"; }
     # Globbing off: an entry such as ~/x.json* must stay a prefix, not expand to the files that exist.
     old_ifs=$IFS; IFS=:; set -f
     for extra in ${AUTODREAM_L1_WRITES_EXTRA:-}; do [ -n "$extra" ] && nl_refuse "$extra"; done
     set +f; IFS=$old_ifs
+    ;;
+
+  l1-stage-env) # $1=stage dir -> KEY=VALUE lines for one confined worker, after seeding a state dir inside the stage
+    # A confined omp call cannot run on an empty write list (bun's SQLite close dies on its first database
+    # write), and ~/.omp/agent holds the settings, extensions, rules and skills that a later interactive omp
+    # loads, so it cannot be allowed either. The worker gets a throwaway HOME inside its stage instead:
+    # omp resolves its whole state tree (agent dir, logs, run, cache) from HOME, so every write lands in
+    # the stage, which the runner copies one file out of. Measured 2026-11-21, claude and omp on a real
+    # host: tests/l1-confine-real.sh --engine omp, ALL PASS, and no write reached ~/.omp except the -shm of
+    # mnemopi banks (a live server mapping them, not the worker).
+    # Seeded from the files the worker only reads: settings, model catalogue, the context files omp loads into
+    # its prompt, and clones of the two databases (cp -c is a copy-on-write clone on APFS, so 30 MB costs
+    # nothing). Library is linked back so a keychain lookup for an api key still resolves, and so are the
+    # native binaries, read-only: a write through either link is refused by the sandbox like any other.
+    [ -n "${1:-}" ] && [ -d "$1" ] || { printf 'omp l1-stage-env: needs the stage directory\n' >&2; exit 1; }
+    ohome="$1/omp-home"; oreal="${HOME:?}/.omp"
+    rm -rf "$ohome"
+    mkdir -p "$ohome/.omp/agent" || exit 1
+    for f in config.yml models.yml mcp.json AGENTS.md APPEND_SYSTEM.md RULES.md kimi-device-id \
+             agent.db agent.db-wal agent.db-shm models.db models.db-wal models.db-shm; do
+      [ -f "$oreal/agent/$f" ] || continue
+      cp -c "$oreal/agent/$f" "$ohome/.omp/agent/$f" 2>/dev/null || cp "$oreal/agent/$f" "$ohome/.omp/agent/$f" || exit 1
+    done
+    [ -e "$HOME/Library" ] && ln -s "$HOME/Library" "$ohome/Library"
+    [ -e "$oreal/natives" ] && ln -s "$oreal/natives" "$ohome/.omp/natives"
+    case "$ohome" in *"
+"*) printf 'omp l1-stage-env: a stage path that holds a newline is refused\n' >&2; exit 1 ;; esac
+    printf 'HOME=%s\n' "$ohome"
     ;;
 
   l2-argv) # $1=model -> NUL-delimited argv for the L2 aggregator; the prompt arrives on stdin

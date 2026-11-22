@@ -3438,8 +3438,20 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       l1ans="$l1stage/$l1ans_name"
       rm -f "$l1ans" "$2"
       l1pre=()
+      l1senv=()
       case " ${L1_CONFINED_ENGINES:-} " in
         *" $engine "*)
+          # An engine that keeps state it must write (omp) gets a throwaway one inside the stage: the
+          # adapter seeds it and names the environment that points the engine there. Exit 2 is no such
+          # verb (claude); any other failure is an attempt that cannot start safely.
+          l1sout=$("$ADAPTERS_DIR/$engine/adapter.sh" l1-stage-env "$l1stage" 2>"$l1stage/stage-env.err"); l1src=$?
+          if [ "$l1src" -ne 0 ] && [ "$l1src" -ne 2 ]; then
+            printf "the state directory for %s could not be prepared in the stage: %s\n" "${l1_subject:-$session}" "$(head -c 200 "$l1stage/stage-env.err" | tr "\n" " ")" >> "$3"
+            return 1
+          fi
+          if [ "$l1src" -eq 0 ]; then
+            while IFS= read -r l1e; do [ -n "$l1e" ] && l1senv+=("$l1e"); done <<< "$l1sout"
+          fi
           while IFS= read -r -d "" l1wa; do l1pre+=("$l1wa"); done < <(bash "$L1_CONFINER" engine-prefix "$ADAPTERS_DIR/$engine/adapter.sh" "$l1stage" 2>>"$3")
           if [ "${#l1pre[@]}" -eq 0 ]; then
             printf "the sandbox for %s could not be built, and a confined run does not fall back to an unconfined worker\n" "${l1_subject:-$session}" >> "$3"
@@ -3476,7 +3488,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
           cat "$FINDINGS_DIR/$hash.stats.json"
           printf "\n\`\`\`\n"
         fi
-      } | ${l1wrap[@]+"${l1wrap[@]}"} ${l1pre[@]+"${l1pre[@]}"} env ${envs[@]+"${envs[@]}"} "TMPDIR=$l1stage/tmp" "${argv[@]}" > "$4" 2> "$3"
+      } | ${l1wrap[@]+"${l1wrap[@]}"} ${l1pre[@]+"${l1pre[@]}"} env ${envs[@]+"${envs[@]}"} "TMPDIR=$l1stage/tmp" ${l1senv[@]+"${l1senv[@]}"} "${argv[@]}" > "$4" 2> "$3"
       # Index 1 is the engine side of the pipe; index 0 is the brace group.
       l1rc="${PIPESTATUS[1]}"
       l1elapsed=$(($(date +%s) - l1start))

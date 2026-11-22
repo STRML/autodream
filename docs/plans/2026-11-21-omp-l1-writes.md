@@ -1,42 +1,55 @@
-# What a confined omp L1 worker may write (#169)
+# How a confined omp L1 worker runs (#169)
 
-Decision: the omp adapter's `l1-writes` is default deny, like claude's. A confined omp call writes its
-staging directory and whatever `AUTODREAM_L1_WRITES_EXTRA` names, until a measurement says a path is
-needed. This host runs `AUTODREAM_ADAPTERS=claude,omp` with L2 on omp, so without this verb every omp
-worker ran unconfined and `l1_confined` read `partial`.
+Decision: an omp worker runs under the sandbox with the same empty write list as before, on a throwaway
+HOME inside its staging directory. This host runs `AUTODREAM_ADAPTERS=claude,omp` with L2 on omp, so until
+now every omp worker ran unconfined and `l1_confined` read `partial`.
 
 ```
-before   claude ─▶ sandbox      omp ─▶ no write profile ─▶ unconfined      l1_confined: partial
-after    claude ─▶ sandbox      omp ─▶ default-deny list ─▶ sandbox        l1_confined: yes
+before   omp ─▶ no write profile ─▶ unconfined                          l1_confined: partial
+after    omp ─▶ adapter l1-stage-env seeds <stage>/omp-home ─▶ HOME=...  l1_confined: yes
+                 └─ sandbox: writes only the stage; every omp write lands in omp-home
 ```
 
-## Why measure
+## What was measured (2026-11-21, outside any sandbox, glm-5.3-flash)
 
-omp keeps agent state under `~/.omp` (settings, extensions, rules, skills, sessions, `agent.db`), and a
-headless omp registers a client under `~/.omp/run/daemons/`, the live daemon's state. A path is allowed
-only if a confined call fails without it and writing it cannot make a later omp session run attacker
-code. Settings, extensions, rules and skills are out whatever the measurement says: omp loads them in
-the next interactive session.
+| Run | Result |
+|---|---|
+| `--engine omp --measure` (unconfined) | exit 0. Wrote under `~/.omp`: `agent/{agent,models}.db` and their WAL, `agent/memories/mnemopi/**/mnemopi.db*`, `agent/memories/sharpshooter/work-*/state.json`, `cache/{judgment-cache,legacy-pi-extension-cache}.db*`, `logs/omp.<date>.<pid>.log`. The host was not quiet, so some rows are other omp processes |
+| `--engine omp` (confined, empty list) | FAIL, exit 1 inside bun's SQLite close. No answer in the stage |
+| `--engine omp --isolate agent` (`PI_CODING_AGENT_DIR` in the stage) | ALL PASS. Real-`$HOME` writes: `~/.omp/agent/{agent,models}.db-shm`, mnemopi bank `-shm`, `~/.omp/run/daemon/daemon.db{,-wal}` |
+| `--engine omp --isolate home` (`HOME` in the stage) | ALL PASS. Real-`$HOME` writes: only mnemopi bank `-shm` files |
 
-## How to measure
+`PI_CODING_AGENT_DIR` moves the agent dir only. omp resolves its config root (`logs`, `run`, `cache`) from
+`HOME` (`packages/utils/src/dirs.ts`: `rootSubdir`, `baseRootSubdir`), and `PI_CONFIG_DIR` only renames the
+directory under `HOME`; the XDG redirects are Linux only. So `agent` leaves `run/daemon` (the live daemon's
+registry) and the cache databases writable, and `home` is the shape that keeps all of it in the stage.
 
-Run outside any other sandbox, on a quiet host (a live omp session writes `~/.omp/agent/sessions` and
-the shared logs while the call runs, and those rows are noise). The model is the host's pin
-(`AUTODREAM_L1_MODEL_OMP` from the nightly's config), then the manifest default.
+## Why not allow paths
 
-1. `bash tests/l1-confine-real.sh --engine omp --writes` prints the list the nightly would use. Expected: empty.
-2. `bash tests/l1-confine-real.sh --engine omp --measure` makes one unconfined call and lists what it wrote under omp's state paths. That is what `l1-writes` may have to cover.
-3. `bash tests/l1-confine-real.sh --engine omp` makes the same call under the default-deny profile. ALL PASS means ship the empty list.
-4. If step 3 fails, stderr usually names the refused path. Add it to `AUTODREAM_L1_WRITES_EXTRA` in `$AUTODREAM_DIR/config`, re-run, and record the path and its exposure in the table below.
-
-## Table
-
-| Path | In? | Why |
+| Path | Verdict | Why |
 |---|---|---|
-| staging directory | in | the worker's whole job |
-| `~/.omp/agent/{settings,extensions,rules,skills}` | out | loaded by the next interactive omp session: code or configuration |
-| `~/.omp/agent/sessions` | out | `--no-session` leaves no transcript, so a confined call has no reason to write it |
-| `~/.omp/run/daemons/<client>` | pending | a headless omp registers here. Whether a confined call fails without it is the open measurement |
-| `~/.omp/logs`, `~/.omp/cache` | pending | not measured yet |
+| `~/.omp/agent` | no | settings, extensions, rules, skills and the databases a later interactive omp trusts |
+| `~/.omp/cache/judgment-cache.db` | no | a worker that can write it could pre-approve a judgment for a later session |
+| `~/.omp/run/daemon` | no | the live daemon's registry |
+| `~/.omp/logs` | harmless | but a file-by-file list is the shape that rots |
 
-Filled in from the coordinator's run; until then the list is empty and the PR is not mergeable.
+## What `l1-stage-env` does
+
+The adapter verb runs in the runner, outside the sandbox, once per attempt (a retry reseeds from a clean
+tree), and prints `HOME=<stage>/omp-home`. It seeds only what the worker reads: `config.yml`, `models.yml`,
+`mcp.json`, the context files omp loads into its prompt (`AGENTS.md`, `APPEND_SYSTEM.md`, `RULES.md`),
+and APFS clones of `agent.db` and `models.db` (`cp -c`, free for a 30 MB file). `Library` and `natives`
+are linked back read-only so a keychain lookup for an api key and the native addon still resolve; a write
+through either link is refused like any other. The agent dir is 22 GB, so it is never copied wholesale.
+
+## Cost and residual
+
+- The worker reads copies of its settings, so a change made mid-run is not seen.
+- Credentials sit in the stage for the life of the call (`models.yml`, `agent.db`): 0700 directory under
+  `$AUTODREAM_DIR/staging`, removed when the session's answer is accepted and swept when the run is dead.
+  The worker can already read the real files, so nothing new is readable.
+- The mnemopi bank `-shm` files changed in the real tree during the isolated run. They are the shared-memory
+  index of a bank, mapped by the live mnemopi server (a separate process), not by the worker: with
+  `HOME` in the stage the worker's own config root, and so its mnemopi socket and banks, are the stage's.
+  Reaching the real server would take a tool, and the worker holds `Read` and `Write` only. Not proved
+  here: a quiet-host rerun that shows no `-shm` write at all would.

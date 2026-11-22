@@ -196,10 +196,26 @@ has "$out" "/omp-extra" "an extra entry reaches omp's list"
 env AUTODREAM_DIR="$D/nightly" HOME="$D/home" bash "$RC" --engine no-such-engine --writes >/dev/null 2>&1; rc=$?
 assert_eq "$rc" "2" "an engine with no adapter is refused"
 
-env AUTODREAM_DIR="$D/nightly" HOME="$D/home" bash "$RC" --engine omp --isolate sideways --writes >/dev/null 2>&1; rc=$?
-assert_eq "$rc" "2" "--isolate takes agent or home and nothing else"
-env AUTODREAM_DIR="$D/nightly" HOME="$D/home" bash "$RC" --isolate agent --writes >/dev/null 2>&1; rc=$?
-assert_eq "$rc" "0" "--writes ignores --isolate (it makes no call)"
+
+echo "# omp l1-stage-env: a throwaway state dir inside the stage, seeded from what the worker only reads"
+OA="$REPO/adapters/omp/adapter.sh"
+RH="$D/omphome"; mkdir -p "$RH/.omp/agent" "$RH/.omp/natives" "$RH/Library" "$D/ostage"
+printf 'k: v\n' > "$RH/.omp/agent/config.yml"; printf 'm: 1\n' > "$RH/.omp/agent/models.yml"; printf 'db' > "$RH/.omp/agent/agent.db"
+printf 'secret' > "$RH/.omp/agent/sessions-not-seeded"; printf 'x' > "$RH/.omp/agent/extensions-not-seeded"
+out=$(env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" 2>"$D/err"); rc=$?
+assert_eq "$rc" "0" "the verb prepares the stage"
+assert_eq "$out" "HOME=$D/ostage/omp-home" "and names the throwaway HOME"
+assert_eq "$(cat "$D/ostage/omp-home/.omp/agent/config.yml" 2>/dev/null)" "k: v" "settings are seeded"
+assert_eq "$(cat "$D/ostage/omp-home/.omp/agent/agent.db" 2>/dev/null)" "db" "so is a database"
+[ ! -e "$D/ostage/omp-home/.omp/agent/sessions-not-seeded" ] && [ ! -e "$D/ostage/omp-home/.omp/agent/extensions-not-seeded" ] && ok "and nothing else of the agent dir is" || no "the agent dir was copied wholesale"
+[ -L "$D/ostage/omp-home/Library" ] && [ -L "$D/ostage/omp-home/.omp/natives" ] && ok "Library and the native binaries are linked back" || no "Library or natives link missing"
+printf 'stale' > "$D/ostage/omp-home/.omp/agent/left-by-the-last-attempt"
+env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" >/dev/null 2>&1
+[ ! -e "$D/ostage/omp-home/.omp/agent/left-by-the-last-attempt" ] && ok "a retry reseeds from a clean tree" || no "a retry kept the last attempt's files"
+env HOME="$RH" bash "$OA" l1-stage-env "$D/no-such-stage" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "1" "a stage that does not exist is a failure, not the no-such-verb exit"
+env HOME="$RH" bash "$REPO/adapters/claude/adapter.sh" l1-stage-env "$D/ostage" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "2" "claude has no such verb (exit 2), so its workers keep their own state"
 
 echo "# real confinement (only where a sandbox works here)"
 real=$(env TMPDIR="$D" bash "$H" probe)

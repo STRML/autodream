@@ -3356,6 +3356,25 @@ test_l1_answer_is_moved_aside_before_it_is_tested(){
   rm -rf "$root"
 }
 
+test_l1_confined_omp_worker_runs_on_a_throwaway_home(){
+  echo "# L1 confinement: a confined omp worker gets a HOME inside its stage; a claude worker keeps its own"
+  local root; root=$(setup_env); mk_omp_session "$root" aaaa >/dev/null
+  mkdir -p "$root/home/.omp/agent"; printf 'k: v\n' > "$root/home/.omp/agent/config.yml"
+  fake_sandbox "$root"
+  PATH="$root/shim-sb:$PATH" MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+  assert_grep "$root/cap/l1-home.txt" "/autodream/staging/run-[0-9]*/.*/omp-home\$" "the omp worker's HOME is inside its staging directory"
+  assert_nogrep "$root/cap/l1-home.txt" "^$root/home\$" "and not the real one"
+  rm -rf "$root"
+  root=$(setup_env); mk_session "$root" s1
+  PATH="$root/shim-sb:$PATH" MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_L1_CONFINE=0 run_dream "$root"
+  assert_nogrep "$root/cap/l1-home.txt" "omp-home" "an unconfined run does not move HOME"
+  rm -rf "$root"
+  root=$(setup_env); mk_omp_session "$root" aaaa >/dev/null
+  MOCK_CAPTURE_DIR="$root/cap" AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+  assert_nogrep "$root/cap/l1-home.txt" "omp-home" "an omp worker the sandbox does not cover keeps its HOME too: no seeding for nothing"
+  rm -rf "$root"
+}
+
 test_run_lock_is_per_date_and_live_holders_win(){
   echo "# a second run for a date does not start while a live run holds the date's lock (#55)"
   local root; root=$(setup_env); mk_session "$root" sess1
@@ -6934,6 +6953,7 @@ _run test_builtin_slash_commands_are_not_skill_invocations
 _run test_omp_adapter_is_opt_in
 _run test_l1_precheck_probes_the_l1_provider
 _run test_l1_confined_stat_is_partial_when_an_engine_runs_unconfined
+_run test_l1_confined_omp_worker_runs_on_a_throwaway_home
 _run test_worker_failure_probe_names_the_l1_provider
 _run test_one_dead_provider_does_not_hold_back_the_others
 _run test_omp_session_is_linearized_for_the_worker
