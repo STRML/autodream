@@ -196,6 +196,11 @@ has "$out" "/omp-extra" "an extra entry reaches omp's list"
 env AUTODREAM_DIR="$D/nightly" HOME="$D/home" bash "$RC" --engine no-such-engine --writes >/dev/null 2>&1; rc=$?
 assert_eq "$rc" "2" "an engine with no adapter is refused"
 
+env AUTODREAM_DIR="$D/nightly" HOME="$D/home" bash "$RC" --engine omp --isolate sideways --writes >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "2" "--isolate takes agent or home and nothing else"
+env AUTODREAM_DIR="$D/nightly" HOME="$D/home" bash "$RC" --isolate agent --writes >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "0" "--writes ignores --isolate (it makes no call)"
+
 echo "# real confinement (only where a sandbox works here)"
 real=$(env TMPDIR="$D" bash "$H" probe)
 if [ "$(verdict "$real")" != "yes" ]; then

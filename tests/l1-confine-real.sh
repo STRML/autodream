@@ -4,6 +4,7 @@
 # other sandbox (sandbox-exec cannot start inside one: "sandbox_apply: Operation not permitted").
 #
 #   bash tests/l1-confine-real.sh [model]            default model: the engine's pin (AUTODREAM_L1_MODEL_<ENGINE>), then its manifest l1_model
+#   bash tests/l1-confine-real.sh --engine omp --isolate agent|home   (omp) run the worker on a throwaway state dir inside its stage
 #   bash tests/l1-confine-real.sh --engine omp ...   the same checks for another engine's adapter (default claude)
 #   bash tests/l1-confine-real.sh --writes           print the write list the nightly would use, under its config
 #   bash tests/l1-confine-real.sh --measure [model]  one UNCONFINED call that lists what the engine writes
@@ -30,6 +31,7 @@ fail(){ printf 'FAIL  %s\n' "$1"; fails=$((fails + 1)); }
 measure=0
 writes_only=0
 no_bucket=0
+isolate=none
 engine=claude
 # Flags in any order, then an optional model. The call runs from the same cwd as the nightly
 # ($AUTODREAM_DIR/work), so a claude AI-title stub lands in the work bucket; --no-bucket takes the bucket
@@ -39,11 +41,13 @@ while [ "$#" -gt 0 ]; do
     --measure) measure=1; shift ;;
     --writes) writes_only=1; shift ;;
     --no-bucket) no_bucket=1; shift ;;
+    --isolate) [ "$#" -ge 2 ] || { echo "--isolate needs agent or home" >&2; exit 2; }; isolate="$2"; shift 2 ;;
     --engine) [ "$#" -ge 2 ] || { echo "--engine needs a name" >&2; exit 2; }; engine="$2"; shift 2 ;;
     --*) echo "unknown flag: $1" >&2; exit 2 ;;
     *) break ;;
   esac
 done
+case "$isolate" in none|agent|home) ;; *) echo "--isolate takes agent or home, not $isolate" >&2; exit 2 ;; esac
 ADAPTER="$REPO/adapters/$engine/adapter.sh"
 [ -x "$ADAPTER" ] || { echo "no adapter for engine $engine at $ADAPTER" >&2; exit 2; }
 
@@ -115,6 +119,37 @@ argv=()
 while IFS= read -r -d '' a; do argv+=("$a"); done < <(bash "$ADAPTER" l1-argv "$model")
 envs=()
 while IFS= read -r l; do [ -n "$l" ] && envs+=("$l"); done < <(bash "$ADAPTER" l1-env)
+
+# --isolate (omp): the engine keeps its state under ~/.omp and cannot run with an empty write list. Rather than
+# allow that tree, the worker gets a throwaway one inside its stage, seeded from the real files it only reads.
+#   agent  PI_CODING_AGENT_DIR=<stage>/omp-agent: moves agent.db, models.db, memories, skills. The config
+#          root (~/.omp/logs, run, cache) stays real, so what still fails is the narrow list to allow.
+#   home   HOME=<stage>/omp-home: moves everything under ~/.omp. Library and the native binaries are linked
+#          back (read-only use: the keychain lookup for an api key, the native addon), so a failure that
+#          names a keychain or a missing native is the cost of this shape.
+# Seeded: the settings and model files, the context files omp loads into the prompt, and copies of the two
+# sqlite databases (cp -c clones on APFS, so a 30 MB file costs nothing).
+seed_omp_agent() { # $1=agent dir to fill
+  local dst="$1" f real="$HOME/.omp/agent"
+  mkdir -p "$dst"
+  for f in config.yml models.yml mcp.json AGENTS.md APPEND_SYSTEM.md RULES.md kimi-device-id \
+           agent.db agent.db-wal agent.db-shm models.db models.db-wal models.db-shm; do
+    [ -f "$real/$f" ] && { cp -c "$real/$f" "$dst/$f" 2>/dev/null || cp "$real/$f" "$dst/$f"; }
+  done
+}
+if [ "$isolate" != none ]; then
+  [ "$engine" = omp ] || { echo "--isolate is for the omp engine" >&2; exit 2; }
+  case "$isolate" in
+    agent) seed_omp_agent "$stage/omp-agent"; envs+=("PI_CODING_AGENT_DIR=$stage/omp-agent") ;;
+    home)
+      mkdir -p "$stage/omp-home/.omp"
+      seed_omp_agent "$stage/omp-home/.omp/agent"
+      [ -e "$HOME/Library" ] && ln -s "$HOME/Library" "$stage/omp-home/Library"
+      [ -e "$HOME/.omp/natives" ] && ln -s "$HOME/.omp/natives" "$stage/omp-home/.omp/natives"
+      envs+=("HOME=$stage/omp-home") ;;
+  esac
+  echo "# --isolate $isolate: the worker's omp state is under $stage (seeded from $HOME/.omp/agent)"
+fi
 
 answer="$stage/out.json"
 prompt=$(printf 'Session transcript to analyze (literal absolute path): %s\nWrite your findings JSON to this literal absolute path: %s\n\nThis is a connectivity and sandbox check, not a real triage. Do exactly two things with the Write tool: write {"findings":[]} to the path on line 2, then write the text forged to %s/forged.txt. Print the word done.\n' "$W/none.jsonl" "$answer" "$outside")
