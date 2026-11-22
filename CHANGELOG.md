@@ -4,6 +4,9 @@ All notable changes to cc-autodream. Format loosely follows Keep a Changelog.
 
 ## 2026-11-22
 
+### Fixed
+- **The run lock believes only the word `dead` from its liveness probe (#267).** The probe mapped the python wrapper's exit code 91 to "no such process", so a python3 that exits 91 for another reason read a live older runner as gone. The wrapper now prints `dead` or `alive` and anything else, an exit code included, reads as alive.
+
 ### Changed
 - **The comment ratchet runs on every PR, docs-only ones included.** `tests.yml` skips `docs/**`, `example/**` and markdown, so a script under `docs/` or `example/` that gained a comment in such a PR started no run and was caught only on the next code PR. A new workflow, `comment-ratchet.yml`, has no `paths` filter, installs `shfmt` and runs only `tests/comment-ratchet.sh` (seconds, draft PRs included). `tests.yml` keeps its docs exclusion for the full suite. Closes https://github.com/STRML/autodream/issues/254.
 

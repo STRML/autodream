@@ -3408,16 +3408,27 @@ test_run_lock_metadata_of_the_wrong_type_or_a_write_that_fails_midway_changes_no
   rm -rf "$root"
 }
 
-test_run_lock_a_liveness_probe_that_fails_to_run_is_not_a_dead_holder(){
-  echo "# the run lock: only no such process reads as dead, so a probe that exits 1 for any other reason keeps the holder"
+test_run_lock_only_the_word_dead_from_the_liveness_probe_reads_as_dead(){
+  echo "# the run lock: only the word dead reads as dead, so a probe that fails, exits 91 or says anything else keeps the holder"
   local root; root=$(setup_env); local sh="$root/shim" dead out
   mkdir -p "$sh" "$root/autodream"
   printf '#!/bin/sh\nexit 1\n' > "$sh/python3"; chmod +x "$sh/python3"
   true & dead=$!; wait "$dead" 2>/dev/null
   out=$(PATH="$sh:$PATH" lock_fn "$root/autodream" 'lock_pid_alive 4242; echo rc=$?')
   assert_eq "$out" "rc=0" "a python that exits 1 before it probes reads as alive"
+  printf '#!/bin/sh\nexit 91\n' > "$sh/python3"
+  out=$(PATH="$sh:$PATH" lock_fn "$root/autodream" 'lock_pid_alive 4242; echo rc=$?')
+  assert_eq "$out" "rc=0" "a python that exits 91 and says nothing reads as alive"
+  printf '#!/bin/sh\necho dead; exit 91\n' > "$sh/python3"
+  out=$(PATH="$sh:$PATH" lock_fn "$root/autodream" 'lock_pid_alive 4242; echo rc=$?')
+  assert_eq "$out" "rc=1" "a python that prints the word dead is believed, whatever its exit code"
+  printf '#!/bin/sh\necho later; exit 0\n' > "$sh/python3"
+  out=$(PATH="$sh:$PATH" lock_fn "$root/autodream" 'lock_pid_alive 4242; echo rc=$?')
+  assert_eq "$out" "rc=0" "any other word reads as alive"
   out=$(lock_fn "$root/autodream" "lock_pid_alive $dead; echo rc=\$?")
   assert_eq "$out" "rc=1" "a pid that no process has still reads as dead"
+  out=$(lock_fn "$root/autodream" "lock_pid_alive $$; echo rc=\$?")
+  assert_eq "$out" "rc=0" "and a live pid reads as alive"
   rm -rf "$root"
 }
 
@@ -4677,7 +4688,7 @@ _run test_run_lock_an_older_runner_holding_the_directory_is_honored
 _run test_run_lock_a_stale_directory_that_cannot_be_written_is_left_as_found
 _run test_run_lock_release_leaves_a_directory_it_did_not_make
 _run test_run_lock_metadata_of_the_wrong_type_or_a_write_that_fails_midway_changes_nothing
-_run test_run_lock_a_liveness_probe_that_fails_to_run_is_not_a_dead_holder
+_run test_run_lock_only_the_word_dead_from_the_liveness_probe_reads_as_dead
 _run test_run_lock_a_lock_path_that_is_a_file_or_a_symlink_is_never_written_through
 _run test_run_lock_a_pid_of_zero_is_not_a_holder
 _run test_run_lock_a_failed_probe_is_not_a_dead_holder
