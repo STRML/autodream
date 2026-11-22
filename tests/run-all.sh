@@ -3409,7 +3409,7 @@ test_run_lock_metadata_of_the_wrong_type_or_a_write_that_fails_midway_changes_no
 }
 
 test_run_lock_only_the_word_dead_from_the_liveness_probe_reads_as_dead(){
-  echo "# the run lock: only the word dead reads as dead, so a probe that fails, exits 91 or says anything else keeps the holder"
+  echo "# the run lock: only the word dead from a probe that exited 0 reads as dead, so a probe that fails, exits 91 or says anything else keeps the holder"
   local root; root=$(setup_env); local sh="$root/shim" dead out
   mkdir -p "$sh" "$root/autodream"
   printf '#!/bin/sh\nexit 1\n' > "$sh/python3"; chmod +x "$sh/python3"
@@ -3421,7 +3421,13 @@ test_run_lock_only_the_word_dead_from_the_liveness_probe_reads_as_dead(){
   assert_eq "$out" "rc=0" "a python that exits 91 and says nothing reads as alive"
   printf '#!/bin/sh\necho dead; exit 91\n' > "$sh/python3"
   out=$(PATH="$sh:$PATH" lock_fn "$root/autodream" 'lock_pid_alive 4242; echo rc=$?')
-  assert_eq "$out" "rc=1" "a python that prints the word dead is believed, whatever its exit code"
+  assert_eq "$out" "rc=0" "a python that prints the word dead and then fails is not believed"
+  printf '#!/bin/sh\necho dead; exit 1\n' > "$sh/python3"
+  out=$(PATH="$sh:$PATH" lock_fn "$root/autodream" 'lock_pid_alive 4242; echo rc=$?')
+  assert_eq "$out" "rc=0" "a python that prints the word dead and exits 1 reads as alive"
+  printf '#!/bin/sh\necho dead; exit 0\n' > "$sh/python3"
+  out=$(PATH="$sh:$PATH" lock_fn "$root/autodream" 'lock_pid_alive 4242; echo rc=$?')
+  assert_eq "$out" "rc=1" "a python that prints the word dead and exits 0 is believed"
   printf '#!/bin/sh\necho later; exit 0\n' > "$sh/python3"
   out=$(PATH="$sh:$PATH" lock_fn "$root/autodream" 'lock_pid_alive 4242; echo rc=$?')
   assert_eq "$out" "rc=0" "any other word reads as alive"

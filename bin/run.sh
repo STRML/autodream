@@ -1094,7 +1094,7 @@ while owner_alive():
 lock_dir_young() { [ -n "$(find "$1" -maxdepth 0 -mmin -1 2>/dev/null)" ]; }
 
 lock_pid_alive() {
-  local word
+  local word rc=0
   word=$(python3 -c 'import os, sys
 try:
     os.kill(int(sys.argv[1]), 0)
@@ -1102,8 +1102,8 @@ try:
 except ProcessLookupError:
     print("dead")
 except Exception:
-    print("alive")' "$1" 2>/dev/null) || true
-  [ "$word" != "dead" ]
+    print("alive")' "$1" 2>/dev/null) || rc=$?
+  [ "$rc" -ne 0 ] || [ "$word" != "dead" ]
 }
 
 lock_names_live_run() {
