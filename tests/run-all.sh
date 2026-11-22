@@ -3688,6 +3688,21 @@ test_run_lock_an_older_runner_holding_the_directory_is_honored(){
   rm -rf "$root"
 }
 
+test_run_lock_an_older_runner_that_creates_the_directory_after_the_check_keeps_it(){
+  echo "# the run lock: a live older runner whose directory appears after the first check is put back and the run is told it is held (#242)"
+  local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
+  local lk="$root/autodream/locks/x.lock" out
+  sleep 60 & local old=$!
+  mkdir -p "$lk"; printf '%s\n' "$old" > "$lk/pid"
+  out=$(LK="$lk" lock_fn "$root/autodream" 'eval "$(declare -f lock_names_live_run | sed "1s/lock_names_live_run/real_live/")"; n=0
+    lock_names_live_run(){ n=$((n + 1)); [ "$n" -eq 1 ] && return 1; real_live "$@"; }
+    acquire_lock "$LK" 0; echo "rc=$?"; echo "holder=$LOCK_HOLDER"; echo "pid=$(cat "$LK/pid" 2>/dev/null)"')
+  kill "$old" 2>/dev/null; wait "$old" 2>/dev/null
+  assert_eq "$(printf '%s' "$out" | tr '\n' ' ')" "rc=1 holder=$old pid=$old" "the run is held, and the older runner's directory is back with its pid"
+  assert_eq "$(ls "$root/autodream/locks" | grep -c 'stale')" "0" "and nothing is left set aside"
+  rm -rf "$root"
+}
+
 test_run_lock_a_directory_that_cannot_be_replaced_is_not_a_taken_lock(){
   echo "# the run lock: a stale directory that cannot be set aside reports that it could not lock (#242)"
   [ "$(id -u)" != 0 ] || { echo "  skip - root can write any file"; return 0; }
@@ -5033,6 +5048,7 @@ _run test_run_lock_release_ignores_a_directory_it_never_acquired
 _run test_run_lock_an_older_runner_holding_the_directory_is_honored
 _run test_run_lock_a_directory_that_cannot_be_replaced_is_not_a_taken_lock
 _run test_run_lock_a_holder_follows_the_subshell_that_acquired
+_run test_run_lock_an_older_runner_that_creates_the_directory_after_the_check_keeps_it
 _run test_run_lock_a_directory_an_older_runner_is_still_creating_is_held
 _run test_run_lock_a_directory_with_no_pid_that_is_old_is_reclaimed
 _run test_run_lock_a_stale_directory_is_replaced_by_a_rename_then_mkdir

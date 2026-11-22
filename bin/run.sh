@@ -2072,6 +2072,11 @@ lock_take_dir() {
   fi
   if [ -e "$dir" ]; then
     mv "$dir" "$aside" 2>/dev/null || [ ! -e "$dir" ] || return 3
+    if lock_names_live_run "$aside"; then
+      lock_holder_name "$aside"
+      python3 -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' "$aside" "$dir" 2>/dev/null || true
+      return 1
+    fi
     rm -rf "$aside"
   fi
   if ! mkdir "$dir" 2>/dev/null; then

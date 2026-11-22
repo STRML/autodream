@@ -101,7 +101,8 @@ release_lock <dir>: only for a dir this process recorded: rm -rf <dir>, then end
 | Run killed between forking the holder and its first look at the owner | n/a | the holder's parent is already pid 1, or `kill -0` fails before its first attempt: it leaves without taking the lock | none |
 | Acquire in a pipeline or background subshell (interactive run, remote sync job) | n/a | the holder watches the forking subshell, not the top-level shell: the lock frees when that subshell dies | none |
 | Older runner between its `mkdir` and its pid write | n/a | a directory with no usable pid under a minute old is held | "another run holds the lock" |
-| Older runner creates the directory between our check and our `mkdir` | n/a | the stale directory is renamed aside and ours made with a plain `mkdir`, which fails: held | same |
+| Older runner creates the directory between our check and our move | n/a | the moved copy is judged live and put back with an atomic rename: held | same |
+| Older runner creates the directory between our move and our `mkdir` | n/a | the plain `mkdir` fails: held | same |
 | Directory with no usable pid, over a minute old | Reclaimed after three tries | crashed run's: replaced | none |
 | Run killed while its holder waits behind another holder | n/a | holder checks the owner on every attempt and leaves, not at the end of the wait | none |
 | A child of the run outlives it | Not an issue (pid check) | does not hold the lock: the descriptor is only in the holder | none |
