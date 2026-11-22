@@ -40,7 +40,7 @@ def read_bytes(path):
 
 def decode(path, data):
     try:
-        return data.decode("utf-8")
+        return data.decode("utf-8-sig")
     except UnicodeDecodeError as err:
         raise CountError("%s: not valid UTF-8 (%s)" % (path, err))
 
@@ -176,8 +176,6 @@ def jsx_unwrapped(text):
 
 
 def block_end(lines, start):
-    if "*/" in lines[start][2:]:
-        return start
     for j in range(start + 1, len(lines)):
         if "*/" in lines[j]:
             return j
@@ -193,11 +191,12 @@ def count_js(path, data):
         if text.startswith("//"):
             count += 0 if JS_DIRECTIVE.match(text[2:]) else 1
         elif text.startswith("/*"):
-            end = block_end(lines, i)
-            if end is None:
-                count += 1
-            else:
-                count += sum(1 for line in lines[i:end + 1] if line)
+            closed = "*/" in text[2:]
+            opens = not closed and text[2:3] in ("", "*", " ", "\t")
+            count += 1 if closed or opens else 0
+            end = block_end(lines, i) if opens else None
+            if end is not None:
+                count += sum(1 for line in lines[i + 1:end + 1] if line)
                 i = end
         elif text.startswith("*"):
             count += 1
