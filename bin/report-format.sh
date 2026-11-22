@@ -56,6 +56,12 @@ report_finishes(){
   return 0
 }
 
+report_last_line(){
+  awk 'NF && $0 !~ /^<!-- autodream:remote-short=.* -->$/ { line = $0 } END { print line }' "$1" 2>/dev/null | sed 's/[[:space:]]*$//'
+}
+
+report_last_line_excerpt(){ report_last_line "$1" | tr -d '[:cntrl:]' | cut -c1-80; }
+
 report_incomplete_cause(){
   local report="$1" last
   report_has_questions_block "$report" && return 0
@@ -63,7 +69,7 @@ report_incomplete_cause(){
     printf 'an open-questions marker but no AUTODREAM_QUESTIONS_BEGIN/END block\n'
     return 0
   fi
-  last=$(awk 'NF && $0 !~ /^<!-- autodream:remote-short=.* -->$/ { line = $0 } END { print line }' "$report" 2>/dev/null | sed 's/[[:space:]]*$//')
+  last=$(report_last_line "$report")
   case "$last" in
     *'?') printf 'no open-questions marker, and the report ends in a question written as prose outside an AUTODREAM_QUESTIONS_BEGIN/END block\n' ;;
     *)    printf 'no open-questions marker and no AUTODREAM_QUESTIONS_BEGIN/END block\n' ;;

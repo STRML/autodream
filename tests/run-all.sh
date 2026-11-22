@@ -993,6 +993,7 @@ test_a_prose_question_with_no_block_is_named_in_the_retry_log(){
   vault_run "$root"
   unset MOCK_MODE AUTODREAM_L2_ATTEMPTS
   assert_grep "$root/run.out" "no open-questions marker, and the report ends in a question written as prose outside an AUTODREAM_QUESTIONS_BEGIN/END block" "the log names the prose question and the missing block"
+  assert_grep "$root/run.out" 'it ends with: "Should .claude in .adapters-rejected be cleaned up?"' "and quotes what the capture ends with"
   assert_grep "$root/run.out" "L2 aggregation attempt 2" "and the report is retried"
   assert_no_file "$root/dreams/$DATE.md" "no truncated report stands as the night's report"
   rm -rf "$root"
