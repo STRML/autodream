@@ -171,6 +171,10 @@ def count_python(path, data):
     return len(lines)
 
 
+def jsx_unwrapped(text):
+    return text[1:] if text.startswith(("{/*", "{//")) else text
+
+
 def block_end(lines, start):
     if "*/" in lines[start][2:]:
         return start
@@ -181,7 +185,7 @@ def block_end(lines, start):
 
 
 def count_js(path, data):
-    lines = [raw.lstrip() for raw in decode(path, data).splitlines()]
+    lines = [jsx_unwrapped(raw.lstrip()) for raw in decode(path, data).splitlines()]
     count = 0
     i = 0
     while i < len(lines):

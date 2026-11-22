@@ -213,6 +213,8 @@ counter_fixtures() {
   eq "$(num "$d/block-a.ts") $(num "$d/block-b.ts") $(num "$d/block-c.ts")" "2 3 2" "a line added inside a closed block raises the count, starred or not, and a blank one does not"
   printf '%s\n' '/* a */ const x = 1;' 'const y = 2; /* b' ' * c' ' */' > "$d/block-after-code.ts"
   eq "$(num "$d/block-after-code.ts")" 3 "a block that opens after code is not counted on its opening line, its starred lines are"
+  printf '%s\n' 'const el = (' '  <div>' '    {/* explain the layout' '        across two lines */}' '    {// one line' '    }' '  </div>' ');' > "$d/jsx.tsx"
+  eq "$(num "$d/jsx.tsx")" 3 "a JSX comment that starts a line with {/* or {// is a comment line"
   printf '%s\n' 'const r = /[/*]/.test(v);' 'const o = {a: 1} / 2;' "const s = '// not a comment';" '// real comment' > "$d/midline.ts"
   eq "$(num "$d/midline.ts")" 1 "a slash, regex or string in the middle of a line never matters, only line starts are read"
   printf '%s\n' '#!/usr/bin/env node' '// real comment' > "$d/shebang.ts"

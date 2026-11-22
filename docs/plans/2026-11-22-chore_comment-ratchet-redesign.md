@@ -45,7 +45,9 @@ The coordinator chose the stateless direction on 2026-11-22. Two review rounds t
 | a `/*` at a line start inside a template that a later `*/` closes | counts every non-blank line up to that `*/`, code included | over-count. The residual risk: deleting a counted code line in that span leaves slack until the baseline is tightened. It needs a template line that starts with `/*` and a later `*/`, which this repo does not contain; `--update` and the below-baseline note exist to drain slack. | none possible without a pathological file |
 | an unclosed `/*` | counts only its own line | none | `a /* inside a template opens nothing…`, `an unclosed block opens nothing…` |
 | a `*` line outside any block (a continued multiplication) | counts it | over-count | `a line that starts with * is counted whether or not a block is open` |
-| a block that opens after code (`x = 1; /* a`) | the opening line is not counted (it is trailing, like `x = 1 // a`); its starred lines are | under-count by one line | `a block that opens after code is not counted…` |
+| a block that opens after code (`x = 1; /* a`, including a line that also closes an earlier block) | the opening line is not counted (it is trailing, like `x = 1 // a`); its starred lines are | under-count: the unstarred continuation lines of that block are missed | `a block that opens after code is not counted…` |
+| a JSX comment, which has to be `{/* … */}` | a line that starts with `{/*` or `{//` is read as if the brace were not there | none (p1-verifier's finding on 8dd3c21) | `a JSX comment that starts a line…` |
+| `/* oxlint-disable … */`, the block form of the directive | counted: only the `//` forms are exempt, matching the exact list in CLAUDE.md | over-count, a choice and not a bug | none |
 | a regex, division or string in the middle of a line | ignored | none: only line starts are read | `a slash, regex or string in the middle of a line never matters…` |
 | CRLF endings, `#!` hashbang | read the same, not counted | none | `CRLF line endings read the same`, `a hashbang line is not a comment` |
 
