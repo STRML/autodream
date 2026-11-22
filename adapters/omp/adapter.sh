@@ -158,6 +158,25 @@ case "$cmd" in
     :
     ;;
 
+  l1-writes) # -> the paths an L1 worker may write besides its staging directory, one per line
+    # run.sh runs the worker under an OS sandbox that can write nothing else (#169, bin/l1-confine.sh).
+    # Default deny, as for claude: a path is here only because a confined omp call needs it and writing it
+    # cannot make a later session run attacker code. omp keeps its agent state (settings, extensions,
+    # rules, skills, sessions) under ~/.omp, and a headless worker registers a client under
+    # ~/.omp/run/daemons (the live daemon's state), so the list is MEASURED, not guessed:
+    #   bash tests/l1-confine-real.sh --engine omp --measure     one unconfined call, what it writes
+    #   bash tests/l1-confine-real.sh --engine omp               the same call confined, default deny
+    # docs/plans/2026-11-21-omp-l1-writes.md has the table. A host whose confined call fails without
+    # something else names it in AUTODREAM_L1_WRITES_EXTRA (colon-separated, absolute, a trailing * is a
+    # prefix) and accepts that path's exposure.
+    nl_refuse() { case "$1" in *"
+"*) printf 'l1-writes: refusing a path that holds a newline\n' >&2; exit 3 ;; esac; printf '%s\n' "$1"; }
+    # Globbing off: an entry such as ~/x.json* must stay a prefix, not expand to the files that exist.
+    old_ifs=$IFS; IFS=:; set -f
+    for extra in ${AUTODREAM_L1_WRITES_EXTRA:-}; do [ -n "$extra" ] && nl_refuse "$extra"; done
+    set +f; IFS=$old_ifs
+    ;;
+
   l2-argv) # $1=model -> NUL-delimited argv for the L2 aggregator; the prompt arrives on stdin
     [ "$#" -ge 1 ] && [ -n "$1" ] || exit 2
     # The L1 overlay applies here too (advisor off, no local provider probes, no first-turn

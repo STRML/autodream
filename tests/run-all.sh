@@ -3237,7 +3237,7 @@ test_l1_staging_failure_is_a_worker_failure_with_evidence(){
 }
 
 test_l1_confine_names_the_engine_without_a_write_profile(){
-  echo "# L1 confinement: an engine whose adapter declares no write profile is reported unconfined"
+  echo "# L1 confinement: the write lists of the claude and omp adapters, and an unknown verb exits 2"
   local out
   # CLAUDE_CONFIG_DIR and the extras are the caller's, so the list is read with both unset.
   out=$(env -u CLAUDE_CONFIG_DIR -u AUTODREAM_L1_WRITES_EXTRA -u AUTODREAM_WORK_BUCKET bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1); local rc=$?
@@ -3259,8 +3259,15 @@ test_l1_confine_names_the_engine_without_a_write_profile(){
   assert_eq "$rc" "3" "a HOME that holds a newline is refused, not split"
   out=$(env -u CLAUDE_CONFIG_DIR AUTODREAM_L1_WRITES_EXTRA="$(printf '/ok\n/Users')" bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1); rc=$?
   assert_eq "$rc" "3" "and so is an extra entry that does"
-  bash "$REPO/adapters/omp/adapter.sh" l1-writes >/dev/null 2>&1; rc=$?
-  assert_eq "$rc" "2" "the omp adapter declares no write profile, so its workers stay unconfined and run-stats says so"
+  out=$(env -u AUTODREAM_L1_WRITES_EXTRA bash "$REPO/adapters/omp/adapter.sh" l1-writes 2>&1); rc=$?
+  assert_eq "$rc" "0" "the omp adapter answers l1-writes"
+  assert_eq "$out" "" "and its default is deny: nothing beyond the staging directory until a measurement says otherwise"
+  out=$(AUTODREAM_L1_WRITES_EXTRA="/extra/one:/extra/two*" bash "$REPO/adapters/omp/adapter.sh" l1-writes 2>&1)
+  case "$out" in *"/extra/one"*"/extra/two*"*) ok "an operator's AUTODREAM_L1_WRITES_EXTRA entries reach it, a trailing * kept" ;; *) no "omp AUTODREAM_L1_WRITES_EXTRA entries (got: $out)" ;; esac
+  out=$(AUTODREAM_L1_WRITES_EXTRA="$(printf '/ok\n/Users')" bash "$REPO/adapters/omp/adapter.sh" l1-writes 2>&1); rc=$?
+  assert_eq "$rc" "3" "an extra entry that holds a newline is refused, not split"
+  bash "$REPO/adapters/omp/adapter.sh" no-such-verb >/dev/null 2>&1; rc=$?
+  assert_eq "$rc" "2" "a verb an adapter does not have exits 2, which is what run.sh reads as no write profile"
 }
 
 # A sandbox-exec stand-in that passes the probe and confines nothing else: it makes the probe's
@@ -3299,14 +3306,26 @@ test_l1_confined_stat_is_partial_when_an_engine_runs_unconfined(){
   root=$(setup_env); mk_session "$root" s1; mk_omp_session "$root" aaaa >/dev/null
   fake_sandbox "$root"
   PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec run_dream_omp "$root"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: yes$' "claude and omp both have a write profile: yes"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined_omp: yes$' "the per-engine line names omp"
+  rm -rf "$root"
+  # An engine whose adapter has no l1-writes verb is the case the stat exists for: a copy of the adapters
+  # with omp's verb renamed away, handed to the runner through ADAPTERS_ROOT.
+  root=$(setup_env); mk_session "$root" s1; mk_omp_session "$root" aaaa >/dev/null
+  fake_sandbox "$root"
+  cp -R "$REPO/adapters" "$root/adapters"; ln -s "$REPO/bin" "$root/bin"
+  sed 's/^  l1-writes)/  l1-writes-renamed)/' "$REPO/adapters/omp/adapter.sh" > "$root/adapters/omp/adapter.sh"
+  PATH="$root/shim-sb:$PATH" ADAPTERS_ROOT="$root/adapters" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec run_dream_omp "$root"
   assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: partial$' "claude confined and omp not: partial"
   assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined_omp: no$' "the per-engine line names omp"
   assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_reason: .*omp' "and the reason names the engine"
   rm -rf "$root"
   root=$(setup_env); mk_omp_session "$root" aaaa >/dev/null
   fake_sandbox "$root"
-  PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
-  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: no$' "omp alone: no, although the sandbox works"
+  cp -R "$REPO/adapters" "$root/adapters"; ln -s "$REPO/bin" "$root/bin"
+  sed 's/^  l1-writes)/  l1-writes-renamed)/' "$REPO/adapters/omp/adapter.sh" > "$root/adapters/omp/adapter.sh"
+  PATH="$root/shim-sb:$PATH" ADAPTERS_ROOT="$root/adapters" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec AUTODREAM_ADAPTERS=omp run_dream_omp "$root"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: no$' "omp alone with no profile: no, although the sandbox works"
   rm -rf "$root"
 }
 

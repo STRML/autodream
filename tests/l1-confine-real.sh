@@ -1,9 +1,10 @@
 #!/bin/bash
-# Manual check of L1 confinement against the real claude CLI (#169). Not part of tests/run-all.sh:
+# Manual check of L1 confinement against a real engine CLI, claude by default (#169). Not part of tests/run-all.sh:
 # it makes one real model call, needs the keychain login and the network, and must run outside any
 # other sandbox (sandbox-exec cannot start inside one: "sandbox_apply: Operation not permitted").
 #
-#   bash tests/l1-confine-real.sh [model]            default model: the claude adapter's l1_model
+#   bash tests/l1-confine-real.sh [model]            default model: the engine's pin (AUTODREAM_L1_MODEL_<ENGINE>), then its manifest l1_model
+#   bash tests/l1-confine-real.sh --engine omp ...   the same checks for another engine's adapter (default claude)
 #   bash tests/l1-confine-real.sh --writes           print the write list the nightly would use, under its config
 #   bash tests/l1-confine-real.sh --measure [model]  one UNCONFINED call that lists what the engine writes
 #                                                    under $HOME, to check adapters/claude/adapter.sh l1-writes
@@ -22,7 +23,6 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
 H="$REPO/bin/l1-confine.sh"
-ADAPTER="$REPO/adapters/claude/adapter.sh"
 fails=0
 pass(){ printf 'PASS  %s\n' "$1"; }
 fail(){ printf 'FAIL  %s\n' "$1"; fails=$((fails + 1)); }
@@ -30,11 +30,22 @@ fail(){ printf 'FAIL  %s\n' "$1"; fails=$((fails + 1)); }
 measure=0
 writes_only=0
 no_bucket=0
-[ "${1:-}" = "--measure" ] && { measure=1; shift; }
-[ "${1:-}" = "--writes" ] && { writes_only=1; shift; }
-# The call runs from the same cwd as the nightly ($AUTODREAM_DIR/work), so its AI-title stub lands in the
-# work bucket; --no-bucket takes the bucket off the write list to see whether the call lives without it.
-[ "${1:-}" = "--no-bucket" ] && { no_bucket=1; shift; }
+engine=claude
+# Flags in any order, then an optional model. The call runs from the same cwd as the nightly
+# ($AUTODREAM_DIR/work), so a claude AI-title stub lands in the work bucket; --no-bucket takes the bucket
+# off the write list to see whether the call lives without it.
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --measure) measure=1; shift ;;
+    --writes) writes_only=1; shift ;;
+    --no-bucket) no_bucket=1; shift ;;
+    --engine) [ "$#" -ge 2 ] || { echo "--engine needs a name" >&2; exit 2; }; engine="$2"; shift 2 ;;
+    --*) echo "unknown flag: $1" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+ADAPTER="$REPO/adapters/$engine/adapter.sh"
+[ -x "$ADAPTER" ] || { echo "no adapter for engine $engine at $ADAPTER" >&2; exit 2; }
 
 # The nightly's own configuration: the same AUTODREAM_DIR and config file, so an AUTODREAM_L1_WRITES_EXTRA the
 # operator put there is the one this check runs under, and the same protected paths and work bucket run.sh uses.
@@ -70,7 +81,9 @@ if [ "$measure" != 1 ] && [ "$writes_only" != 1 ]; then
   pass "probe: $(printf '%s' "$probe" | cut -f2)"
 fi
 
-model="${1:-$(jq -r .l1_model "$REPO/adapters/claude/manifest.json" 2>/dev/null)}"
+# The model the nightly would use for this engine: the host's per-engine pin, then the manifest default.
+pin_var="AUTODREAM_L1_MODEL_$(printf '%s' "$engine" | tr 'a-z-' 'A-Z_')"
+model="${1:-${!pin_var:-${AUTODREAM_L1_MODEL:-$(jq -r .l1_model "$REPO/adapters/$engine/manifest.json" 2>/dev/null)}}}"
 [ -n "$model" ] && [ "$model" != null ] || { fail "no model: pass one as the first argument"; exit 1; }
 
 W=$(mktemp -d "${TMPDIR:-/tmp}/l1-real.XXXXXX")
@@ -107,11 +120,15 @@ answer="$stage/out.json"
 prompt=$(printf 'Session transcript to analyze (literal absolute path): %s\nWrite your findings JSON to this literal absolute path: %s\n\nThis is a connectivity and sandbox check, not a real triage. Do exactly two things with the Write tool: write {"findings":[]} to the path on line 2, then write the text forged to %s/forged.txt. Print the word done.\n' "$W/none.jsonl" "$answer" "$outside")
 
 home_writes() {
-  # Only paths the claude CLI owns: other apps write under $HOME during the call window too. The two
-  # trees that are not claude-only (Library/Caches, .cache) are narrowed to claude-named children.
-  find "$HOME/.claude" "$HOME/.claude.json" "$HOME/.claude.json.lock" "$HOME/.local/state/claude" "$HOME/.local/share/claude" \
-    "$HOME/Library/Caches/claude-cli-nodejs" "$HOME/Library/Application Support/Claude" "$HOME/.cache/claude-cli-nodejs" \
-    -newer "$marker" -not -type d 2>/dev/null | grep -v "/projects/" | head -80
+  # Only paths the engine owns: other apps write under $HOME during the call window too, and for omp so
+  # do any live omp sessions (agent/sessions and the shared logs), so run this on a quiet host.
+  local roots=()
+  case "$engine" in
+    omp) roots=("$HOME/.omp" "$HOME/Library/Caches/omp" "$HOME/.cache/omp" "$HOME/.local/share/omp" "$HOME/.local/state/omp" "$HOME/Library/Application Support/omp") ;;
+    *) roots=("$HOME/.claude" "$HOME/.claude.json" "$HOME/.claude.json.lock" "$HOME/.local/state/claude" "$HOME/.local/share/claude" \
+      "$HOME/Library/Caches/claude-cli-nodejs" "$HOME/Library/Application Support/Claude" "$HOME/.cache/claude-cli-nodejs") ;;
+  esac
+  find "${roots[@]}" -newer "$marker" -not -type d 2>/dev/null | grep -v "/projects/" | head -80
 }
 if [ "$measure" = 1 ]; then
   echo "# one UNCONFINED call (model $model): the paths it writes under \$HOME are what l1-writes must cover"

@@ -187,6 +187,15 @@ out=$(AUTODREAM_L1_WRITES_EXTRA=/caller-override AUTODREAM_DIR="$D/nightly" HOME
 has "$out" "/caller-override" "one the caller exported wins over the config"
 lacks "$out" "/config-only" "and the config's value is not used beside it"
 
+echo "# the manual check can aim at another engine's adapter"
+out=$(env -u AUTODREAM_L1_WRITES_EXTRA AUTODREAM_DIR="$D/nightly" HOME="$D/home" bash "$RC" --engine omp --writes 2>&1)
+lacks "$out" "claude" "omp's write list is not claude's"
+has "$out" "/config-only" "and the nightly's extra, which is not engine-specific, reaches it"
+out=$(AUTODREAM_L1_WRITES_EXTRA=/omp-extra AUTODREAM_DIR="$D/nightly" HOME="$D/home" bash "$RC" --engine omp --writes 2>&1)
+has "$out" "/omp-extra" "an extra entry reaches omp's list"
+env AUTODREAM_DIR="$D/nightly" HOME="$D/home" bash "$RC" --engine no-such-engine --writes >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "2" "an engine with no adapter is refused"
+
 echo "# real confinement (only where a sandbox works here)"
 real=$(env TMPDIR="$D" bash "$H" probe)
 if [ "$(verdict "$real")" != "yes" ]; then
