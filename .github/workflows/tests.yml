@@ -17,6 +17,8 @@ name: tests
 # '**.md' ignore, and left two tests red on main (#178). So the filter is `paths` with negations,
 # where the last matching pattern wins: everything, minus docs, plus that markdown back again.
 # `paths-ignore` cannot re-include, and an event cannot have both. Keep the two lists in step.
+# Code under docs/ or example/ is code too: the comment ratchet counts every tracked .sh, .py and
+# JS or TS file, so those extensions come back after the exclusions (a path filter has no braces).
 on:
   push:
     branches: [main]
@@ -30,6 +32,16 @@ on:
       - 'adapters/**'
       - 'docs/demo/**'
       - 'docs/screenshots/fixture.py'
+      - '**.sh'
+      - '**.py'
+      - '**.js'
+      - '**.jsx'
+      - '**.mjs'
+      - '**.cjs'
+      - '**.ts'
+      - '**.tsx'
+      - '**.mts'
+      - '**.cts'
   pull_request:
     # ready_for_review is not a default type: without it, marking a draft ready starts nothing
     # and the job's draft skip would leave the PR with no test run.
@@ -44,6 +56,16 @@ on:
       - 'adapters/**'
       - 'docs/demo/**'
       - 'docs/screenshots/fixture.py'
+      - '**.sh'
+      - '**.py'
+      - '**.js'
+      - '**.jsx'
+      - '**.mjs'
+      - '**.cjs'
+      - '**.ts'
+      - '**.tsx'
+      - '**.mts'
+      - '**.cts'
 
 concurrency:
   group: tests-${{ github.event.pull_request.number || github.ref }}

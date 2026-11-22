@@ -98,7 +98,7 @@ update_baseline() {
 }
 
 update_into() {
-  local allow=$1 counts=$2 rows=$3 tmp=$4 problem up rc
+  local allow=$1 counts=$2 rows=$3 tmp=$4 problem up rc total files
   collect_counts "$counts" || return 1
   new_baseline_rows "$counts" "$rows" || { complain "could not build the new baseline rows"; return 1; }
   [ -s "$rows" ] || { complain "no file has a comment left, so there is nothing to ratchet; delete the ratchet on purpose, not through --update"; return 1; }
@@ -124,8 +124,13 @@ update_into() {
     fi
     [ "$rc" -eq 0 ] || { complain "comparing against the old baseline failed (exit $rc)"; return 1; }
   fi
+  total=$(awk -F'\t' '{ s += $2 } END { print s + 0 }' "$tmp") || { complain "could not total the new baseline"; return 1; }
+  files=$(wc -l < "$tmp" | tr -d ' ') || { complain "could not count the new baseline"; return 1; }
+  [ -n "$total" ] && [ -n "$files" ] || { complain "the new baseline totals came back empty"; return 1; }
+  [ ! -d "$BASELINE" ] || { complain "$BASELINE is a directory, so nothing can be written there"; return 1; }
   mv "$tmp" "$BASELINE" || { complain "could not replace $BASELINE"; return 1; }
-  echo "wrote $BASELINE ($(awk -F'\t' '{ s += $2 } END { print s + 0 }' "$BASELINE") comment lines across $(wc -l < "$BASELINE" | tr -d ' ') files)"
+  cmp -s "$rows" "$BASELINE" || { complain "$BASELINE does not hold the new baseline after the move"; return 1; }
+  echo "wrote $BASELINE ($total comment lines across $files files)"
 }
 
 case "${1:-}" in
@@ -174,7 +179,7 @@ counter_fixtures() {
   eq "$(num "$d/a.sh")" 2 "shell: shebang, shellcheck, heredoc bodies and trailing comments are not counted"
   printf '%s\n' '#!/usr/bin/env python3' '# one' 'x = 1  # trailing' '# noqa: E501' '    # two' > "$d/b.py"
   eq "$(num "$d/b.py")" 2 "python: shebang and noqa are not counted"
-  printf '%s\n' '// one' '/* two' ' three */' '// @ts-expect-error' 'const x = 1 // trailing' > "$d/c.ts"
+  printf '%s\n' '// one' '/* two' ' * three */' '// @ts-expect-error' 'const x = 1 // trailing' > "$d/c.ts"
   eq "$(num "$d/c.ts")" 3 "ts: line and block comments count, a @ts directive does not"
   printf '%s\n' '#!/bin/bash' 'echo no comments' > "$d/noext"
   eq "$(num "$d/noext")" 0 "a bash shebang without an extension is read as shell"
@@ -196,11 +201,16 @@ counter_fixtures() {
   printf '%s\n' 's = """' '# data' '"""' '# real comment' > "$d/doc.py"
   eq "$(num "$d/doc.py")" 1 "a comment-looking line inside a python triple-quoted string is data"
   printf '%s\n' 'const t = `' '// inside a template' '`;' '// real comment' > "$d/tmpl.ts"
-  eq "$(num "$d/tmpl.ts")" 2 "a template literal line that starts with // is over-counted: the accepted trade of a stateless rule, which can fail a PR and never hides a comment"
+  eq "$(num "$d/tmpl.ts")" 2 "a template literal line that starts with // is over-counted: every line is judged alone, so a new comment always adds one"
+  printf '%s\n' 'const t = `' '/* data' '`;' '' > "$d/phantom-a.ts"
+  printf '%s\n' 'const t = `' '/* data' '`;' '// real comment' > "$d/phantom-b.ts"
+  eq "$(num "$d/phantom-a.ts") $(num "$d/phantom-b.ts")" "1 2" "a /* inside a template opens nothing: a real comment added after it still raises the count"
   printf '%s\n' '/**' ' * doc' ' */' 'const a = b' '  * c;' '// real comment' > "$d/block.ts"
-  eq "$(num "$d/block.ts")" 4 "a * line counts inside a block that opened at a line start and not outside one"
+  eq "$(num "$d/block.ts")" 5 "a line that starts with * is counted whether or not a block is open"
+  printf '%s\n' '/* a' 'plain body' '*/' > "$d/plain-block.ts"
+  eq "$(num "$d/plain-block.ts")" 2 "a block body line with no star is not counted, its opening and closing lines are"
   printf '%s\n' '/* a */ const x = 1;' 'const y = 2; /* b' ' * c' ' */' > "$d/block-after-code.ts"
-  eq "$(num "$d/block-after-code.ts")" 1 "a block that opens after code is not tracked, so its continuation lines are not counted"
+  eq "$(num "$d/block-after-code.ts")" 3 "a block that opens after code is not counted on its opening line, its starred lines are"
   printf '%s\n' 'const r = /[/*]/.test(v);' 'const o = {a: 1} / 2;' "const s = '// not a comment';" '// real comment' > "$d/midline.ts"
   eq "$(num "$d/midline.ts")" 1 "a slash, regex or string in the middle of a line never matters, only line starts are read"
   printf '%s\n' '#!/usr/bin/env node' '// real comment' > "$d/shebang.ts"
@@ -208,17 +218,7 @@ counter_fixtures() {
   printf '// one\r\n/* two\r\n * three\r\n */\r\n' > "$d/crlf.ts"
   eq "$(num "$d/crlf.ts")" 4 "CRLF line endings read the same"
   printf '%s\n' '/* never closed' ' still comment' > "$d/open.ts"
-  eq "$(num "$d/open.ts")" 2 "an unclosed block comment counts to the end of the file"
-  printf '%s\n' 'if (a) {} else {}' '/[/*]/.test(v);' '// real comment' > "$d/else-block.ts"
-  eq "$(num "$d/else-block.ts")" 1 "a regex after a block that follows else is a regex"
-  printf '%s\n' 'label: {} /[/*]/.test(v);' '// real comment' > "$d/label-block.ts"
-  eq "$(num "$d/label-block.ts")" 1 "a regex after a labeled block is read the only way the whole file lexes"
-  printf '%s\n' 'const a = b /[/*]/ c;' '// real comment' > "$d/flip-div.ts"
-  eq "$(num "$d/flip-div.ts")" 1 "a slash the heuristic reads as division is flipped when only the regex reading lexes"
-  printf '%s\n' 'const t = 1 +' '/ 2;' '// real comment' > "$d/no-close.ts"
-  eq "$(num "$d/no-close.ts")" 1 "a slash with no closing slash on its line is a division"
-  printf '%s\n' 'const q = (a + b) / 2 / 3;' 'i++ / 2 / 4;' '// real comment' > "$d/div.ts"
-  eq "$(num "$d/div.ts")" 1 "division after a parenthesis or an increment is not a regex"
+  eq "$(num "$d/open.ts")" 1 "an unclosed block opens nothing, so only its first line counts and nothing after it is swallowed"
 
   printf '%s\n' '# pragmatism matters' '# shellcheck sourced from here' '# shellcheck disable=SC2086' '# shellcheck source=/dev/null' '# shellcheck shell=bash' > "$d/dir.sh"
   eq "$(num "$d/dir.sh")" 2 "shell: only the exact shellcheck disable=, source= and shell= forms are exempt"
@@ -266,12 +266,21 @@ enumeration_fixtures() {
   fx=$(mkrepo) || { bad "make a fixture repo"; return; }
   printf '%s\n' '# one' > "$fx/notes.txt"
   ln -s notes.txt "$fx/script.sh"
-  ln -s nowhere "$fx/dead.sh"
+  ln -s nowhere "$fx/dead.txt"
   printf '%s\n' '# two' > "$fx/top.sh"
   track "$fx"
   bash "$COUNT" --repo "$fx" > "$fx/out" 2> "$fx/err"
   rc=$?
-  eq "$rc $(tr '\t\n' ' ;' < "$fx/out")" "0 1 script.sh;1 top.sh;" "a tracked symlink to a file is counted, a dangling one is skipped"
+  eq "$rc $(tr '\t\n' ' ;' < "$fx/out")" "0 1 script.sh;1 top.sh;" "a tracked symlink to a file is counted, a dangling one with a data extension is skipped"
+  rm -rf "$fx"
+
+  fx=$(mkrepo) || { bad "make a fixture repo"; return; }
+  printf '%s\n' '# two' > "$fx/top.sh"
+  ln -s nowhere "$fx/dead.sh"
+  track "$fx"
+  bash "$COUNT" --repo "$fx" > "$fx/out" 2> "$fx/err"
+  rc=$?
+  eq "$rc $(grep -c 'dead.sh' "$fx/err") $(wc -c < "$fx/out" | tr -d ' ')" "1 1 0" "a tracked code symlink that points at nothing fails and names it"
   rm -rf "$fx"
 
   if not_root; then
@@ -379,6 +388,25 @@ failing_tool_fixtures() {
   out=$(PATH="$shim:$PATH" ratchet_in "$fx" 2>&1); rc=$?
   eq "$rc" 1 "the check fails when the awk comparison itself fails"
   rm -rf "$fx" "$shim"
+  fx=$(baseline_fixture) || { bad "make a fixture repo"; return; }
+  shim=$(mktemp -d)
+  real_awk=$(command -v awk)
+  printf '#!/bin/bash\nfor a; do last=$a; done\ncase "$last" in *.comment-baseline.*) exit 1 ;; esac\nexec %s "$@"\n' "$real_awk" > "$shim/awk"
+  chmod +x "$shim/awk"
+  printf '%s\n' '# three' > "$fx/c.sh"
+  track "$fx"
+  before=$(cksum < "$fx/.comment-baseline")
+  out=$(PATH="$shim:$PATH" ratchet_in "$fx" --update --allow-increase 2>&1); rc=$?
+  eq "$rc $(printf '%s' "$out" | grep -c '^wrote') $(same_as "$fx/.comment-baseline" "$before" && echo same)" "1 0 same" "--update fails before publishing when the final totalling awk fails"
+  rm -rf "$fx" "$shim"
+
+  fx=$(baseline_fixture) || { bad "make a fixture repo"; return; }
+  rm -f "$fx/.comment-baseline"
+  mkdir "$fx/.comment-baseline"
+  out=$(ratchet_in "$fx" --update --allow-increase 2>&1); rc=$?
+  eq "$rc $(printf '%s' "$out" | grep -c '^wrote') $([ -d "$fx/.comment-baseline" ] && ls -A "$fx/.comment-baseline" | wc -l | tr -d ' ')" "1 0 0" "--update --allow-increase onto a directory fails and moves nothing into it"
+  rm -rf "$fx"
+
   if not_root; then
     fx=$(baseline_fixture) || { bad "make a fixture repo"; return; }
     printf '%s\n' '# three' > "$fx/c.sh"

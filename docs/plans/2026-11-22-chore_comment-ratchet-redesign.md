@@ -20,35 +20,41 @@ round 4  █            1   regex guess (labeled block)
 
 ## Class D: no state, so no guess
 
-The lexer existed to answer one question: is a line that starts with `//` or `/*` really a comment, or data inside a template literal or string? The rule that does not need the answer reads each line on its own:
+The lexer existed to answer one question: is a line that starts with `//` or `/*` really a comment, or data inside a template literal or string? The rule that does not need the answer judges each line alone:
 
 ```
-in a block?  yes ─▶ count the line; a `*/` on it ends the block
-             no  ─▶ first non-blank characters are
-                      //  ─▶ count (unless an exact directive: @ts-expect-error, @ts-ignore, oxlint-disable)
-                      /*  ─▶ count; a `*/` later on the line closes it, otherwise a block opens
-                      else ─▶ nothing (a `*` line outside a block is multiplication or a pointer, not a comment)
+a line counts when its first non-blank characters are
+    //   (unless an exact directive: @ts-expect-error, @ts-ignore, oxlint-disable)
+    /*   a block opening
+    *    a block body or closing line (` * text`, ` */`)
+nothing else counts, and no line looks at any other line
 ```
 
-There are no strings, templates, regexes or division to classify, so there is nothing to guess and nothing to lose track of. The coordinator chose this on 2026-11-22. The JS and TS tracks had already deleted the real comments, so the rule only has to guard against new ones.
+There are no strings, templates, regexes or division to classify, and no state to lose. The coordinator chose the stateless direction on 2026-11-22. Round 5 then showed that the first version still carried one bit of state (an open block), and that a phantom block opened by `/*` inside a template swallowed every later line, so a new comment added after it changed nothing. Now every line stands alone, and a new `//`, `/*` or `*` line always adds exactly one.
 
 ### Accepted trades, and which way each one fails
 
 | Input | What the rule does | Direction | Fixture |
 |---|---|---|---|
-| a line inside a multiline template literal that starts with `//` or `/*` | counts it | over-count: can fail a PR, never hides a comment | `a template literal line that starts with // is over-counted…` |
-| a block comment that opens after code (`x = 1; /* a`) with continuation lines | counts none of them | under-count: a comment can slip past on a continuation line | `a block that opens after code is not tracked…` |
+| a line inside a multiline template literal that starts with `//`, `/*` or `*` | counts it | over-count: can fail a PR, never hides a comment | `a template literal line that starts with // is over-counted…`, `a /* inside a template opens nothing…` |
+| a `*` line outside any block (a continued multiplication) | counts it | over-count | `a line that starts with * is counted whether or not a block is open` |
+| a block body line with no star prefix | not counted; the opening and closing lines are | under-count by the body lines, but the opening line is always counted, so a new block comment still adds at least one | `a block body line with no star is not counted…` |
+| a block that opens after code (`x = 1; /* a`) | the opening line is not counted (it is trailing, like `x = 1 // a`); its starred lines are | under-count by one line | `a block that opens after code is not counted…` |
 | a regex, division or string in the middle of a line | ignored | none: only line starts are read | `a slash, regex or string in the middle of a line never matters…` |
-| an unclosed `/*` | counts to the end of the file | over-count, no error | `an unclosed block comment counts to the end of the file` |
-| CRLF endings | read the same | none | `CRLF line endings read the same` |
-| `#!` hashbang | not counted | none | `a hashbang line is not a comment` |
-| a `*` line outside a block | not counted | none | `a * line counts inside a block…` |
+| an unclosed `/*` | counts only its own line, swallows nothing | none | `an unclosed block opens nothing…` |
+| CRLF endings, `#!` hashbang | read the same, not counted | none | `CRLF line endings read the same`, `a hashbang line is not a comment` |
 
-The under-count row is the one to weigh. It needs a block comment that starts after code, which is not how this repo writes comments, and that line still carries code a reviewer reads. I accept it for the same reason the coordinator accepted the over-count: it keeps the rule stateless.
+## Round 5 (full review against this plan)
 
-### What this removes
+Five findings, grouped. Each is a repeat of an earlier class, so the rule for each is the same: fix by class, sweep the siblings.
 
-The scanner class (about 200 lines), the paren and brace stacks, the adjacency rule and the speculation with 64 flips from the first draft of this plan. Every class D finding depended on a lexer, so none of them can recur.
+| Finding | Class | Fix | Test |
+|---|---|---|---|
+| a phantom JS block hides newly added comments | class D, stateful rule | drop the block state (above) | `a /* inside a template opens nothing…` |
+| CI skips code under `docs/` and `example/` | C: CI scope | `tests.yml` re-includes `**.sh`, `**.py` and each JS/TS extension after its exclusions, for push and pull_request | `tests/ci-scope.sh`: one assertion per extension and one for the order |
+| `--update --allow-increase` onto a directory reports success | B: a successful move is not proof of replacement | refuse a directory destination, and compare the baseline with the new rows after the move | `--update --allow-increase onto a directory fails…` |
+| a tracked dangling code symlink is skipped | B: an unreadable file read as nothing | a dangling link with a code extension fails and names the path; one with a data extension has nothing to read | `a tracked code symlink that points at nothing fails…` |
+| the final totalling `awk` of `--update` is discarded inside `echo` | B: a failed subprocess hidden in a success message | totals are computed from the temp file and checked before the move, and the message prints only after the move is verified | `--update fails before publishing when the final totalling awk fails` |
 
 ## Not changing
 
