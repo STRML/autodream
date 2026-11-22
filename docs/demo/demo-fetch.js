@@ -1,14 +1,4 @@
 "use strict";
-// The demo has no server: API reads come from the JSON files build.py wrote next to the page,
-// and thread actions answer with a notice instead of changing anything.
-//
-// Every date in the demo is relative to the day it was built (window.DEMO_BUILT). Answers are
-// moved forward by the days between that and the visitor's local today, so "the last 7 days",
-// thread ages and the age filter read the same on any day, in any timezone. Relative ages do
-// not change, so neither do the statuses computed from them.
-// The shift is fixed for the page's life, because links already drawn carry shifted dates. The
-// first request after the local date changes reloads the page instead, which redraws them all,
-// after moving the dates in the URL fragment by the same days so it still names the same report.
 (function () {
   const realFetch = window.fetch.bind(window);
   const base = new URL(".", document.baseURI);

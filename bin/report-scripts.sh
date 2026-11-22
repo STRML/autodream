@@ -1,71 +1,8 @@
 #!/usr/bin/env bash
-# report-scripts.sh — run the allowlisted report commands and leave their output where L2 can read it.
-#
-# WHY THIS EXISTS
-#
-# Operator notes keep asking the nightly run to "run X and quote the rows". L2 holds Read and Glob
-# only, so it cannot, and the ask failed without a word. This collector runs the commands BEFORE L2
-# and writes each result to <findings-dir>/report-<name>.md. A new report is one line in the
-# allowlist, never a change to run.sh or the prompt.
-#
-# THE ALLOWLIST
-#
-#   $AUTODREAM_DIR/report-scripts.conf      one entry per line, `#` starts a comment line:
-#     <name> <absolute-or-~/ path> [args...]
-#
-#   Args are literal words split on whitespace. Nothing is evaluated: no quotes, no `$VAR`, no glob,
-#   no `;`. A missing conf is "no reports", never an error. Only the operator edits the conf, so an
-#   operator note (which can come from a phone or a transcript) can never widen what runs.
-#
-# THE ALLOWLIST IS SNAPSHOT BEFORE ANY MODEL RUNS
-#
-# An L1 worker reads untrusted transcripts and holds the Write tool, so it could rewrite the conf, or a
-# script the conf names, and this collector would then run the result with the operator's privileges.
-# run.sh therefore calls `snapshot` before the first model call and keeps the output in memory, then
-# hands it back to `collect`. The snapshot is each entry's line plus the sha256 of its script. `collect`
-# runs only what the snapshot lists, and refuses (status `changed`, nothing executed) a script whose
-# hash differs now, or that did not exist when the snapshot was taken. A `collect` with no snapshot
-# (by hand) reads the conf and checks nothing, because nothing has run since you wrote it.
-#
-# What the hash covers, and what it does not: the file named as the entry's path, and every argument
-# that is an existing file at snapshot time (`name /bin/bash ~/x.sh` pins bash and x.sh together; an
-# argument file that appears later is also "changed"). Not covered: anything a script sources, reads
-# or runs on its own, and the same-run window is all that is defended. A worker that plants a conf
-# entry or a script on night N gets it snapshotted as trusted on night N+1, because nothing tells a
-# planted line from one the operator wrote, and the snapshot cannot protect a trust anchor the worker
-# can also write. Both gaps close when workers can no longer write outside their own staging dir
-# (https://github.com/STRML/autodream/issues/169).
-#
-# THE FAILURE IS THE CONTENT
-#
-# A non-zero exit, a timeout, a missing or non-executable script, a relative path: each still writes
-# report-<name>.md, with FAILED on the first body line, so L2 reports the failure instead of seeing
-# silence. Same principle as x-bookmarks.sh. The collector itself exits 0 whatever the entries do and
-# never aborts the run; it exits 1 only when it cannot write the findings dir.
-#
-# report-index.txt is the one fixed path L2 reads (PROMPT.md forbids globbing the findings dir: a
-# directory listing stops at 200 entries). It lists every entry, its status and its file.
-#
-# Usage:
-#   report-scripts.sh snapshot                          print the snapshot (run.sh holds it in memory)
-#   report-scripts.sh collect <findings-dir> [snapshot-file]
-#
-# Config (env):
-#   AUTODREAM_DIR                 default $HOME/.claude/autodream
-#   AUTODREAM_REPORT_TIMEOUT      seconds per entry, then killed            default 60
-#   AUTODREAM_REPORT_MAX_BYTES    cap on one report's body                  default 100000
-#                                 (a command is also limited to 4x this per file it writes, stdout
-#                                 and stderr included, so a command that never stops printing cannot
-#                                 fill the disk before its timeout. The limit is per file, and macOS
-#                                 does not enforce it on `>>` appends, so what a script appends to
-#                                 its own files is bounded by the timeout alone)
-#   AUTODREAM_REPORT_KILL_GRACE   seconds between the TERM at the timeout and a KILL   default 5
-
 set -u
 set -f   # args are literal words: a `*` in the conf must never glob
 
 _pp="$(dirname "${BASH_SOURCE[0]}")/portable.sh"
-# Installed copies are symlinks: a merge updates them before install.sh links a new helper.
 [ -r "$_pp" ] || _pp="$(dirname "$(readlink "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")/portable.sh"
 # shellcheck source=/dev/null
 . "$_pp"
@@ -78,7 +15,6 @@ case "$TIMEOUT_S" in ''|*[!0-9]*) TIMEOUT_S=60 ;; esac
 case "$MAX_BYTES" in ''|*[!0-9]*) MAX_BYTES=100000 ;; esac
 KILL_GRACE="${AUTODREAM_REPORT_KILL_GRACE:-5}"
 case "$KILL_GRACE" in ''|*[!0-9]*) KILL_GRACE=5 ;; esac
-# 10#: a value with a leading zero (08) is a number here, not a bad octal that aborts the collector.
 TIMEOUT_S=$((10#$TIMEOUT_S)); MAX_BYTES=$((10#$MAX_BYTES)); KILL_GRACE=$((10#$KILL_GRACE))
 [ "$TIMEOUT_S" -gt 0 ] || TIMEOUT_S=60
 [ "$MAX_BYTES" -gt 0 ] || MAX_BYTES=100000
@@ -87,7 +23,6 @@ FILE_LIMIT_KB=$((MAX_BYTES * 4 / 1024 + 1))
 
 utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
-# $1=path as written in the conf -> the absolute path it means ("~/" is HOME, anything else is kept)
 expand_path() {
   case "$1" in
     \~/*) printf '%s' "$HOME/${1#\~/}" ;;
@@ -95,21 +30,18 @@ expand_path() {
   esac
 }
 
-# $1=expanded path -> sha256 of the file, or "-" when it is not a readable absolute-path file
 hash_of() {
   case "$1" in /*) ;; *) printf -- '-'; return 0 ;; esac
   [ -f "$1" ] && [ -r "$1" ] || { printf -- '-'; return 0; }
   shasum -a 256 -- "$1" 2>/dev/null | cut -d' ' -f1 | grep -E '^[0-9a-f]{64}$' || printf -- '-'
 }
 
-# $1=pid -> that process and every descendant, one per line, children first
 tree_pids() {
   local c
   for c in $(pgrep -P "$1" 2>/dev/null); do tree_pids "$c"; done
   printf '%s\n' "$1"
 }
 
-# $1=file of pids -> any that outlived a TERM get what is left of the grace period, then KILL.
 settle_tree() {
   local p alive i=0 limit=$((KILL_GRACE * 10))
   while [ "$i" -lt "$limit" ]; do
@@ -121,19 +53,9 @@ settle_tree() {
   for p in $(cat "$1" 2>/dev/null); do kill -s KILL "$p" 2>/dev/null || true; done
 }
 
-# $1=seconds, $2=flag file, rest=command -> runs it bounded: TERM at the timeout, KILL KILL_GRACE
-# seconds later. A command that traps or ignores TERM must not be able to hold the nightly run, and the
-# processes it started must not outlive it. There is one path, this watchdog, and no timeout(1): the
-# binary reports the command's own exit status when the command traps TERM and exits 0, and leaves a
-# TERM-ignoring child of an exited wrapper running, so neither could be told apart from a normal run.
-# The flag file is the caller's. It is empty unless the timeout fired, and then holds the tree that
-# was signalled, so "it timed out" is read from it and never inferred from the exit status or the clock.
 run_bounded() {
   local secs="$1" flag="$2" pid wd rc; shift 2
   "$@" & pid=$!
-  # At the timeout the watchdog records the tree, then sends TERM. It traps TERM and takes its own
-  # sleep with it, so a command that finishes in time leaves nothing behind, and a watchdog woken at
-  # that moment cannot fire at a recycled pid.
   ( trap 'kill "${sp:-}" 2>/dev/null; exit 0' TERM
     sleep "$secs" & sp=$!; wait "$sp" || exit 0
     tree=$(tree_pids "$pid")
@@ -143,16 +65,10 @@ run_bounded() {
     for p in $tree; do kill -s KILL "$p" 2>/dev/null || true; done ) >/dev/null 2>&1 & wd=$!
   wait "$pid"; rc=$?
   kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
-  # TERM was sent. The command may be gone while a TERM-ignoring child it started is not, and it is no
-  # longer reachable through the command's process tree, so it is settled from the recorded list.
   if [ -s "$flag" ]; then settle_tree "$flag"; fi
   return "$rc"
 }
 
-# $1=script path, rest=its arguments -> what an entry is pinned to. The script's own sha256 when no
-# argument names an existing file. Otherwise a sha256 over the script hash and each such file's path and
-# hash, so an interpreter entry (`name /bin/bash ~/x.sh`) is pinned to its payload too. A relative
-# argument is looked up from HOME, where the command runs. "-" when anything could not be hashed.
 entry_hash() {
   local path="$1" h f fh a parts=""; shift
   h=$(hash_of "$path")
@@ -169,7 +85,6 @@ entry_hash() {
   printf '%s\n%s' "$h" "$parts" | shasum -a 256 2>/dev/null | cut -d' ' -f1 | grep -E '^[0-9a-f]{64}$' || printf -- '-'
 }
 
-# Prints "#present" or "#absent" for the conf, then "<sha256 or ->\t<conf line>" per entry line.
 snapshot() {
   [ -f "$CONF" ] || { printf '#absent\n'; return 0; }
   printf '#present\n'
@@ -191,7 +106,6 @@ collect() {
   local fdir="${1:-}" snapfile="${2:-}" checked=1
   [ -n "$fdir" ] && [ -d "$fdir" ] && [ -w "$fdir" ] || { echo "report-scripts: findings dir not writable: $fdir" >&2; return 1; }
   local work; work=$(mktemp -d "${TMPDIR:-/tmp}/report-scripts.XXXXXX") || { echo "report-scripts: no temp dir" >&2; return 1; }
-  # A rerun of the same date must not leave the report of an entry that has left the conf.
   find "$fdir" -maxdepth 1 \( -name 'report-*.md' -o -name report-index.txt \) -exec rm -f {} + \
     || { echo "report-scripts: could not remove the earlier report files in $fdir" >&2; rm -rf "$work"; return 1; }
 
@@ -200,13 +114,10 @@ collect() {
   : > "$rows"
   local seen=" "
 
-  # No snapshot means a manual run: read the conf now and skip the hash check.
-  # A conf that exists and cannot be read is unavailable, not "none configured".
   if [ -z "$snapfile" ]; then
     snapfile="$work/snapshot"; checked=0
     snapshot > "$snapfile" || printf '#unavailable\n' > "$snapfile"
   fi
-  # An unreadable snapshot has no first line, so its state is empty and reads as unavailable below.
   local state; state=$(sed -n 1p "$snapfile" 2>/dev/null)
 
   if [ "$state" = "#present" ]; then
@@ -220,7 +131,6 @@ collect() {
       if ! printf '%s' "$name" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$'; then
         printf '(entry %s)\tinvalid\t-\tname "%s" is not [A-Za-z0-9._-]\n' "$lineno" "$name" >> "$rows"; continue
       fi
-      # Compared lowercased: Foo and foo are one file on a case-insensitive filesystem.
       lname=$(printf '%s' "$name" | tr 'A-Z' 'a-z')
       case "$seen" in *" $lname "*)
         printf '%s\tinvalid\t-\tduplicate name (names are compared ignoring case), the first entry keeps its file\n' "$name" >> "$rows"; continue ;;
@@ -246,8 +156,6 @@ collect() {
       if [ "$status" = ok ] && [ ! -f "$path" ]; then status=missing; reason="FAILED: script not found: $path"; fi
       if [ "$status" = ok ] && [ ! -x "$path" ]; then status=missing; reason="FAILED: script is not executable: $path"; fi
       if [ "$status" = ok ] && [ "$checked" = 1 ]; then
-        # Fail closed: run only when both hashes are real sha256 values and equal. A "-" on both
-        # sides (hashing failed twice) must never read as "unchanged".
         now=$(entry_hash "$path" ${args[@]+"${args[@]}"})
         if ! printf '%s' "$want" | grep -Eq '^[0-9a-f]{64}$' || [ "$now" != "$want" ]; then
           status=changed; reason="FAILED: the script changed since this run started, did not exist then, or could not be hashed; not run: $path"
@@ -266,8 +174,6 @@ collect() {
       ( ulimit -f "$FILE_LIMIT_KB" 2>/dev/null; cd "$HOME" 2>/dev/null || cd /; run_bounded "$TIMEOUT_S" "$tflag" "$path" ${args[@]+"${args[@]}"} ) < /dev/null > "$out" 2> "$err"
       rc=$?
       if [ -s "$tflag" ]; then
-        # The watchdog fired. The exit status says nothing here: a command that traps TERM and exits 0
-        # is still one that ran past its limit.
         status=timeout; reason="FAILED: timed out after ${TIMEOUT_S}s and was stopped (exit $rc)"
       elif [ "$rc" -eq 153 ]; then
         status=failed; reason="FAILED: output exceeded the ${FILE_LIMIT_KB} KB per-file limit and was stopped (exit 153, SIGXFSZ)"
@@ -292,8 +198,6 @@ collect() {
   else
     printf '# report-scripts: %s entries from %s; columns: name, status, file, detail\n' "$n" "$CONF" > "$idx"
     cat "$rows" >> "$idx" || wfail=1
-    # Every entry line wrote exactly one row. A row write that failed would otherwise leave a short
-    # index that reads as complete.
     [ "$(wc -l < "$rows" | tr -d ' ')" = "$n" ] || wfail=1
   fi
   cp "$idx" "$fdir/.report-index.tmp" && mv "$fdir/.report-index.tmp" "$fdir/report-index.txt" || wfail=1
@@ -301,12 +205,9 @@ collect() {
   return "$wfail"
 }
 
-# write_report <fdir> <name> <command text> <exit text> <failure line or ""> <stdout file or ""> <stderr file or "">
 write_report() {
   local fdir="$1" name="$2" cmd="$3" exit_text="$4" failure="$5" out="$6" err="$7"
   local tmp="$fdir/.report-$name.tmp" size=0
-  # Every write is checked on its own: the status of a brace group is its last command, and a
-  # full disk can fail an earlier write while a later one succeeds.
   printf '# report-%s: %s | %s | %s\n' "$name" "$cmd" "$exit_text" "$(utc_now)" > "$tmp" || return 1
   if [ -n "$failure" ]; then printf '%s\n' "$failure" >> "$tmp" || return 1; fi
   if [ -n "$out" ] && [ -f "$out" ]; then

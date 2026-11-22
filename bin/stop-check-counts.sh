@@ -1,26 +1,4 @@
 #!/usr/bin/env bash
-# stop-check-counts.sh — model-free, read-only counts over the stop-check verdict log.
-# Usage: stop-check-counts.sh [--since-hours N]   (default 36)
-#
-# The stop-check mod appends one JSON line per judged turn to ~/.claude/stop-check/verdicts.jsonl:
-# {"kind":"ok|ask|bad|error","at":"<UTC ISO, with milliseconds>","message":"...","note":"..."}.
-#
-# recent  the verdicts inside the window, grouped by kind, most frequent first.
-# weekly  the last eight UTC weeks (Monday start, oldest first), one column per kind seen in them.
-#         A week with no verdicts is a row of zeros, never a gap.
-#
-# Counts only: `message` and `note` hold quoted session text and are never printed. A line that does
-# not parse, or has no usable `kind` and `at`, is counted and reported as unparseable, never dropped
-# silently. A line dated after the clock is reported too ("dated after now"), and a `kind` outside
-# [a-z]+ is counted as `other`: the log is written by another tool and a kind holding a tab or newline
-# would otherwise forge rows in this report.
-#
-# Env: STOP_CHECK_VERDICTS  path to the log   default $HOME/.claude/stop-check/verdicts.jsonl
-#      STOP_CHECK_NOW       epoch seconds to treat as now (tests)   default: the clock
-#
-# Written as a report script for the nightly run: allowlist it in report-scripts.conf and L2 can
-# quote its rows (see README, "Report scripts").
-
 set -u
 
 hours=36
@@ -38,7 +16,6 @@ case "$now" in ''|*[!0-9]*) echo "stop-check-counts: STOP_CHECK_NOW must be epoc
 command -v jq >/dev/null 2>&1 || { echo "stop-check-counts: jq not found" >&2; exit 1; }
 [ -r "$log" ] || { echo "stop-check-counts: no verdict log at $log" >&2; exit 1; }
 
-# jq emits tagged TSV rows; awk lays them out, so the column widths do not depend on jq's version.
 jq -nrR --argjson now "$now" --argjson hours "$hours" '
   def frac: ((capture("\\.(?<f>[0-9]+)Z$") | .f) // null) | if . == null then 0 else ("0." + .) | tonumber end;
   def ts: frac as $f | (sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) + $f;
@@ -93,8 +70,6 @@ jq -nrR --argjson now "$now" --argjson hours "$hours" '
   }
   END { }
 '
-# Both stages must have succeeded: jq alone failing, or awk failing to write the layout, is a script
-# failure, and the collector reads exit 0 as ok.
 stages=("${PIPESTATUS[@]}")
 [ "${stages[0]}" -eq 0 ] || exit "${stages[0]}"
 exit "${stages[1]}"
