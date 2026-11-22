@@ -8,11 +8,11 @@ Some sessions are enormous: 4500+ lines, about 10 MB, with base64 images and gia
 
 ## Decision
 
-`run.sh` calls the slimmer only for sessions over `AUTODREAM_SLIM_BYTES`; smaller ones are read verbatim. The default mode caps the damage in three steps:
+`run.sh` calls the slimmer for sessions over `AUTODREAM_SLIM_BYTES`, and as the fallback when the chunker fails; other sessions are read verbatim. The default mode caps the damage in three steps:
 
 1. Cut every line to a maximum width, which removes base64 blobs and huge tool outputs.
 2. Keep the head and the tail and elide the middle, which is usually repetitive churn.
-3. Hard-cap the total bytes as a last safety net.
+3. Hard-cap the total bytes as a last safety net. The cap applies before the footer is appended, so the output can run a little over it.
 
 A lossy view is acceptable because triage is fuzzy pattern-spotting, not strict JSON parsing: a representative transcript still yields useful findings.
 
