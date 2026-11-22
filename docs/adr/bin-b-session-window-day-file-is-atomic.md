@@ -11,7 +11,7 @@ Status: accepted · Date: 2026-11-21 · Code: `bin/session-window.sh` (`day-file
 - Exit 1 leaves OUT alone, so a transcript wholly inside the day is read exactly as before.
 - The slice goes to a unique temp beside OUT and is renamed, so a killed run never leaves a half slice that a later step reads as whole.
 - The temp takes the original's mtime (`touch -r`), so `transcript_mtime` in the stats sidecar still describes the session and not the moment of slicing.
-- An empty slice is exit 2. It means the file changed since enumeration, or its in-window records were all on an abandoned branch it no longer lists. That is no verdict on the session, so the caller reads the whole transcript instead of nothing.
+- An empty slice is exit 2. It means the file changed since enumeration, or no record survived the cut and there was no `autodream_meta` header to keep. That is no verdict on the session, so the caller reads the whole transcript instead of nothing.
 
 ## Consequences
 
