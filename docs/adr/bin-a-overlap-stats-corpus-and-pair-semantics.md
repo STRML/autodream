@@ -19,7 +19,7 @@ Two exclusions exist because the first versions measured nothing:
 - Gated sessions stay in. The noise gate runs after `compute_session_stats` has written every sidecar, and a gated session is real concurrent human activity that was not worth triaging, whereas an advisor pair is the same activity counted twice. The script cannot see the gate decision and does not care about it. The stat therefore includes every gated top-level session, which the Activity snapshot's session total leaves out, and PROMPT.md says so beside the figure.
 - A missing or empty `user_turn_timestamps` (pre-#14 sidecars, sessions with no timestamped user turn) becomes `[]` and cannot form a pair; `has_overlap` short-circuits on an empty array.
 - `has_overlap` is a two-pointer sweep over two sorted epoch-second arrays, O(|a| + |b|), and deliberately not a cross product, since a long session can carry hundreds of user-turn timestamps.
-- The script never fails the caller: a missing or empty findings dir yields `{"overlap_events":0,"sessions_with_overlap":0}`.
+- A missing findings directory yields `{"overlap_events":0,"sessions_with_overlap":0}` and exit 0. The window argument is not validated: a non-numeric value makes `jq --argjson` fail and the script exit 2.
 
 ## Consequences
 

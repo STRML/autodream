@@ -12,8 +12,8 @@ The character set is enumerated, not a range. Verified on the host: under bash 3
 
 ## Decision
 
-`session_hash` captures the `shasum` output without a pipe so its status is seen, takes the first 12 characters, and prints them only when all twelve are in `[0123456789abcdef]`. Otherwise it returns 1 with nothing on stdout. A caller treats a failure as "this session cannot be keyed": `oversized-gate.sh` counts it as unmeasurable and leaves it out of the ratio. `preflight.sh` makes a missing `shasum` a hard stop, because it is the one dependency whose absence produces no error at all.
+`session_hash` captures the `shasum` output without a pipe so its status is seen, takes the first 12 characters, and prints them only when the prefix is 12 characters long and holds nothing outside `0123456789abcdef` (a negated `case` pattern). Otherwise it returns 1 with nothing on stdout. A caller treats a failure as "this session cannot be keyed": `oversized-gate.sh` counts it as unmeasurable and leaves it out of the ratio. `preflight.sh` makes a missing `shasum` a hard stop, because it is the one dependency whose absence produces no error at all.
 
 ## Consequences
 
-Call `session_hash` instead of deriving a hash inline. The pattern is twelve literal bracket expressions on purpose; do not collapse it into a range or a `{12}` quantifier without re-running the bash 3.2 collation check.
+Call `session_hash` instead of deriving a hash inline. The hex digits are listed out on purpose; do not replace the list with a range such as `[0-9a-f]` without re-running the bash 3.2 collation check.
