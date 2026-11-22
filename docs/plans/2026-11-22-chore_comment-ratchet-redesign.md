@@ -70,3 +70,19 @@ Round 5 had five findings and round 6 three (phantom block regression, CI scope 
 ## Not changing
 
 Parsers for shell and Python, the exact directive list, fail-closed I/O, baseline rules, CI steps. They held through rounds 2 to 4 with no new findings.
+
+## JS and TS: a parser replaces the line rule (issue 253)
+
+The line-start rule above is gone. `bin/comment-count-js.mjs` parses the file with `typescript` (pinned in `package.json`, installed by `npm ci`) and counts the lines whose first non-blank character sits inside a comment range from the parser's trivia, or is the `{` of a JSX comment. Every row of the trades table above that is about a JS or TS file now resolves:
+
+| Row | Now |
+|---|---|
+| a line inside a template literal that starts with `//`, `/*` or `*` | data, counts nothing |
+| a `/*` inside a template that a later `*/` closes | data, counts nothing |
+| a block that opens after code, with unstarred body lines | the opening line does not count (it is trailing), every later line it spans does |
+| an unclosed `/*` or a `/*` glob | a syntax error: the count fails and names the file |
+| `/*tight*/` and `/*Copyright` with no space after the opener | a comment like any other |
+| a `*` line outside any block | code, not a comment |
+| JSX text that starts with `//` | text, not a comment |
+
+It fails closed: a missing `node`, a missing `typescript` module (`npm ci`) and a file that does not parse all exit 1 with a message, never a zero. The shell and Python counters are unchanged.

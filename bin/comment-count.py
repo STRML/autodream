@@ -21,9 +21,6 @@ SHELL_DIRECTIVE = re.compile(r"\s*shellcheck\s+(disable|source|shell)=")
 PYTHON_DIRECTIVE = re.compile(
     r"\s*(noqa(?=$|\s|:)|type:\s*ignore(?=$|\s|\[)|pragma:\s*\S)"
 )
-JS_DIRECTIVE = re.compile(
-    r"\s*(@ts-expect-error|@ts-ignore|oxlint-disable(?:-next-line|-line)?)(?=$|\s|:)"
-)
 
 
 class CountError(Exception):
@@ -171,37 +168,23 @@ def count_python(path, data):
     return len(lines)
 
 
-def jsx_unwrapped(text):
-    return text[1:] if text.startswith(("{/*", "{//")) else text
-
-
-def block_end(lines, start):
-    for j in range(start + 1, len(lines)):
-        if "*/" in lines[j]:
-            return j
-    return None
-
-
 def count_js(path, data):
-    lines = [jsx_unwrapped(raw.lstrip()) for raw in decode(path, data).splitlines()]
-    count = 0
-    i = 0
-    while i < len(lines):
-        text = lines[i]
-        if text.startswith("//"):
-            count += 0 if JS_DIRECTIVE.match(text[2:]) else 1
-        elif text.startswith("/*"):
-            closed = "*/" in text[2:]
-            opens = not closed and text[2:3] in ("", "*", " ", "\t")
-            count += 1 if closed or opens else 0
-            end = block_end(lines, i) if opens else None
-            if end is not None:
-                count += sum(1 for line in lines[i + 1:end + 1] if line)
-                i = end
-        elif text.startswith("*"):
-            count += 1
-        i += 1
-    return count
+    wanted = os.environ.get("COMMENT_COUNT_NODE", "node")
+    node = shutil.which(wanted)
+    if node is None:
+        raise CountError(
+            "node not found (%s): the ratchet parses JS and TS with TypeScript's parser and "
+            "cannot count without it. Install node 20 or later and run npm ci" % wanted
+        )
+    helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "comment-count-js.mjs")
+    run = subprocess.run([node, helper, path], input=data, capture_output=True)
+    detail = run.stderr.decode("utf-8", "replace").strip().splitlines()
+    if run.returncode != 0:
+        raise CountError("%s: %s" % (path, detail[0] if detail else "the JS counter exited %d" % run.returncode))
+    try:
+        return int(run.stdout.decode("utf-8", "replace").strip())
+    except ValueError:
+        raise CountError("%s: the JS counter printed %r, not a number" % (path, run.stdout[:40]))
 
 
 COUNTERS = {"sh": count_shell, "py": count_python, "js": count_js}
