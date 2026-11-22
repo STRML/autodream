@@ -178,6 +178,12 @@ assert_eq "$(report_last_line_excerpt "$D/ctrailrs")" "Should we clean up?" "the
 fx crsonly  '# R\n\nbody\n<!-- autodream:remote-short=studio -->\n'
 assert_eq "$(report_last_line_excerpt "$D/crsonly")" "body" "a remote-short record alone is skipped, the line before it is the last line"
 assert_eq "$(report_last_line_excerpt "$D/empty")" "" "an empty capture has an empty excerpt"
+fx ctrailcr 'Q\r\n\r\nShould we clean up?\r\nreport: /x/y.md\r\ns1\r\ns2\r\ns3\r\n<!-- autodream:remote-short=studio -->\r\n'
+assert_eq "$(report_last_line_excerpt "$D/ctrailcr")" "Should we clean up?" "a CRLF remote-short record takes no slot either"
+fx crscr    '# R\r\n\r\nbody\r\n<!-- autodream:remote-short=studio -->\r\n'
+assert_eq "$(report_last_line_excerpt "$D/crscr")" "body" "and is skipped when it is the last line"
+fx cff      "# R\n\nx$(printf '\377\200\200\200%.0s' $(seq 1 100))\n"
+assert_eq "$(LC_ALL=C report_last_line_excerpt "$D/cff" | wc -c | tr -d ' ')" "81" "an invalid lead byte opens no continuation allowance"
 assert_eq "$(LC_ALL=C report_last_line_excerpt "$D/cstray" | wc -c | tr -d ' ')" "81" "stray continuation bytes count as characters, so the excerpt stays at 80 (plus the newline)"
 
 fx cbadall  '# R\n\nbad \377\376 bytes\n## Open questions\n- one\n- two\nAUTODREAM_QUESTIONS_BEGIN\n1. **Q** a?\nAUTODREAM_QUESTIONS_END\n<!-- autodream:open-questions=2 -->\nAUTODREAM_REPORT_END\nAUTODREAM_PINS_BEGIN\n{"project":"p"}\nAUTODREAM_PINS_END\nreport: x\n'

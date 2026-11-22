@@ -58,13 +58,15 @@ report_finishes(){
 
 report_last_line(){
   LC_ALL=C awk '
-    $0 ~ /[^[:space:]]/ && $0 !~ /^<!-- autodream:remote-short=.* -->$/ { line = $0 }
+    { t = $0; sub(/\r$/, "", t) }
+    t ~ /[^[:space:]]/ && t !~ /^<!-- autodream:remote-short=.* -->$/ { line = $0 }
     END { print line }' "$1" 2>/dev/null | LC_ALL=C sed 's/[[:space:]]*$//'
 }
 
 report_tail_question(){
   LC_ALL=C awk '
-    $0 ~ /[^[:space:]]/ && $0 !~ /^<!-- autodream:remote-short=.* -->$/ { l[++n] = $0 }
+    { t = $0; sub(/\r$/, "", t) }
+    t ~ /[^[:space:]]/ && t !~ /^<!-- autodream:remote-short=.* -->$/ { l[++n] = $0 }
     END {
       for (i = n; i >= 1 && i > n - 5; i--) {
         t = l[i]
@@ -80,7 +82,11 @@ report_cut_chars(){
     for (i = 1; i <= length($0); i++) {
       c = substr($0, i, 1)
       if (c < "\200") { cont = 0; n++ }
-      else if (c >= "\300") { cont = (c >= "\360") ? 3 : (c >= "\340") ? 2 : 1; n++ }
+      else if (c >= "\365") { cont = 0; n++ }
+      else if (c >= "\360") { cont = 3; n++ }
+      else if (c >= "\340") { cont = 2; n++ }
+      else if (c >= "\302") { cont = 1; n++ }
+      else if (c >= "\300") { cont = 0; n++ }
       else if (cont > 0) { cont-- }
       else { n++ }
       if (n > max) break

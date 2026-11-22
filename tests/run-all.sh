@@ -1013,6 +1013,8 @@ test_a_bad_byte_in_the_l2_capture_does_not_hide_the_cause_or_the_report(){
   vault_run "$root"
   unset LC_ALL MOCK_MODE AUTODREAM_L2_ATTEMPTS
   assert_file "$root/dreams/$DATE.md" "a delivered report with a bad byte is staged"
+  assert_eq "$(LC_ALL=C grep -a -c ' byte$' "$root/dreams/$DATE.md")" "1" "with its body, bad byte and all"
+  assert_eq "$(LC_ALL=C grep -a -c 'autodream:open-questions=0' "$root/dreams/$DATE.md")" "1" "and its marker"
   rm -rf "$root"
 }
 
