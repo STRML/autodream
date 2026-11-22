@@ -3420,6 +3420,16 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
     # error key) rather than by a findings array alone. l1_subject names what failed in the
     # diagnostic line: the session, or a chunk of it. That line is skipped by failure-class.sh on
     # its prefix, so naming a chunk there costs the classifier nothing.
+    # A failure of the runner own setup before the engine starts (no staging root, no stage, no state
+    # directory, no sandbox) says nothing about the session. It is ledgered like an outage, so the date is
+    # deferred and the slot stays empty: the final-round stub would fill it, satisfy the missing-work check
+    # and let a report publish over sessions that were never triaged.
+    l1_infra_fail() {
+      netdown=staging
+      printf "%s %s %s\n" "$hash" "${AUTODREAM_CURRENT_ROUND:-1}" staging >> "$FINDINGS_DIR/l1-netdown.txt"
+      printf "the runner could not set this worker up; no stub, the session is left for a later run\n" >> "$3"
+      return 1
+    }
     l1_attempt() {
       # The answer is written in a staging directory of its own, one per answer file and reused by the
       # retries of this run, and copied to $2 once the engine has exited (#169). The engine can then be
@@ -3427,13 +3437,13 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       # left at that path is this attempt answer.
       if [ -z "${L1_STAGE_ROOT:-}" ]; then
         printf "no staging root is set, so there is nowhere to stage the answer for %s\n" "${l1_subject:-$session}" >> "$3"
-        return 1
+        l1_infra_fail "$@"; return 1
       fi
       l1ans_name=$(basename "$2")
       l1stage="$L1_STAGE_ROOT/$hash.$l1ans_name"
-      if ! { [ ! -L "$l1stage" ] && ( umask 077; mkdir -p "$l1stage/tmp" ) 2>/dev/null && l1stage=$(cd "$l1stage" && pwd -P); }; then
+      if ! { [ ! -L "$l1stage" ] && ( umask 077; mkdir -p "$l1stage/tmp" ) 2>/dev/null && [ ! -L "$l1stage/tmp" ] && l1stage=$(cd "$l1stage" && pwd -P); }; then
         printf "could not make the staging directory %s for %s\n" "$l1stage" "${l1_subject:-$session}" >> "$3"
-        return 1
+        l1_infra_fail "$@"; return 1
       fi
       l1ans="$l1stage/$l1ans_name"
       rm -f "$l1ans" "$2"
@@ -3444,18 +3454,24 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
           # An engine that keeps state it must write (omp) gets a throwaway one inside the stage: the
           # adapter seeds it and names the environment that points the engine there. Exit 2 is no such
           # verb (claude); any other failure is an attempt that cannot start safely.
-          l1sout=$("$ADAPTERS_DIR/$engine/adapter.sh" l1-stage-env "$l1stage" 2>"$l1stage/stage-env.err"); l1src=$?
+          # Its stderr goes to a file in the staging root, beside the stages and not in one: this runs
+          # outside the sandbox, and a worker that left a symlink at a path inside its own stage on an
+          # earlier attempt would have this redirection truncate whatever the link points at.
+          l1serr=$(mktemp "$L1_STAGE_ROOT/senv.XXXXXX") || { printf "could not make a temp file for the state setup of %s\n" "${l1_subject:-$session}" >> "$3"; l1_infra_fail "$@"; return 1; }
+          l1sout=$("$ADAPTERS_DIR/$engine/adapter.sh" l1-stage-env "$l1stage" 2>"$l1serr"); l1src=$?
           if [ "$l1src" -ne 0 ] && [ "$l1src" -ne 2 ]; then
-            printf "the state directory for %s could not be prepared in the stage: %s\n" "${l1_subject:-$session}" "$(head -c 200 "$l1stage/stage-env.err" | tr "\n" " ")" >> "$3"
-            return 1
+            printf "the state directory for %s could not be prepared in the stage: %s\n" "${l1_subject:-$session}" "$(head -c 200 "$l1serr" | tr "\n" " ")" >> "$3"
+            rm -f "$l1serr"
+            l1_infra_fail "$@"; return 1
           fi
+          rm -f "$l1serr"
           if [ "$l1src" -eq 0 ]; then
             while IFS= read -r l1e; do [ -n "$l1e" ] && l1senv+=("$l1e"); done <<< "$l1sout"
           fi
           while IFS= read -r -d "" l1wa; do l1pre+=("$l1wa"); done < <(bash "$L1_CONFINER" engine-prefix "$ADAPTERS_DIR/$engine/adapter.sh" "$l1stage" 2>>"$3")
           if [ "${#l1pre[@]}" -eq 0 ]; then
             printf "the sandbox for %s could not be built, and a confined run does not fall back to an unconfined worker\n" "${l1_subject:-$session}" >> "$3"
-            return 1
+            l1_infra_fail "$@"; return 1
           fi
           ;;
       esac
@@ -3687,7 +3703,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
           else
             cfail=1
             [ -n "$cfirst" ] || cfirst="$cerr"
-            if [ "$netdown" = "true" ] || [ "$netdown" = "provider" ]; then break; fi
+            if [ "$netdown" = "true" ] || [ "$netdown" = "provider" ] || [ "$netdown" = "staging" ]; then break; fi
           fi
           l1_subject=""
         fi
@@ -3758,8 +3774,8 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       # next run skips the session because its slot is filled. Leaving the slot empty is what
       # makes the retry work; the run defers instead, so the silent-failure concern is
       # answered by the deferral, not the stub.
-      if [ "$netdown" = "true" ] || [ "$netdown" = "provider" ]; then
-        echo "FAIL ($([ "$netdown" = "true" ] && echo "network down" || echo "provider refusal"); no stub, left for a later run): $session ($hash) [$(($(date +%s) - t0))s] — see $errlog" >&2
+      if [ "$netdown" = "true" ] || [ "$netdown" = "provider" ] || [ "$netdown" = "staging" ]; then
+        echo "FAIL ($(case "$netdown" in true) echo "network down" ;; staging) echo "runner setup failed" ;; *) echo "provider refusal" ;; esac); no stub, left for a later run): $session ($hash) [$(($(date +%s) - t0))s] — see $errlog" >&2
       elif [ "${AUTODREAM_CURRENT_ROUND:-1}" -ge "${AUTODREAM_L1_ROUNDS:-5}" ]; then
         sz=$(wc -c < "$session" 2>/dev/null | tr -d " ")
         lines=$(wc -l < "$session" 2>/dev/null | tr -d " ")
@@ -4584,7 +4600,7 @@ EOF
   # deferred, however bad round 1 was.
   if [ "$MISSING" -gt 0 ] && [ "$LAST_ROUND_RUN" -gt 0 ] \
      && [ -s "$FINDINGS_DIR/l1-netdown.txt" ] \
-     && awk -v r="$LAST_ROUND_RUN" '$2 == r && ($3 == "true" || $3 == "provider") { found = 1 } END { exit !found }' \
+     && awk -v r="$LAST_ROUND_RUN" '$2 == r && ($3 == "true" || $3 == "provider" || $3 == "staging") { found = 1 } END { exit !found }' \
           "$FINDINGS_DIR/l1-netdown.txt"; then
     NET_DEFERRED=yes
     log "L1 finished with $MISSING session(s) missing and round $LAST_ROUND_RUN failing with no route or a provider refusal — deferring $TARGET_DATE for a later run"

@@ -119,8 +119,10 @@ while IFS= read -r l; do [ -n "$l" ] && envs+=("$l"); done < <(bash "$ADAPTER" l
 # An engine that keeps state it must write (omp) gets a throwaway one inside the stage: the same adapter verb
 # run.sh calls per worker seeds it and names the environment that points the engine there. Claude has no such
 # verb (exit 2) and gets nothing.
+# --measure is the unconfined call, which runs on the real state, so it seeds nothing and cannot be blocked by it.
 senv=()
-sout=$(bash "$ADAPTER" l1-stage-env "$stage" 2>"$W/stage-env.err"); src=$?
+src=2
+[ "$measure" = 1 ] || { sout=$(bash "$ADAPTER" l1-stage-env "$stage" 2>"$W/stage-env.err"); src=$?; }
 if [ "$src" -eq 0 ]; then
   while IFS= read -r l; do [ -n "$l" ] && senv+=("$l"); done <<< "$sout"
   echo "# l1-stage-env: ${senv[*]} (the engine's state is under $stage, seeded from $HOME)"

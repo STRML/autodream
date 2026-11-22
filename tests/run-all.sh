@@ -3232,7 +3232,9 @@ test_l1_staging_failure_is_a_worker_failure_with_evidence(){
   AUTODREAM_L1_ROUNDS=1 run_dream "$root"
   chmod 700 "$root/autodream/staging" 2>/dev/null
   assert_grep "$(fdir "$root")/$h.json.err" 'could not make the staging directory' "the .err says the staging directory could not be made"
-  assert_grep "$(fdir "$root")/$h.json" 'worker exited without findings JSON after 1 rounds' "and the session is stubbed like any failed worker"
+  assert_no_file "$(fdir "$root")/$h.json" "and the session is not stubbed: a stub would fill its slot and let a report publish over work never done"
+  assert_no_file "$root/dreams/$DATE.md" "so the date is deferred, not reported"
+  assert_grep "$(fdir "$root")/l1-netdown.txt" " staging\$" "and the ledger says the runner could not set the worker up"
   rm -rf "$root"
 }
 
@@ -3293,6 +3295,25 @@ test_l1_confine_setup_stops_before_l1_when_an_engine_prefix_cannot_be_built(){
     assert_grep "$root/run.out" 'FATAL:' "[$extra] and the log says so"
     rm -rf "$root"
   done
+}
+
+test_l1_worker_setup_failure_defers_the_date_and_follows_no_planted_link(){
+  echo "# L1 confinement: a state setup that fails every attempt defers the date, and a symlink the worker left is never followed"
+  local root; root=$(setup_env); mk_session "$root" s1
+  local h; h=$(hash_of "$root/projects/proj-a/s1.jsonl")
+  fake_sandbox "$root"
+  cp -R "$REPO/adapters" "$root/adapters"; ln -s "$REPO/bin" "$root/bin"
+  printf 'precious\n' > "$root/victim"
+  # A claude adapter with a state verb that plants a symlink at the old stderr path inside the stage, then fails.
+  sed 's|^  l2-argv) |  l1-stage-env) ln -sf "$VICTIM" "$1/stage-env.err" 2>/dev/null; echo "no state dir" >\&2; exit 1 ;;\n\n  l2-argv) |' \
+    "$REPO/adapters/claude/adapter.sh" > "$root/adapters/claude/adapter.sh"
+  VICTIM="$root/victim" PATH="$root/shim-sb:$PATH" ADAPTERS_ROOT="$root/adapters" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec run_dream "$root"
+  assert_eq "$(cat "$root/victim")" "precious" "the file the planted link pointed at is untouched across the retry"
+  assert_no_file "$(fdir "$root")/$h.json" "the session is not stubbed"
+  assert_no_file "$root/dreams/$DATE.md" "and no report is written over it"
+  assert_grep "$(fdir "$root")/l1-netdown.txt" " staging\$" "the ledger names the failure"
+  [ "$(cat "$root/run.exit")" != 0 ] && ok "the run exits non-zero, so the date is retried" || no "the run exited 0"
+  rm -rf "$root"
 }
 
 test_l1_confine_setup_stops_when_a_protected_directory_cannot_be_listed(){
@@ -4476,6 +4497,7 @@ _run test_l1_confine_names_the_engine_without_a_write_profile
 _run test_l1_confine_setup_stops_before_l1_when_an_engine_prefix_cannot_be_built
 _run test_l1_answer_is_moved_aside_before_it_is_tested
 _run test_l1_confine_setup_stops_when_a_protected_directory_cannot_be_listed
+_run test_l1_worker_setup_failure_defers_the_date_and_follows_no_planted_link
 _run test_run_lock_is_reclaimed_from_a_dead_holder
 _run test_killed_run_temps_are_swept_at_the_start_of_the_next_run
 _run test_self_audit_stats

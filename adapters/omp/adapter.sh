@@ -178,27 +178,47 @@ case "$cmd" in
     # write), and ~/.omp/agent holds the settings, extensions, rules and skills that a later interactive omp
     # loads, so it cannot be allowed either. The worker gets a throwaway HOME inside its stage instead:
     # omp resolves its whole state tree (agent dir, logs, run, cache) from HOME, so every write lands in
-    # the stage, which the runner copies one file out of. Measured 2026-11-21, claude and omp on a real
-    # host: tests/l1-confine-real.sh --engine omp, ALL PASS, and no write reached ~/.omp except the -shm of
-    # mnemopi banks (a live server mapping them, not the worker).
-    # Seeded from the files the worker only reads: settings, model catalogue, the context files omp loads into
-    # its prompt, and clones of the two databases (cp -c is a copy-on-write clone on APFS, so 30 MB costs
-    # nothing). Library is linked back so a keychain lookup for an api key still resolves, and so are the
-    # native binaries, read-only: a write through either link is refused by the sandbox like any other.
-    [ -n "${1:-}" ] && [ -d "$1" ] || { printf 'omp l1-stage-env: needs the stage directory\n' >&2; exit 1; }
-    ohome="$1/omp-home"; oreal="${HOME:?}/.omp"
-    rm -rf "$ohome"
-    mkdir -p "$ohome/.omp/agent" || exit 1
-    for f in config.yml models.yml mcp.json AGENTS.md APPEND_SYSTEM.md RULES.md kimi-device-id \
-             agent.db agent.db-wal agent.db-shm models.db models.db-wal models.db-shm; do
-      [ -f "$oreal/agent/$f" ] || continue
-      cp -c "$oreal/agent/$f" "$ohome/.omp/agent/$f" 2>/dev/null || cp "$oreal/agent/$f" "$ohome/.omp/agent/$f" || exit 1
-    done
-    [ -e "$HOME/Library" ] && ln -s "$HOME/Library" "$ohome/Library"
-    [ -e "$oreal/natives" ] && ln -s "$oreal/natives" "$ohome/.omp/natives"
+    # the stage. Measured 2026-11-21 on a real host: tests/l1-confine-real.sh --engine omp, ALL PASS, and no
+    # write reached ~/.omp except the -shm of mnemopi banks (a live server mapping them, not the worker).
+    # Seeded from what the worker only reads: settings (config and models, .yml or .yaml), the context files
+    # omp loads into its prompt, and one consistent SQLite snapshot of each database (seed-db.py, the backup
+    # API: a live database is not safe to copy file by file). The OAuth rows are left out of the copy, so a
+    # worker cannot rotate a refresh token that dies with its stage. Library is linked back so a keychain
+    # lookup for an api key still resolves, and so are the native binaries, read-only: a write through
+    # either link is refused by the sandbox like any other.
+    # The overrides omp honors for its directories are read here and written back explicitly, so an inherited
+    # one cannot point the worker at the real tree: PI_CODING_AGENT_DIR is the source and is replaced,
+    # PI_CONFIG_DIR names the directory under HOME. A named profile, or an XDG redirect on Linux, moves the
+    # state somewhere this seeding does not model, so those refuse instead of running on the wrong files.
+    err() { printf 'omp l1-stage-env: %s\n' "$1" >&2; exit 1; }
+    [ -n "${1:-}" ] && [ -d "$1" ] || err "needs the stage directory"
+    [ -z "${OMP_PROFILE:-}${PI_PROFILE:-}" ] || err "a named omp profile (OMP_PROFILE or PI_PROFILE) is not supported under confinement"
+    if [ "$(uname -s)" = Linux ] && [ -n "${XDG_DATA_HOME:-}${XDG_STATE_HOME:-}${XDG_CACHE_HOME:-}" ]; then
+      err "XDG_DATA_HOME, XDG_STATE_HOME or XDG_CACHE_HOME is set: omp would keep its state outside HOME"
+    fi
+    cname="${PI_CONFIG_DIR:-.omp}"
+    case "$cname" in ""|/*|*..*) err "PI_CONFIG_DIR must be a plain directory name under HOME: $cname" ;; esac
+    osrc="${PI_CODING_AGENT_DIR:-${HOME:?}/$cname/agent}"
+    ohome="$1/omp-home"; odst="$ohome/$cname/agent"
     case "$ohome" in *"
-"*) printf 'omp l1-stage-env: a stage path that holds a newline is refused\n' >&2; exit 1 ;; esac
-    printf 'HOME=%s\n' "$ohome"
+"*) err "a stage path that holds a newline is refused" ;; esac
+    rm -rf "$ohome"
+    mkdir -p "$odst" || err "could not make $odst"
+    if [ -e "$osrc" ]; then
+      { [ -d "$osrc" ] && [ -r "$osrc" ] && [ -x "$osrc" ]; } || err "cannot read the agent directory $osrc"
+      command -v python3 >/dev/null 2>&1 || err "python3 is needed to snapshot omp's databases"
+      for f in config.yml config.yaml models.yml models.yaml mcp.json AGENTS.md APPEND_SYSTEM.md RULES.md kimi-device-id; do
+        [ -e "$osrc/$f" ] || continue
+        cp "$osrc/$f" "$odst/$f" || err "could not copy $osrc/$f"
+      done
+      for f in agent.db models.db; do
+        [ -e "$osrc/$f" ] || continue
+        python3 "$ADIR/seed-db.py" "$osrc/$f" "$odst/$f" $([ "$f" = agent.db ] && printf '%s' --drop-oauth) || err "could not snapshot $osrc/$f"
+      done
+    fi
+    [ -e "$HOME/Library" ] && ln -s "$HOME/Library" "$ohome/Library"
+    [ -e "$HOME/$cname/natives" ] && ln -s "$HOME/$cname/natives" "$ohome/$cname/natives"
+    printf 'HOME=%s\nPI_CONFIG_DIR=%s\nPI_CODING_AGENT_DIR=%s\n' "$ohome" "$cname" "$odst"
     ;;
 
   l2-argv) # $1=model -> NUL-delimited argv for the L2 aggregator; the prompt arrives on stdin

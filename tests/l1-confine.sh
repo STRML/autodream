@@ -204,22 +204,74 @@ assert_eq "$rc" "2" "an engine with no adapter is refused"
 echo "# omp l1-stage-env: a throwaway state dir inside the stage, seeded from what the worker only reads"
 OA="$REPO/adapters/omp/adapter.sh"
 RH="$D/omphome"; mkdir -p "$RH/.omp/agent" "$RH/.omp/natives" "$RH/Library" "$D/ostage"
-printf 'k: v\n' > "$RH/.omp/agent/config.yml"; printf 'm: 1\n' > "$RH/.omp/agent/models.yml"; printf 'db' > "$RH/.omp/agent/agent.db"
+printf 'k: v\n' > "$RH/.omp/agent/config.yml"; printf 'y: 1\n' > "$RH/.omp/agent/config.yaml"; printf 'm: 1\n' > "$RH/.omp/agent/models.yml"
 printf 'secret' > "$RH/.omp/agent/sessions-not-seeded"; printf 'x' > "$RH/.omp/agent/extensions-not-seeded"
+# agent.db is a live WAL database with an api key, an OAuth credential and one committed row that sits only in
+# the log; the connection stays open while the verb runs, as a live omp would.
+python3 - "$RH/.omp/agent" <<'PY' &
+import sqlite3, sys, time
+d = sys.argv[1]
+c = sqlite3.connect(d + "/agent.db"); c.execute("PRAGMA journal_mode=WAL"); c.execute("PRAGMA wal_autocheckpoint=0")
+c.execute("CREATE TABLE auth_credentials (id INTEGER PRIMARY KEY, provider TEXT, credential_type TEXT, data TEXT)")
+c.execute("INSERT INTO auth_credentials (provider, credential_type, data) VALUES ('neuralwatt','api_key','k1')")
+c.execute("INSERT INTO auth_credentials (provider, credential_type, data) VALUES ('openai-codex','oauth','refresh-1')")
+c.commit()
+c.execute("INSERT INTO auth_credentials (provider, credential_type, data) VALUES ('deepseek','api_key','only-in-the-log')"); c.commit()
+m = sqlite3.connect(d + "/models.db"); m.execute("CREATE TABLE m (x)"); m.execute("INSERT INTO m VALUES (1)"); m.commit(); m.close()
+open(d + "/ready", "w").close()
+time.sleep(30)
+PY
+holder=$!
+for _ in $(seq 1 50); do [ -e "$RH/.omp/agent/ready" ] && break; sleep 0.1; done
 out=$(env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" 2>"$D/err"); rc=$?
 assert_eq "$rc" "0" "the verb prepares the stage"
-assert_eq "$out" "HOME=$D/ostage/omp-home" "and names the throwaway HOME"
-assert_eq "$(cat "$D/ostage/omp-home/.omp/agent/config.yml" 2>/dev/null)" "k: v" "settings are seeded"
-assert_eq "$(cat "$D/ostage/omp-home/.omp/agent/agent.db" 2>/dev/null)" "db" "so is a database"
-[ ! -e "$D/ostage/omp-home/.omp/agent/sessions-not-seeded" ] && [ ! -e "$D/ostage/omp-home/.omp/agent/extensions-not-seeded" ] && ok "and nothing else of the agent dir is" || no "the agent dir was copied wholesale"
+assert_eq "$out" "HOME=$D/ostage/omp-home
+PI_CONFIG_DIR=.omp
+PI_CODING_AGENT_DIR=$D/ostage/omp-home/.omp/agent" "and names the throwaway HOME and pins both directory overrides to it"
+SA="$D/ostage/omp-home/.omp/agent"
+assert_eq "$(cat "$SA/config.yml" 2>/dev/null)" "k: v" "settings are seeded"
+assert_eq "$(cat "$SA/config.yaml" 2>/dev/null)" "y: 1" "and so is the .yaml spelling omp also reads"
+[ ! -e "$SA/sessions-not-seeded" ] && [ ! -e "$SA/extensions-not-seeded" ] && ok "and nothing else of the agent dir is" || no "the agent dir was copied wholesale"
+assert_eq "$(python3 -c "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute('select group_concat(provider) from auth_credentials order by id').fetchone()[0])" "$SA/agent.db")" "neuralwatt,deepseek" "the database copy is one consistent snapshot, the committed row that only the log holds included"
+assert_eq "$(python3 -c "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute('select count(*) from m').fetchone()[0])" "$SA/models.db")" "1" "so is the model catalogue"
+assert_eq "$(python3 -c "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute(\"select count(*) from auth_credentials where credential_type='oauth'\").fetchone()[0])" "$SA/agent.db")" "0" "the OAuth credential is left out of the worker's copy: a refresh there would rotate a token that dies with the stage"
+assert_eq "$(python3 -c "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute(\"select count(*) from auth_credentials where credential_type='oauth'\").fetchone()[0])" "$RH/.omp/agent/agent.db")" "1" "and the real database still holds it"
+kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
 [ -L "$D/ostage/omp-home/Library" ] && [ -L "$D/ostage/omp-home/.omp/natives" ] && ok "Library and the native binaries are linked back" || no "Library or natives link missing"
-printf 'stale' > "$D/ostage/omp-home/.omp/agent/left-by-the-last-attempt"
+printf 'stale' > "$SA/left-by-the-last-attempt"
 env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" >/dev/null 2>&1
-[ ! -e "$D/ostage/omp-home/.omp/agent/left-by-the-last-attempt" ] && ok "a retry reseeds from a clean tree" || no "a retry kept the last attempt's files"
+[ ! -e "$SA/left-by-the-last-attempt" ] && ok "a retry reseeds from a clean tree" || no "a retry kept the last attempt's files"
 env HOME="$RH" bash "$OA" l1-stage-env "$D/no-such-stage" >/dev/null 2>&1; rc=$?
 assert_eq "$rc" "1" "a stage that does not exist is a failure, not the no-such-verb exit"
 env HOME="$RH" bash "$REPO/adapters/claude/adapter.sh" l1-stage-env "$D/ostage" >/dev/null 2>&1; rc=$?
 assert_eq "$rc" "2" "claude has no such verb (exit 2), so its workers keep their own state"
+
+echo "# omp l1-stage-env: the overrides omp honors, and what it cannot model"
+mkdir -p "$D/otherhome/agentdir"; printf 'other: 1\n' > "$D/otherhome/agentdir/config.yml"
+out=$(env HOME="$RH" PI_CODING_AGENT_DIR="$D/otherhome/agentdir" bash "$OA" l1-stage-env "$D/ostage" 2>/dev/null)
+assert_eq "$(cat "$D/ostage/omp-home/.omp/agent/config.yml" 2>/dev/null)" "other: 1" "an inherited PI_CODING_AGENT_DIR is the source that is seeded"
+has "$out" "PI_CODING_AGENT_DIR=$D/ostage/omp-home/.omp/agent" "and is replaced by the stage's, so the worker cannot be pointed at the real tree"
+mkdir -p "$RH/.omp-alt/agent"; printf 'alt: 1\n' > "$RH/.omp-alt/agent/config.yml"
+out=$(env HOME="$RH" PI_CONFIG_DIR=.omp-alt bash "$OA" l1-stage-env "$D/ostage" 2>/dev/null)
+assert_eq "$(cat "$D/ostage/omp-home/.omp-alt/agent/config.yml" 2>/dev/null)" "alt: 1" "a renamed config directory is seeded under the same name"
+has "$out" "PI_CONFIG_DIR=.omp-alt" "and kept"
+env HOME="$RH" PI_CONFIG_DIR=/etc bash "$OA" l1-stage-env "$D/ostage" >/dev/null 2>"$D/err"; rc=$?
+assert_eq "$rc" "1" "a PI_CONFIG_DIR that is not a plain name under HOME is refused"
+env HOME="$RH" OMP_PROFILE=work bash "$OA" l1-stage-env "$D/ostage" >/dev/null 2>"$D/err"; rc=$?
+assert_eq "$rc" "1" "a named profile is refused: its state is somewhere this seeding does not model"
+has "$(cat "$D/err")" "profile" "and the reason says so"
+mkdir -p "$D/lockedhome/.omp/agent"; chmod 000 "$D/lockedhome/.omp/agent"
+if [ ! -r "$D/lockedhome/.omp/agent" ]; then
+  env HOME="$D/lockedhome" bash "$OA" l1-stage-env "$D/ostage" >/dev/null 2>"$D/err"; rc=$?
+  assert_eq "$rc" "1" "an agent directory that exists but cannot be read is a failure, not an empty one"
+  has "$(cat "$D/err")" "cannot read" "with the reason"
+else
+  printf '  skip - this user can read a mode 000 directory\n'
+fi
+chmod 700 "$D/lockedhome/.omp/agent"
+mkdir -p "$D/freshhome"
+out=$(env HOME="$D/freshhome" bash "$OA" l1-stage-env "$D/ostage" 2>/dev/null); rc=$?
+assert_eq "$rc" "0" "a host with no omp state yet seeds nothing and succeeds"
 
 echo "# real confinement (only where a sandbox works here)"
 real=$(env TMPDIR="$D" bash "$H" probe)
