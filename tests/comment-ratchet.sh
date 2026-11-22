@@ -269,6 +269,12 @@ counter_fixtures() {
   printf '%s\n' 'const s = "\xff";' > "$d/bad-utf8.ts"
   printf 'const s = "\xff";\n' > "$d/bad-utf8.ts"
   eq "$(fail_naming "$d/bad-utf8.ts")" "1 1" "a file that is not valid UTF-8 fails and names the file"
+  printf '%s\n' 'const a: number = 1;' > "$d/typed.jsx"
+  eq "$(fail_naming "$d/typed.jsx")" "1 1" "a .jsx file with TypeScript syntax fails like a .js one"
+  printf '%s\n' '<!-- legacy' 'let x = 1;' '--> also legacy' > "$d/legacy.js"
+  eq "$(num "$d/legacy.js")" 2 "a script with HTML-like comments is read and the comment lines count"
+  printf '%s\n' 'function f() {' '  { /* trailing */ let x = 1; }' '}' > "$d/block.js"
+  eq "$(num "$d/block.js")" 0 "a comment after code inside a plain block brace is not a JSX comment line"
   COMMENT_COUNT_NODE="$d/no-such-node" bash "$COUNT" "$d/types.d.ts" > "$d/out" 2> "$d/err"
   rc=$?
   eq "$rc $(grep -c node "$d/err") $(wc -c < "$d/out" | tr -d ' ')" "1 1 0" "a missing node fails with a message and counts nothing"
@@ -469,7 +475,7 @@ failing_tool_fixtures() {
 
 lint_coverage_fixture() {
   local dirs dir f covered missing=""
-  dirs=$(node -e 'const s = require("./package.json").scripts.lint.split(/\s+/); process.stdout.write(s.filter((w) => !w.startsWith("-") && w !== "oxlint" && w !== "npm").join("\n"))' 2>/dev/null) || { bad "read the lint script from package.json"; return; }
+  dirs=$(node -e 'const s = require(process.argv[1]).scripts.lint.split(/\s+/); process.stdout.write(s.filter((w) => !w.startsWith("-") && w !== "oxlint" && w !== "npm").join("\n"))' "$REPO/package.json" 2>/dev/null) || { bad "read the lint script from package.json"; return; }
   while IFS= read -r f; do
     case "$f" in node_modules/*) continue ;; esac
     covered=0
