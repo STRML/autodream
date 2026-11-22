@@ -1,17 +1,4 @@
 #!/bin/bash
-# Tests for bin/x-bookmarks.sh — the fetch, the read state, and every way it degrades.
-#
-# No network. `curl` is shimmed by a fake earlier on PATH (same trick tests/review-skip.sh
-# uses for `claude`), and the queryId cache is pre-seeded so the bundle-scraping walk is
-# skipped — that walk is against a live third party and cannot be meaningfully faked.
-#
-# What is actually worth pinning here is everything downstream of the HTTP call, because
-# that is where the two bugs found during development lived: emit ordering came out
-# oldest-first, and mark-read silently no-opped on every line. Both were invisible to a
-# smoke test and both would have quietly wasted the feature.
-#
-# Usage:  tests/x-bookmarks.sh
-# Exit:   0 if every assertion passes, 1 otherwise.
 
 set -u
 
@@ -29,10 +16,6 @@ assert_grep(){     grep -q "$2" "$1" 2>/dev/null && ok "$3" || no "$3 (no /$2/ i
 assert_nogrep(){   grep -q "$2" "$1" 2>/dev/null && no "$3 (/$2/ unexpectedly in $1)" || ok "$3"; }
 assert_eq(){       [ "$1" = "$2" ] && ok "$3" || no "$3 (got [$1] want [$2])"; }
 
-# A two-bookmark page in the real response shape: bookmark_timeline_v2 -> instructions ->
-# entries -> content.itemContent.tweet_results.result, author under core.user_results.
-# The ids are deliberately NOT in ascending file order, so an emit that trusts file
-# position instead of sorting by id fails this fixture.
 fixture_page(){ cat <<'JSON'
 {"data":{"bookmark_timeline_v2":{"timeline":{"instructions":[{"type":"TimelineAddEntries","entries":[
 {"entryId":"tweet-100","content":{"itemContent":{"tweet_results":{"result":{
@@ -48,8 +31,6 @@ fixture_page(){ cat <<'JSON'
 JSON
 }
 
-# Fake curl. Honours -o <file> and -w '%{http_code}' the way the script uses them:
-# writes MOCK_BODY (or the fixture) to the -o path and prints MOCK_CODE.
 make_curl_shim(){ # $1=bindir
   mkdir -p "$1"
   cat > "$1/curl" <<'SH'
@@ -64,8 +45,6 @@ printf '%s' "${MOCK_CODE:-200}"
 exit 0
 SH
   chmod +x "$1/curl"
-  # Fake sleep: the script paces its pages with a real `sleep 2`, which made every collect in this
-  # suite wait. Record the request instead (MOCK_SLEEP_LOG) so a test can still say what was asked.
   cat > "$1/sleep" <<'SH'
 #!/bin/bash
 [ -n "${MOCK_SLEEP_LOG:-}" ] && printf '%s\n' "$*" >> "$MOCK_SLEEP_LOG"
@@ -74,7 +53,6 @@ SH
   chmod +x "$1/sleep"
 }
 
-# Fresh sandbox with credentials and a pre-seeded queryId so detection is skipped.
 setup(){
   local root; root=$(mktemp -d "${TMPDIR:-/tmp}/xbmt.XXXXXX")
   mkdir -p "$root/state" "$root/findings" "$root/bin"
@@ -86,17 +64,12 @@ setup(){
 }
 run_bm(){ # $1=root, rest = args ; MOCK_CODE/MOCK_BODY/X_CREDS_FILE inherited
   local root="$1"; shift
-  # AUTODREAM_DIR and AUTODREAM_CONFIG are pinned into the sandbox because the script
-  # sources its config: without this the suite would read the developer's real
-  # ~/.claude/autodream/config and inherit whatever they set there.
   PATH="$root/bin:$PATH" \
   AUTODREAM_DIR="$root" AUTODREAM_CONFIG="$root/no-such-config" \
   X_CREDS_FILE="${X_CREDS_FILE:-$root/creds}" X_STATE_DIR="$root/state" \
   X_MAX_PAGES="${X_MAX_PAGES:-1}" MOCK_BODY="${MOCK_BODY:-$root/page.json}" MOCK_SLEEP_LOG="${MOCK_SLEEP_LOG:-}" \
   bash "$BIN" "$@" > "$root/out.txt" 2>&1
 }
-
-# ---------------------------------------------------------------------------
 
 test_pages_are_paced_and_the_last_one_is_not_waited_on(){
   echo "# pacing: two seconds between pages, and no wait after the last page the run will fetch"
@@ -146,8 +119,6 @@ test_stale_queryid_clears_cache(){
 test_queryid_source_is_recorded(){
   echo "# every collect records where the queryId came from, including when it never looked"
   local root; root=$(setup)
-  # The seeded cache means the bundle walk is not exercised — which is the state #38
-  # exists to make visible, since the fetch works either way.
   run_bm "$root" collect "$root/findings"
   assert_grep "$root/findings/x-bookmarks-queryid.txt" "^cache$" "a reused id is recorded as cache, not as a working walk"
   rm -f "$root/state/query-id"
@@ -253,14 +224,9 @@ test_text_is_capped(){
   rm -rf "$root"
 }
 
-# ---- Regressions from the PR #37 review -------------------------------------------
-
 test_duplicate_ids_within_one_fetch(){
   echo "# regression: the same id twice in one fetch produces one state row, not two"
   local root; root=$(setup)
-  # X's cursor pagination genuinely returns a post twice when the timeline shifts between
-  # requests. Dedupe used to consult only the pre-existing state file, so neither copy
-  # looked known and both were written.
   jq -c '.data.bookmark_timeline_v2.timeline.instructions[0].entries =
           [ .data.bookmark_timeline_v2.timeline.instructions[0].entries[0],
             .data.bookmark_timeline_v2.timeline.instructions[0].entries[0],
@@ -275,11 +241,8 @@ test_duplicate_ids_within_one_fetch(){
 test_auth_failure_reason_is_not_empty(){
   echo "# regression: the credential-expiry reason survives the subshell that produced it"
   local root; root=$(setup)
-  # fail() used to set a shell variable from inside nested command substitutions, so the
-  # reason died with the subshell and the report said a fetch failed for no stated reason.
   MOCK_CODE=401 run_bm "$root" collect "$root/findings"
   local first; first=$(head -1 "$root/findings/x-bookmarks.md")
-  # Everything after the em dash must be non-empty.
   case "$first" in
     *"— "?*) ok "the failure header carries an actual reason" ;;
     *) no "the failure header has an empty reason (got: $first)" ;;
@@ -291,9 +254,6 @@ test_auth_failure_reason_is_not_empty(){
 test_no_jq_still_writes_the_file(){
   echo "# regression: a missing jq reports itself instead of silently writing nothing"
   local root; root=$(setup)
-  # PATH holding only what the script needs, minus jq. A bare exit here used to skip the
-  # dispatch entirely, so no output file was written, run.sh's `|| log` never fired
-  # (status 0), and PROMPT.md read the absent file as "feature not enabled".
   mkdir -p "$root/nojq"
   local b
   for b in date mktemp rm cat mkdir grep sed sort head tail wc stat sleep find basename cut tr awk; do
@@ -312,8 +272,6 @@ test_no_jq_still_writes_the_file(){
   rm -rf "$root"
 }
 
-# chmod 555 stops writes for everyone but root. Returns 1 (and the test skips) when the
-# directory still takes a write, so the test cannot fail for the wrong reason.
 deny_writes(){
   chmod 555 "$1"
   ( : > "$1/.probe" ) 2>/dev/null || return 0
@@ -323,8 +281,6 @@ deny_writes(){
 test_state_write_failure_is_not_no_unread(){
   echo "# regression: a seen.jsonl that cannot be written is reported, not read as an empty inbox (#108)"
   local root; root=$(setup)
-  # No prior state and a state dir that cannot take the staged file: the fetch succeeds,
-  # merge_state fails, and the report used to be told there were no unread bookmarks.
   deny_writes "$root/state" || { ok "skipped: this user can write to a read-only directory"; rm -rf "$root"; return; }
   run_bm "$root" collect "$root/findings"
   local rc=$?
@@ -361,8 +317,6 @@ test_state_write_failure_keeps_earlier_unread(){
   done
 }
 
-# A curl shim that serves the bookmarks page, logs every URL it is asked for, and returns
-# a Bookmarks chunk only for MOCK_CHUNK_URL. Every other URL is a miss (a 404 body).
 make_walk_shim(){ # $1=bindir
   mkdir -p "$1"
   cat > "$1/curl" <<'SH'
@@ -394,8 +348,6 @@ test_walk_reaches_every_suffix_variant(){
     for i in $(seq 1 30); do printf '"https://abs.twimg.com/responsive-web/client-web/main.page%s.js"\n' "$i"; done
     printf '{7:"bundle.Bookmarks"}{7:"%s"}\n' "$hash"
   } > "$root/page.html"
-  # The last variant the walk enumerates: with the old global cap of 24 requests it sat
-  # behind 30 page URLs and was never requested.
   MOCK_HTML="$root/page.html" MOCK_LOG="$root/requests.log" \
   MOCK_CHUNK_URL="https://abs.twimg.com/responsive-web/client-web/bundle.Bookmarks.${hash}9.js" \
     run_bm "$root" collect "$root/findings"
@@ -403,15 +355,6 @@ test_walk_reaches_every_suffix_variant(){
   assert_eq "$(cat "$root/findings/x-bookmarks-queryid.txt")" "fresh" "and recorded as a fresh scrape"
   rm -rf "$root"
 }
-
-# ---- The browser path (#166) ---------------------------------------------------------
-#
-# `agent-browser` is shimmed the way curl is. The shim logs every call (AB_LOG), strips the
-# global --session/--profile/--headed flags, serves MOCK_HAR on `network har stop <path>`,
-# and answers `get url` with AB_URL. AB_FAIL=<open|har-start|har-stop|get-url|wait|scroll>
-# makes that one command exit 1, and AB_HANG=<same> makes it block (exec, so the watchdog's
-# kill reaches the sleep). Nothing here touches x.com: the real browser path cannot be
-# exercised without a logged-in profile, which is what the PR's verify command is for.
 
 make_ab_shim(){ # $1=bindir
   mkdir -p "$1"
@@ -442,7 +385,6 @@ SH
   chmod +x "$1/agent-browser"
 }
 
-# curl that records the call and fails: proves the browser path never reached for it.
 make_curl_trap(){ # $1=bindir
   cat > "$1/curl" <<'SH'
 #!/bin/bash
@@ -452,13 +394,9 @@ SH
   chmod +x "$1/curl"
 }
 
-# make_har <out> <status:bodyfile>...  — a HAR with one Bookmarks entry per pair, in order,
-# between a BookmarkFolders call and an unrelated asset that must both be ignored.
 make_har(){
   local out="$1"; shift
   local entries='[{"request":{"method":"GET","url":"https://x.com/i/api/graphql/ZZZ/BookmarkFolders?variables=%7B%7D"},"response":{"status":200,"content":{"text":"{\"folders\":true}"}}},{"request":{"method":"GET","url":"https://abs.twimg.com/main.js"},"response":{"status":200,"content":{"text":"x"}}}]'
-  # Each pair is status:file[:cursor]. The cursor is the one the request carried in its variables:
-  # none for the first pair, CURSOR_END (the fixture page's bottom cursor) for the rest, "-" for none.
   local pair status rest file cur i=0
   for pair in "$@"; do
     i=$((i + 1))
@@ -474,8 +412,6 @@ make_har(){
   jq -n --argjson e "$entries" '{log:{version:"1.2",entries:$e}}' > "$out"
 }
 
-# A sandbox for the browser path: shims, a profile dir, a trapped curl, no queryId cache and
-# a HAR holding the fixture page. Credentials exist unless the test removes them.
 bsetup(){
   local root; root=$(setup)
   make_ab_shim "$root/bin"
@@ -548,7 +484,6 @@ test_browser_mode_orders_the_har_before_the_page(){
 test_browser_mode_scrolls_for_more_pages(){
   echo "# X_MAX_PAGES > 1: the browser scrolls, and every Bookmarks response in the HAR is read"
   local root; root=$(bsetup)
-  # Page two holds one more bookmark, id 50.
   jq -c '.data.bookmark_timeline_v2.timeline.instructions[0].entries =
           [{"entryId":"tweet-50","content":{"itemContent":{"tweet_results":{"result":{"rest_id":"50","core":{"user_results":{"result":{"core":{"screen_name":"pagetwo"}}}},"legacy":{"full_text":"page two post","entities":{"urls":[]}}}}}}}]' \
     "$root/page.json" > "$root/page2.json"
@@ -587,8 +522,6 @@ test_browser_mode_decodes_a_base64_body(){
   rm -rf "$root"
 }
 
-# One fallback case: break the browser path in the named way, collect, and check the GraphQL
-# fallback served the bookmarks with the browser cause recorded.
 fallback_case(){ # $1=case name
   local name="$1" root cause_re timeout=20
   root=$(bsetup)
@@ -689,12 +622,6 @@ test_browser_is_closed_on_every_outcome(){
 test_watchdog_does_not_fire_after_a_command_that_finished(){
   echo "# a command that finished in time is never reported as timed out, and does not wait out the limit"
   local root; root=$(bsetup)
-  # The watchdog used to sleep the whole limit in one call and kill that sleep on a normal exit,
-  # so its subshell ran its next statements (flag a timeout, signal the pid) before the parent
-  # killed it, and a good command could come back as exit 124. That race cannot be reproduced
-  # deterministically here (pkill cannot enumerate processes under the sandbox), so this pins
-  # the properties of the polling shape instead: every command in a run is a success with a
-  # 30 second limit, none is reported as a timeout, and the run does not wait the limit out.
   local t0=$SECONDS
   X_BROWSER_TIMEOUT=30 run_br "$root" collect "$root/findings"
   local elapsed=$((SECONDS - t0))
@@ -704,9 +631,6 @@ test_watchdog_does_not_fire_after_a_command_that_finished(){
   rm -rf "$root"
 }
 
-# A HAR whose page-2 response is bad must not be read as a success for page 1: the older bookmarks
-# on page 2 would never be fetched again once page 1 is marked seen (the next night stops at the
-# first known id).
 partial_har_case(){ # $1=name
   local name="$1" root cause_re
   root=$(bsetup)
@@ -755,7 +679,6 @@ test_a_bad_response_in_the_har_is_not_a_partial_success(){
   rm -rf "$root"
 }
 
-# A second page that exists in the fixture world: one more bookmark (id 50) and no bottom cursor.
 make_page2(){ # $1=root
   jq -c '.data.bookmark_timeline_v2.timeline.instructions[0].entries =
           [{"entryId":"tweet-50","content":{"itemContent":{"tweet_results":{"result":{"rest_id":"50","core":{"user_results":{"result":{"core":{"screen_name":"pagetwo"}}}},"legacy":{"full_text":"page two post","entities":{"urls":[]}}}}}}}]' \
@@ -766,8 +689,6 @@ test_an_incomplete_capture_is_not_a_success(){
   echo "# a prefix of the timeline is committed only when it reaches a known bookmark, the cap or the end"
   local root; root=$(bsetup)
   make_curl_shim "$root/bin"
-  # X_MAX_PAGES=2 and a HAR that holds page one alone (the scroll or the wait did not load page two),
-  # page one has a bottom cursor and no known id: recording it as seen would hide page two for good.
   X_MAX_PAGES=2 run_br "$root" collect "$root/findings"
   assert_eq "$(fetch_path "$root/findings")" "fallback_graphql" "a capture that stops short of the cap falls back"
   assert_grep "$root/findings/x-bookmarks-fetch.txt" "no response to" "and the cause says the next page never loaded"
@@ -811,8 +732,6 @@ test_the_cursor_is_matched_as_a_value_not_a_substring(){
   echo "# the next page is the request whose variables carry the cursor, never one that merely contains its text"
   local root; root=$(bsetup)
   make_curl_shim "$root/bin"
-  # A bottom cursor of 20 is also the page size in every request URL (count%22%3A20). Matching the
-  # URL as a substring read page one as its own next page and accepted a capture that had no page two.
   jq '(.. | objects | select(.cursorType? == "Bottom") | .value) = "20"' "$root/page.json" > "$root/page-c20.json"
   make_har "$root/har.json" "200:$root/page-c20.json"
   X_MAX_PAGES=2 run_br "$root" collect "$root/findings"
@@ -827,7 +746,6 @@ test_the_cursor_is_matched_as_a_value_not_a_substring(){
   assert_eq "$(fetch_path "$root/findings")" "browser" "the real page two, whose request carries cursor 20, is found"
   assert_grep "$root/findings/x-bookmarks.md" "page two post" "and read"
   rm -rf "$root"
-  # A numeric entryId on a timeline entry must not hide the bottom cursor from next_cursor.
   root=$(bsetup)
   make_curl_shim "$root/bin"
   jq '.data.bookmark_timeline_v2.timeline.instructions[0].entries += [{"entryId":5,"content":{"entryType":"TimelineTimelineItem"}}]' "$root/page.json" > "$root/page-num.json"
@@ -876,7 +794,6 @@ test_a_parse_error_is_not_an_empty_page(){
   assert_nogrep "$root/findings/x-bookmarks.md" "no unread bookmarks" "and never as an empty inbox"
   rm -rf "$root"
   root=$(bsetup)
-  # An entry whose url is not a string, after a valid one: the extraction must not stop half way.
   jq '.log.entries += [{"request":{"method":"GET","url":5},"response":{"status":200,"content":{"text":"x"}}}]' "$root/har.json" > "$root/har2.json"
   MOCK_HAR="$root/har2.json" run_br "$root" collect "$root/findings"
   assert_eq "$(fetch_path "$root/findings")" "browser" "a HAR entry with a non-string url is skipped, not fatal"

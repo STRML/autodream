@@ -1,18 +1,4 @@
 #!/bin/bash
-# Unit tests for bin/l1-confine.sh: the OS sandbox an L1 worker runs under (#169).
-#
-# The failure matrix, one row per case below:
-#
-#   state                                   probe says                         prefix / stage
-#   no sandbox tool on PATH                 no, names what is missing          prefix fails
-#   tool rejects the profile at startup     no, quotes the tool's complaint    -
-#   tool starts but confines nothing        no, "did not refuse a write"       -
-#   tool works                              yes, tool name                     argv writes only the stage
-#   writable path with a quote or newline   -                                  refused, no profile
-#   a protected path under a writable one   -                                  denied after the allow
-#
-# The real-confinement cases run only where a sandbox works (the probe says yes). Inside another
-# sandbox, sandbox-exec cannot start, so there they print a skip line and the shim cases still run.
 set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -35,11 +21,9 @@ if [ ! -r "$H" ]; then
 fi
 
 D="$SUITE_TMP/c"; mkdir -p "$D/shim" "$D/bare"
-# A PATH holding only what the helper itself needs, so no real sandbox tool is on it.
 for t in sh bash mkdir rm cat dirname basename mktemp tr head sed printf env; do
   p=$(command -v "$t" 2>/dev/null) && [ -x "$p" ] && ln -sf "$p" "$D/bare/$t"
 done
-# probe's reason is one line; the tab separates the verdict from it.
 probe_with() { env PATH="$1" TMPDIR="$D" bash "$H" probe; }
 verdict() { printf '%s' "$1" | cut -f1; }
 reason() { printf '%s' "$1" | cut -f2-; }
@@ -56,7 +40,6 @@ assert_eq "$(verdict "$out")" "no" "a profile the tool refuses at startup is not
 has "$(reason "$out")" "rejected" "and the reason quotes the tool"
 
 echo "# probe: a tool that starts and confines nothing"
-# Skips the -p profile argument and runs the command as is: the probe must not trust exit 0.
 printf '#!/bin/sh\nshift 2\nexec "$@"\n' > "$D/shim/sandbox-exec"; chmod +x "$D/shim/sandbox-exec"
 out=$(probe_with "$D/shim:$D/bare")
 assert_eq "$(verdict "$out")" "no" "a tool that accepts the profile and refuses nothing is not confined"
@@ -73,8 +56,6 @@ has "$txt" "(deny file-write*)" "writes are denied by default"
 has "$txt" "(allow file-write* (subpath \"$PS\"))" "the staging directory is writable"
 has "$txt" "(subpath \"$(cd "$D/state/dir" && pwd -P)\")" "a state directory is a subpath rule"
 has "$txt" "(regex #\"^$(cd "$D/state" && pwd -P | sed 's/[][\.^$*+?(){}|]/\\&/g')/file\\.json\")" "a path ending in * is a prefix rule"
-# The protect list is denied AFTER the writable paths and BEFORE the stage allow, so it wins over a
-# state directory that happens to contain it but the stage (inside it) stays writable.
 txt=$(prefix_text env L1_CONFINE_PROTECT="$D/state/dir/inner" bash "$H" prefix "$S" "$D/state/dir")
 allow_line=$(printf '%s\n' "$txt" | grep -n "subpath \"$(cd "$D/state/dir" && pwd -P)\"" | head -1 | cut -d: -f1)
 deny_line=$(printf '%s\n' "$txt" | grep -n "(deny file-write\* (subpath" | head -1 | cut -d: -f1)
@@ -206,8 +187,6 @@ OA="$REPO/adapters/omp/adapter.sh"
 RH="$D/omphome"; mkdir -p "$RH/.omp/agent" "$RH/.omp/natives" "$RH/Library" "$D/ostage"
 printf 'k: v\n' > "$RH/.omp/agent/config.yml"; printf 'y: 1\n' > "$RH/.omp/agent/config.yaml"; printf 'm: 1\n' > "$RH/.omp/agent/models.yml"; printf '{}\n' > "$RH/.omp/agent/mcp.json"
 printf 'secret' > "$RH/.omp/agent/sessions-not-seeded"; printf 'x' > "$RH/.omp/agent/extensions-not-seeded"
-# agent.db is a live WAL database with an api key, an OAuth credential and one committed row that sits only in
-# the log; the connection stays open while the verb runs, as a live omp would.
 python3 - "$RH/.omp/agent" <<'PY' &
 import sqlite3, sys, time
 d = sys.argv[1]
@@ -252,7 +231,6 @@ env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>&
 assert_eq "$(cat "$D/ostage/omp-home/.omp/agent/.env" 2>/dev/null)" "KEY=agent" "the agent dir's .env is seeded: a provider key may live there"
 assert_eq "$(cat "$D/ostage/omp-home/.omp/.env" 2>/dev/null)" "KEY=root" "and the config root's"
 assert_eq "$(cat "$D/ostage/omp-home/.env" 2>/dev/null)" "KEY=home" "and HOME's"
-# A worker's leftovers in the stage cannot redirect the verb: it builds beside the stage and renames in.
 ln -sfn "$D/realdir" "$D/ostage/omp-home"
 env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>&1; rc=$?
 assert_eq "$rc" "0" "a symlink left where omp-home goes is removed, not followed"
@@ -387,7 +365,6 @@ printf a > "$D/store/bank/mnemopi.db"; store_snapshot "$D/store" "$D/snap.b3" >/
 sleep 1; printf changed > "$D/store-target/linked.db"
 store_snapshot "$D/store" "$D/snap.link" >/dev/null; msg=$(store_unchanged "$D/snap.b3" "$D/snap.link"); rc=$?
 assert_eq "$rc" "1" "a file reached only through a symlinked directory below the root is watched"
-# The decision as the real check makes it.
 store_snapshot "$D/store" "$D/v.before" >/dev/null; vb=$?
 msg=$(store_verdict "$D/store" "$vb" "" "$D/v.before" "$D/v.after"); rc=$?
 assert_eq "$rc" "0" "verdict: an untouched store passes"

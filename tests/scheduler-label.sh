@@ -1,12 +1,4 @@
 #!/usr/bin/env bash
-# Unit tests for bin/scheduler-label.sh.
-#
-# One test per row of the #14 failure matrix. The bug this covers produced no
-# error on the host it broke, so every assertion here is on the returned label
-# and the exit status, never on a log line.
-#
-# Nothing touches launchctl or the real ~/Library/LaunchAgents: the script reads
-# LAUNCH_AGENTS_DIR, and the tests point it at a sandbox.
 
 set -uo pipefail
 
@@ -32,7 +24,6 @@ assert_eq() {
 USER_SLUG="$(id -un | tr -dc 'a-zA-Z0-9')"
 DEFAULT="com.$USER_SLUG.autodream"
 
-# Write a plist that schedules $2/run.sh under label $1.
 make_plist() {
   local label="$1" runner_dir="$2" file="$LA/$1.plist"
   cat > "$file" <<PLIST
@@ -52,7 +43,6 @@ PLIST
   printf '%s\n' "$file"
 }
 
-# The -review sibling runs review.sh, so it must never be adopted.
 make_review_plist() {
   local label="$1" runner_dir="$2"
   cat > "$LA/$1.plist" <<PLIST
@@ -90,9 +80,6 @@ run_sut() { # run_sut <target> -> sets SUT_OUT / SUT_RC
   SUT_ERR="$(cat "$SANDBOX/err")"
 }
 
-# install.sh runs `chmod +x "$REPO_DIR/bin/"*.sh` against the live checkout, so
-# the rows below that drive the real installer change this working tree's file
-# modes as a side effect. Snapshot them and put them back.
 MODES_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/scheduler-label-modes.XXXXXX")"
 find "$REPO/bin" -name '*.sh' -exec stat -f '%p %N' {} \; > "$MODES_SNAPSHOT" 2>/dev/null
 stat -f '%p %N' "$REPO/install.sh" >> "$MODES_SNAPSHOT" 2>/dev/null
@@ -107,13 +94,11 @@ trap 'cleanup; restore_modes' EXIT
 
 printf 'scheduler-label\n'
 
-# --- row: no autodream plist exists at all ---------------------------------
 reset_sandbox
 run_sut "$OMP"
 assert_eq "$DEFAULT" "$SUT_OUT" "empty LaunchAgents dir yields the default label"
 assert_eq "0" "$SUT_RC" "empty LaunchAgents dir exits 0"
 
-# --- row: the LaunchAgents dir does not exist ------------------------------
 reset_sandbox
 export LAUNCH_AGENTS_DIR="$SANDBOX/nope"
 run_sut "$OMP"
@@ -121,40 +106,30 @@ assert_eq "$DEFAULT" "$SUT_OUT" "a missing LaunchAgents dir yields the default, 
 assert_eq "0" "$SUT_RC" "a missing LaunchAgents dir exits 0"
 export LAUNCH_AGENTS_DIR="$LA"
 
-# --- row: a foreign install holds a DIFFERENT label (the #14 regression) ---
-# This is the shape of the host that broke: a second install scheduled under another
-# label (here the retiring omp-autodream one). The old code adopted that label and
-# overwrote the job.
 reset_sandbox
 make_plist "com.$USER_SLUG.omp-autodream" "$CC" >/dev/null
 run_sut "$OMP"
 assert_eq "$DEFAULT" "$SUT_OUT" "a plist running another install's run.sh is not adopted"
 assert_eq "0" "$SUT_RC" "a foreign label under a different name is not a conflict"
 
-# and it must be left exactly as it was
 if grep -q "$CC/run.sh" "$LA/com.$USER_SLUG.omp-autodream.plist"; then
   ok "the foreign plist is left pointing at its own runner"
 else
   nope "the foreign plist is left pointing at its own runner" "it was rewritten"
 fi
 
-# --- row: our own prior install, default label -----------------------------
 reset_sandbox
 make_plist "$DEFAULT" "$OMP" >/dev/null
 run_sut "$OMP"
 assert_eq "$DEFAULT" "$SUT_OUT" "our own plist at the default label is adopted"
 assert_eq "0" "$SUT_RC" "adopting our own plist exits 0"
 
-# --- row: our own prior install under a NON-default label ------------------
-# A re-install must stay idempotent: adopt whatever label the user gave us
-# rather than orphaning that job and scheduling a second one.
 reset_sandbox
 make_plist "com.example.autodream-omp" "$OMP" >/dev/null
 run_sut "$OMP"
 assert_eq "com.example.autodream-omp" "$SUT_OUT" "our own plist under a custom label is adopted"
 assert_eq "0" "$SUT_RC" "adopting a custom label exits 0"
 
-# --- row: the default label is held by a foreign install -------------------
 reset_sandbox
 make_plist "$DEFAULT" "$CC" >/dev/null
 run_sut "$OMP"
@@ -165,27 +140,16 @@ case "$SUT_ERR" in
   *) nope "the conflict message names the offending plist" "stderr was [$SUT_ERR]" ;;
 esac
 
-# --- row: the .ondemand sibling is skipped ---------------------------------
-# Adopting it would nest a second .ondemand suffix on autodream-now's label.
 reset_sandbox
 make_plist "$DEFAULT.ondemand" "$OMP" >/dev/null
 run_sut "$OMP"
 assert_eq "$DEFAULT" "$SUT_OUT" "the .ondemand sibling is not adopted as the base label"
 
-# --- row: a foreign job holds the default label in a file named *.ondemand.plist
-# launchd keys a job by Label, so the filename proves nothing (Codex review of 0129fc0).
 reset_sandbox
 mv "$(make_plist "$DEFAULT" "$CC")" "$LA/backup.ondemand.plist"
 run_sut "$OMP"
 assert_eq "3" "$SUT_RC" "a foreign default-label job is a conflict whatever its filename"
 
-# --- row: autodream-now's on-demand label -----------------------------------
-# autodream-now boots out its on-demand label before every run, and that plist lives in
-# the install's own AUTODREAM_DIR where no LaunchAgents scan can see it. Any two installs
-# that share a base label - a foreign holder of the default, or two --no-schedule
-# installs that both fall back to it - would share the on-demand label and evict each
-# other's runs (Codex review of 1ee66e4 and cd309b6). So the label always carries a
-# hash of the resolved install dir, and it must not change with how that dir is spelled.
 ondemand_label() { # ondemand_label <install-dir> -> the Label autodream-now would load
   AUTODREAM_DIR="$1" bash "$REPO/bin/autodream-now.sh" 2020-01-01 --dry-run 2>/dev/null \
     | sed -n '/<key>Label<\/key>/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}'
@@ -207,13 +171,11 @@ make_plist "$DEFAULT" "$CC" >/dev/null
 [ "$(ondemand_label "$OMP")" != "$(ondemand_label "$CC")" ] && ok "a foreign default-label holder does not share this install's on-demand label" \
   || nope "a foreign default-label holder does not share this install's on-demand label" "labels matched"
 
-# --- row: the -review sibling is skipped -----------------------------------
 reset_sandbox
 make_review_plist "com.$USER_SLUG.autodream-review" "$CC"
 run_sut "$OMP"
 assert_eq "$DEFAULT" "$SUT_OUT" "a plist running review.sh is not adopted"
 
-# --- row: an unreadable / malformed plist ----------------------------------
 reset_sandbox
 printf 'this is not a plist\n' > "$LA/com.broken.autodream.plist"
 make_plist "$DEFAULT" "$OMP" >/dev/null
@@ -221,22 +183,17 @@ run_sut "$OMP"
 assert_eq "$DEFAULT" "$SUT_OUT" "a malformed plist is skipped rather than fatal"
 assert_eq "0" "$SUT_RC" "a malformed plist does not change the exit status"
 
-# --- row: the target carries a trailing slash ------------------------------
 reset_sandbox
 make_plist "$DEFAULT" "$OMP" >/dev/null
 run_sut "$OMP/"
 assert_eq "$DEFAULT" "$SUT_OUT" "a trailing slash on the target still matches our own plist"
 
-# --- row: the target is reached through a symlink --------------------------
 reset_sandbox
 make_plist "$DEFAULT" "$OMP" >/dev/null
 ln -s "$SANDBOX/omp" "$SANDBOX/omp-link"
 run_sut "$SANDBOX/omp-link/autodream"
 assert_eq "$DEFAULT" "$SUT_OUT" "a symlinked target still matches our own plist"
 
-# --- row: both a foreign install and our own are present -------------------
-# Ours wins regardless of glob order, and the foreign one is not a conflict
-# because it does not hold our default label.
 reset_sandbox
 make_plist "com.$USER_SLUG.autodream" "$CC" >/dev/null
 make_plist "$DEFAULT" "$OMP" >/dev/null
@@ -244,9 +201,6 @@ run_sut "$OMP"
 assert_eq "$DEFAULT" "$SUT_OUT" "with both installs present, ours is adopted"
 assert_eq "0" "$SUT_RC" "with both installs present, exit is 0"
 
-# --- row: a foreign job holds the default label in a file named for something else ---
-# launchd keys a job by Label, not filename. install.sh would boot out this label
-# and overwrite the job even though "autodream" is nowhere in the file name.
 reset_sandbox
 mv "$(make_plist "$DEFAULT" "$CC")" "$LA/backup.plist"
 run_sut "$OMP"
@@ -256,13 +210,11 @@ case "$SUT_ERR" in
   *) nope "the conflict names backup.plist" "stderr was [$SUT_ERR]" ;;
 esac
 
-# --- row: the default label is held by a job that runs no run.sh at all ----------
 reset_sandbox
 make_review_plist "$DEFAULT" "$CC"
 run_sut "$OMP"
 assert_eq "3" "$SUT_RC" "the default label held by a job with no run.sh is a conflict"
 
-# --- row: our own job, renamed into a file without "autodream" in its name --------
 reset_sandbox
 mv "$(make_plist "com.example.nightly" "$OMP")" "$LA/nightly.plist"
 run_sut "$OMP"
@@ -270,14 +222,6 @@ assert_eq "com.example.nightly" "$SUT_OUT" "our own job is adopted whatever its 
 assert_eq "0" "$SUT_RC" "adopting a renamed file exits 0"
 
 
-# --- install.sh must not write a plist it was refused --------------------------
-# The helper only advises. The regression stops only if install.sh honours the
-# non-zero status, so drive the real installer down its real scheduling path.
-#
-# HOME is the sandbox, so install_schedule's $HOME/Library/LaunchAgents and the
-# helper's default agree without either needing a test-only override. launchctl
-# is shimmed: if the refusal ever stops working, the test records the call
-# instead of mutating this machine's launchd.
 reset_sandbox
 unset LAUNCH_AGENTS_DIR
 FAKE_HOME="$SANDBOX/home"
@@ -315,26 +259,18 @@ else
   nope "install.sh reports why the schedule was skipped" "output: $(tail -5 "$SANDBOX/install.out")"
 fi
 
-# A refusal must not then advise arming a wake schedule for the job it declined
-# to install. The logic state and what the user is told have to agree.
 if grep -q 'pmset repeat wake' "$SANDBOX/install.out"; then
   nope "a refused schedule does not advise pmset" "install.out still prints the wake advice"
 else
   ok "a refused schedule does not advise pmset"
 fi
 
-# The symlinks must still be there - a refused schedule is not a failed install.
 if [ -L "$SANDBOX/omp/autodream/run.sh" ]; then
   ok "a refused schedule still installs the symlinks"
 else
   nope "a refused schedule still installs the symlinks" "run.sh symlink missing"
 fi
 
-# --- a REAL scheduling failure must still fail the install ------------------
-# The refusal path returns non-zero, so the caller has to swallow it. Swallowing
-# every non-zero return instead would convert a broken plist or a failed
-# bootstrap into an exit-0 install that claims everything is in place - the same
-# silent-success shape as #14. Simulate one with a launchctl shim that fails.
 reset_sandbox
 unset LAUNCH_AGENTS_DIR
 FAKE_HOME="$SANDBOX/home"
@@ -364,16 +300,9 @@ else
   nope "a real scheduling failure is reported as a failure, not as 'in place'" "output: $(tail -5 "$SANDBOX/fail.out")"
 fi
 
-# --- the shipped template must be adoptable by our own ownership check --------
-# It used `bash -lc "$HOME/.../run.sh"`. bash expands $HOME at runtime so the job
-# ran, but norm_dir resolves the literal string, never matched, and a job
-# hand-installed from this repo's own template got a second one scheduled beside
-# it on the next ./install.sh. Copy the template the way its own instructions
-# say to and check the helper adopts it.
 reset_sandbox
 TEMPLATE="$REPO/launchd/com.user.autodream.plist.example"
 if [ -f "$TEMPLATE" ]; then
-  # Strip the leading comment block the .example carries above <?xml.
   sed -n '/<?xml/,$p' "$TEMPLATE" \
     | sed -e "s|/Users/REPLACE_WITH_USERNAME/.claude/autodream|$OMP|g" \
           -e "s|/Users/REPLACE_WITH_USERNAME|$SANDBOX|g" \
@@ -390,9 +319,6 @@ else
   nope "the shipped template exists" "$TEMPLATE missing"
 fi
 
-# --- --plist: the path of the job this install owns, for autodream-now's env copy ---
-# autodream-now copies the environment out of this file, so it must be the job that runs
-# THIS install, never one that only holds the label.
 run_plist() { # run_plist <target> -> sets SUT_OUT / SUT_RC
   SUT_OUT="$(bash "$SUT" --plist "$1" 2>"$SANDBOX/err")"
   SUT_RC=$?

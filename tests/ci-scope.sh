@@ -1,10 +1,4 @@
 #!/bin/bash
-# Tests for .github/ci-scope.sh, which decides whether a PR's tests.yml run needs the whole suite
-# or only the web dashboard's suite. The failure that matters is a PR classified `web` whose change
-# the full suite would have caught, so every assertion here leans toward `full`.
-#
-# Usage:  tests/ci-scope.sh
-# Exit:   0 if every assertion passes, 1 otherwise.
 
 set -u
 
@@ -48,8 +42,6 @@ assert_eq "$(scope web/../bin/run.sh)" full "a path that climbs out of web/"
 assert_eq "$(printf '' | bash "$SCOPE" 2>/dev/null)" full "no changed paths at all"
 
 echo "# given a base and a head, it diffs them itself and sees both sides of a rename"
-# --name-only alone reports a rename by its new path only, so moving bin/run.sh into web/ read as a
-# web-only change. The selector now runs the diff, with --no-renames, so CI cannot pass it half.
 G=$(mktemp -d "${TMPDIR:-/tmp}/ciscope.XXXXXX")
 ( cd "$G" && git init -q && git config user.email t@t && git config user.name t \
   && mkdir bin web && printf 'echo run\n' > bin/run.sh && printf 'a{}\n' > web/app.css \
@@ -66,20 +58,12 @@ fi
 rm -rf "$G"
 
 echo "# every tracked web file is one the full suite never reads"
-# The oracle for the rule: a file the selector calls web must not be named by any code tests.yml's
-# full suite runs. web/threads.* fails this, which is why the selector excludes it. Left out of the
-# readers: install.sh, which only links the web files; the macOS-only suites run-all adds on Darwin
-# (install-web-agent among them), which tests.yml's Linux shards never run and launchd.yml still
-# runs on its own paths; and bin/autodream-web, the launcher only the web suite and those macOS
-# suites start.
 web_files=$(cd "$REPO" && git ls-files | while IFS= read -r p; do
   if [ "$(scope "$p")" = web ] && [ "${p%.md}" = "$p" ]; then printf '%s\n' "$p"; fi
 done)
 [ -n "$web_files" ] && ok "some tracked files classify as web ($(printf '%s\n' "$web_files" | wc -l | tr -d ' '))" || no "no tracked file classifies as web"
 darwin_only=$(sed -n 's/.*Darwin \] && _suites="$_suites \(.*\)"$/\1/p' "$HERE/run-all.sh")
 [ -n "$darwin_only" ] && ok "run-all.sh's macOS-only suites are known ($darwin_only)" || no "could not read run-all.sh's macOS-only suites"
-# A function, not a loop inside $(...): bash 3.2 cannot parse a case pattern's `)` inside a command
-# substitution, which is the interpreter run-all.sh and launchd use on macOS.
 reader_paths() {
   local p
   cd "$REPO" && git ls-files 'bin/*' 'adapters/*' 'prompts/*' 'tests/*.sh' 'tests/*.py' | while IFS= read -r p; do

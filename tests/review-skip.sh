@@ -1,15 +1,4 @@
 #!/bin/bash
-# Tests for bin/review.sh's "nothing to triage" skip.
-#
-# Drives the real review.sh against fixture reports with a mock claude on PATH,
-# and asserts on whether a session would have been launched. No network, no
-# model calls. Companion to run-all.sh, which covers bin/run.sh.
-#
-# The mock claude writes a marker file and exits; if the marker exists after a
-# run, review.sh reached `exec claude`, i.e. it decided to launch a session.
-#
-# Usage:  tests/review-skip.sh
-# Exit:   0 if every assertion passes, 1 otherwise.
 
 set -u
 
@@ -25,7 +14,6 @@ no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
 assert_grep(){   grep -q -- "$2" "$1" 2>/dev/null && ok "$3" || no "$3 (no /$2/ in $1)"; }
 assert_eq(){     [ "$1" = "$2" ] && ok "$3" || no "$3 (got [$1] want [$2])"; }
 
-# Sandbox: a dreams/ dir plus a mock claude that records that it was invoked.
 setup_env(){
   local root; root=$(mktemp -d "${TMPDIR:-/tmp}/ccrev.XXXXXX")
   mkdir -p "$root/dreams" "$root/bin"
@@ -42,10 +30,6 @@ mk_report(){ # $1=root $2=date $3=body
   printf '%s\n' "$3" > "$1/dreams/$2.md"
 }
 
-# Runs review.sh and echoes "launched" or "skipped".
-# Config file is forced to a nonexistent path so the host's own
-# ~/.claude/autodream/config (AUTODREAM_TRIAGE_SURFACE=cmux) cannot leak in and
-# spawn a real workspace mid-test.
 run_review(){ # $1=root ; rest = args
   local root="$1"; shift
   rm -f "$root/launched"
@@ -58,8 +42,6 @@ run_review(){ # $1=root ; rest = args
   [ -f "$root/launched" ] && printf 'launched' || printf 'skipped'
 }
 
-# Same invocation, but returns review.sh's own exit code instead of a verdict.
-# run_review cannot be used for this: its exit status is the verdict printf's.
 run_review_rc(){ # $1=root ; rest = args
   local root="$1"; shift
   LAUNCH_MARKER="$root/launched" \
@@ -69,8 +51,6 @@ run_review_rc(){ # $1=root ; rest = args
   CLAUDE_BIN="$root/bin/claude" \
   bash "$REVIEW" "$@" > "$root/out" 2>&1
 }
-
-# --- fixture bodies --------------------------------------------------------
 
 REPORT_MARKER_ZERO='# Autodream — 2020-01-02
 
@@ -108,8 +88,6 @@ No Claude Code sessions were modified on this date.
 
 (Generated 2020-01-03T07:00:06Z)'
 
-# An empty day that someone already closed out (see the real 2026-06-27). Both
-# skip reasons apply; "already triaged" is the one worth printing.
 REPORT_STUB_TRIAGED='# Autodream — 2020-01-02
 
 No Claude Code sessions were modified on this date.
@@ -134,7 +112,6 @@ REPORT_TRIAGED='# Autodream — 2020-01-02
 - [2020-01-03] thing: **applied.** Did the thing.
 - [2020-01-03] other: **watch, no change.**'
 
-# Real reports have used a dated heading and a numbered list (see 2026-07-09).
 REPORT_TRIAGED_NUMBERED='# Autodream — 2020-01-02
 
 ## Open questions for the user
@@ -147,8 +124,6 @@ REPORT_TRIAGED_NUMBERED='# Autodream — 2020-01-02
 1. **Q1 (thing) — APPLIED.** Did the thing.
 2. **Q2 (other) — APPLIED, modified.** Did the other thing.
 3. **Q3 (third) — APPLIED.** And the third.'
-
-# --- tests -----------------------------------------------------------------
 
 test_marker_zero_skips(){
   local root; root=$(setup_env)
@@ -182,8 +157,6 @@ test_stub_skips(){
   assert_eq "$(run_review "$root" 2020-01-02)" skipped "empty-day stub skips"
 }
 
-# The conservative default: a shape we cannot classify must launch, because a
-# false skip silently swallows real questions.
 test_unknown_launches(){
   local root; root=$(setup_env)
   mk_report "$root" 2020-01-02 "$REPORT_NO_SECTION"
@@ -216,9 +189,6 @@ test_latest_report_default(){
   local root; root=$(setup_env)
   mk_report "$root" 2020-01-01 "$REPORT_MARKER_THREE"
   mk_report "$root" 2020-01-02 "$REPORT_MARKER_ZERO"
-  # Stamp both explicitly. Writing them in order is not enough: review.sh picks
-  # the latest with `ls -t`, and two files written in the same instant tie —
-  # BSD ls then breaks the tie by name, which would pick the wrong report.
   touch -t 202001011200 "$root/dreams/2020-01-01.md"
   touch -t 202001021200 "$root/dreams/2020-01-02.md"
   assert_eq "$(run_review "$root")" skipped "no-arg run resolves the latest report and skips it"
@@ -241,7 +211,6 @@ test_two_dates_error(){
   assert_eq "$rc" 2 "two dates exits 2"
 }
 
-# --help is built from the header comment block, so it must not stop mid-thought.
 test_help_is_complete(){
   local root; root=$(setup_env)
   run_review_rc "$root" --help
@@ -255,8 +224,6 @@ test_missing_report_errors(){
   run_review "$root" 2020-01-09 >/dev/null
   assert_grep "$root/out" 'no autodream report found' "a missing report still errors, not skips"
 }
-
-# ---------------------------------------------------------------------------
 
 [ -x "$REVIEW" ] || { echo "FATAL: $REVIEW not executable"; exit 1; }
 

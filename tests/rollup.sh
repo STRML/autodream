@@ -1,17 +1,4 @@
 #!/bin/bash
-# Tests for bin/rollup.sh: the per-session roll-up (rollup.tsv) and the per-category tally
-# (categories.tsv) that Layer 2 counts from instead of listing the findings directory.
-#
-# Why this exists. L2's Glob and directory reads stop at 200 entries. On 2026-10-31 the findings
-# dir held 2683 (885 findings JSONs, 885 .served, 885 sidecars, ~28 side files), so L2 counted from
-# a 90-file sample and never saw fanouts.tsv. The fixture here holds more than 200 sessions on
-# purpose, plus every side file that shares the directory, and every expected number is a literal
-# derived from how the fixture was built, never recomputed with the same jq the script uses.
-#
-# One block per row of the failure matrix in the PR.
-#
-# Usage:  tests/rollup.sh
-# Exit:   0 if every assertion passes, 1 otherwise.
 
 set -u
 
@@ -38,8 +25,6 @@ F="$T/findings"
 mkdir -p "$F/outside-worklist"
 h(){ printf '%012x' "$1"; }   # a session's 12-hex artifact key from its fixture number
 
-# sidecar NUM SIDECHAIN NESTED ADVISOR [SANDBOX_SHAPE_DENIES as a raw JSON value; absent when omitted,
-# as in an omp sidecar or one written before the field existed]
 sidecar(){
   local extra=""; [ "$#" -ge 5 ] && extra=",\"sandbox_shape_denies\":$5"
   printf '{"user_message_count":%s,"turn_count":%s,"tool_call_count":%s,"duration_minutes":%s,"models_used":["m-a","m-b"],"isSidechain":%s,"nested":%s,"is_advisor":%s%s}\n' \
@@ -60,38 +45,25 @@ gated(){ # NUM
 }
 SF='[{"category":"sandbox_friction","severity":"low","what":"x"}]'
 
-# 1-100: triaged top-level, one sandbox_friction:low each. 1-10 also missed_skill:high, and 1 has it twice.
 for i in $(seq 1 100); do
   f=$SF
   [ "$i" -le 10 ] && f='[{"category":"sandbox_friction","severity":"low"},{"category":"missed_skill","severity":"high"}]'
   [ "$i" -eq 1 ] && f='[{"category":"sandbox_friction","severity":"low"},{"category":"missed_skill","severity":"high"},{"category":"missed_skill","severity":"high"}]'
-  # 2 carries a finding with no severity at all.
   [ "$i" -eq 2 ] && f='[{"category":"sandbox_friction","severity":"low"},{"category":"missed_skill","severity":"high"},{"category":"memory_miss"}]'
-  # 6 has the same category at two severities: one session in the category's "all" row.
   [ "$i" -eq 6 ] && f='[{"category":"sandbox_friction","severity":"low"},{"category":"missed_skill","severity":"high"},{"category":"missed_skill","severity":"low"}]'
   triaged "$i" "$f"; sidecar "$i" false false false 0; source_row "$i" claude
 done
-# sandbox_shape_denies: 4 hit the deny 124 times, 9 exactly 10 times, 11 once. 12's sidecar
-# predates the field and 13's holds a string: both blank, never 0.
 sidecar 4 false false false 124; sidecar 9 false false false 10; sidecar 11 false false false 1
 sidecar 12 false false false; sidecar 13 false false false '"lots"'
-# 7 authored a skill and was given two instructions.
 jq -c '.skills_authored = ["new-skill"] | .instructions_given = ["do x", "do y"]' "$F/$(h 7).json" > "$T/7.json" && mv "$T/7.json" "$F/$(h 7).json"
-# 3's project holds a tab, which must not split the row.
 triaged 3 '[{"category":"sandbox_friction","severity":"low"},{"category":"missed_skill","severity":"high"}]' "$(printf 'tab\there')"
-# 101-190: gated top-level.
 for i in $(seq 101 190); do gated "$i"; sidecar "$i" false false false; source_row "$i" omp; done
-# 201-220: triaged claude subagents under parent 1 (11-20) and parent 2 (the rest): one tool_loop:medium each.
 for i in $(seq 201 220); do
   triaged "$i" '[{"category":"tool_loop","severity":"medium"}]'; sidecar "$i" true false false; source_row "$i" claude
   p=$(h 1); [ "$i" -gt 210 ] && p=$(h 2)
   printf '%s\t%s\n' "$(h "$i")" "$p" >> "$F/fanouts.tsv"
 done
-# 221-225: gated omp children (nested, not sidechain): nested, but no fanouts.tsv row, since that file holds ungated rows only.
 for i in $(seq 221 225); do gated "$i"; sidecar "$i" false true false; source_row "$i" omp; done
-# 231-233: omp advisor sidecars under parent 5. 231 and 232 carry sandbox_friction, a tool-behavior
-# finding L1 suppresses for advisors: a triage failure, never a ranked pattern. 232 and 233 both
-# carry memory_miss:medium, a content finding: one session, counted as the parent's.
 for i in 231 232 233; do
   af='[{"category":"sandbox_friction","severity":"low"}]'
   [ "$i" -eq 232 ] && af='[{"category":"sandbox_friction","severity":"low"},{"category":"memory_miss","severity":"medium"}]'
@@ -99,31 +71,20 @@ for i in 231 232 233; do
   triaged "$i" "$af"; sidecar "$i" true true true; source_row "$i" omp
   printf '%s\t%s\n' "$(h "$i")" "$(h 5)" >> "$F/fanouts.tsv"
 done
-# 240: an L1 error stub.
 jq -cn '{session_path:"/s/240.jsonl", error:"worker produced no findings JSON", findings:[]}' > "$F/$(h 240).json"
 sidecar 240 false false false; source_row 240 claude
-# 241: triaged, sidecar missing.
 triaged 241 '[]'; source_row 241 claude
-# 242: a findings JSON that does not parse.
 printf '{"session_path": "/s/242.jsonl", "findings": [' > "$F/$(h 242).json"
 sidecar 242 false false false 3; source_row 242 claude
-# 243: a sidecar that does not parse; the findings still count.
 triaged 243 "$SF"; printf 'not json' > "$F/$(h 243).stats.json"; source_row 243 claude
-# 244: parses, but findings is not an array (run.sh's L1_FINDINGS_OK refuses it too).
 printf '{"session_path":"/s/244.jsonl","findings":"oops"}\n' > "$F/$(h 244).json"
 sidecar 244 false false false; source_row 244 claude
-# 245: a gated stub whose findings is not an array: the array check comes before the gate.
 printf '{"session_path":"/s/245.jsonl","skipped":"below_noise_gate","findings":"oops"}\n' > "$F/$(h 245).json"
 sidecar 245 false false false; source_row 245 claude
-# Side files that share the directory and must not become rows.
 printf '{"not":"a session"}\n' > "$F/pins-like.json"
 printf '{"findings":[{"category":"sandbox_friction","severity":"low"}]}\n' > "$F/outside-worklist/$(h 999).json"
 printf 'worker exit code: 1\n' > "$F/$(h 240).json.err"
 : > "$F/run-stats.txt"; : > "$F/changelog-window.md"
-
-# Totals by construction: 100 + 90 + 20 + 5 + 3 + 1 + 1 + 1 + 1 + 1 + 1 = 224 sessions.
-# triaged 100 + 20 + 3 + 1 (241) + 1 (243) = 125; gated 90 + 5 = 95; error 1;
-# unreadable 3 (242, 244, 245). Ungated, the set the report calls N: 125 + 1 + 3 = 129.
 
 echo "# a findings dir with more than 200 sessions rolls up every one of them"
 OUT="$T/out"; mkdir -p "$OUT"

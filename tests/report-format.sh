@@ -1,13 +1,4 @@
 #!/bin/bash
-# Tests for bin/report-format.sh: how the runner, the notifier, the streak counter and the review
-# launcher read a report's two contracts, the open-questions marker and the L2 stdout sentinel.
-#
-# Each helper is compared with the inline code it replaced, kept below as a reference
-# implementation, over a matrix of fixtures. The refactor is only safe if the two agree on
-# output and on exit status for every fixture, the awkward ones included.
-#
-# Usage:  tests/report-format.sh
-# Exit:   0 if every assertion passes, 1 otherwise.
 
 set -u
 
@@ -23,7 +14,6 @@ ok(){ printf '  ok   - %s\n' "$1"; pass=$((pass + 1)); }
 no(){ printf '  FAIL - %s\n' "$1"; fail=$((fail + 1)); }
 assert_eq(){ if [ "$1" = "$2" ]; then ok "$3"; else no "$3 (got [$1] want [$2])"; fi; }
 
-# ---- reference implementations: the code the helpers replaced, verbatim ----
 old_marker(){ sed -n 's/.*<!-- *autodream:open-questions=\([0-9][0-9]*\) *-->.*/\1/p' "$1" 2>/dev/null | head -1; }
 old_has_marker(){ grep -q 'autodream:open-questions=' "$1" 2>/dev/null; }
 old_has_sentinel(){ grep -q '^AUTODREAM_REPORT_END$' "$1" 2>/dev/null; }
@@ -43,7 +33,6 @@ old_pins(){
     }' "$1" 2>/dev/null
 }
 
-# Inside the suite's own temp root, which suite_tmp removes on every way out.
 D=$(mktemp -d "${TMPDIR:-/tmp}/ccrf.XXXXXX")
 
 fx(){ printf '%b' "$2" > "$D/$1"; }
@@ -64,7 +53,6 @@ fx inline   'the text mentions autodream:open-questions=3 in prose\n'
 fx indented '  AUTODREAM_REPORT_END\nbody\n'
 FIXTURES="normal nosent twosent lastline firstline unclosed pinsabove empty crlf nonl spaced twomark badmark inline indented missing"
 
-# same stdout and same exit status as the reference, for every fixture
 same(){ # $1=helper $2=reference
   local f out_new out_old
   for f in $FIXTURES; do
@@ -108,7 +96,6 @@ assert_eq "$(report_questions "$D/qblock")" "$(printf '## Open questions for the
 assert_eq "$(report_questions "$D/qreversed" | head -1)" "1. **Q** — a?" "an unusable block falls back to the heading read"
 assert_eq "$(report_questions "$D/qabsent" | head -1)" "1. **Q** — a?" "a pre-block report is read the old way"
 assert_eq "$(report_questions "$D/empty")" "" "a report with neither yields nothing"
-# The block wins over anything the body happens to say, which is the whole point.
 fx qboth    '# R\n## Open questions for the user\nLEGACY-BODY\n\nAUTODREAM_QUESTIONS_BEGIN\nBLOCK-BODY\nAUTODREAM_QUESTIONS_END\n'
 assert_eq "$(report_questions "$D/qboth")" "BLOCK-BODY" "the block wins over a heading-shaped body"
 
@@ -157,8 +144,6 @@ assert_eq "$(report_open_questions "$D/normal")" "3" "report_open_questions read
 assert_eq "$(report_open_questions "$D/empty")" "unknown" "and stays unknown when it cannot tell"
 
 echo "# the callers use the lib and not their own copy"
-# Each caller must call the helper it replaced (a mention of the file name proves nothing: an error
-# message would do), and must load the lib on a line of its own.
 uses(){ # $1=script $2=helper
   if grep -qE "^[^#]*\\b$2\\b" "$REPO/bin/$1"; then ok "bin/$1 calls $2"; else no "bin/$1 does not call $2"; fi
 }
@@ -171,8 +156,6 @@ uses run.sh report_has_sentinel
 uses run.sh report_body
 uses run.sh report_after_sentinel
 uses run.sh report_pin_lines
-# run.sh must not re-implement the completeness decision locally: one predicate,
-# so the live gate, the sweep and the pins cannot disagree.
 if grep -qE 'report_has_marker .*REPORT_PATH|report_has_questions_block .*REPORT_PATH' "$REPO/bin/run.sh"; then
   no "bin/run.sh decides completeness outside report_finishes"
 else ok "bin/run.sh decides completeness only through report_finishes"; fi
@@ -180,7 +163,6 @@ for f in notify.sh question-streaks.sh triage-dream.sh run.sh; do
   # shellcheck disable=SC2016 # the dollar signs are literal: the regex matches the script's own source line
   if grep -qE '^[[:space:]]*\. "\$(_rf|_lib)"' "$REPO/bin/$f" && grep -q 'report-format\.sh' "$REPO/bin/$f"; then ok "bin/$f sources report-format.sh"; else no "bin/$f does not source report-format.sh"; fi
 done
-# Any spelling of the marker or sentinel read, strict or loose, belongs in the lib. Comments are skipped.
 inline=$(grep -nE "autodream:open-questions=|\\^AUTODREAM_REPORT_END" "$REPO"/bin/*.sh | grep -v 'bin/report-format.sh' | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' | grep -E "grep|sed|awk" || true)
 assert_eq "$inline" "" "no other script reads the marker or the sentinel with its own grep, sed or awk"
 

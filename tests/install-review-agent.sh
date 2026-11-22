@@ -1,9 +1,4 @@
 #!/usr/bin/env bash
-# install.sh provisions the review triage LaunchAgent beside the nightly one.
-#
-# HOME is a sandbox and launchctl is a shim that records its calls, so nothing here touches
-# this machine's launchd. cmux and claude are fake executables: the installer only needs to
-# find them, never run them.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

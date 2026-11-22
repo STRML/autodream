@@ -13,7 +13,6 @@ FAIL=0
 . "$PORTABLE"
 AS_OF=$(pdate_shift "$(pdate_yesterday)" 1 d) || exit 1
 
-# Portable delete for test fixtures: /usr/bin/trash exists only on macOS, and CI runs Linux.
 remove_path() { python3 -c 'import os,shutil,sys
 p=sys.argv[1]
 if os.path.isdir(p) and not os.path.islink(p): shutil.rmtree(p)
@@ -546,8 +545,6 @@ test_threads_fresh_old_lock_directory_blocks_during_upgrade() {
 }
 
 test_threads_status_write_sets_no_signal_trap() {
-  # With a kernel flock, process death releases the lock. A trap that released it and let bash
-  # continue would publish a stale copy after another writer took the lock.
   if grep -q 'trap ' "$THREADS"; then no "threads.sh installs no signal trap"; else ok "threads.sh installs no signal trap"; fi
 }
 

@@ -1,27 +1,4 @@
 #!/bin/bash
-# Tests for bin/review.sh's cmux triage-surface launch path.
-#
-# Drives the real review.sh against fixture reports with a mock cmux binary,
-# and asserts on the same-day dedup marker contract: only one workspace opens
-# per report, a failed create releases the claim, --force bypasses it, and the
-# marker binds to the report's content digest (a rebuilt report gets a fresh
-# marker). No network, no model calls, and crucially no real cmux workspace.
-#
-# The marker scheme under test:
-#   claim dir    $LOGS_DIR/review-launched-$DATE-$DIGEST     (atomic mkdir)
-#   confirmed    $LOGS_DIR/review-launched-$DATE-$DIGEST.confirmed (written
-#                only after cmux returns success — dedup keys on THIS, so an
-#                unconfirmed claim can age out and be reclaimed)
-#
-# The mock cmux (like the mock claude in review-skip.sh) records that it was
-# invoked and can be told to fail. review.sh runs cmux as
-# `"$CMUX" workspace create --name ... --command ...`, so the mock only needs
-# to accept that shape and echo a workspace ref back (the tab-title rename loop
-# that follows runs `"$CMUX" tab-action ...` in a detached background block —
-# the mock handles it as a no-op, and review.sh never waits on it).
-#
-# Usage:  tests/review-cmux.sh
-# Exit:   0 if every assertion passes, 1 otherwise.
 
 set -u
 
@@ -38,11 +15,6 @@ assert_eq(){ [ "$1" = "$2" ] && ok "$3" || no "$3 (got [$1] want [$2])"; }
 assert_grep(){ grep -q -- "$2" "$1" 2>/dev/null && ok "$3" || no "$3 (no /$2/ in $1)"; }
 assert_nogrep(){ grep -q -- "$2" "$1" 2>/dev/null && no "$3 (/ $2 / unexpectedly in $1)" || ok "$3"; }
 
-# Sandbox: a dreams/ dir plus a mock cmux AND a mock claude (the review
-# preflight now requires CLAUDE_BIN to exist before it will launch a workspace).
-# The claude mock only needs to be present + executable — in cmux mode review.sh
-# never actually execs it, it only preflights the path. Fake both so the suite
-# is self-contained on a CI runner with no ~/.local/bin/claude.
 setup_env(){
   local root; root=$(mktemp -d "${TMPDIR:-/tmp}/ccrevcmux.XXXXXX")
   mkdir -p "$root/dreams" "$root/autodream"
@@ -72,21 +44,12 @@ mk_report(){ # $1=root $2=date $3=body
   printf '%s\n' "$3" > "$1/dreams/$2.md"
 }
 
-# The marker path review.sh will use for a given report: claim dir keyed by
-# content digest, confirmed as a sibling token.
 marker_dir(){ # $1=root $2=date
   local key; key=$(shasum -a 256 "$1/dreams/$2.md" | awk '{print $1}')
   printf '%s/autodream/logs/review-launched-%s-%s\n' "$1" "$2" "$key"
 }
 marker_confirmed(){ printf '%s.confirmed\n' "$(marker_dir "$1" "$2")"; }
 
-# Run review.sh against the mock cmux with a pinned downstream date (2020-01-02,
-# same fixture dates as review-skip.sh) and an install-dir marker forest in the
-# sandbox. AUTODREAM_DIR must be set to the sandbox dir so review.sh's same-day
-# marker lands inside the sandbox — unset, it would derive from $0 and fall to
-# the real ~/.claude/autodream, writing the claim into the host's install dir.
-# AUTODREAM_CONFIG pins the load of the host's own config (surface=cmux) out of
-# the picture: we set the surface explicitly below.
 run_review(){ # $1=root ; rest = args ; override env via $REVIEW_ENV
   local root="$1"; shift
   env $REVIEW_ENV \
@@ -102,14 +65,8 @@ run_review(){ # $1=root ; rest = args ; override env via $REVIEW_ENV
 REVIEW_ENV=""
 
 cmux_calls(){ # $1=root — count `workspace create` invocations in the mock log
-  # Only count the create line; the rename loop's tab-action lines (detached,
-  # 3x sleep 3) may land in the log long after the create returned and would
-  # make a raw `wc -l` flaky. grep -c on an empty log prints 0 AND exits 1, so
-  # `|| true` (not `|| echo 0`) keeps the single 0 without a duplicate.
   grep -c '^workspace create ' "$1/cmux.log" 2>/dev/null || true
 }
-
-# --- fixtures (same shapes review-skip.sh uses) ----------------------------
 
 REPORT_OPEN='# Autodream — 2020-01-02
 
@@ -118,11 +75,6 @@ REPORT_OPEN='# Autodream — 2020-01-02
 
 <!-- autodream:open-questions=3 -->'
 
-# --- tests -----------------------------------------------------------------
-
-# First trigger opens exactly one workspace and stamps the confirmed token. The
-# marker key is the content digest: a rebuilt report (new digest) must NOT be
-# swallowed by a stale marker (see marker_binds_to_report below).
 test_first_trigger_opens_workspace(){
   local root; root=$(setup_env)
   mk_report "$root" 2020-01-02 "$REPORT_OPEN"
@@ -136,8 +88,6 @@ test_first_trigger_opens_workspace(){
     || no "confirmed token missing at $conf"
 }
 
-# Second trigger same date + same report digest must be deduped: no second cmux
-# call, exit 0, and a notice pointing at --force.
 test_second_trigger_is_deduped(){
   local root; root=$(setup_env)
   mk_report "$root" 2020-01-02 "$REPORT_OPEN"
@@ -158,10 +108,6 @@ test_second_trigger_is_deduped(){
   assert_grep "$root/out2" '\-\-force' "dedup notice offers --force"
 }
 
-# --force must bypass the marker even when a fresh confirmed token is sitting
-# there. It must ALSO stamp its own confirmed token on a first-ever force run
-# (round-3 finding 1: gating the write on CLAIMED meant a first force launch
-# left no token, so the next scheduled trigger opened a duplicate workspace).
 test_force_bypasses_marker(){
   local root; root=$(setup_env)
   mk_report "$root" 2020-01-02 "$REPORT_OPEN"
@@ -171,13 +117,10 @@ test_force_bypasses_marker(){
   [ -f "$(marker_confirmed "$root" 2020-01-02)" ] \
     && ok "--force stamps its own confirmed token" \
     || no "--force left no confirmed token (next trigger would re-pop)"
-  # The stamped token must then dedup the routine trigger.
   run_review "$root" 2020-01-02
   assert_eq "$(cmux_calls "$root")" "$((before + 1))" "token stamped by --force dedups the next trigger"
 }
 
-# A failed create must release the claim (rmdir) so the next trigger retries,
-# and must exit non-zero so a scheduled job can't think the triage happened.
 test_failed_create_releases_marker(){
   local root; root=$(setup_env)
   mk_report "$root" 2020-01-02 "$REPORT_OPEN"
@@ -191,15 +134,10 @@ test_failed_create_releases_marker(){
     && ok "failed create leaves no confirmed token" \
     || no "failed create left a confirmed token"
   assert_grep "$root/out" 'cmux workspace create failed' "failure names cmux"
-  # Retry after the failure must succeed (claim was released, not latched). The
-  # log holds the failed create line plus the retried one, hence 2.
   run_review "$root" 2020-01-02
   assert_eq "$(cmux_calls "$root")" 2 "retry after failure opens the workspace"
 }
 
-# The marker binds to the report's content digest: rebuild the report (new
-# digest) and a normal review must open again, not be swallowed by the old
-# marker.
 test_marker_binds_to_report_digest(){
   local root; root=$(setup_env)
   mk_report "$root" 2020-01-02 "$REPORT_OPEN"
@@ -212,12 +150,6 @@ test_marker_binds_to_report_digest(){
     || no "new confirmed token missing for rebuilt report"
 }
 
-# Stale claims and confirmed tokens get reaped so the marker forest cannot grow
-# unbounded. A claim dir + token older than 14 days must be deleted when
-# review.sh runs. The confirmed token is created inside cls... as a sibling
-# file, so the prune must be able to delete both the (empty) claim dir and its
-# token — a `-delete` prune that only handles empty dirs would leave the token
-# behind, silently.
 test_stale_markers_are_pruned(){
   local root; root=$(setup_env)
   mk_report "$root" 2020-01-02 "$REPORT_OPEN"
@@ -234,11 +166,6 @@ test_stale_markers_are_pruned(){
     || no "stale confirmed token still present"
 }
 
-# A confirmed launch past the grace window must STILL be deduped (the age-based
-# reclaim only ever looks at *unconfirmed* claims). Aging the confirmed pair
-# beyond the 900s grace but under the 14-day forest prune makes MARKER_AGE big
-# enough that a naive reclaim would misfire while the (now unconditional) 14-day
-# reap does not scavenge the fixture — pinning that confirmation wins over age.
 test_confirmed_marker_survives_grace(){
   local root; root=$(setup_env)
   mk_report "$root" 2020-01-02 "$REPORT_OPEN"
@@ -250,9 +177,6 @@ test_confirmed_marker_survives_grace(){
   assert_eq "$(cmux_calls "$root")" 1 "confirmed launch is deduped even past the grace window"
 }
 
-# An unconfirmed claim that is OLDER than the grace window is an abandoned
-# launch (the process died while cmux was blocked). It must be reclaimed so the
-# popup can finally open, instead of suppressing triggers forever.
 test_abandoned_claim_is_reclaimed(){
   local root; root=$(setup_env)
   mk_report "$root" 2020-01-02 "$REPORT_OPEN"
@@ -267,8 +191,6 @@ test_abandoned_claim_is_reclaimed(){
     || no "reclaimed claim has no confirmed token"
 }
 
-# An unconfirmed claim that is YOUNG is a launch still in progress by another
-# trigger — the popup must not open twice while the first is still starting.
 test_in_progress_claim_suppresses(){
   local root; root=$(setup_env)
   mk_report "$root" 2020-01-02 "$REPORT_OPEN"
@@ -279,15 +201,10 @@ test_in_progress_claim_suppresses(){
   assert_grep "$root/out" 'already in progress' "in-progress notice is emitted"
 }
 
-# The scheduled review job forces AUTODREAM_TRIAGE_SURFACE=cmux. If cmux is
-# missing, review.sh must fail non-zero (no headless inline claude from a
-# launchd job) when stdin is not a TTY — a manual terminal still gets the
-# inline fallback.
 test_headless_missing_cmux_fails(){
   local root; root=$(setup_env)
   mk_report "$root" 2020-01-02 "$REPORT_OPEN"
   local rc=0
-  # `</dev/null` makes stdin non-interactive, like a launchd job.
   env AUTODREAM_DIR="$root/autodream" \
       AUTODREAM_CONFIG="$root/nonexistent-config" \
       AUTODREAM_TRIAGE_SURFACE=cmux \
@@ -300,15 +217,9 @@ test_headless_missing_cmux_fails(){
   assert_nogrep "$root/out" 'falling back to inline' "headless run does not fall back to inline"
 }
 
-# Interactive terminal (stdin is a TTY) with missing cmux keeps the inline
-# fallback, so a manual `review.sh` on a cmux-less host still triages inline.
 test_interactive_missing_cmux_falls_back_inline(){
   local root; root=$(setup_env)
   mk_report "$root" 2020-01-02 "$REPORT_OPEN"
-  # A pseudo-TTY keeps `[ -t 0 ]` true even with a redirected command. tests/with-pty.py, not BSD
-  # `script`: script calls tcgetattr on its own stdin and fails with "Operation not supported on
-  # socket" whenever the suite is started from something that hands it a socket, which is what
-  # made this test fail only when run through run-all.sh.
   local rc=0
   env AUTODREAM_DIR="$root/autodream" \
       AUTODREAM_CONFIG="$root/nonexistent-config" \
@@ -322,8 +233,6 @@ test_interactive_missing_cmux_falls_back_inline(){
   assert_grep "$root/out" 'falling back to inline' "interactive run falls back to inline"
 }
 
-# A logs dir that can't be created (e.g. a file is in the way) must exit
-# non-zero with a real message, not silently pretend the triage was skipped.
 test_logs_dir_failure_exits_nonzero(){
   local root; root=$(setup_env)
   mk_report "$root" 2020-01-02 "$REPORT_OPEN"
@@ -335,9 +244,6 @@ test_logs_dir_failure_exits_nonzero(){
   assert_grep "$root/out" 'cannot create logs dir' "logs-dir failure is named"
 }
 
-# A logs dir that EXISTS but cannot be written (mkdir -p passes, the claim
-# mkdir fails) must exit non-zero for the I/O error — not report "already in
-# progress" and exit 0, which silently drops triage.
 test_unwritable_claim_dir_fails(){
   local root; root=$(setup_env)
   mk_report "$root" 2020-01-02 "$REPORT_OPEN"
@@ -358,9 +264,6 @@ test_unwritable_claim_dir_fails(){
   assert_eq "$(cmux_calls "$root")" 0 "no cmux launch when the claim could not be written"
 }
 
-# A workspace whose embedded claude cannot start is a confirmed dead end: the
-# token would be written on cmux success and every later trigger dedupes on it.
-# Preflight the exact CLAUDE_BIN path we pass into the workspace env.
 test_missing_claude_preflights(){
   local root; root=$(setup_env)
   mk_report "$root" 2020-01-02 "$REPORT_OPEN"
@@ -381,15 +284,10 @@ test_missing_claude_preflights(){
     || no "confirmed token written despite preflight abort"
 }
 
-# shasum is the content-digest contract; if it is missing the marker must FAIL
-# CLOSED (exit non-zero) rather than silently regress to seconds-resolution
-# mtime and reintroduce same-second collision dedup bugs.
 test_missing_shasum_fails_closed(){
   local root; root=$(setup_env)
   mk_report "$root" 2020-01-02 "$REPORT_OPEN"
   local rc=0
-  # A shasum that is not there, first on PATH: /bin is /usr/bin on Linux, so a PATH that
-  # leaves /usr/bin out cannot hide it there.
   printf '#!/bin/sh\nexit 127\n' > "$root/shasum"; chmod +x "$root/shasum"
   env AUTODREAM_DIR="$root/autodream" \
     AUTODREAM_CONFIG="$root/nonexistent-config" \
@@ -403,10 +301,6 @@ test_missing_shasum_fails_closed(){
   assert_grep "$root/out" 'shasum unavailable' "shasum-missing is named"
 }
 
-# cmux exiting 0 is the creation contract: confirmation is bound immediately
-# even if the stdout ref does not parse (round-4 executor #2: a kill between
-# create and confirm, or a stdout-format change, must NEVER let the age-reclaim
-# open a duplicate). An empty ref only costs the cosmetic tab-title rename.
 test_empty_ref_still_confirms(){
   local root; root=$(setup_env)
   mk_report "$root" 2020-01-02 "$REPORT_OPEN"
@@ -430,7 +324,6 @@ MOCK
   [ -f "$(marker_confirmed "$root" 2020-01-02)" ] \
     && ok "rc-0 confirm is bound regardless of parseable ref" \
     || no "rc-0 launch left no confirmed token (next trigger could duplicate)"
-  # The bind must hold: a second run for the same report dedups.
   env AUTODREAM_DIR="$root/autodream" \
     AUTODREAM_CONFIG="$root/nonexistent-config" \
     AUTODREAM_TRIAGE_SURFACE=cmux \
@@ -442,8 +335,6 @@ MOCK
   assert_eq "$(cmux_calls "$root")" 1 "confirmed empty-ref launch dedups the next trigger"
   assert_grep "$root/out2" 'already launched for this report' "dedup notice fired"
 }
-
-# ---------------------------------------------------------------------------
 
 [ -x "$REVIEW" ] || { echo "FATAL: $REVIEW not executable"; exit 1; }
 

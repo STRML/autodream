@@ -1,9 +1,4 @@
 #!/bin/bash
-# bin/dream-grounding.sh (fixed, model-free checks) and bin/triage-dream.sh (the read-only
-# model pass over their output). No network, no model: the engine is tests/mock-claude.sh.
-#
-# The capture files here are the mock's triage-* files, never its l2-* files, so this suite
-# cannot disturb an assertion about L2's own arguments and prompt.
 set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)

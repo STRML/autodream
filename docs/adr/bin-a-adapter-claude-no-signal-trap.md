@@ -12,4 +12,4 @@ No trap. Being killed mid-flight is this pipeline's normal failure, so a stale t
 
 ## Consequences
 
-`tests/adapter-claude.sh` explains why a trap is safe in the test suite and not in the adapter: the deferral is bounded there (every foreground child is a `sleep 0.05` or faster) and unbounded here. Do not add a trap to the adapter without reading that test comment.
+A trap is safe in the test suite and not in the adapter: the deferral is bounded there (every foreground child is a `sleep 0.05` or faster) and unbounded here. `docs/adr/tests-adapters-claude-suite-trap-bounded-deferral.md` records the suite side. Do not add a trap to the adapter without reading it.

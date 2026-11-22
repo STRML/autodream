@@ -1,16 +1,4 @@
 #!/bin/bash
-# Unit tests for bin/merge-chunks.sh: judge a chunk answer, and merge the answers for one session
-# into the one findings JSON that Layer 2 already reads.
-#
-# Why this exists. A worker's answer is untrusted input, and the merge is the place a session
-# stops being "some chunks" and becomes "the session". The properties worth a test are the ones a
-# smoke test cannot see: an error or malformed answer must never be merged around, the merge must
-# be total over wrongly typed fields, and the fields must mean what the header says when the
-# answers disagree.
-#
-# Contract:
-#   merge-chunks.sh --check FILE                     exit 0 usable, 1 not
-#   merge-chunks.sh --session PATH [--elided N] FILE...   merged object on stdout; 2 usage; 3 refused
 
 set -u
 

@@ -1,13 +1,4 @@
 #!/bin/bash
-# Tests for bin/triage-candidates.sh - the nightly list of touched repos that need issue triage.
-#
-# Every repo is a real git repo in a temp dir whose origin URL points at github.com/test/<name>.
-# `gh` is a shim earlier on PATH that serves issue lists from files. No network, no GitHub.
-# One scenario per row of the failure matrix in the PR. The script never fails its caller, so
-# most rows assert the exit status (0) and the row it wrote.
-#
-# Usage:  tests/triage-candidates.sh
-# Exit:   0 if every assertion passes, 1 otherwise.
 
 set -u
 
@@ -27,15 +18,8 @@ assert_eq(){ [ "$1" = "$2" ] && ok "$3" || no "$3 (got '$1', want '$2')"; }
 T=$SUITE_TMP
 export FAKE_GH_DIR="$T/gh"
 mkdir -p "$FAKE_GH_DIR" "$T/bin"
-# A test that forgets its own state file must not write to the real one.
 export AUTODREAM_TRIAGE_STATE="$T/state-default.tsv"
 
-# ---- the gh shim ----------------------------------------------------------------------------
-# auth status        -> exit 0 (FAKE_GH_AUTH_FAIL=1 makes it exit 1)
-# issue list -R X    -> $FAKE_GH_DIR/issues-<name>.json (default [])
-#                       $FAKE_GH_DIR/disabled-<name> present: "has disabled issues" on stderr, exit 1
-# repo view X        -> $FAKE_GH_DIR/perm-<name> ("PERMISSION<TAB>isArchived"), default ADMIN/false
-# FAKE_GH_FAIL=1 fails every issue list; FAKE_GH_SLEEP=N delays it; FAKE_GH_REPO_FAIL=1 fails repo view.
 cat > "$T/bin/gh" <<'SH'
 #!/bin/bash
 case "$1 $2" in
@@ -64,7 +48,6 @@ export PATH="$T/bin:$PATH"
 
 g(){ git -c user.name=t -c user.email=t@t -c commit.gpgsign=false -c init.defaultBranch=main "$@"; }
 
-# make_repo NAME [URL] - a repo under $T/roots/NAME with origin URL (default github.com/test/NAME).
 make_repo(){
   NAME=$1; R="$T/roots/$NAME"
   mkdir -p "$R"; g init -q "$R"
@@ -72,9 +55,6 @@ make_repo(){
   g -C "$R" remote add origin "${2:-https://github.com/test/$NAME.git}"
 }
 
-# issues NAME UNTRIAGED LABELED [BUGONLY] - writes the issue list the shim serves.
-# UNTRIAGED issues carry no state label, LABELED ones carry ready-for-agent. With BUGONLY the
-# repo has no state labels at all: every issue is just `bug`.
 issues(){
   local name=$1 u=$2 l=$3 only=${4:-} i out="[" sep=""
   for ((i = 1; i <= u; i++)); do
@@ -87,8 +67,6 @@ issues(){
   printf '%s]\n' "$out" > "$FAKE_GH_DIR/issues-$name.json"
 }
 
-# run_t DATE ROWS... - runs the script for findings date DATE with the given stdin rows (one
-# argument per row; a bare path becomes a 3-column session row). Sets OUT, RC, F.
 run_t(){
   local date=$1; shift
   F="$T/findings/$date"; mkdir -p "$F"
@@ -188,7 +166,6 @@ touch "$FAKE_GH_DIR/disabled-kappa"
 run_t 2026-10-01 "$R"
 row test/kappa | grep -q 'issues-disabled' && ok "a repo with issues disabled is skipped as issues-disabled" || no "kappa disabled: $(cat "$(tsv)")"
 mv "$FAKE_GH_DIR/disabled-kappa" "$T/disabled-kappa.off"
-# gh missing: a PATH with only the tools the script needs.
 mkdir -p "$T/nogh"
 for c in bash env git jq awk sed grep sort date cut tr mkdir mv cat dirname basename head tail wc printf sleep rm mktemp; do
   p=$(command -v "$c" 2>/dev/null) && ln -sf "$p" "$T/nogh/$c"

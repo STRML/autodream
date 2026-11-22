@@ -1,12 +1,4 @@
 #!/bin/bash
-# Unit tests for bin/adapters.sh — loading, identity safety, containment.
-#
-# The security-relevant assertions here are the last three groups. Dispatch
-# builds a command path from the adapter's directory name, so anything that can
-# influence that name can influence what gets executed. The manifest is data,
-# read with jq and never sourced; the basename is validated; and the directory
-# is realpath-contained, because a basename check alone does not stop
-# adapters/evil being a symlink to somewhere else entirely.
 set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -41,8 +33,6 @@ mk_adapter(){ # $1=root $2=dirname $3=manifest name field
   printf '#!/bin/bash\nprintf "ran %%s" "$1"\n' > "$1/$2/adapter.sh"
   chmod +x "$1/$2/adapter.sh"
 }
-# Each case gets a fresh reject log, since adapters_list runs in a command
-# substitution and could not report rejections through a shell variable.
 use(){ ADAPTERS_ROOT="$1"; ADAPTERS_REJECT_LOG="$1/.rejected"; : > "$ADAPTERS_REJECT_LOG"; }
 
 echo "# adapters: a well-formed adapter loads and dispatches"
@@ -59,9 +49,6 @@ has "claude" "$(adapters_rejected)" "the refusal is visible AFTER a \$(adapters_
 echo "# adapters: an unsafe basename is refused"
 root=$(sandbox); mk_adapter "$root" ".evil" ".evil"; use "$root"
 assert_eq "$(adapters_list)" "" "a dot-prefixed basename is refused"
-# Absent from the list is not the same as REFUSED. "$root"/*/ never matched a
-# dot-prefixed directory, so .evil was invisible rather than rejected and
-# adapters_rejected reported `none` — which reads as "nothing was refused".
 has ".evil" "$(adapters_rejected)" "a dot-prefixed dir is RECORDED as refused, not merely skipped"
 root=$(sandbox); mk_adapter "$root" "Bad" "Bad"; use "$root"
 assert_eq "$(adapters_list)" "" "an uppercase basename is refused"
@@ -74,11 +61,6 @@ assert_eq "$(adapters_list)" "" "a symlinked adapter dir is refused"
 has "evil" "$(adapters_rejected)" "the containment escape is recorded"
 
 echo "# adapters: an adapter missing its manifest or adapter.sh is refused"
-# Each of these pairs an empty list with the refusal record on purpose. An empty
-# list alone cannot tell "the loader saw this and refused it" from "the glob
-# never matched it" — which is exactly how a malformed `.evil` read as `none`
-# refused for as long as it did. Every rejection case below reaches
-# _adapter_reject in bin/adapters.sh, so every one of them can say so.
 root=$(sandbox); mkdir -p "$root/bare"; use "$root"
 assert_eq "$(adapters_list)" "" "a directory with neither file is refused"
 has "bare" "$(adapters_rejected)" "a dir with neither file is RECORDED as refused"
@@ -89,10 +71,6 @@ has "half" "$(adapters_rejected)" "a manifest with no adapter.sh is RECORDED as 
 echo "# adapters: underscore-prefixed dirs are excluded from the default set"
 root=$(sandbox); mk_adapter "$root" claude claude; mk_adapter "$root" _fixture _fixture; use "$root"
 assert_eq "$(adapters_list)" "claude" "_fixture is not in the default set"
-# `none`, not the empty string. run.sh writes this value straight into
-# run-stats.txt, where a blank cannot be told apart from a key that was never
-# measured — and a caller-side `|| printf none` cannot rescue it, because
-# returning 0 with no output is success.
 assert_eq "$(adapters_rejected)" "none" "excluding a test adapter is not a rejection"
 
 echo "# adapters: the manifest is data — \$HOME substitutes, nothing evaluates"
@@ -116,12 +94,6 @@ assert_eq "$(adapters_list)" "" "unparseable JSON is refused"
 has "claude" "$(adapters_rejected)" "unparseable JSON is RECORDED as refused"
 
 echo "# adapters: dispatch validates the name it builds a path from"
-# The header of bin/adapters.sh argues that identity is the directory basename
-# precisely BECAUSE dispatch builds a command path out of it. That argument only
-# holds if the dispatching functions check. Every caller today passes a name that
-# came through adapters_list, so this is not reachable now — it is the guarantee
-# the seam is supposed to make to the third-party adapter that arrives later,
-# and a guarantee nothing enforces is a comment.
 root=$(sandbox); mk_adapter "$root" claude claude; use "$root"
 outside=$(sandbox); mkdir -p "$outside/evil"
 printf '#!/bin/bash\nprintf pwned\n' > "$outside/evil/adapter.sh"; chmod +x "$outside/evil/adapter.sh"
@@ -138,18 +110,11 @@ if adapter_manifest_get "$esc" .name >/dev/null 2>&1; then
 else
   ok "adapter_manifest_get refuses a traversing name"
 fi
-# The valid name still works, so the guard is a check and not a blanket refusal.
 assert_eq "$(adapter_run claude hello)" "ran hello" "a valid name still dispatches"
 
 echo "# adapters: an unwritable reject log reports unknown, never a confident none"
-# The refusal happened; adapters_rejected just cannot name it. Saying `none` there
-# is worst on the total-outage path, where run.sh fatals with "accepted no
-# adapters (rejected: none)" and the operator is told nothing was refused when
-# everything was. The flag has to be a FILE: _adapter_reject runs inside
-# $(adapters_list), so a shell variable set there never reaches this caller.
 root=$(sandbox); mk_adapter "$root" "Bad" "Bad"
 ADAPTERS_ROOT="$root"
-# A directory where the log should be: every append fails, nothing can be named.
 ADAPTERS_REJECT_LOG="$root/.rejected-dir"; mkdir -p "$ADAPTERS_REJECT_LOG"
 rm -f "$(_adapter_reject_broken_marker)"
 assert_eq "$(adapters_list)" "" "the malformed adapter is still refused"
@@ -196,8 +161,6 @@ l1counts=$(mktemp "${TMPDIR:-/tmp}/l1model.XXXXXX")
   unset AUTODREAM_L1_ENGINE_OMP
   printf '%s %s\n' "$pass" "$fail" > "$l1counts"
 )
-# A missing counts file means the subshell died before reporting, which is a failure, not a
-# pass: the assertions inside it never reached the totals.
 if read -r _p _f < "$l1counts" 2>/dev/null; then pass=$_p; fail=$_f
 else no "adapter_l1_model assertions did not report their counts"; fi
 rm -f "$l1counts" 2>/dev/null

@@ -1,16 +1,4 @@
 #!/bin/bash
-# Tests for bin/cookie-cadence.sh, the #39 measurement pass.
-#
-# Drives the real script against fixture findings dirs. No network, no model calls, no
-# credentials — the script only ever reads x-bookmarks.md headers and a file mtime.
-#
-# The whole script is one classification decision, and getting it wrong is not visible in
-# the output: counting a network failure as an expiry makes a yearly chore read as a
-# weekly one, and the number looks just as authoritative either way. So the fixtures pin
-# each header shape the fetcher can actually write.
-#
-# Usage:  tests/cookie-cadence.sh
-# Exit:   0 if every assertion passes, 1 otherwise.
 
 set -u
 
@@ -32,7 +20,6 @@ setup_env(){
   printf '%s' "$root"
 }
 
-# The four header shapes bin/x-bookmarks.sh writes, plus the no-file case.
 mk_day(){ # $1=root $2=date $3=ok|noneunread|auth|login|other|none|absent
   local dir="$1/findings/$2"
   mkdir -p "$dir"

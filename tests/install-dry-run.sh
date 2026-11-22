@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# install.sh --dry-run changes nothing, and --adapters / --l2-engine write one managed config section.
-#
-# HOME is a sandbox and launchctl is a shim that records its calls; the cutover is rehearsed with
-# --dry-run on the real host, so a dry run that wrote anything would be the bug.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

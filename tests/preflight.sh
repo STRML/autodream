@@ -1,10 +1,4 @@
 #!/bin/bash
-# Unit tests for bin/preflight.sh.
-#
-# These dependencies are not new — run.sh already relies on all of them. They
-# were simply never checked, and one fails in a way that destroys a night's
-# corpus without erroring: with `shasum` absent the artifact hash assignment
-# yields an empty string, so every session targets the same findings filename.
 set -u
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -30,7 +24,6 @@ assert_eq "$rc" "1" "exits 1 on a missing L2 engine"
 has "definitely-not-a-real-binary-xyz" "$out" "names the missing engine"
 
 echo "# preflight: missing shared dependencies are named, not silently skipped"
-# An empty PATH dir hides every external command from `command -v`.
 empty=$(mktemp -d "${TMPDIR:-/tmp}/pf.XXXXXX")
 out=$(PATH="$empty" "$PF" --l2-bin bash 2>&1); rc=$?
 assert_eq "$rc" "1" "exits 1 when dependencies are missing"
@@ -39,9 +32,6 @@ has "shasum"   "$out" "names shasum"
 has "python3"  "$out" "mentions python3"
 
 echo "# preflight: python3 alone is a DEGRADED warning, never a hard stop"
-# run.sh:1248 already skips project-field normalisation gracefully without it.
-# Making this fatal would take a host whose python3 is only a pyenv shim from a
-# slightly-worse report to no report at all, every night.
 if AUTODREAM_PREFLIGHT_FORCE_MISSING=python3 "$PF" --l2-bin bash >/dev/null 2>&1; then
   ok "a missing python3 alone still exits 0"
 else
@@ -49,8 +39,6 @@ else
 fi
 out3=$(AUTODREAM_PREFLIGHT_FORCE_MISSING=python3 "$PF" --l2-bin bash 2>&1)
 case "$out3" in *MISSING*python3*) no "python3 is not reported as MISSING" ;; *) ok "python3 is not reported as MISSING" ;; esac
-# Assert the DEGRADED line is actually emitted. Without this the test passed on
-# any host that HAS python3 — it simulated nothing and proved nothing.
 case "$out3" in *DEGRADED*python3*) ok "python3 absence emits a DEGRADED warning" ;;
                 *) no "python3 absence emits a DEGRADED warning (got: $out3)" ;; esac
 has "realpath" "$out" "names realpath"
@@ -60,12 +48,6 @@ has "one filename" "$out" "says what a missing shasum actually costs"
 has "containment"  "$out" "says why realpath is security-critical"
 
 echo "# preflight: a flag with no value is a usage error, never a hang"
-# `shift 2` with one argument left fails and shifts nothing, so the arg loop
-# spun forever. Preflight runs before the idempotency guard, so a wedged one
-# would also block every launchd catch-up trigger behind "label already running".
-# macOS has no stock `timeout`, and the workflow installs coreutils for
-# `gtimeout` only — it deliberately keeps gnubin off PATH because the suite
-# depends on BSD date and touch. Same selection run-all.sh already uses.
 TO=""
 command -v timeout  >/dev/null 2>&1 && TO=timeout
 [ -n "$TO" ] || { command -v gtimeout >/dev/null 2>&1 && TO=gtimeout; }
