@@ -337,6 +337,10 @@ else
     echo "mock: partial stdout, no sentinel" >&2
     exit 0
   fi
+  if [ "$mode" = "l2_prose_question" ]; then
+    printf '# Autodream — mock\n\nmock aggregate report\n\nShould .claude in .adapters-rejected be cleaned up?\nAUTODREAM_REPORT_END\nreport: %s\n' "$rep"
+    exit 0
+  fi
   if [ "$mode" = "l2_partial_marker" ]; then
     printf '# Autodream — mock\n\nmock aggregate report\n\n<!-- autodream:open-questions=0 -->\n'
     exit 0

@@ -118,6 +118,17 @@ report_finishes "$D/fmarker" 2020-01-02; assert_eq "$?" "0" "before the epoch a 
 report_finishes "$D/fmarker";            assert_eq "$?" "0" "no date given: the file-level check only"
 report_finishes "$D/empty" 2020-01-02;   assert_eq "$?" "1" "an empty file never finishes a date"
 
+echo "# report_incomplete_cause: why a report did not finish, in a phrase the retry log can quote"
+fx cprose   '# R\n\nbody\n\nShould .claude in .adapters-rejected be cleaned up?\n'
+fx cprosebl '# R\n\nbody\n\n- Should we clean up?\n\n\n'
+fx cplain   '# R\n\nbody with no question at all.\n'
+fx cmarkonly '# R\n\nbody\n<!-- autodream:open-questions=1 -->\n'
+assert_eq "$(report_incomplete_cause "$D/cprose")" "no open-questions marker, and the report ends in a question written as prose outside an AUTODREAM_QUESTIONS_BEGIN/END block" "no marker and a prose question at the end is named as such"
+assert_eq "$(report_incomplete_cause "$D/cprosebl")" "no open-questions marker, and the report ends in a question written as prose outside an AUTODREAM_QUESTIONS_BEGIN/END block" "trailing blank lines and a bullet do not hide it"
+assert_eq "$(report_incomplete_cause "$D/cplain")" "no open-questions marker and no AUTODREAM_QUESTIONS_BEGIN/END block" "no marker and no question is the plain case"
+assert_eq "$(report_incomplete_cause "$D/cmarkonly")" "an open-questions marker but no AUTODREAM_QUESTIONS_BEGIN/END block" "a marker without the block is named too"
+assert_eq "$(report_incomplete_cause "$D/fdate")" "" "a report with the block has no cause to name"
+
 echo "# the body: everything before the LAST sentinel"
 same report_body old_body
 assert_eq "$(report_body "$D/twosent" | tail -1)" "<!-- autodream:open-questions=1 -->" "the last sentinel ends the body"
