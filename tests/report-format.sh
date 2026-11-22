@@ -140,7 +140,9 @@ assert_eq "$(report_last_line_excerpt "$D/cctl")" "bodyends[31m here?" "control 
 UTF8_LOCALE=$(locale -a 2>/dev/null | grep -i -m1 -E '^(en_US|C)\.utf-?8$')
 fx cbad     '# R\n\nbody \377\376 and then\nShould we clean up?\n'
 fx cmb      "# R\n\n$(printf 'x%.0s' $(seq 1 79))$(printf '\303\251%.0s' 1 2 3 4 5)\n"
-fx ctrail   '# R\n\nbody\n\nShould we clean up?\nreport: /tmp/dreams/2020-01-02.md\nsummary one\nsummary two\nsummary three\n'
+fx ctrail   "# R\n\nbody\n\nShould we clean up?\nreport: $D/ctrail\nsummary one\nsummary two\nsummary three\n"
+fx ctraildt '# R\n\nbody\n\nShould we clean up?\nreport: /tmp/f/dropped-threads.md\nsummary one\nsummary two\nsummary three\n'
+fx cquotedabs '# R\n\nreport: /quoted/path\nShould we clean up?\n'
 fx cquoted  '# R\n\nreport: /tmp/dreams/x.md\nl1\nl2\nl3\nl4\nShould we clean up?\n'
 fx csent    '# R\n\nquoted:\nAUTODREAM_REPORT_END\nreport: quoted input\n\nShould we clean up?\n'
 fx cstray   "# R\n\nx$(printf '\\200%.0s' $(seq 1 1000))\n"
@@ -152,6 +154,8 @@ assert_eq "$(LC_ALL=C report_last_line_excerpt "$D/cmb")" "$(printf 'x%.0s' $(se
 assert_eq "$(report_last_line_excerpt "$D/ctrail")" "Should we clean up?" "trailing report: and summary lines do not hide the last body line"
 assert_eq "$(report_incomplete_cause "$D/ctrail")" "no open-questions marker, and the report ends in a question written as prose outside an AUTODREAM_QUESTIONS_BEGIN/END block" "so the prose question is named when the sentinel is missing"
 assert_eq "$(report_last_line_excerpt "$D/csent")" "Should we clean up?" "a quoted sentinel or report: line in the body hides nothing after it"
+assert_eq "$(report_last_line_excerpt "$D/ctraildt")" "Should we clean up?" "the trailer may name the dropped-threads path L2 was given as line 2"
+assert_eq "$(report_last_line_excerpt "$D/cquotedabs")" "Should we clean up?" "a quoted absolute report: line near the end is body text, not the trailer"
 assert_eq "$(report_last_line_excerpt "$D/cquoted")" "Should we clean up?" "an absolute report: line quoted high in the body is not the trailer"
 assert_eq "$(LC_ALL=C report_last_line_excerpt "$D/cstray" | wc -c | tr -d ' ')" "81" "stray continuation bytes count as characters, so the excerpt stays at 80 (plus the newline)"
 

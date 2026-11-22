@@ -57,9 +57,9 @@ report_finishes(){
 }
 
 report_last_line(){
-  LC_ALL=C awk '
+  RF_REPORT="$1" LC_ALL=C awk '
     { l[NR] = $0 }
-    /^report: \/[^ ]+$/ { r = NR }
+    $0 == "report: " ENVIRON["RF_REPORT"] || $0 ~ /^report: \/.*\/dropped-threads\.md$/ { r = NR }
     END {
       stop = (r && NR - r <= 4) ? r : NR + 1
       for (i = stop - 1; i >= 1; i--)
