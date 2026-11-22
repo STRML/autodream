@@ -999,10 +999,29 @@ test_a_prose_question_with_no_block_is_named_in_the_retry_log(){
   export MOCK_MODE=l2_prose_question AUTODREAM_L2_ATTEMPTS=2
   vault_run "$root"
   unset MOCK_MODE AUTODREAM_L2_ATTEMPTS
-  assert_grep "$root/run.out" "no open-questions marker, and the report ends in a question written as prose outside an AUTODREAM_QUESTIONS_BEGIN/END block" "the log names the prose question and the missing block"
-  assert_grep "$root/run.out" 'it ends with: "Should .claude in .adapters-rejected be cleaned up?"' "and quotes what the capture ends with"
+  assert_grep "$root/run.out" "no open-questions marker, and the report carries a question written as prose near its end, outside an AUTODREAM_QUESTIONS_BEGIN/END block" "the log names the prose question and the missing block"
+  assert_grep "$root/run.out" 'its tail reads: "Should .claude in .adapters-rejected be cleaned up?"' "and quotes what the capture ends with"
   assert_grep "$root/run.out" "L2 aggregation attempt 2" "and the report is retried"
   assert_no_file "$root/dreams/$DATE.md" "no truncated report stands as the night's report"
+  rm -rf "$root"
+}
+
+test_a_bad_byte_in_the_l2_capture_does_not_hide_the_cause_or_the_report(){
+  echo "# an invalid UTF-8 byte in the L2 capture, under a UTF-8 locale, neither blanks the retry log nor stops a delivered report"
+  local root utf8; root=$(setup_env); mk_session "$root" s1
+  utf8=$(locale -a 2>/dev/null | grep -i -m1 -E '^(en_US|C)\.utf-?8$')
+  [ -n "$utf8" ] || { echo "  skip - no UTF-8 locale installed"; rm -rf "$root"; return 0; }
+  export LC_ALL="$utf8" MOCK_MODE=l2_degraded_prose_trailer AUTODREAM_L2_ATTEMPTS=2
+  vault_run "$root"
+  assert_grep "$root/run.out" "the report carries a question written as prose near its end, outside an AUTODREAM_QUESTIONS_BEGIN/END block" "a capture with a bad byte and a trailer still names the prose question"
+  assert_grep "$root/run.out" 'its tail reads: "Should we clean up?"' "and quotes the last body line, not the summary"
+  rm -rf "$root"; root=$(setup_env); mk_session "$root" s1
+  export MOCK_MODE=l2_bad_byte
+  vault_run "$root"
+  unset LC_ALL MOCK_MODE AUTODREAM_L2_ATTEMPTS
+  assert_file "$root/dreams/$DATE.md" "a delivered report with a bad byte is staged"
+  assert_eq "$(LC_ALL=C grep -a -c ' byte$' "$root/dreams/$DATE.md")" "1" "with its body, bad byte and all"
+  assert_eq "$(LC_ALL=C grep -a -c 'autodream:open-questions=0' "$root/dreams/$DATE.md")" "1" "and its marker"
   rm -rf "$root"
 }
 
@@ -4774,6 +4793,7 @@ _run test_force_rebuild_failed_l2_does_not_consume
 _run test_unmovable_stale_report_disarms_consuming
 _run test_partial_report_does_not_consume
 _run test_a_prose_question_with_no_block_is_named_in_the_retry_log
+_run test_a_bad_byte_in_the_l2_capture_does_not_hide_the_cause_or_the_report
 _run test_partial_report_keeps_previous
 _run test_run_outcome_is_written_only_for_a_delivered_or_untouched_report
 _run test_partial_report_does_not_block_retry

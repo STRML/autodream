@@ -3930,7 +3930,7 @@ PY
     if report_has_sentinel "$L2_STDOUT"; then
       write_session_cwds "$FINDINGS_DIR" || log "WARNING: could not write session-cwds.tsv; Lately will fall back to project buckets"
       if report_body "$L2_STDOUT" > "$REPORT_PATH.body" \
-         && { awk '!/^<!-- autodream:remote-short=.* -->$/' "$REPORT_PATH.body" && remote_short_line; } > "$REPORT_PATH.tmp" \
+         && { LC_ALL=C awk '!/^<!-- autodream:remote-short=.* -->$/' "$REPORT_PATH.body" && remote_short_line; } > "$REPORT_PATH.tmp" \
          && mv "$REPORT_PATH.tmp" "$REPORT_PATH"; then
         L2_COMPLETE=1
       else
@@ -3951,7 +3951,7 @@ PY
         log "L2 attempt $attempt wrote a complete-looking report but no AUTODREAM_REPORT_END sentinel; not a validated delivery, retrying (exit $L2_RC)"
       else
         L2_INCOMPLETE_CAUSE=$(report_incomplete_cause "$REPORT_PATH")
-        log "L2 attempt $attempt left a report with ${L2_INCOMPLETE_CAUSE:-no open-questions marker}; it ends with: \"$(report_last_line_excerpt "$REPORT_PATH")\"; treating it as truncated and retrying (exit $L2_RC)"
+        log "L2 attempt $attempt left a report with ${L2_INCOMPLETE_CAUSE:-no open-questions marker}; its tail reads: \"$(report_last_line_excerpt "$REPORT_PATH")\"; treating it as truncated and retrying (exit $L2_RC)"
       fi
     else
       log "L2 attempt $attempt wrote no report (exit $L2_RC)"

@@ -341,6 +341,15 @@ else
     printf '# Autodream — mock\n\nmock aggregate report\n\nShould .claude in .adapters-rejected be cleaned up?\nAUTODREAM_REPORT_END\nreport: %s\n' "$rep"
     exit 0
   fi
+  if [ "$mode" = "l2_degraded_prose_trailer" ]; then
+    dest=$(printf '%s\n' "$input" | sed -n 's/^Report destination (literal absolute path): //p' | head -1)
+    printf '# Autodream — mock\n\nbad \377 byte\n\nShould we clean up?\nreport: %s\nsessions reviewed: 1\nfindings: 0\npins proposed: 0\n' "$dest"
+    exit 0
+  fi
+  if [ "$mode" = "l2_bad_byte" ]; then
+    printf '# Autodream — mock\n\nbad \377 byte\n\n<!-- autodream:open-questions=0 -->\nAUTODREAM_REPORT_END\nreport: %s\n' "$rep"
+    exit 0
+  fi
   if [ "$mode" = "l2_partial_marker" ]; then
     printf '# Autodream — mock\n\nmock aggregate report\n\n<!-- autodream:open-questions=0 -->\n'
     exit 0
