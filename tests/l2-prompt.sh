@@ -59,7 +59,8 @@ if report_has_questions_block "$T/example-report.md"; then ok "the example block
 assert_eq "$(report_marker_count "$T/example-report.md")" "0" "and its count marker is zero"
 if report_finishes "$T/example-report.md" 2026-11-19; then ok "a report ending in the example finishes"; else no "a report ending in the example does not finish"; fi
 
-case "$(cat "$REPO/prompts/PROMPT.md")" in *"still ends with the whole block"*) ok "PROMPT.md requires the block on a night with nothing to ask" ;; *) no "PROMPT.md does not require the block on a night with nothing to ask" ;; esac
+case "$(cat "$REPO/prompts/PROMPT.md")" in *"ends with the whole block, whatever the night"*) ok "PROMPT.md requires the block on a night with nothing to ask" ;; *) no "PROMPT.md does not require the block on a night with nothing to ask" ;; esac
+case "$(cat "$REPO/prompts/PROMPT.md")" in *"With questions, list them and give their real count"*) ok "and says a night with questions keeps its real count" ;; *) no "PROMPT.md does not keep the real count on a night with questions" ;; esac
 
 echo "# the loader"
 # shellcheck source=/dev/null
