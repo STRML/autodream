@@ -1124,6 +1124,43 @@ test_partial_report_does_not_consume(){
   rm -rf "$root"
 }
 
+test_run_outcome_is_written_only_for_a_delivered_or_untouched_report(){
+  echo "# autodream-now --watch reads logs/run-<date>.outcome: the runner writes it, under the launch's token, only when it delivered or left a finished report alone"
+  local root o sh; root=$(setup_env); mk_session "$root" s1; o="$root/autodream/logs/run-$DATE.outcome"
+  AUTODREAM_RUN_TOKEN=tok.1 vault_run "$root"
+  assert_eq "$(sed -n 1p "$o" 2>/dev/null)" "tok.1 delivered" "a validated delivery is written under the token"
+  AUTODREAM_RUN_TOKEN=tok.2 vault_run "$root"
+  assert_eq "$(sed -n 2p "$o" 2>/dev/null)" "tok.2 noop" "a finished report left alone (the idempotency guard) is a noop"
+  AUTODREAM_FORCE=1 AUTODREAM_RUN_TOKEN=tok.3 vault_run "$root"
+  assert_eq "$(sed -n 3p "$o" 2>/dev/null)" "tok.3 delivered" "a forced rebuild that delivers is delivered"
+  vault_run "$root"
+  AUTODREAM_RUN_TOKEN='bad token; touch x' vault_run "$root"
+  assert_eq "$(wc -l < "$o" | tr -d ' ')" "3" "no token, or a token with characters outside [0-9A-Za-z._-], writes nothing (every scheduled run)"
+  rm -rf "$root"
+
+  # a degraded capture (complete-looking, no sentinel) whose move-aside fails: the file stays at the report path
+  root=$(setup_env); mk_session "$root" s1; o="$root/autodream/logs/run-$DATE.outcome"; sh="$root/shim"; mkdir -p "$sh"
+  printf '#!/bin/bash\ncase "$*" in *.partial-*) exit 1 ;; esac\nexec /bin/mv "$@"\n' > "$sh/mv"; chmod +x "$sh/mv"
+  export MOCK_MODE=l2_partial_marker AUTODREAM_L2_ATTEMPTS=1
+  PATH="$sh:$PATH" AUTODREAM_RUN_TOKEN=tok.4 vault_run "$root"
+  unset MOCK_MODE AUTODREAM_L2_ATTEMPTS
+  assert_grep "$root/run.out" "an incomplete report is at" "the run says the capture could not be moved aside"
+  assert_eq "$(cat "$o" 2>/dev/null)" "" "and writes no outcome for it"
+  rm -rf "$root"
+
+  # no sessions: the stub report is complete and is the run's delivery
+  root=$(setup_env); o="$root/autodream/logs/run-$DATE.outcome"
+  AUTODREAM_RUN_TOKEN=tok.5 vault_run "$root"
+  assert_eq "$(cat "$o" 2>/dev/null)" "tok.5 delivered" "the no-sessions stub counts as delivered"
+  # a forced rebuild whose stub cannot be written leaves the old report, which is complete: it is not this run's delivery
+  chmod 444 "$root/dreams/$DATE.md"
+  AUTODREAM_FORCE=1 AUTODREAM_RUN_TOKEN=tok.6 vault_run "$root"
+  chmod 644 "$root/dreams/$DATE.md"
+  assert_eq "$(grep -c 'tok.6' "$o" || true)" "0" "a stub that could not be written over the old report is not reported as delivered"
+  assert_grep "$root/run.out" "could not be written" "and the run says so"
+  rm -rf "$root"
+}
+
 test_partial_report_does_not_block_retry(){
   echo "# regression: a truncated report must not satisfy the idempotency guard forever"
   local root; root=$(setup_env); mk_session "$root" s1
@@ -3550,7 +3587,7 @@ Other findings dropped by the gate:
 EOF
 )
   run_notify "$f"
-  assert_grep "$root/inbox/2020-02-01-open-questions.md" '^# 1 open question$' "marker wins over the 6 list lines in the section"
+  assert_grep "$root/inbox/2020-02-01-open-questions.md" '^\*\*1 open question\*\*$' "marker wins over the 6 list lines in the section"
 
   # --- marker of 0 must stay silent even though the section has prose and bullets ---
   f=$(mk_report 2020-02-02 <<'EOF'
@@ -3576,7 +3613,7 @@ EOF
 EOF
 )
   run_notify "$f"
-  assert_grep "$root/inbox/2020-02-03-open-questions.md" '^# 2 open questions$' "no marker: 2 items, not 5 list lines"
+  assert_grep "$root/inbox/2020-02-03-open-questions.md" '^\*\*2 open questions\*\*$' "no marker: 2 items, not 5 list lines"
 
   # --- no marker: bold topic titles beat the bullets underneath them ---
   f=$(mk_report 2020-02-04 <<'EOF'
@@ -3590,7 +3627,7 @@ EOF
 EOF
 )
   run_notify "$f"
-  assert_grep "$root/inbox/2020-02-04-open-questions.md" '^# 2 open questions$' "no marker: 2 titles, not 4 bullets"
+  assert_grep "$root/inbox/2020-02-04-open-questions.md" '^\*\*2 open questions\*\*$' "no marker: 2 titles, not 4 bullets"
 
   # --- no marker: plain bullets are the questions ---
   f=$(mk_report 2020-02-05 <<'EOF'
@@ -3599,7 +3636,7 @@ EOF
 EOF
 )
   run_notify "$f"
-  assert_grep "$root/inbox/2020-02-05-open-questions.md" '^# 2 open questions$' "no marker: plain bullets counted"
+  assert_grep "$root/inbox/2020-02-05-open-questions.md" '^\*\*2 open questions\*\*$' "no marker: plain bullets counted"
 
   # --- no marker: bare prose still pops, since a non-empty section has something to say ---
   f=$(mk_report 2020-02-06 <<'EOF'
@@ -3607,7 +3644,7 @@ Should the fanout be raised to 12 given the recent session volume?
 EOF
 )
   run_notify "$f"
-  assert_grep "$root/inbox/2020-02-06-open-questions.md" '^# 1 open question$' "no marker: prose falls back to 1"
+  assert_grep "$root/inbox/2020-02-06-open-questions.md" '^\*\*1 open question\*\*$' "no marker: prose falls back to 1"
 
   # --- no marker: a "None ..." lead-in is zero, not a prose question ---
   # Without this case the prose tier turns every quiet pre-marker night into a false pop.
@@ -4222,6 +4259,7 @@ _run test_force_rebuild_failed_l2_does_not_consume
 _run test_unmovable_stale_report_disarms_consuming
 _run test_partial_report_does_not_consume
 _run test_partial_report_keeps_previous
+_run test_run_outcome_is_written_only_for_a_delivered_or_untouched_report
 _run test_partial_report_does_not_block_retry
 _run test_complete_report_retires_partials
 _run test_dead_stdout_does_not_kill_the_run

@@ -11,8 +11,12 @@
 #   autodream-now.sh [YYYY-MM-DD] [--force] [--watch] [--dry-run]
 #     YYYY-MM-DD   date to process (default: yesterday, same as run.sh)
 #     --force      set AUTODREAM_FORCE=1 (rebuild even if a report already exists)
-#     --watch      tail the run log until the report appears (or it gives up), then exit
+#     --watch      tail this run's log until it writes a complete report (exit 0) or ends
+#                  without one (exit 1)
 #     --dry-run    print the generated plist + launchctl commands; don't run anything
+#
+# The one-shot job gets the scheduled job's environment (that is where a login setting
+# such as CLAUDE_CONFIG_DIR lives), so a manual run uses the same login as the nightly.
 #
 # Everything is auto-detected — nothing is hardcoded to a particular user or host.
 set -euo pipefail
@@ -128,6 +132,61 @@ env_xml+="        <key>DREAMS_DIR</key><string>${DREAMS_DIR}</string>
 [ "$FORCE" = 1 ] && env_xml+="        <key>AUTODREAM_FORCE</key><string>1</string>
 "
 
+# The scheduled job's environment, minus the four keys set above. A login setting lives
+# there: a host whose nightly runs on a non-default Claude profile sets CLAUDE_CONFIG_DIR
+# in the job, and a one-shot plist built from PATH alone ran the CLI on the default
+# profile. With no login there, every L2 attempt wrote "Not logged in · Please run /login"
+# and the date stayed unassembled. The caller's own shell environment is deliberately NOT
+# copied: a terminal inside another Claude profile would run the job under that login.
+# scheduler-label.sh --plist applies the same ownership rule the label uses, so a plist
+# that merely shares the label is never read. No scheduled job means nothing is inherited,
+# which is the old behavior. A scheduled job whose environment cannot be read (no plutil, no
+# jq on the job's own PATH or the caller's, a plist that will not convert) refuses the launch:
+# copying nothing would start the run logged out again, the failure this exists to prevent.
+# $1=variable to set, $2=text -> the text with & < > escaped, trailing newlines kept (a
+# command substitution would strip them, so the text carries a sentinel through sed).
+xml_escape_into() {
+  local out
+  out="$(printf '%sx' "$2" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')"
+  printf -v "$1" '%s' "${out%x}"
+}
+SCHED_PLIST="$("$BIN_DIR/scheduler-label.sh" --plist "$AUTODREAM_DIR" 2>/dev/null || true)"
+INHERITED_KEYS=""
+if [ -n "$SCHED_PLIST" ]; then
+  ENV_WORK="$(mktemp -d "${TMPDIR:-/tmp}/autodream-now.XXXXXX")" || { echo "autodream-now: cannot make a scratch directory" >&2; exit 65; }
+  # AUTODREAM_JQ_BIN names the jq to use (the tests point it at a failing one); else the job's own PATH
+  # is searched first, because the caller's PATH may lack /opt/homebrew/bin where jq often lives.
+  JQ_BIN="${AUTODREAM_JQ_BIN:-$(PATH="$PATH_VAL:$PATH" command -v jq 2>/dev/null || true)}"
+  PLUTIL_BIN="$(PATH="$PATH_VAL:$PATH" command -v plutil 2>/dev/null || true)"
+  if [ -z "$JQ_BIN" ] || [ -z "$PLUTIL_BIN" ]; then
+    rm -rf "$ENV_WORK"
+    echo "autodream-now: the scheduled job $SCHED_PLIST has an environment to copy and this needs both plutil and jq (not found); refusing to launch logged out" >&2
+    exit 65
+  fi
+  # A key the plist does not have is an empty environment, not a failure; a plist that will not
+  # convert, or a jq that fails, is.
+  "$PLUTIL_BIN" -convert json -o "$ENV_WORK/job.json" "$SCHED_PLIST" 2>/dev/null \
+    && "$JQ_BIN" -j '(.EnvironmentVariables // {}) | to_entries[] | select(.value | type == "string") | .key, "\u0000", .value, "\u0000"' "$ENV_WORK/job.json" > "$ENV_WORK/env.nul" 2>/dev/null \
+    || { rm -rf "$ENV_WORK"; echo "autodream-now: could not read the environment of the scheduled job $SCHED_PLIST; refusing to launch logged out" >&2; exit 65; }
+  # NUL-separated key/value pairs, so no value can be split or unescaped on the way through.
+  ek=""; ev=""   # set by xml_escape_into (printf -v)
+  while IFS= read -r -d '' k && IFS= read -r -d '' v; do
+    case "$k" in PATH|AUTODREAM_DIR|DREAMS_DIR|AUTODREAM_FORCE|AUTODREAM_RUN_TOKEN) continue ;; esac
+    xml_escape_into ek "$k"
+    xml_escape_into ev "$v"
+    env_xml+="        <key>${ek}</key><string>${ev}</string>
+"
+    INHERITED_KEYS="${INHERITED_KEYS:+$INHERITED_KEYS }$k"
+  done < "$ENV_WORK/env.nul"
+  rm -rf "$ENV_WORK"
+fi
+
+# This launch's id. run.sh writes it beside how the run ended (logs/run-<date>.outcome), and --watch
+# reads that and nothing else, so the line cannot be mixed up with an earlier run's.
+RUN_TOKEN="$(date +%s).$$.$RANDOM"
+env_xml+="        <key>AUTODREAM_RUN_TOKEN</key><string>${RUN_TOKEN}</string>
+"
+
 ONDEMAND_OUT="$AUTODREAM_DIR/logs/ondemand.out.log"
 ONDEMAND_ERR="$AUTODREAM_DIR/logs/ondemand.err.log"
 
@@ -173,6 +232,7 @@ if [ "$DRYRUN" = 1 ]; then
   echo "launchctl bootstrap $DOMAIN $PLIST   # RunAtLoad fires the one-shot run"
   echo "# log:    $LOG"
   echo "# report: $REPORT"
+  echo "# env from the scheduled job: ${INHERITED_KEYS:-none}${SCHED_PLIST:+ ($SCHED_PLIST)}"
   exit 0
 fi
 
@@ -194,7 +254,9 @@ if [ -n "$holder_pid" ]; then
   exit 75
 fi
 
-printf '%s\n' "$PLIST_BODY" > "$PLIST"
+# Owner-only: the body now carries the scheduled job's environment, which can hold more
+# than paths. launchd only refuses group- or world-writable agent plists, so 600 loads.
+( umask 077; rm -f "$PLIST"; printf '%s\n' "$PLIST_BODY" > "$PLIST" )
 if command -v plutil >/dev/null 2>&1; then
   plutil -lint "$PLIST" >/dev/null || { echo "autodream-now: generated plist failed plutil lint" >&2; exit 65; }
 fi
@@ -203,12 +265,16 @@ fi
 # one-shot run exactly once. Do NOT also kickstart, or a fast run (e.g. the
 # idempotency no-op) would execute twice.
 launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+# Taken before bootstrap, for --watch: a date's log already holds every earlier attempt's lines.
+LOG_START=0
+[ -f "$LOG" ] && LOG_START="$(wc -c < "$LOG" | tr -d ' ')"
 launchctl bootstrap "$DOMAIN" "$PLIST"
 
 echo "autodream: launched $LABEL for $TARGET (detached, no time cap)"
 echo "  run log: $LOG"
 echo "  report:  $REPORT"
 echo "  this run's launchd stderr: $ONDEMAND_ERR"
+echo "  env from the scheduled job: ${INHERITED_KEYS:-none}"
 
 if [ "$WATCH" = 0 ]; then
   echo "Tail it with:  tail -f \"$LOG\""
@@ -221,23 +287,67 @@ echo "Watching (Ctrl-C to stop watching; the run keeps going) ..."
 for _ in $(seq 1 120); do [ -f "$LOG" ] && break; sleep 1; done
 [ -f "$LOG" ] || { echo "log never appeared at $LOG; check $ONDEMAND_ERR" >&2; exit 1; }
 
-tail -n +1 -f "$LOG" &
+# This run's lines only: the log for a date accumulates every earlier attempt.
+tail -c +"$((LOG_START + 1))" -f "$LOG" &
 TAIL_PID=$!
 trap 'kill "$TAIL_PID" 2>/dev/null || true' EXIT
 
-# Poll for the report. Generous ceiling (90 min) since real runs can be long.
+# Two separate questions.
+#   Did this run deliver? Only run.sh knows, so it says so: one line in logs/run-<date>.outcome,
+#   "<this launch's token> delivered|noop". Nothing else counts: not a report file that looks complete
+#   (run.sh keeps a marker-bearing capture with no AUTODREAM_REPORT_END sentinel at the report path
+#   between L2 attempts, and a killed run leaves it there), not the file's mtime (a whole second, so a
+#   report written in the launch second reads as new), not a log line (the log also holds model text),
+#   and not a completeness predicate evaluated here (another config's questions epoch, and the runner
+#   accepts a legacy report before that epoch that has no marker). The token is this launch's own, so
+#   an earlier run's line is never read as this one's.
+#   Is the run over? launchd has run the job and holds no process for it. Without this, a run whose
+#   every attempt failed was watched for the full 90 minutes.
+OUTCOME="${LOG%.log}.outcome"
+job_finished() { # 0 once launchd has run the job and no process is left
+  local out
+  out="$(launchctl print "$DOMAIN/$LABEL" 2>/dev/null)" || return 0   # unloaded: nothing to wait for
+  grep -qE '^[[:space:]]*pid = [0-9]' <<<"$out" && return 1
+  grep -qE '^[[:space:]]*runs = [1-9]' <<<"$out"                      # runs = 0: not started yet
+}
+outcome_of_this_run() { # delivered | noop | (nothing yet)
+  [ -f "$OUTCOME" ] || return 0
+  awk -v t="$RUN_TOKEN" '$1 == t { s = $2 } END { if (s != "") print s }' "$OUTCOME" 2>/dev/null
+}
+
+POLL="${AUTODREAM_WATCH_POLL:-5}"
+# Generous ceiling (90 min) since real runs can be long.
 deadline=$(( $(date +%s) + 90*60 ))
+report_outcome() { # $1=delivered|noop -> prints the verdict and exits; returns when there is none
+  case "$1" in
+    delivered) sleep 1; echo; echo "✓ report ready: $REPORT"; exit 0 ;;
+    noop)
+      sleep 1; echo
+      if [ "$FORCE" = 1 ]; then
+        echo "✗ the run ended without writing a new report; the previous one is unchanged: $REPORT" >&2
+        exit 1
+      fi
+      echo "✓ report already existed; nothing to rebuild: $REPORT"
+      exit 0 ;;
+  esac
+}
 while :; do
-  if [ -s "$REPORT" ]; then
+  report_outcome "$(outcome_of_this_run)"
+  if job_finished; then
     sleep 1
+    report_outcome "$(outcome_of_this_run)"   # the line can land just before the job exits
     echo
-    echo "✓ report ready: $REPORT"
-    exit 0
+    echo "✗ the run ended without delivering a report for $TARGET." >&2
+    echo "  Why is in $LOG (and $ONDEMAND_ERR); an incomplete capture, if any, is at $REPORT.partial-*" >&2
+    if [ "$FORCE" = 1 ] && [ -s "$REPORT" ]; then
+      echo "  --force wrote nothing new: the previous one is unchanged: $REPORT" >&2
+    fi
+    exit 1
   fi
   if [ "$(date +%s)" -ge "$deadline" ]; then
     echo
     echo "gave up watching after 90 min; run may still be going — check $LOG" >&2
     exit 1
   fi
-  sleep 5
+  sleep "$POLL"
 done

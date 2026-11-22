@@ -1714,6 +1714,19 @@ report_complete() {
   report_finishes "$REPORT_PATH" "${TARGET_DATE:-}"
 }
 
+# One line in logs/run-<date>.outcome saying how this run ended, for autodream-now.sh --watch. The watcher
+# decides "ready" from this and from nothing else: the runner is the only one that knows whether a report
+# was delivered, and the log (which also holds model text), the report's mtime (a whole second) and a
+# completeness predicate the watcher evaluates for itself (with another config's epoch) each gave the wrong
+# answer. The token is the watcher's own id for this launch (AUTODREAM_RUN_TOKEN), so a line from an
+# earlier run is never mistaken for this one and no clock is involved. Nothing is written when no watcher
+# set a token, which is every scheduled run. $1=delivered (a validated report stands) or noop (a finished
+# report already existed and nothing was rebuilt); a run that ends any other way writes nothing.
+write_run_outcome() {
+  case "${AUTODREAM_RUN_TOKEN:-}" in ''|*[!0-9A-Za-z._-]*) return 0 ;; esac
+  printf '%s %s\n' "$AUTODREAM_RUN_TOKEN" "$1" >> "${RUN_LOG%.log}.outcome" 2>/dev/null || true
+}
+
 # ---- L2 attempt diagnostics (issue 42) ----
 # L2 attempt 1 has died with exit 143 (SIGTERM) and a bare "Execution error" on 2026-08-01,
 # 08-31, 09-02, 09-04, 09-19 and 10-02, and nothing in the log says who sent the signal.
@@ -3787,6 +3800,7 @@ run() {
   # failed overnight left NO report, so it correctly proceeds and finishes the work.
   if report_finishes_date && [ "${AUTODREAM_FORCE:-0}" != "1" ]; then
     log "report already exists for $TARGET_DATE ($REPORT_PATH); nothing to do (AUTODREAM_FORCE=1 to rebuild)"
+    write_run_outcome noop
     return 0
   fi
   # Present but not finished: the move-aside before L2 sets it aside as .stale-<epoch>. It is
@@ -4076,6 +4090,10 @@ None; no sessions were triaged on this date.
 <!-- autodream:open-questions=0 -->
 AUTODREAM_QUESTIONS_END
 EOF
+    # The status of the write above, kept for the outcome below: a stub that could not be opened for
+    # writing leaves the previous report in place, and that old file is complete, so report_complete
+    # alone would call it this run's delivery.
+    STUB_RC=$?
     if [ -s "$FINDINGS_DIR/dropped-threads.md" ]; then
       awk -v section="$FINDINGS_DIR/dropped-threads.md" '
         $0 == "AUTODREAM_QUESTIONS_BEGIN" {
@@ -4094,6 +4112,11 @@ EOF
     if [ -x "$AUTODREAM_DIR/question-streaks.sh" ]; then
       env AUTODREAM_DIR="$AUTODREAM_DIR" "$AUTODREAM_DIR/question-streaks.sh" update "$REPORT_PATH" "$FINDINGS_DIR" \
         || log "question-streaks returned non-zero (continuing)"
+    fi
+    if [ "$STUB_RC" -eq 0 ] && report_complete; then
+      write_run_outcome delivered
+    else
+      log "WARNING: the stub report for $TARGET_DATE could not be written (exit $STUB_RC); not reporting it as delivered"
     fi
     return 0
   fi
@@ -5273,6 +5296,9 @@ PY
 
   if [ -f "$REPORT_PATH" ]; then
     log "report bytes: $(wc -c < "$REPORT_PATH" | tr -d ' ')"
+    # Only a sentinel-validated report counts as delivered. A degraded capture that could not be moved
+    # aside also leaves a file here, and must not be reported as ready.
+    if [ "$L2_DELIVERED" = "1" ] && report_complete; then write_run_outcome delivered; fi
 
     # ---- Escalate questions this report has now asked N nights running ----
     # Before the pins and notify.sh, deliberately: it only reads the report and writes one
