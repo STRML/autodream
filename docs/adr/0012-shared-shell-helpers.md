@@ -16,7 +16,7 @@ Status: accepted · Date: 2026-11-21 · Code: `bin/lib-flock.sh` (`flock_acquire
 
 ### Context
 
-`question-streaks.sh` and `threads.sh` serialize a read-modify-write on a state file. The mkdir lock they used was reclaimed by contenders that judged its holder gone, and a shell cannot make "judge, then take away" atomic: four gate rounds on #192 each found another interleaving (`docs/plans/2026-11-21-fix_question-streaks-lock-owner-redesign.md`). The story is in docs/adr/0020-question-streaks.md#background-open-questions-that-never-get-answered, "Open questions that never get answered", and `bin-b-question-streaks-flock-skips-not-blocks`.
+`question-streaks.sh` and `threads.sh` serialize a read-modify-write on a state file. The mkdir lock they used was reclaimed by contenders that judged its holder gone, and a shell cannot make "judge, then take away" atomic: four gate rounds on #192 each found another interleaving (`docs/plans/2026-11-21-fix_question-streaks-lock-owner-redesign.md`). The story is in docs/adr/0020-question-streaks.md#background-open-questions-that-never-get-answered, "Open questions that never get answered", and `docs/adr/0020-question-streaks.md#the-state-lock-is-a-kernel-flock-and-failing-to-take-it-skips-the-update`.
 
 ### Decision
 
@@ -29,7 +29,7 @@ Return codes of `flock_acquire`:
 - 2 cannot lock: the file cannot be opened, or the lock call failed for a reason other than contention
 - 3 `python3` is not on PATH
 - 4 this process already holds a lock (a second `exec 9>>` would close the first description and drop the first lock, so a double acquire is refused rather than allowed to unlock the outer one)
-- 5 an older version's lock directory is still live (see `rest-lib-flock-legacy-dir-and-inherited-fd`)
+- 5 an older version's lock directory is still live (see `docs/adr/0012-shared-shell-helpers.md#lib-flock-honors-an-old-mkdir-lock-while-it-is-young-and-long-running-children-must-close-fd-9`)
 
 Two guards sit in front of the lock call:
 
@@ -38,7 +38,7 @@ Two guards sit in front of the lock call:
 
 ### Consequences
 
-`python3` is already needed by the web dashboard; without it the caller gets 3 and says so. Change the lock protocol here for both scripts together (`bin-b-threads-state-flock`). Callers decide what each code means for them (`question-streaks.sh` skips the update; see its ADR).
+`python3` is already needed by the web dashboard; without it the caller gets 3 and says so. Change the lock protocol here for both scripts together (`docs/adr/0021-dropped-threads.md#threadssh-takes-the-same-flock-as-question-streakssh-and-honors-the-old-mkdir-lock-while-it-is-young`). Callers decide what each code means for them (`question-streaks.sh` skips the update; see its ADR).
 
 ## lib-flock honors an old mkdir lock while it is young, and long-running children must close fd 9
 
@@ -63,7 +63,7 @@ Every child started while the lock is held inherits fd 9. The short-lived ones (
 
 ### Consequences
 
-The 300-second constant and the `none` for an older directory are the remaining judgment calls; remove the legacy path once no older writer can exist. A new long-running child started under the lock needs `9>&-` (`bin-b-question-streaks-banner`).
+The 300-second constant and the `none` for an older directory are the remaining judgment calls; remove the legacy path once no older writer can exist. A new long-running child started under the lock needs `9>&-` (`docs/adr/0020-question-streaks.md#the-banner-runs-osascript-with-fd-9-closed-and-escapes-the-message-for-applescript`).
 
 ## path_state has three answers, and "absent" is believed only under a searchable ancestor
 
@@ -99,7 +99,7 @@ Every caller goes through these functions. Each tool is detected on its own (`_P
 - `pdate_fmt_epoch <epoch> <+FORMAT>` prints the epoch formatted in local time (`TZ=UTC pdate_fmt_epoch` for UTC).
 - `pstat_mtime <file>` prints the mtime in epoch seconds; `pstat_mode <file>` the permission bits in octal with no leading zeros (600, 755).
 - `repo_slug <repo dir>` prints `owner/repo` from a github.com origin URL, and nothing otherwise.
-- `tmo` is in `rest-portable-tmo-keeps-stdin-and-reaps-its-watchdog`.
+- `tmo` is in `docs/adr/0012-shared-shell-helpers.md#tmos-watchdog-fallback-hands-the-callers-stdin-to-the-job-and-kills-its-own-sleep`.
 
 ### Consequences
 

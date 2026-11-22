@@ -100,7 +100,7 @@ A sandbox tool can accept a profile and confine nothing, or start and refuse eve
 
 ### Consequences
 
-`run.sh` runs the probe once per run and reports `l1_confined` from it (`runsh-l1-confiner-missing-runs-unconfined`). The probe builds a prefix with no paths, so the real per-engine prefix is built separately at setup. The suite skips the real-sandbox cases where `sandbox-exec` cannot start (it cannot inside another sandbox).
+`run.sh` runs the probe once per run and reports `l1_confined` from it (`docs/adr/0006-l1-confinement.md#a-missing-l1-confinesh-runs-workers-unconfined-and-says-so-rather-than-failing-the-night`). The probe builds a prefix with no paths, so the real per-engine prefix is built separately at setup. The suite skips the real-sandbox cases where `sandbox-exec` cannot start (it cannot inside another sandbox).
 
 ## protected paths are denied after the writable ones, and bwrap binds protected paths read-only, stage last
 
@@ -118,7 +118,7 @@ bwrap binds an existing path, so a prefix rule binds the files that already matc
 
 ### Consequences
 
-The bwrap limit shows up in run-stats as `l1_confine_note` (`runsh-l1-confine-bwrap-prefix-rule-limit`). Reordering the deny and allow lines changes which one wins; the order is the rule. The protect list is built and validated by the runner (`runsh-l1-write-confinement-staging`).
+The bwrap limit shows up in run-stats as `l1_confine_note` (`docs/adr/0006-l1-confinement.md#with-bwrap-a-trailing-star-write-rule-covers-only-files-that-exist-at-launch-and-run-stats-says-so`). Reordering the deny and allow lines changes which one wins; the order is the rule. The protect list is built and validated by the runner (`docs/adr/0006-l1-confinement.md#each-l1-engine-call-writes-only-its-own-staging-dir-under-an-os-sandbox-and-the-runner-copies-the-answer-out`).
 
 ## an L1 worker runs under an OS sandbox that denies every write except its staging directory
 
@@ -142,7 +142,7 @@ The subcommands are `probe`, `prefix <stage> [writable-path ...]` and `engine-pr
 
 ### Consequences
 
-Setup and every worker call build the same prefix from the same list, so a list that cannot be confined is found before a worker starts (see `runsh-l1-confine-setup-fails-fast`). The bwrap limit on prefix rules is in `runsh-l1-confine-bwrap-prefix-rule-limit`. The write list and the work-bucket decision are in `bin-a-adapter-claude-l1-writes-default-deny` and `runsh-l1-work-bucket-not-on-confine-write-list`; the runner side is `runsh-l1-write-confinement-staging` and docs/adr/0006-l1-confinement.md#background-who-starts-the-l1-worker-decision-2-of-the-consolidation-confinement, "A worker writes only its staging directory (#169)" and "What the sandbox allows". Widening the deny to reads or the network would break the engine; widening the allow list grants every worker the same write, so add a path only with a measurement (`tests/l1-confine-real.sh --measure`).
+Setup and every worker call build the same prefix from the same list, so a list that cannot be confined is found before a worker starts (see `docs/adr/0006-l1-confinement.md#l1-confinement-setup-builds-the-real-prefix-and-state-directory-up-front-and-a-refusal-is-a-fatal-never-a-quiet-unconfined-engine`). The bwrap limit on prefix rules is in `docs/adr/0006-l1-confinement.md#with-bwrap-a-trailing-star-write-rule-covers-only-files-that-exist-at-launch-and-run-stats-says-so`. The write list and the work-bucket decision are in `docs/adr/0006-l1-confinement.md#an-l1-worker-may-write-only-its-staging-directory-plus-a-default-deny-list-that-holds-the-clis-own-cache` and `docs/adr/0006-l1-confinement.md#the-isolated-work-bucket-is-exported-to-workers-but-is-not-on-the-confinement-write-list-so-runsh-keeps-wiping-it`; the runner side is `docs/adr/0006-l1-confinement.md#each-l1-engine-call-writes-only-its-own-staging-dir-under-an-os-sandbox-and-the-runner-copies-the-answer-out` and docs/adr/0006-l1-confinement.md#background-who-starts-the-l1-worker-decision-2-of-the-consolidation-confinement, "A worker writes only its staging directory (#169)" and "What the sandbox allows". Widening the deny to reads or the network would break the engine; widening the allow list grants every worker the same write, so add a path only with a measurement (`tests/l1-confine-real.sh --measure`).
 
 ## with bwrap a trailing-star write rule covers only files that exist at launch, and run-stats says so
 

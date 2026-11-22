@@ -344,7 +344,7 @@ Matching a plist on the string `run.sh` alone took over another install's job an
 
 ### Consequences
 
-See `bin-b-install-schedule-exit-codes` for what the caller does with exit 3.
+See `docs/adr/0023-install-and-scheduling.md#only-the-label-refusal-exit-3-is-survivable-every-other-schedule-failure-fails-the-install` for what the caller does with exit 3.
 
 ## install.sh never links over a missing source or a real directory, and says so
 
@@ -397,7 +397,7 @@ launchd has no login shell, so a CLI outside the usual directories is unreachabl
 - The PATH is seeded with the directories of `claude`, `git`, `bash` and `rsync`, then the engine of every enabled adapter and of the L2 engine, then (with `AUTODREAM_X_FETCH=browser`) `agent-browser` and `node`, then the usual system directories.
 - `<NAME>_BIN` or `X_BROWSER_BIN` from the config wins when it names an absolute, executable, non-temp file, as the adapters resolve it at run time. The installer's own environment does not count.
 - An adapter name reaches an indirect expansion, so it must match the character set `--adapters` enforces; a hand-edited config cannot put anything else there.
-- `claude`'s resolved path is remembered as `CLAUDE_BIN_ABS` for the review agent (see `bin-b-install-review-claude-bin`).
+- `claude`'s resolved path is remembered as `CLAUDE_BIN_ABS` for the review agent (see `docs/adr/0023-install-and-scheduling.md#the-review-agent-pins-the-first-usable-claude-config-before-path`).
 
 ### Consequences
 
@@ -474,7 +474,7 @@ Status: accepted · Date: 2026-11-21 · Code: `install.sh` (`install_schedule` a
 
 ### Context
 
-A foreign job holding our label leaves the symlinks installed and the run still works by hand, so the install can finish. Any other failure (a plist failing `plutil -lint`, a bootstrap that did not take) would print "everything is in place" over a silently broken schedule, the state that went unnoticed for 18 days (see `bin-b-install-label-ownership`).
+A foreign job holding our label leaves the symlinks installed and the run still works by hand, so the install can finish. Any other failure (a plist failing `plutil -lint`, a bootstrap that did not take) would print "everything is in place" over a silently broken schedule, the state that went unnoticed for 18 days (see `docs/adr/0023-install-and-scheduling.md#the-schedule-label-comes-from-scheduler-labelsh-never-from-a-name-match`).
 
 The caller runs `install_schedule || schedule_rc=$?`, and that form disables `set -e` for the whole function body. A bootstrap failure left to errexit would therefore print `scheduled:` over a job that was never bootstrapped.
 

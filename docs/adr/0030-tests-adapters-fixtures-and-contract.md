@@ -6,7 +6,7 @@ Status: accepted · Date: 2026-11-22 · Code: `tests/adapter-contract.sh` (`norm
 
 ### Context
 
-Adapter subcommands that write a file go through a temp and a rename (`bin-a-adapter-claude-atomic-destination-write`, `docs/design/unify-harness-adapters-2026-08-23.md`). Several assertions for it passed against the broken implementations they were meant to catch.
+Adapter subcommands that write a file go through a temp and a rename (`docs/adr/0003-adapters-and-engines.md#adapter-subcommands-write-through-a-unique-temp-in-the-destination-directory-refuse-a-directory-destination-and-verify-a-regular-file-afterwards`, `docs/design/unify-harness-adapters-2026-08-23.md`). Several assertions for it passed against the broken implementations they were meant to catch.
 
 ### Decision
 
@@ -23,7 +23,7 @@ Do not weaken the glob or drop the SENTINEL. Do not describe the read-only test 
 
 ### Context
 
-An empty `adapters_list` cannot tell "the loader saw this and refused it" from "the glob never matched it". `"$root"/*/` never matched a dot-prefixed directory, so a malformed `.evil` was invisible rather than rejected and `adapters_rejected` reported `none`, which reads as "nothing was refused". It stayed that way until a test asked for the record (`bin-a-adapters-reject-log-is-a-file`).
+An empty `adapters_list` cannot tell "the loader saw this and refused it" from "the glob never matched it". `"$root"/*/` never matched a dot-prefixed directory, so a malformed `.evil` was invisible rather than rejected and `adapters_rejected` reported `none`, which reads as "nothing was refused". It stayed that way until a test asked for the record (`docs/adr/0003-adapters-and-engines.md#refusals-are-recorded-in-a-file-and-an-unreadable-record-reports-unknown-never-none`).
 
 ### Decision
 

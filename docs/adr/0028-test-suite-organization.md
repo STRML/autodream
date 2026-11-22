@@ -59,7 +59,7 @@ Invocations: `ci-scope.sh BASE HEAD` diffs two revisions with `--no-renames` and
 
 ### Consequences
 
-A new top-level directory needs a rule only if it should ever be web. The default is `full`. Adding a web path means adding a case and a row in `tests/ci-scope.sh`, which also checks that no code the Linux suite runs names a file the selector calls web. See `tests-ci-scope-and-shard-guards`.
+A new top-level directory needs a rule only if it should ever be web. The default is `full`. Adding a web path means adding a case and a row in `tests/ci-scope.sh`, which also checks that no code the Linux suite runs names a file the selector calls web. See `docs/adr/0032-tests-ci-scope-and-shard-guards.md`.
 
 ## the review-gate pretest runs the unit suites inside a fixed budget and says what it skipped
 

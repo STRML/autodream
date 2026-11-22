@@ -16,7 +16,7 @@ Status: accepted · Date: 2026-10-13 · Code: `bin/prune-worktrees.sh` (`sweep_w
 
 ### Context
 
-A proof that the PR merged (see `rest-prune-worktrees-proof-before-delete`) says the branch's commits are safe. It says nothing about what else is in the worktree directory, or whether someone is using it. The nightly run removes a directory and a remote branch, so each way a finished-looking branch can still be in use became a keep rule. The report gives the reason for every keep (`worktree-prune.tsv` and `.md`), and the README has the user-facing table.
+A proof that the PR merged (see `docs/adr/0026-worktree-pruning.md#a-branch-is-deleted-only-on-exact-proof-that-the-work-landed`) says the branch's commits are safe. It says nothing about what else is in the worktree directory, or whether someone is using it. The nightly run removes a directory and a remote branch, so each way a finished-looking branch can still be in use became a keep rule. The report gives the reason for every keep (`worktree-prune.tsv` and `.md`), and the README has the user-facing table.
 
 ### Decision
 
@@ -69,7 +69,7 @@ The push half appears only when the branch existed on the remote. A worktree dir
 - **Pin first.** `remove_item` creates `refs/prune-ledger/<run id>/<branch>` at the tip before any change, with an empty old value so the pin is create-only and an existing pin of that name is never overwritten. The pin is never removed. A failed pin means nothing is removed (`pin-failed: no safe undo, no delete`). If the intent line then fails, the pin is deleted again, because nothing was changed.
 - **One append, one line.** `ledger` returns 1 on a failed append. A tab or newline inside a field would shift the columns, so both become spaces. `lstep` records a failed step append in `LBAD`, so the final `complete` row and the report say `ledger-incomplete`. The intent line still holds the undo.
 - **The recover commands are quoted by `shq`**, which wraps a string in single quotes. `printf %q` prints `$'..'` for some names, which fish cannot read. The commands run unchanged in bash, zsh and fish.
-- **An interrupted run is recorded.** The watchdog TERM handler writes an `interrupted` line for the removal in flight, naming what to check (worktree, remote branch, local branch). See `rest-prune-worktrees-no-call-can-hang-the-night`.
+- **An interrupted run is recorded.** The watchdog TERM handler writes an `interrupted` line for the removal in flight, naming what to check (worktree, remote branch, local branch). See `docs/adr/0026-worktree-pruning.md#no-call-the-pruner-makes-can-hang-the-nightly-run`.
 
 ### Consequences
 
@@ -145,4 +145,4 @@ The remote branch is deleted with `git push --force-with-lease=refs/heads/<b>:<t
 
 ### Consequences
 
-A change that makes a proof more lenient is unrecoverable on the remote. A new proof needs a test in `tests/prune-worktrees.sh` that pins a KEEP before any test that pins a removal. Cases already pinned there: `closedold`, `closednew`, `closedlater`, `fork`, `qa2`, `hiddenopen`. Loosening `headRefOid == tip` to ancestry would delete squash-merged branches that have post-merge commits. The way back from a mistake is the ledger, described in `rest-prune-worktrees-ledger-no-log-no-delete`.
+A change that makes a proof more lenient is unrecoverable on the remote. A new proof needs a test in `tests/prune-worktrees.sh` that pins a KEEP before any test that pins a removal. Cases already pinned there: `closedold`, `closednew`, `closedlater`, `fork`, `qa2`, `hiddenopen`. Loosening `headRefOid == tip` to ancestry would delete squash-merged branches that have post-merge commits. The way back from a mistake is the ledger, described in `docs/adr/0026-worktree-pruning.md#no-removal-without-a-write-ahead-ledger-record-and-a-pinned-tip`.

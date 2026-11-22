@@ -9,7 +9,7 @@ Status: accepted · Date: 2026-11-22 · Code: `tests/lib-project.sh` (the `decla
 Three ways this suite could pass while testing nothing:
 
 - With `encode_project` or `canonical_project` undefined, every comparison is empty-equals-empty and the suite is green against no implementation.
-- A check of a hard-coded pattern does not exercise `session_hash`. Putting `[0-9a-f]` back into the function would pass it. Verified on this host: under bash 3.2 with an en_US.UTF-8 collation `A` matches `[0-9a-f]`, and under bash 5.3 it does not. The nightly runs `#!/bin/bash`, which is 3.2. The same behaviour made an uppercase adapter basename pass on CI and never locally (see `bin-a-lib-project-session-hash`).
+- A check of a hard-coded pattern does not exercise `session_hash`. Putting `[0-9a-f]` back into the function would pass it. Verified on this host: under bash 3.2 with an en_US.UTF-8 collation `A` matches `[0-9a-f]`, and under bash 5.3 it does not. The nightly runs `#!/bin/bash`, which is 3.2. The same behaviour made an uppercase adapter basename pass on CI and never locally (see `docs/adr/0002-session-enumeration.md#the-artifact-key-is-a-validated-12-character-hex-prefix-of-sha1-and-nothing-derives-it-any-other-way`).
 - Under that collation the order runs `...eEfFgG...`, so `F` sorts after `f` and falls outside `a-f`, while `A` through `E` fall inside. A digest starting `ABCDEF` is rejected by the range form too, for the wrong reason. Verified character by character on this host.
 
 ### Decision
@@ -27,7 +27,7 @@ Do not lengthen the stub digest's uppercase prefix to `ABCDEF` or beyond, and do
 
 ### Context
 
-Hand-written encoder cases cannot find a gap in the encoder that nobody thought of. An eyeball survey of dash-shaped bucket names found none for the space bug, because the broken form is also dash-shaped. The regression that motivated the suite: seanperkins/autodream-merge maps only `/`, so it produces `-Users-<u>-.claude` for a directory Claude stores as `-Users-<u>--claude`. The encoding itself is in `bin-a-lib-project-bucket-encoding`.
+Hand-written encoder cases cannot find a gap in the encoder that nobody thought of. An eyeball survey of dash-shaped bucket names found none for the space bug, because the broken form is also dash-shaped. The regression that motivated the suite: seanperkins/autodream-merge maps only `/`, so it produces `-Users-<u>-.claude` for a directory Claude stores as `-Users-<u>--claude`. The encoding itself is in `docs/adr/0002-session-enumeration.md#a-project-key-is-the-physical-path-with-every-byte-outside-a-za-z0-9--mapped-to-a-dash-derived-once-in-lib-projectsh`.
 
 ### Decision
 

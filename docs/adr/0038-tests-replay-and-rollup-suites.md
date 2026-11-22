@@ -45,7 +45,7 @@ Narrowing the staging window to the day itself would make the replay pass while 
 
 ### Context
 
-L2's Glob and directory reads stop at 200 entries. On 2026-10-31 the findings dir held 2683 entries (885 findings JSONs, 885 `.served`, 885 sidecars, about 28 side files), so L2 counted from a 90-file sample and never saw `fanouts.tsv`. A fixture under 200 entries would pass against a script that still listed the directory. The production decision is in `bin-b-rollup-counting-outside-l2`.
+L2's Glob and directory reads stop at 200 entries. On 2026-10-31 the findings dir held 2683 entries (885 findings JSONs, 885 `.served`, 885 sidecars, about 28 side files), so L2 counted from a 90-file sample and never saw `fanouts.tsv`. A fixture under 200 entries would pass against a script that still listed the directory. The production decision is in `docs/adr/0010-rollup-and-run-stats.md#the-per-session-and-per-category-counts-are-computed-by-rollupsh-not-by-l2`.
 
 ### Decision
 

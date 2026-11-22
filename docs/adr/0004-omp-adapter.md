@@ -282,7 +282,7 @@ Status: accepted · Date: 2026-10-03 · Code: `adapters/omp/linearize.sh`
 
 ### Context
 
-A directory at the destination makes `mv` move the temp file inside it and report success, with nothing written where the caller looks. The same happens if a directory appears at `$dst` between a guard and the `mv`: it takes the temp inside and still returns 0. The claude adapter hit the same shape, see `bin-a-adapter-claude-atomic-destination-write`.
+A directory at the destination makes `mv` move the temp file inside it and report success, with nothing written where the caller looks. The same happens if a directory appears at `$dst` between a guard and the `mv`: it takes the temp inside and still returns 0. The claude adapter hit the same shape, see `docs/adr/0003-adapters-and-engines.md#adapter-subcommands-write-through-a-unique-temp-in-the-destination-directory-refuse-a-directory-destination-and-verify-a-regular-file-afterwards`.
 
 ### Decision
 
@@ -356,7 +356,7 @@ The same rule is therefore written twice, once in `linearize.sh` and once in `st
 
 ### Consequences
 
-A change to one copy must change the other. `tests/adapter-omp.sh` pins both against `__advisor-<name>.jsonl` and the nested cases. Do not derive these flags from entry contents. See also `tests-adapters-omp-stats-and-overlay` and docs/adr/0004-omp-adapter.md#background-the-omp-adapter-adaptersomp, "The OMP adapter" (nested sessions are real sessions).
+A change to one copy must change the other. `tests/adapter-omp.sh` pins both against `__advisor-<name>.jsonl` and the nested cases. Do not derive these flags from entry contents. See also `docs/adr/0031-tests-adapters-omp-stats-and-overlay.md` and docs/adr/0004-omp-adapter.md#background-the-omp-adapter-adaptersomp, "The OMP adapter" (nested sessions are real sessions).
 
 ## the omp skills inventory lists the active on-disk surface from fixed roots, standalone roots first, first name wins
 

@@ -6,7 +6,7 @@ Status: accepted · Date: 2026-11-22 · Code: `tests/adapter-claude.sh` (`ps_usa
 
 ### Context
 
-The interrupt test guards two properties: the temp-and-rename wrap keeps a partial write out of the destination when a run is killed, and the adapter still dies when signalled. It does not assert that the temp is cleaned up. That would demand a signal trap, and a trap makes things worse: bash defers a trapped signal until the foreground child returns, so the adapter ignores SIGTERM for as long as the delegate runs. The version that asserted temp cleanup hung for the full timeout against exactly that fix and left orphaned delegates. The stale temp is tracked as an issue; the responsiveness assertion is what stops a reader from "fixing" the leak the obvious way (`bin-a-adapter-claude-no-signal-trap`).
+The interrupt test guards two properties: the temp-and-rename wrap keeps a partial write out of the destination when a run is killed, and the adapter still dies when signalled. It does not assert that the temp is cleaned up. That would demand a signal trap, and a trap makes things worse: bash defers a trapped signal until the foreground child returns, so the adapter ignores SIGTERM for as long as the delegate runs. The version that asserted temp cleanup hung for the full timeout against exactly that fix and left orphaned delegates. The stale temp is tracked as an issue; the responsiveness assertion is what stops a reader from "fixing" the leak the obvious way (`docs/adr/0003-adapters-and-engines.md#the-stats-and-slim-wrappers-install-no-signal-trap-and-a-killed-runs-temp-file-is-swept-by-the-runner`).
 
 ### Decision
 
@@ -40,7 +40,7 @@ Do not replace the group kill with a name match. Do not leave `set -m` on for th
 
 The suite parks a process on purpose: the FIFO test starts a `slim` whose first read waits for a writer that never comes. Cleanup used to sit on the last lines of the file, so a run that ended any other way (Ctrl-C, a harness timeout, an early exit) reached none of it and the delegate was reparented to init and blocked for good. Measured: 22 interrupted runs over about 90 minutes on 2026-08-26 left 66 `slim-transcript.sh` processes alive, still there nine days later, each holding a FIFO in a deleted temp dir.
 
-`adapters/claude/adapter.sh` documents the opposite conclusion (no trap; see `bin-a-adapter-claude-no-signal-trap`, issue #57). Bash defers a trapped signal until the FOREGROUND child returns in both places, and a foreground `sleep` is not interruptible. Measured on bash 5.3.15 and `/bin/bash` 3.2.57, a trapped TERM sent 1s into `sleep 5` fires at t=5, while the same signal during `wait` fires at t=1.
+`adapters/claude/adapter.sh` documents the opposite conclusion (no trap; see `docs/adr/0003-adapters-and-engines.md#the-stats-and-slim-wrappers-install-no-signal-trap-and-a-killed-runs-temp-file-is-swept-by-the-runner`, issue #57). Bash defers a trapped signal until the FOREGROUND child returns in both places, and a foreground `sleep` is not interruptible. Measured on bash 5.3.15 and `/bin/bash` 3.2.57, a trapped TERM sent 1s into `sleep 5` fires at t=5, while the same signal during `wait` fires at t=1.
 
 ### Decision
 

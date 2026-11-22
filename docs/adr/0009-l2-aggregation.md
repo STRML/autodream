@@ -63,7 +63,7 @@ The pipeline replaces every non-hex character with a space, splits to one token 
 
 ### Consequences
 
-Tightening the pattern to the backticked form brings back the false all-clear. `dream-grounding.sh` excludes the same 12-hex spans from its sha claims so the two checks do not overlap (see `bin-a-dream-grounding-fixed-checks-in-code`).
+Tightening the pattern to the backticked form brings back the false all-clear. `dream-grounding.sh` excludes the same 12-hex spans from its sha claims so the two checks do not overlap (see `docs/adr/0009-l2-aggregation.md#report-claims-are-grounded-by-fixed-read-only-checks-in-code-and-a-check-that-cannot-run-says-unknown`).
 
 ## citation-check reports counts, never a verdict, and treats anything it cannot confirm as a defect
 
@@ -102,7 +102,7 @@ The script builds one index per run: every `session_path` any findings record cl
 
 ### Consequences
 
-The index is built once, before the loop, so cost does not grow with the number of citations. The substring match is permissive on purpose, in line with `bin-a-citation-check-any-12-hex-token`: a path match can only turn an alarm into a resolution when a triaged session really holds that token.
+The index is built once, before the loop, so cost does not grow with the number of citations. The substring match is permissive on purpose, in line with `docs/adr/0009-l2-aggregation.md#a-citation-is-any-standalone-12-hex-token-so-a-stray-token-is-a-false-alarm-and-never-a-false-all-clear`: a path match can only turn an alarm into a resolution when a triaged session really holds that token.
 
 ## report claims are grounded by fixed, read-only checks in code, and a check that cannot run says unknown
 

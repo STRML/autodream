@@ -174,7 +174,7 @@ Status: accepted · Date: 2026-11-21 · Code: `bin/remote-sync.sh` (argument che
 
 ### Context
 
-The label names a directory under `remote/` and a lock, so a label with a slash, a dot-only name or an odd character could write outside the mirror root. A host that starts with `-` would reach ssh as an option. The path reaches the remote shell, and openrsync does not quote it, so a character outside what a projects path needs could be interpreted there. The runner validates its own config the same way (`runsh-remote-sync-entry-validation`); the helper repeats the checks because it is also run alone.
+The label names a directory under `remote/` and a lock, so a label with a slash, a dot-only name or an odd character could write outside the mirror root. A host that starts with `-` would reach ssh as an option. The path reaches the remote shell, and openrsync does not quote it, so a character outside what a projects path needs could be interpreted there. The runner validates its own config the same way (`docs/adr/0015-remote-sync.md#remote-entries-are-validated-before-any-ssh-and-reserved-labels-are-refused`); the helper repeats the checks because it is also run alone.
 
 ### Decision
 
@@ -182,7 +182,7 @@ Before any ssh or rsync the helper refuses, with `invalid (<why>)` and exit 2: a
 
 ### Consequences
 
-Widening the path character set widens what openrsync hands the remote shell. A missing `err-cause.sh` beside the script (looked up through the symlink `install.sh` makes) is `failed (err-cause.sh not found beside remote-sync.sh)`, not a crash (`bin-b-install-helper-link-fallback`).
+Widening the path character set widens what openrsync hands the remote shell. A missing `err-cause.sh` beside the script (looked up through the symlink `install.sh` makes) is `failed (err-cause.sh not found beside remote-sync.sh)`, not a crash (`docs/adr/0023-install-and-scheduling.md#an-installed-script-finds-a-newer-helper-through-its-own-symlink-target`).
 
 ## remote-sync pulls *.jsonl one way with rsync over ssh into a mirror that is never pruned
 
@@ -190,7 +190,7 @@ Status: accepted · Date: 2026-11-21 · Code: `bin/remote-sync.sh`
 
 ### Context
 
-Sessions on another host (#226) have to reach the nightly corpus. A network mount was rejected: it puts every live session's appends on a filesystem that drops whenever the laptop sleeps or the host reboots. A pull is read-only on the remote and needs only sshd there (docs/adr/0015-remote-sync.md#background-remote-hosts-a-one-way-pull-not-a-shared-filesystem-226, "Remote hosts: a one-way pull"; runner side `runsh-remote-roots-one-way-pull`).
+Sessions on another host (#226) have to reach the nightly corpus. A network mount was rejected: it puts every live session's appends on a filesystem that drops whenever the laptop sleeps or the host reboots. A pull is read-only on the remote and needs only sshd there (docs/adr/0015-remote-sync.md#background-remote-hosts-a-one-way-pull-not-a-shared-filesystem-226, "Remote hosts: a one-way pull"; runner side `docs/adr/0015-remote-sync.md#remote-session-roots-are-a-one-way-pull-into-local-mirrors-never-a-mount`).
 
 ### Decision
 
@@ -204,7 +204,7 @@ Sessions on another host (#226) have to reach the nightly corpus. A network moun
 
 ### Consequences
 
-Disk is the only cost of the archive; the size is measured nightly (`runsh-remote-mirror-size-measured`). A prune would need an rsync exclude for what it removed, not just a delete. Do not add `--delete` or move the `mkdir` to the mirror itself.
+Disk is the only cost of the archive; the size is measured nightly (`docs/adr/0015-remote-sync.md#the-remote-mirror-is-an-archive-and-its-size-is-measured-every-night`). A prune would need an rsync exclude for what it removed, not just a delete. Do not add `--delete` or move the `mkdir` to the mirror itself.
 
 ## remote-sync prints exactly one status line, and exit 23 is split into partial and failed
 
@@ -225,7 +225,7 @@ Stdout is one line:
 - `failed (<cause>)`: everything else, a remote root that does not exist included (23 with a `change_dir`/`link_stat ... failed: No such file` or `(l)stat: No such file` line), and 30 or 35 as `failed (timeout)`
 - `invalid (<why>)`: the label or the target was refused before any ssh
 
-Exit 0 for ok and partial, 1 for failed, 2 for invalid. rsync's whole stderr also goes to this script's stderr. The cause is the first meaningful line of rsync's stderr (ssh's own error comes first when the connection fails), cleaned like the changelog's git causes by `err_cause_line` in `bin/err-cause.sh` (`bin-a-err-cause-first-real-line`). A line from rsync or ssh (matched by `tool_lines`) wins over ssh-config noise; with none, the first line wins.
+Exit 0 for ok and partial, 1 for failed, 2 for invalid. rsync's whole stderr also goes to this script's stderr. The cause is the first meaningful line of rsync's stderr (ssh's own error comes first when the connection fails), cleaned like the changelog's git causes by `err_cause_line` in `bin/err-cause.sh` (`docs/adr/0008-failure-and-network.md#a-failures-cause-is-the-first-stderr-line-that-is-not-blank-hint-or-warning-cleaned-for-markdown`). A line from rsync or ssh (matched by `tool_lines`) wins over ssh-config noise; with none, the first line wins.
 
 ### Consequences
 

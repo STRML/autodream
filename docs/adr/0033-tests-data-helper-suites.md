@@ -61,7 +61,7 @@ Keep the positive `DEGRADED` assertion: removing it makes the python3 case pass 
 
 ### Context
 
-`bin/session-window.sh bounds` computes local-day epoch bounds with BSD `date`. A test that derives its expected bounds with the same `date` call cannot disagree with the code, so it passes whatever the helper does on a DST day. The production rules are in `bin-b-session-window-record-timestamps-place-the-day`.
+`bin/session-window.sh bounds` computes local-day epoch bounds with BSD `date`. A test that derives its expected bounds with the same `date` call cannot disagree with the code, so it passes whatever the helper does on a DST day. The production rules are in `docs/adr/0002-session-enumeration.md#a-session-belongs-to-the-day-its-records-say-by-top-level-timestamp-compared-as-epoch-seconds`.
 
 `needs-slice` decides whether a transcript holds records outside the day. A file whose first and last records are inside the day looks wholly in-day to a check of just those two.
 

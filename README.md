@@ -82,7 +82,7 @@ The dashboard's front page, on made-up data. [Click through the demo](https://st
 | OMP sessions | Reads the live branch of OMP's append-only session tree | `adapters/omp/` |
 | Remote hosts | One-way rsync of another machine's transcripts before the scan | [Remote hosts](#remote-hosts) |
 | Report-day window | Places a session by the timestamps inside it, not its file mtime | `bin/session-window.sh` |
-| Long sessions | Opt-in chunked triage reads a whole transcript, not its head and tail | `AUTODREAM_L1_CHUNK_BYTES` |
+| Long sessions | Opt-in chunked triage reads a long transcript in sequential chunks instead of its head and tail (past `AUTODREAM_L1_MAX_CHUNKS` the middle chunks are dropped) | `AUTODREAM_L1_CHUNK_BYTES` |
 | Ranked report | Frequency times severity; eval sandboxes count at a quarter weight | `prompts/PROMPT.md` |
 | Grounded proposals | A proposal that edits a file must cite the `file:line` it read | `prompts/PROMPT.md` |
 | Open questions | `review.sh` walks them one at a time; a question asked three reports running is flagged | `bin/review.sh`, `bin/question-streaks.sh` |
@@ -98,7 +98,7 @@ The dashboard's front page, on made-up data. [Click through the demo](https://st
 
 ## Quick start
 
-You need macOS and `claude` on PATH. The nightly schedule is a launchd job.
+You need macOS and the `claude` CLI. The runner calls `$HOME/.local/bin/claude` unless `CLAUDE_BIN` in the config names another path. The nightly schedule is a launchd job.
 
 ```bash
 git clone https://github.com/STRML/autodream ~/git/autodream
@@ -165,7 +165,7 @@ Put settings in `~/.claude/autodream/config` as plain `KEY=value` bash (see [`ex
 | `AUTODREAM_L1_TIMEOUT` | `1200` | Seconds before a worker and its process group are killed |
 | `AUTODREAM_L1_ROUNDS` | `5` | Retry rounds for sessions with no findings |
 | `AUTODREAM_L1_CONFINE` | `1` | `0` runs workers without the OS sandbox |
-| `AUTODREAM_L1_CHUNK_BYTES` | `0` (off) | Split a transcript larger than this into chunks. Costs up to `AUTODREAM_L1_MAX_CHUNKS` (8) calls per long session |
+| `AUTODREAM_L1_CHUNK_BYTES` | `0` (off) | Split a transcript larger than this into chunks. A long session costs up to `AUTODREAM_L1_MAX_CHUNKS` (8) calls, plus a retry for each failed chunk |
 | `AUTODREAM_WINDOW` | `1` | `0` places sessions by file mtime alone |
 | `SESSION_ROOTS` | every indexed `~/.claude*/projects` | Colon-separated roots; `install.sh` writes the indexed set |
 | `AUTODREAM_REMOTE_ROOTS` | unset (off) | Hosts to pull, as above |
@@ -199,10 +199,10 @@ L1 engine call
 | omp Layer 1 state | Each confined omp worker runs with a throwaway `HOME` inside its stage. The databases are copied there with the OAuth credential rows left out, so a worker cannot rotate your refresh token. omp's memory backend is off for these calls | A model whose only credential is OAuth leaves omp unconfined (`l1_confined_omp: no`, with the reason) |
 | Layer 1 probe | Each run checks that a write beside the staging dir is refused | A tool that accepts a profile and confines nothing counts as no sandbox |
 | Layer 2 | `Glob` and `Read` only, on both engines. The runner takes the report from stdout only when the end sentinel is present, and pins only from a closed block after it | A capture with no sentinel is kept as a partial and retried |
-| Pins | `apply-pins.sh` refuses a pin for a project with no sessions that night, and keeps a ledger so a rerun never stores one twice | A failed call writes no ledger row, so a rerun retries it |
+| Pins | `apply-pins.sh` refuses a pin for a project with no sessions that night, and keeps a ledger so a rerun skips a stored pin | A failed call writes no ledger row, so a rerun retries it. A pin stored but not recorded (`unledgered`) is stored again by a rerun |
 | Counts | Session, category and failure tallies come from `rollup.tsv`, built from the runner's own session rows | A model's number never replaces one of these |
 | Self-pollution | Workers run with `--no-session-persistence`, from a working directory that is wiped before and after, and enumeration drops any transcript whose first turn is one of autodream's own prompts. Without these, 215 sessions were enumerated on 2026-05-29 against 21 real ones | Older stubs in the real bucket are removed by `bin/prune-self-sessions.sh --delete` |
-| Dead network | The date is left unassembled and a later trigger retries it | Never publishes a report from a short corpus |
+| Dead network or refusing provider | The date is left unassembled and a later trigger retries it, so no report is built from a short corpus | A remote host that fails to sync does not defer the date: the report names the host and a finished report is not rebuilt |
 
 The sandbox bounds what a worker can write. Layer 2's grounding and triviality gates check what a bad transcript can make a worker say, so read open questions before you approve anything. Layer 1 workers run with `bypassPermissions`: do not run autodream in a shared environment.
 
@@ -222,7 +222,7 @@ Not today. Codex is in the upstream changelog watch only. A Codex adapter would 
 
 ### Does it run on Linux?
 
-The pipeline and its tests do: Linux CI runs the suite against a mock engine. Install, the launchd schedule, notifications and the review agent are macOS. On Linux, run `bin/run.sh DATE` from your own scheduler.
+The pipeline and its tests do: Linux CI runs the suite against a mock engine. Install, the launchd schedule, notifications and the review agent are macOS. On Linux there is no nightly job, notification or review agent. `./install.sh --no-schedule --no-review --no-web` links the scripts and prompts into `~/.claude/autodream/` (CI runs the install suites on macOS only), and you run `~/.claude/autodream/run.sh DATE` from your own scheduler.
 
 ### What if the Mac is asleep at 03:15?
 
