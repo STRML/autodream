@@ -3061,7 +3061,7 @@ L1_CONFINE_PROTECT=""
 L1_CONFINED_STAT=no
 L1_CONFINE_FATAL=""
 l1_confine_setup() {
-  local probe verdict reason eng d p ok_engines="" no_engines="" all_engines err sstage wrc
+  local probe verdict reason eng d p ok_engines="" no_engines="" all_engines err sstage wrc swhy
   L1_CONFINED=no; L1_CONFINE_USING=none; L1_CONFINED_ENGINES=""; L1_CONFINE_STATS=""; L1_CONFINE_FATAL=""
   L1_STAGE_ROOT="$AUTODREAM_DIR/staging/run-$$"
   L1_CONFINE_PROTECT="$AUTODREAM_DIR:$FINDINGS_DIR:$DREAMS_DIR"
@@ -3127,8 +3127,9 @@ l1_confine_setup() {
               L1_CONFINE_STATS="${L1_CONFINE_STATS}l1_confined_$(printf '%s' "$eng" | tr '-' '_'): yes"$'\n' ;;
             4)
               no_engines="${no_engines:+$no_engines }$eng"
-              L1_CONFINE_STATS="${L1_CONFINE_STATS}l1_confined_$(printf '%s' "$eng" | tr '-' '_'): no"$'\n'"l1_confined_$(printf '%s' "$eng" | tr '-' '_')_reason: the model $smodel authenticates with OAuth only, which a throwaway state directory cannot refresh without losing the rotated token"$'\n'
-              log "WARNING: the $eng engine runs unconfined: its model $smodel authenticates with OAuth only; use an API-key model to confine it" ;;
+              swhy=$(printf '%s' "${err:-no reason given}" | head -c 300 | tr '\n\t' '  ')
+              L1_CONFINE_STATS="${L1_CONFINE_STATS}l1_confined_$(printf '%s' "$eng" | tr '-' '_'): no"$'\n'"l1_confined_$(printf '%s' "$eng" | tr '-' '_')_reason: model ${smodel:-none}: $swhy"$'\n'
+              log "WARNING: the $eng engine runs unconfined (model ${smodel:-none}): $swhy; use an API-key model to confine it" ;;
             *)
               [ -n "$L1_CONFINE_FATAL" ] || L1_CONFINE_FATAL="the $eng engine's state directory cannot be prepared: $(printf '%s' "${err:-no reason given}" | head -c 300 | tr '\n\t' '  ')" ;;
           esac
@@ -3437,8 +3438,8 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
     # diagnostic line: the session, or a chunk of it. That line is skipped by failure-class.sh on
     # its prefix, so naming a chunk there costs the classifier nothing.
     # A failure of the runner own setup before the engine starts (no staging root, no stage, no state
-    # directory, no sandbox) says nothing about the session. It is ledgered like an outage, so the date is
-    # deferred and the slot stays empty: the final-round stub would fill it, satisfy the missing-work check
+    # directory, no sandbox) says nothing about the session. It is ledgered as staging and writes no stub, so
+    # the slot stays empty (the decision point after the rounds turns it into a fatal): the final-round stub would fill it, satisfy the missing-work check
     # and let a report publish over sessions that were never triaged.
     l1_infra_fail() {
       netdown=staging
@@ -3457,6 +3458,9 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       fi
       l1ans_name=$(basename "$2")
       l1stage="$L1_STAGE_ROOT/$hash.$l1ans_name"
+      # A worker can leave a symlink where the private tmp goes. Unlinking it follows nothing, so it is removed
+      # and the directory made again, and one hostile worker cannot turn a retry into a failed night.
+      [ ! -L "$l1stage/tmp" ] || rm -f "$l1stage/tmp"
       if ! { [ ! -L "$l1stage" ] && ( umask 077; mkdir -p "$l1stage/tmp" ) 2>/dev/null && [ ! -L "$l1stage/tmp" ] && l1stage=$(cd "$l1stage" && pwd -P); }; then
         printf "could not make the staging directory %s for %s\n" "$l1stage" "${l1_subject:-$session}" >> "$3"
         l1_infra_fail "$@"; return 1
@@ -3474,7 +3478,7 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
           # outside the sandbox, and a worker that left a symlink at a path inside its own stage on an
           # earlier attempt would have this redirection truncate whatever the link points at.
           l1serr=$(mktemp "$L1_STAGE_ROOT/senv.XXXXXX") || { printf "could not make a temp file for the state setup of %s\n" "${l1_subject:-$session}" >> "$3"; l1_infra_fail "$@"; return 1; }
-          l1sout=$("$ADAPTERS_DIR/$engine/adapter.sh" l1-stage-env "$l1stage" "$model" 2>"$l1serr"); l1src=$?
+          l1sout=$("$ADAPTERS_DIR/$engine/adapter.sh" l1-stage-env "$l1stage" 2>"$l1serr"); l1src=$?
           if [ "$l1src" -ne 0 ] && [ "$l1src" -ne 2 ]; then
             printf "the state directory for %s could not be prepared in the stage: %s\n" "${l1_subject:-$session}" "$(head -c 200 "$l1serr" | tr "\n" " ")" >> "$3"
             rm -f "$l1serr"
@@ -3791,7 +3795,10 @@ dispatch_l1() { # one parallel pass; idempotent worker → only the still-missin
       # makes the retry work; the run defers instead, so the silent-failure concern is
       # answered by the deferral, not the stub.
       if [ "$netdown" = "true" ] || [ "$netdown" = "provider" ] || [ "$netdown" = "staging" ]; then
-        echo "FAIL ($(case "$netdown" in true) echo "network down" ;; staging) echo "runner setup failed" ;; *) echo "provider refusal" ;; esac); no stub, left for a later run): $session ($hash) [$(($(date +%s) - t0))s] — see $errlog" >&2
+        failwhy="provider refusal"
+        [ "$netdown" != "true" ] || failwhy="network down"
+        [ "$netdown" != "staging" ] || failwhy="runner setup failed"
+        echo "FAIL ($failwhy; no stub, left for a later run): $session ($hash) [$(($(date +%s) - t0))s] — see $errlog" >&2
       elif [ "${AUTODREAM_CURRENT_ROUND:-1}" -ge "${AUTODREAM_L1_ROUNDS:-5}" ]; then
         sz=$(wc -c < "$session" 2>/dev/null | tr -d " ")
         lines=$(wc -l < "$session" 2>/dev/null | tr -d " ")
@@ -4624,7 +4631,7 @@ EOF
      && awk -v r="$LAST_ROUND_RUN" '$2 == r && $3 == "staging" { found = 1 } END { exit !found }' "$FINDINGS_DIR/l1-netdown.txt"; then
     rm -rf "$L1_STAGE_ROOT" 2>/dev/null
     clean_work_bucket
-    log_fatal "the runner could not set up L1 workers for $MISSING session(s) in round $LAST_ROUND_RUN (stage directory, engine state or sandbox; the .err files in $FINDINGS_DIR name the cause); no stub was written, so $TARGET_DATE is deferred and a later run retries it"
+    log_fatal "the runner could not set up L1 workers for $MISSING session(s) in round $LAST_ROUND_RUN (stage directory, engine state or sandbox; the .err files in $FINDINGS_DIR name the cause); no stub was written, so $TARGET_DATE has no report and a later run retries it"
     fatal_exit
     return 1
   fi

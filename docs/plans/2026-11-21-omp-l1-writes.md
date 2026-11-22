@@ -21,7 +21,7 @@ after    omp ─▶ adapter l1-stage-env seeds <stage>/omp-home ─▶ HOME=... 
 
 `PI_CODING_AGENT_DIR` moves the agent dir only. omp resolves its config root (`logs`, `run`, `cache`) from
 `HOME` (`packages/utils/src/dirs.ts`: `rootSubdir`, `baseRootSubdir`), and `PI_CONFIG_DIR` only renames the
-directory under `HOME`; the XDG redirects are Linux only. So `agent` leaves `run/daemon` (the live daemon's
+directory under `HOME`; the XDG redirects apply on Linux and macOS, and only when `$XDG_*_HOME/omp` exists. So `agent` leaves `run/daemon` (the live daemon's
 registry) and the cache databases writable, and `home` is the shape that keeps all of it in the stage.
 
 ## Why not allow paths
@@ -37,9 +37,9 @@ registry) and the cache databases writable, and `home` is the shape that keeps a
 
 The adapter verb runs in the runner, outside the sandbox, once per attempt (a retry reseeds from a clean
 tree), and prints `HOME`, `PI_CONFIG_DIR` and `PI_CODING_AGENT_DIR`, all pointing into `<stage>/omp-home`.
-It seeds only what the worker reads: `config` and `models` (`.yml` or `.yaml`), `mcp.json`, the context
+It seeds only what the worker reads: `config` and `models` (`.yml` or `.yaml`), the three `.env` files omp loads, the context
 files omp loads into its prompt (`AGENTS.md`, `APPEND_SYSTEM.md`, `RULES.md`), and one snapshot of each
-database. `Library` and `natives` are linked back read-only so a keychain lookup for an api key and the
+database. `mcp.json` is not seeded. `Library` and `natives` are linked back read-only so a keychain lookup for an api key and the
 native addon still resolve; a write through either link is refused like any other. The agent dir is
 22 GB, so it is never copied wholesale.
 
@@ -48,7 +48,7 @@ native addon still resolve; a write through either link is refused like any othe
 | Databases are snapshotted with SQLite's backup API (`seed-db.py`), not copied file by file | `agent.db` and `models.db` are live WAL databases. Copying `.db`, `.db-wal` and `.db-shm` one after another can pair an old database with a newer log. A test holds a committed row only the log has and finds it in the copy |
 | OAuth credential rows are left out of the worker's copy; a model whose only credential is OAuth leaves omp unconfined | a worker that refreshed a token in its copy would rotate the refresh token there, and the copy dies with the stage; a provider that invalidates the old token would leave the real database holding a spent one. Leaving the rows out of an OAuth-only provider's copy would leave the worker nothing to log in with, so setup checks the engine's model (`seed-db.py --provider`, exit 4) and reports `l1_confined_omp: no` with the reason instead of failing every worker. Providers with an api key (this host's neuralwatt) are unaffected |
 | `PI_CODING_AGENT_DIR` is the seed source and is replaced; `PI_CONFIG_DIR` is kept | an inherited override would otherwise point the worker at the real tree, where the sandbox refuses its database writes |
-| A named profile (`OMP_PROFILE`, `PI_PROFILE`), or an `$XDG_*_HOME/omp` tree that exists (Linux and macOS, the condition omp itself uses), refuses | the state lives somewhere this seeding does not model; running on the wrong files is worse than failing |
+| A named profile (`OMP_PROFILE`, `PI_PROFILE`), or an `$XDG_*_HOME/omp` tree that exists (Linux and macOS, the condition omp itself uses), or one of the other path overrides omp reads (`OMP_WORKTREE_DIR`, the three `OMP_*_CACHE_DB` and snapshot overrides, `PI_NATIVES_DIR`), refuses | the state lives somewhere this seeding does not model; running on the wrong files is worse than failing |
 | An agent dir that exists and cannot be read refuses; one that does not exist seeds nothing, once its nearest existing ancestor is shown searchable | a failed `-e` test must not read as "empty state": a path under a directory this user cannot search tests as absent too |
 | Setup runs the verb once per engine with the engine's model, before any worker | a setup that cannot work (an unreadable database) stops the run there, with no stub and no report, instead of failing every attempt |
 | The verb writes its stderr to a file beside the stages, not inside one | the runner runs outside the sandbox, and a worker can leave a symlink at any path in its own stage; a redirection into the stage would follow it and truncate the target |

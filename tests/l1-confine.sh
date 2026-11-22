@@ -247,6 +247,18 @@ env HOME="$RH" bash "$REPO/adapters/claude/adapter.sh" l1-stage-env "$D/ostage" 
 assert_eq "$rc" "2" "claude has no such verb (exit 2), so its workers keep their own state"
 
 [ ! -e "$SA/mcp.json" ] && ok "mcp.json is not seeded: the worker starts no MCP server" || no "mcp.json was seeded"
+printf 'KEY=agent\n' > "$RH/.omp/agent/.env"; printf 'KEY=root\n' > "$RH/.omp/.env"; printf 'KEY=home\n' > "$RH/.env"
+env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>&1
+assert_eq "$(cat "$D/ostage/omp-home/.omp/agent/.env" 2>/dev/null)" "KEY=agent" "the agent dir's .env is seeded: a provider key may live there"
+assert_eq "$(cat "$D/ostage/omp-home/.omp/.env" 2>/dev/null)" "KEY=root" "and the config root's"
+assert_eq "$(cat "$D/ostage/omp-home/.env" 2>/dev/null)" "KEY=home" "and HOME's"
+# A worker's leftovers in the stage cannot redirect the verb: it builds beside the stage and renames in.
+ln -sfn "$D/realdir" "$D/ostage/omp-home"
+env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "0" "a symlink left where omp-home goes is removed, not followed"
+[ ! -L "$D/ostage/omp-home" ] && [ -d "$D/ostage/omp-home/.omp/agent" ] && ok "and the state directory is a real directory again" || no "omp-home is still a link"
+[ -z "$(ls "$D/realdir" | grep -v onefile)" ] && ok "and nothing was written through the link" || no "something was written through the link: $(ls "$D/realdir")"
+[ -z "$(ls "$D" | grep '^seed\.')" ] && ok "and no build directory is left behind" || no "a seed.* build directory was left beside the stage"
 has "$(cat "$REPO/adapters/omp/l1-no-advisor.yml")" 'backend: "off"' "the L1 overlay turns the memory backend off: no retain or consolidate into a store later sessions recall from"
 
 echo "# omp l1-stage-env: the overrides omp honors, and what it cannot model"
@@ -260,6 +272,17 @@ assert_eq "$(cat "$D/ostage/omp-home/.omp-alt/agent/config.yml" 2>/dev/null)" "a
 has "$out" "PI_CONFIG_DIR=.omp-alt" "and kept"
 env HOME="$RH" PI_CONFIG_DIR=/etc bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>"$D/err"; rc=$?
 assert_eq "$rc" "1" "a PI_CONFIG_DIR that is not a plain name under HOME is refused"
+env HOME="$RH" PI_PROFILE=work bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "1" "the legacy PI_PROFILE is refused too"
+mkdir -p "$D/xdg/omp"
+for xv in XDG_DATA_HOME XDG_CACHE_HOME; do
+  env HOME="$RH" "$xv=$D/xdg" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>&1; rc=$?
+  assert_eq "$rc" "1" "$xv with an omp tree under it is refused"
+done
+for ov in OMP_WORKTREE_DIR OMP_JUDGMENT_CACHE_DB PI_NATIVES_DIR; do
+  env HOME="$RH" "$ov=/elsewhere" bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>&1; rc=$?
+  assert_eq "$rc" "1" "$ov (a path override outside the seeded tree) is refused"
+done
 env HOME="$RH" OMP_PROFILE=work bash "$OA" l1-stage-env "$D/ostage" "neuralwatt/m" >/dev/null 2>"$D/err"; rc=$?
 assert_eq "$rc" "1" "a named profile is refused: its state is somewhere this seeding does not model"
 has "$(cat "$D/err")" "profile" "and the reason says so"
@@ -309,8 +332,13 @@ assert_eq "$rc" "0" "so does one with no rows at all (its key comes from the env
 env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "fuzzy-selector" >/dev/null 2>"$D/err"; rc=$?
 assert_eq "$rc" "4" "a selector with no provider (omp resolves it) is refused while any OAuth credential exists: it may be the one used"
 has "$(cat "$D/err")" "names no provider" "with the reason"
+env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "4" "and so is an empty model, which is how setup asks when a source resolved none"
 env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" >/dev/null 2>&1; rc=$?
-assert_eq "$rc" "4" "and so is a call with no model"
+assert_eq "$rc" "0" "a call with no model argument (a worker's) decides nothing about the provider and still leaves the OAuth rows out"
+assert_eq "$(python3 -c "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute(\"select count(*) from auth_credentials where credential_type='oauth'\").fetchone()[0])" "$D/ostage/omp-home/.omp/agent/agent.db")" "0" "the worker copy holds no OAuth row"
+env HOME="$RH" bash "$OA" l1-stage-env "$D/ostage" "OAUTH-ONLY-PROV/x" >/dev/null 2>&1; rc=$?
+assert_eq "$rc" "4" "a provider is compared without regard to case: the selector's spelling is not the credential's"
 mkdir -p "$D/apikeyhome/.omp/agent"
 python3 - "$D/apikeyhome/.omp/agent" <<'PY'
 import sqlite3, sys
@@ -322,6 +350,31 @@ c.commit()
 PY
 env HOME="$D/apikeyhome" bash "$OA" l1-stage-env "$D/ostage" "fuzzy-selector" >/dev/null 2>&1; rc=$?
 assert_eq "$rc" "0" "a host with no live OAuth credential has nothing to lose: a bare selector passes"
+
+echo "# the real check's store comparison: a check that cannot look is not a pass"
+# shellcheck source=/dev/null
+. "$HERE/lib-store-unchanged.sh"
+mkdir -p "$D/store/bank"; : > "$D/store-marker"; sleep 1
+msg=$(store_unchanged "$D/store" "$D/store-marker"); rc=$?
+assert_eq "$rc" "0" "an untouched store passes"
+printf x > "$D/store/bank/mnemopi.db"
+msg=$(store_unchanged "$D/store" "$D/store-marker"); rc=$?
+assert_eq "$rc" "1" "a file written after the marker fails"
+has "$msg" "mnemopi.db" "and names it"
+msg=$(store_unchanged "$D/no-such-store" "$D/store-marker"); rc=$?
+assert_eq "$rc" "2" "a store that does not exist is a skip, not a pass"
+has "$msg" "nothing to compare" "and says so"
+mkdir -p "$D/lockedstore"; chmod 000 "$D/lockedstore"
+if [ ! -r "$D/lockedstore" ]; then
+  msg=$(store_unchanged "$D/lockedstore" "$D/store-marker"); rc=$?
+  assert_eq "$rc" "1" "a store that cannot be scanned fails"
+  has "$msg" "could not scan" "and says why"
+else
+  printf '  skip - this user can read a mode 000 directory\n'
+fi
+chmod 700 "$D/lockedstore"
+msg=$(store_unchanged "$D/store" "$D/no-such-marker"); rc=$?
+assert_eq "$rc" "1" "a marker that does not exist is a failed scan, not an empty result"
 
 echo "# real confinement (only where a sandbox works here)"
 real=$(env TMPDIR="$D" bash "$H" probe)

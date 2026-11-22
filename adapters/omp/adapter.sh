@@ -190,7 +190,7 @@ case "$cmd" in
     # either link is refused by the sandbox like any other.
     # The overrides omp honors for its directories are read here and written back explicitly, so an inherited
     # one cannot point the worker at the real tree: PI_CODING_AGENT_DIR is the source and is replaced,
-    # PI_CONFIG_DIR names the directory under HOME. A named profile, or an XDG redirect on Linux, moves the
+    # PI_CONFIG_DIR names the directory under HOME. A named profile, or an XDG redirect on Linux or macOS, moves the
     # state somewhere this seeding does not model, so those refuse instead of running on the wrong files.
     err() { printf 'omp l1-stage-env: %s\n' "$1" >&2; exit 1; }
     [ -n "${1:-}" ] && [ -d "$1" ] || err "needs the stage directory"
@@ -200,13 +200,24 @@ case "$cmd" in
     for xv in "${XDG_DATA_HOME:-}" "${XDG_STATE_HOME:-}" "${XDG_CACHE_HOME:-}"; do
       [ -z "$xv" ] || [ ! -e "$xv/omp" ] || err "$xv/omp exists, so omp keeps part of its state there instead of under HOME"
     done
+    # Path overrides omp reads that point outside any tree this seeds (dirs.ts): refuse, as for a profile.
+    for ov in OMP_WORKTREE_DIR OMP_GITHUB_CACHE_DB OMP_COMMIT_CACHE_DB OMP_JUDGMENT_CACHE_DB OMP_AUTH_BROKER_SNAPSHOT_CACHE PI_NATIVES_DIR; do
+      [ -z "${!ov:-}" ] || err "$ov is set, so omp keeps part of its state where this seeding does not look"
+    done
     cname="${PI_CONFIG_DIR:-.omp}"
     case "$cname" in ""|/*|*..*) err "PI_CONFIG_DIR must be a plain directory name under HOME: $cname" ;; esac
     osrc="${PI_CODING_AGENT_DIR:-${HOME:?}/$cname/agent}"
-    ohome="$1/omp-home"; odst="$ohome/$cname/agent"
+    ohome="$1/omp-home"
     case "$ohome" in *"
 "*) err "a stage path that holds a newline is refused" ;; esac
+    # Built in a directory of its own beside the stages and renamed into the stage at the end: this runs outside
+    # the sandbox, and every path inside a stage is chosen by the last worker that ran there (a read-only
+    # directory, a symlink at a seeded name, a database that is a link). Nothing below writes into the stage.
     rm -rf "$ohome"
+    [ ! -e "$ohome" ] && [ ! -L "$ohome" ] || err "could not remove the previous state directory $ohome"
+    obuild=$(mktemp -d "$(dirname "$1")/seed.XXXXXX") || err "could not make a build directory beside the stage"
+    trap 'rm -rf "$obuild"' EXIT
+    odst="$obuild/$cname/agent"
     mkdir -p "$odst" || err "could not make $odst"
     # Absent is not the same as unreachable: a missing path under a directory this user cannot search tests
     # as absent too. The nearest ancestor that does exist must be searchable for "absent" to be believed.
@@ -216,18 +227,22 @@ case "$cmd" in
     if [ -e "$osrc" ]; then
       { [ -d "$osrc" ] && [ -r "$osrc" ] && [ -x "$osrc" ]; } || err "cannot read the agent directory $osrc"
       command -v python3 >/dev/null 2>&1 || err "python3 is needed to snapshot omp's databases"
-      for f in config.yml config.yaml models.yml models.yaml AGENTS.md APPEND_SYSTEM.md RULES.md kimi-device-id; do
+      for f in config.yml config.yaml models.yml models.yaml AGENTS.md APPEND_SYSTEM.md RULES.md kimi-device-id .env; do
         [ -e "$osrc/$f" ] || continue
         cp "$osrc/$f" "$odst/$f" || err "could not copy $osrc/$f"
       done
       for f in agent.db models.db; do
         [ -e "$osrc/$f" ] || continue
         if [ "$f" = agent.db ]; then
-          oprov=""; case "${2:-}" in */*) oprov="${2%%/*}" ;; esac
-          python3 "$ADIR/seed-db.py" "$osrc/$f" "$odst/$f" --drop-oauth --provider "$oprov"; orc=$?
+          if [ "${2+set}" = set ]; then
+            oprov=""; case "$2" in */*) oprov="${2%%/*}" ;; esac
+            python3 "$ADIR/seed-db.py" "$osrc/$f" "$odst/$f" --drop-oauth --provider "$oprov"; orc=$?
+          else
+            python3 "$ADIR/seed-db.py" "$osrc/$f" "$odst/$f" --drop-oauth; orc=$?
+          fi
           case "$orc" in
             0) ;;
-            4) printf 'omp l1-stage-env: OAuth credentials cannot be used from a throwaway copy (model: %s)\n' "${2:-none}" >&2; exit 4 ;;
+            4) exit 4 ;;
             *) err "could not snapshot $osrc/$f" ;;
           esac
         else
@@ -235,8 +250,16 @@ case "$cmd" in
         fi
       done
     fi
-    [ -e "$HOME/Library" ] && ln -s "$HOME/Library" "$ohome/Library"
-    [ -e "$HOME/$cname/natives" ] && ln -s "$HOME/$cname/natives" "$ohome/$cname/natives"
+    # omp also reads a .env at HOME and at the config root (utils/src/env.ts): a provider key may live there.
+    for f in "$HOME/.env" "$HOME/$cname/.env"; do
+      [ -e "$f" ] || continue
+      case "$f" in "$HOME/.env") cp "$f" "$obuild/.env" || err "could not copy $f" ;; *) cp "$f" "$obuild/$cname/.env" || err "could not copy $f" ;; esac
+    done
+    [ -e "$HOME/Library" ] && ln -s "$HOME/Library" "$obuild/Library"
+    [ -e "$HOME/$cname/natives" ] && ln -s "$HOME/$cname/natives" "$obuild/$cname/natives"
+    mv "$obuild" "$ohome" || err "could not move the state directory into the stage"
+    trap - EXIT
+    odst="$ohome/$cname/agent"
     printf 'HOME=%s\nPI_CONFIG_DIR=%s\nPI_CODING_AGENT_DIR=%s\n' "$ohome" "$cname" "$odst"
     ;;
 

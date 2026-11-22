@@ -3315,6 +3315,7 @@ test_l1_worker_setup_failure_defers_the_date_and_follows_no_planted_link(){
   assert_no_file "$root/dreams/$DATE.md" "and no report is written over it"
   assert_grep "$(fdir "$root")/l1-netdown.txt" " staging\$" "the ledger names the failure"
   assert_grep "$(fdir "$root")/$h.json.err" 'could not be prepared in the stage' "the .err names what failed"
+  assert_grep "$root/run.out" 'FAIL [(]runner setup failed; no stub' "the worker's FAIL line parses and names the cause (the cause text once sat in a case inside a command substitution, which bash 3.2 rejects)"
   assert_grep "$(fdir "$root")/run-stats.txt" '^fatal: .*could not set up L1 workers' "run-stats carries the cause: a setup failure heals nothing by waiting, so it is a fatal and not an outage deferral"
   assert_grep "$root/notify.log" 'could not set up L1 workers' "a banner is posted, because with no findings JSON unassembled_dates would never name the date"
   [ "$(cat "$root/run.exit")" != 0 ] && ok "the run exits non-zero, so the date is retried" || no "the run exited 0"

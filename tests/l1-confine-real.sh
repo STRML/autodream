@@ -23,7 +23,10 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
 H="$REPO/bin/l1-confine.sh"
+# shellcheck source=/dev/null
+. "$HERE/lib-store-unchanged.sh"
 fails=0
+skipped=0
 pass(){ printf 'PASS  %s\n' "$1"; }
 fail(){ printf 'FAIL  %s\n' "$1"; fails=$((fails + 1)); }
 
@@ -119,6 +122,8 @@ while IFS= read -r l; do [ -n "$l" ] && envs+=("$l"); done < <(bash "$ADAPTER" l
 # An engine that keeps state it must write (omp) gets a throwaway one inside the stage: the same adapter verb
 # run.sh calls per worker seeds it and names the environment that points the engine there. Claude has no such
 # verb (exit 2) and gets nothing.
+# The agent directory omp really uses, resolved as the adapter resolves it.
+real_agent_dir="${PI_CODING_AGENT_DIR:-$HOME/${PI_CONFIG_DIR:-.omp}/agent}"
 # --measure is the unconfined call, which runs on the real state, so it seeds nothing and cannot be blocked by it.
 senv=()
 src=2
@@ -183,14 +188,21 @@ if [ "$engine" = omp ]; then
   # store that every later session recalls from, through a server or daemon that is not the worker. The overlay
   # turns the backend off; this is the proof, on the real store. Another live omp session writes here too, so a
   # FAIL needs a rerun on a quiet host before it is read as a leak.
-  mem_changed=$(find "$HOME/.omp/agent/memories" -newer "$marker" -type f 2>/dev/null | head -5)
-  if [ -z "$mem_changed" ]; then pass "nothing under ~/.omp/agent/memories changed during the confined call"
-  else fail "files under ~/.omp/agent/memories changed during the call (a live omp session, or a leak through the memory server): $(printf '%s' "$mem_changed" | tr '\n' ' ')"; fi
+  mem_msg=$(store_unchanged "$real_agent_dir/memories" "$marker"); mem_rc=$?
+  case "$mem_rc" in
+    0) pass "$mem_msg during the confined call" ;;
+    2) echo "SKIP  $mem_msg"; skipped=$((skipped + 1)) ;;
+    *) fail "$mem_msg (a live omp session, or a leak through the memory server; rerun on a quiet host)" ;;
+  esac
 fi
 echo "# stdout: $(head -c 300 "$W/stdout")"
 
 echo "# files under \$HOME the engine wrote during the call (compare with l1-writes):"
 home_writes
 
-[ "$fails" -eq 0 ] && echo "ALL PASS" || echo "$fails check(s) failed"
+if [ "$fails" -eq 0 ]; then
+  if [ "$skipped" -gt 0 ]; then echo "ALL PASS ($skipped check(s) skipped)"; else echo "ALL PASS"; fi
+else
+  echo "$fails check(s) failed"
+fi
 [ "$fails" -eq 0 ]

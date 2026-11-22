@@ -22,3 +22,6 @@ mnemopi:
 # is "no memory subsystem runs"; autoRecall above stays false for the same reason it was set.
 memory:
   backend: "off"
+# omp's own worker warm-up overlay (thread/worker-warm-up.ts) turns autolearn off with the memory backend.
+autolearn:
+  enabled: false

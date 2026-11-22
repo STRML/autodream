@@ -50,7 +50,7 @@ def main(argv):
             try:
                 if provider:
                     kinds = {r[0] for r in src.execute(
-                        "SELECT credential_type FROM auth_credentials WHERE provider = ? AND disabled_cause IS NULL", (provider,))}
+                        "SELECT credential_type FROM auth_credentials WHERE lower(provider) = lower(?) AND disabled_cause IS NULL", (provider,))}
                     refuse = kinds == {"oauth"}
                     what = "the %s provider authenticates with OAuth only" % provider
                 else:
