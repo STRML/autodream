@@ -1099,10 +1099,10 @@ lock_pid_alive() {
 try:
     os.kill(int(sys.argv[1]), 0)
 except ProcessLookupError:
-    sys.exit(1)
+    sys.exit(91)
 except Exception:
     pass' "$1" >/dev/null 2>&1 || rc=$?
-  [ "$rc" -ne 1 ]
+  [ "$rc" -ne 91 ]
 }
 
 lock_names_live_run() {
@@ -1156,8 +1156,10 @@ acquire_lock() {
     lock_stop_holder "$holder"
     return 1
   fi
-  if [ "$rc" -eq 0 ]; then
+  if [ "$rc" -eq 0 ] && [ "$LOCK_DIR_MADE" -eq 1 ]; then
     LOCK_HOLDERS="$LOCK_HOLDERS$dir=$holder"$'\n'
+  elif [ "$rc" -eq 0 ]; then
+    LOCK_HOLDERS="$LOCK_HOLDERS$dir=t$holder"$'\n'
   else
     LOCK_HOLDERS="$LOCK_HOLDERS$dir=n$holder"$'\n'
   fi
@@ -1174,8 +1176,11 @@ lock_holder_name() {
   [ -n "$LOCK_HOLDER" ] || LOCK_HOLDER="unknown"
 }
 
+LOCK_DIR_MADE=0
+
 lock_take_dir() {
   local dir="$1" owner="$2"
+  LOCK_DIR_MADE=0
   if lock_names_live_run "$dir"; then
     lock_holder_name "$dir"
     return 1
@@ -1183,20 +1188,39 @@ lock_take_dir() {
   if [ -L "$dir" ] || { [ -e "$dir" ] && [ ! -d "$dir" ]; }; then
     return 3
   fi
-  if [ ! -e "$dir" ] && ! mkdir "$dir" 2>/dev/null; then
-    [ -d "$dir" ] || return 3
-    lock_holder_name "$dir"
-    return 1
+  if [ ! -e "$dir" ]; then
+    if ! mkdir "$dir" 2>/dev/null; then
+      [ -d "$dir" ] || return 3
+      lock_holder_name "$dir"
+      return 1
+    fi
+    LOCK_DIR_MADE=1
   fi
   lock_meta_writable "$dir" || return 3
-  { proc_start "$owner" > "$dir/start" && printf '%s\n' "$owner" > "$dir/pid"; } 2>/dev/null || return 3
+  lock_write_meta "$dir" "$owner" || return 3
   return 0
 }
 
 lock_meta_writable() {
-  [ -w "$1" ] || return 1
-  [ ! -e "$1/start" ] || [ -w "$1/start" ] || return 1
-  [ ! -e "$1/pid" ] || [ -w "$1/pid" ]
+  local f
+  [ -d "$1" ] && [ ! -L "$1" ] && [ -w "$1" ] || return 1
+  for f in "$1/start" "$1/pid"; do
+    [ ! -L "$f" ] || return 1
+    [ ! -e "$f" ] || { [ -f "$f" ] && [ -w "$f" ]; } || return 1
+  done
+}
+
+lock_write_meta() {
+  local dir="$1" owner="$2" start oldstart="" oldpid="" hadstart=0 hadpid=0
+  start=$(proc_start "$owner")
+  if [ -e "$dir/start" ]; then hadstart=1; oldstart=$({ cat "$dir/start" && printf x; }) || return 1; fi
+  if [ -e "$dir/pid" ]; then hadpid=1; oldpid=$({ cat "$dir/pid" && printf x; }) || return 1; fi
+  if printf '%s\n' "$start" > "$dir/start" 2>/dev/null && printf '%s\n' "$owner" > "$dir/pid" 2>/dev/null; then
+    return 0
+  fi
+  if [ "$hadstart" -eq 1 ]; then printf '%s' "${oldstart%x}" > "$dir/start" 2>/dev/null; else rm -f "$dir/start"; fi
+  if [ "$hadpid" -eq 1 ]; then printf '%s' "${oldpid%x}" > "$dir/pid" 2>/dev/null; else rm -f "$dir/pid"; fi
+  return 1
 }
 
 release_lock() {
@@ -1207,7 +1231,10 @@ release_lock() {
   done <<< "$LOCK_HOLDERS"
   [ -n "$holder" ] || return 0
   LOCK_HOLDERS="$rest"
-  case "$holder" in n*) meta=0; holder="${holder#n}" ;; esac
+  case "$holder" in
+    n*) meta=0; holder="${holder#n}" ;;
+    t*) meta=0; holder="${holder#t}" ;;
+  esac
   if [ "$meta" -eq 1 ]; then
     rm -f "$dir/pid" "$dir/start"
     rmdir "$dir" 2>/dev/null || true

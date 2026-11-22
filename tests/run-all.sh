@@ -3356,6 +3356,50 @@ test_run_lock_a_stale_directory_that_cannot_be_written_is_left_as_found(){
   rm -rf "$root"
 }
 
+test_run_lock_release_leaves_a_directory_it_did_not_make(){
+  echo "# the run lock: a stale directory is taken over in place, and release removes it only when this run made it"
+  local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
+  local lk="$root/autodream/locks/x.lock" dead before after out
+  true & dead=$!; wait "$dead" 2>/dev/null
+  mkdir -p "$lk"; printf '%s\n' "$dead" > "$lk/pid"; printf 'Mon Jan  1 00:00:00 2018\n' > "$lk/start"
+  before=$(ls -di "$lk" | awk '{print $1}')
+  out=$(LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"')
+  after=$(ls -di "$lk" 2>/dev/null | awk '{print $1}')
+  assert_eq "$out" "rc=0" "a stale directory is taken over"
+  assert_eq "$after" "$before" "and the same directory is still there after release, not removed and recreated"
+  rm -rf "$lk"
+  out=$(LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?; [ -d "$LK" ] && echo made; release_lock "$LK"; [ -d "$LK" ] && echo left || echo gone')
+  assert_eq "$(printf '%s' "$out" | tr '\n' ' ')" "rc=0 made gone" "a directory this run made is removed on release"
+  rm -rf "$root"
+}
+
+test_run_lock_metadata_of_the_wrong_type_or_a_write_that_fails_midway_changes_nothing(){
+  echo "# the run lock: a pid that is a directory is refused before any write, and a write that fails midway restores what it replaced"
+  local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
+  local lk="$root/autodream/locks/x.lock" dead out
+  true & dead=$!; wait "$dead" 2>/dev/null
+  mkdir -p "$lk/pid"; printf 'Mon Jan  1 00:00:00 2018\n' > "$lk/start"
+  touch -t 202001010000 "$lk"
+  out=$(LK="$lk" lock_fn "$root/autodream" 'acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"; cat "$LK/start"')
+  assert_eq "$(printf '%s' "$out" | tr '\n' '|')" "rc=3|Mon Jan  1 00:00:00 2018" "a pid that is a directory is cannot-lock and start keeps its old value"
+  out=$(LK="$lk" lock_fn "$root/autodream" 'lock_meta_writable(){ return 0; }; acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"; cat "$LK/start"')
+  assert_eq "$(printf '%s' "$out" | tr '\n' '|')" "rc=3|Mon Jan  1 00:00:00 2018" "a pid write that fails after start was replaced puts the old start back"
+  rm -rf "$root"
+}
+
+test_run_lock_a_liveness_probe_that_fails_to_run_is_not_a_dead_holder(){
+  echo "# the run lock: only no such process reads as dead, so a probe that exits 1 for any other reason keeps the holder"
+  local root; root=$(setup_env); local sh="$root/shim" dead out
+  mkdir -p "$sh" "$root/autodream"
+  printf '#!/bin/sh\nexit 1\n' > "$sh/python3"; chmod +x "$sh/python3"
+  true & dead=$!; wait "$dead" 2>/dev/null
+  out=$(PATH="$sh:$PATH" lock_fn "$root/autodream" 'lock_pid_alive 4242; echo rc=$?')
+  assert_eq "$out" "rc=0" "a python that exits 1 before it probes reads as alive"
+  out=$(lock_fn "$root/autodream" "lock_pid_alive $dead; echo rc=\$?")
+  assert_eq "$out" "rc=1" "a pid that no process has still reads as dead"
+  rm -rf "$root"
+}
+
 test_run_lock_a_lock_path_that_is_a_file_or_a_symlink_is_never_written_through(){
   echo "# the run lock: a lock path that is a regular file or a symlink is cannot-lock, and release leaves it (#242)"
   local root; root=$(setup_env); mkdir -p "$root/autodream/locks" "$root/target"
@@ -4610,6 +4654,9 @@ _run test_run_lock_a_holder_does_not_outlive_a_dead_owner
 _run test_run_lock_release_ignores_a_directory_it_never_acquired
 _run test_run_lock_an_older_runner_holding_the_directory_is_honored
 _run test_run_lock_a_stale_directory_that_cannot_be_written_is_left_as_found
+_run test_run_lock_release_leaves_a_directory_it_did_not_make
+_run test_run_lock_metadata_of_the_wrong_type_or_a_write_that_fails_midway_changes_nothing
+_run test_run_lock_a_liveness_probe_that_fails_to_run_is_not_a_dead_holder
 _run test_run_lock_a_lock_path_that_is_a_file_or_a_symlink_is_never_written_through
 _run test_run_lock_a_pid_of_zero_is_not_a_holder
 _run test_run_lock_a_failed_probe_is_not_a_dead_holder
