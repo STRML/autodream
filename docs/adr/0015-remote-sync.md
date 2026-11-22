@@ -58,13 +58,15 @@ A pull is read-only on the remote and needs only sshd there.
   first sync that fails leaves no empty mirror in the roots. The mirror is not under
   `$HOME/.claude*`, so root-probe never reports it as an unasked folder.
 - **Lock.** `$AUTODREAM_DIR/locks/remote-<label>.lock` uses the run lock's helpers
-  (`acquire_lock`, `lock_holder_state`, `reclaim_lock`, `release_lock`, each taking the lock dir),
-  so a dead holder is reclaimed the same way. The nightly and an `autodream-now.sh` run for another
-  date take different run locks and would otherwise rsync into one directory at once. A live holder
+  (`acquire_lock` and `release_lock`, each taking the lock dir), so the flock on
+  `remote-<label>.flock` decides and a dead holder frees it with no reclaim (ADR 0001, "One run per
+  date at a time"). The nightly and an `autodream-now.sh` run for another date take different run
+  locks and would otherwise rsync into one directory at once. A live holder
   is waited for (`AUTODREAM_REMOTE_LOCK_WAIT`, default 600 seconds) and the run then syncs itself,
   because scanning a mirror mid-copy misses the files not yet renamed into place, and the next
   day's mtime bound never picks them up. A holder still alive after the wait gives
-  `skipped_locked`, and the mirror is scanned as it stands.
+  `skipped_locked`, and the mirror is scanned as it stands. A lock that cannot be taken at all
+  (read-only locks directory, no python3) gives `failed (cannot take the lock ...)`.
 - **Reporting.** run-stats gets `remote_sync: off|on` and, per label, `remote_sync_<label>`
   (`ok|partial|failed|skipped_locked|invalid`), `remote_sync_<label>_cause` and
   `remote_sync_<label>_last_ok` (stamped in `remote/<label>/last-ok` on ok and partial, else
@@ -344,13 +346,13 @@ Never add a variable assignment to the job body expecting the parent to see it. 
 
 ## A held mirror lock is waited for, then the run syncs itself
 
-Status: accepted · Date: 2026-11-22 · Code: `bin/run.sh` (`wait_for_lock_release`, `remote_sync_locked`)
+Status: accepted · Date: 2026-11-22 · Code: `bin/run.sh` (`acquire_lock`, `remote_sync_locked`)
 
 ### Context
 A run that scanned a mirror another run was still copying into would miss the files not yet renamed into place, and the next day's mtime lower bound would never pick them up. The nightly and an `autodream-now.sh` run for another date take different run locks and would otherwise rsync into one directory at once.
 
 ### Decision
-`remote_sync_locked` takes `$AUTODREAM_DIR/locks/remote-<label>.lock` with the run lock's helpers (see `per-date-run-lock-mkdir`). If a live holder has it, `wait_for_lock_release` polls once a second up to `AUTODREAM_REMOTE_LOCK_WAIT` (default 600, a non-number becomes 600) and the run then syncs itself. A holder still alive after the wait gives `skipped_locked` and the mirror is scanned as it stands. A lock dir that cannot be made gives `failed (cannot create <dir>)`.
+`remote_sync_locked` takes `$AUTODREAM_DIR/locks/remote-<label>.lock` with the run lock's helpers (see ADR 0001, "One run per date at a time"). If a live holder has it, `acquire_lock` waits inside its holder process up to `AUTODREAM_REMOTE_LOCK_WAIT` (default 600, a non-number becomes 600) and the run then syncs itself. A holder still alive after the wait gives `skipped_locked` and the mirror is scanned as it stands. A lock that cannot be taken at all (a read-only locks directory, no python3) gives `failed (cannot take the lock <dir>: read-only locks directory or no python3)`.
 
 See docs/adr/0015-remote-sync.md#background-remote-hosts-a-one-way-pull-not-a-shared-filesystem-226, "Remote hosts" (Lock).
 
