@@ -3424,6 +3424,21 @@ test_run_lock_a_temp_that_is_a_link_is_replaced_and_never_written_through(){
   rm -rf "$root"
 }
 
+test_run_lock_a_temp_that_cannot_be_removed_is_never_written_through(){
+  echo "# the run lock: when a leftover start.tmp or pid.tmp cannot be removed, the write is refused and what it links to is untouched (#266)"
+  local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
+  local lk="$root/autodream/locks/x.lock" dead out name
+  true & dead=$!; wait "$dead" 2>/dev/null
+  for name in start.tmp pid.tmp; do
+    rm -rf "$lk"; mkdir -p "$lk"; printf '%s\n' "$dead" > "$lk/pid"; printf 'Mon Jan  1 00:00:00 2018\n' > "$lk/start"
+    printf 'target\n' > "$root/target"; ln "$root/target" "$lk/$name"
+    out=$(LK="$lk" lock_fn "$root/autodream" 'rm(){ return 1; }; acquire_lock "$LK" 0; echo rc=$?; release_lock "$LK"')
+    assert_eq "$out" "rc=3" "a $name that cannot be removed is cannot-lock"
+    assert_eq "$(cat "$root/target")" "target" "and the file it is linked to is untouched"
+  done
+  rm -rf "$root"
+}
+
 test_run_lock_a_failed_pid_rename_leaves_a_dead_pid_no_rollback_and_no_temp(){
   echo "# the run lock: start and pid are renamed into place with pid last, so a failed pid rename reads as a dead holder, rolls nothing back and leaves no temp (#266)"
   local root; root=$(setup_env); mkdir -p "$root/autodream/locks"
@@ -4710,6 +4725,7 @@ _run test_run_lock_a_stale_directory_that_cannot_be_written_is_left_as_found
 _run test_run_lock_release_leaves_a_directory_it_did_not_make
 _run test_run_lock_metadata_of_the_wrong_type_is_refused_before_any_write
 _run test_run_lock_a_failed_pid_rename_leaves_a_dead_pid_no_rollback_and_no_temp
+_run test_run_lock_a_temp_that_cannot_be_removed_is_never_written_through
 _run test_run_lock_a_temp_that_is_a_link_is_replaced_and_never_written_through
 _run test_run_lock_a_liveness_probe_that_fails_to_run_is_not_a_dead_holder
 _run test_run_lock_a_lock_path_that_is_a_file_or_a_symlink_is_never_written_through

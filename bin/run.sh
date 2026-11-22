@@ -1218,12 +1218,16 @@ lock_meta_writable() {
   done
 }
 
+lock_write_new() {
+  ( set -C; printf '%s\n' "$1" > "$2" ) 2>/dev/null
+}
+
 lock_write_meta() {
   local dir="$1" owner="$2" start
   start=$(proc_start "$owner")
   rm -f "$dir/start.tmp" "$dir/pid.tmp"
-  if printf '%s\n' "$start" > "$dir/start.tmp" 2>/dev/null \
-    && printf '%s\n' "$owner" > "$dir/pid.tmp" 2>/dev/null \
+  if lock_write_new "$start" "$dir/start.tmp" \
+    && lock_write_new "$owner" "$dir/pid.tmp" \
     && mv -f "$dir/start.tmp" "$dir/start" 2>/dev/null \
     && mv -f "$dir/pid.tmp" "$dir/pid" 2>/dev/null; then
     return 0
