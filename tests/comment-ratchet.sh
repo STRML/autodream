@@ -476,34 +476,34 @@ failing_tool_fixtures() {
 }
 
 lint_is_the_grammar_judge_fixture() {
-  local d lint shape n=0 bad_shapes=""
+  local d lint shape name rest text want out wrong=""
   lint="$REPO/node_modules/.bin/oxlint"
   [ -x "$lint" ] || { bad "oxlint is installed (npm ci)"; return; }
   d=$(mktemp -d)
-  for shape in 'dup.js:const x = 1; const x = 2;' 'dup.jsx:const x = 1; const x = 2;' 'dup.mjs:const x = 1; const x = 2;' 'typed.js:const a: number = 1;'; do
-    printf '%s\n' "${shape#*:}" > "$d/${shape%%:*}"
-    n=$((n + 1))
-    "$lint" -A all --deny-warnings "$d/${shape%%:*}" > /dev/null 2>&1 && bad_shapes="$bad_shapes ${shape%%:*}"
+  for shape in \
+    'dup.js|const x = 1; const x = 2;|has already been declared' \
+    'dup.jsx|const x = 1; const x = 2;|has already been declared' \
+    'dup.mjs|const x = 1; const x = 2;|has already been declared' \
+    'typed.js|const a: number = 1;|Missing initializer in const declaration'; do
+    name=${shape%%|*}; rest=${shape#*|}; text=${rest%%|*}; want=${rest#*|}
+    printf '%s\n' "$text" > "$d/$name"
+    out=$(cd "$d" && "$lint" -A all "$name" 2>&1)
+    case "$out" in *"$want"*) ;; *) wrong="$wrong $name" ;; esac
   done
-  eq "$n$bad_shapes" "4" "oxlint rejects a duplicate declaration in .js, .jsx and .mjs and TypeScript syntax in .js, the grammar the counter leaves to it"
+  eq "$wrong" "" "oxlint reports a duplicate declaration in .js, .jsx and .mjs and TypeScript syntax in .js by name, the grammar the counter leaves to it"
   rm -rf "$d"
 }
 
 lint_coverage_fixture() {
-  local dirs dir f covered missing=""
-  dirs=$(node -e 'const s = require(process.argv[1]).scripts.lint.split(/\s+/); process.stdout.write(s.filter((w) => !w.startsWith("-") && w !== "oxlint" && w !== "npm").join("\n"))' "$REPO/package.json" 2>/dev/null) || { bad "read the lint script from package.json"; return; }
-  while IFS= read -r f; do
-    case "$f" in node_modules/*) continue ;; esac
-    covered=0
-    for dir in $dirs; do
-      case "$f" in "$dir"/*|"$dir") covered=1 ;; esac
-    done
-    [ "$covered" -eq 1 ] || missing="$missing $f"
-  done <<EOF
-$(git -C "$REPO" ls-files '*.js' '*.mjs' '*.cjs' '*.jsx' '*.ts' '*.mts' '*.cts' '*.tsx')
-EOF
-  eq "$missing" "" "every tracked JS and TS file is under a path the lint script covers"
-  eq "$(grep '"ignorePatterns"' "$REPO/.oxlintrc.json" | grep -cE '\.(js|mjs|cjs|jsx|ts|mts|cts|tsx)"')" 0 "the oxlint config ignores no JS or TS file by extension"
+  local lint args tracked linted missing
+  lint="$REPO/node_modules/.bin/oxlint"
+  [ -x "$lint" ] || { bad "oxlint is installed (npm ci)"; return; }
+  args=$(node -e 'const w = require(process.argv[1]).scripts.lint.split(/\s+/); process.stdout.write(w.slice(w.indexOf("oxlint") + 1).join("\n"))' "$REPO/package.json" 2>/dev/null) || { bad "read the lint script from package.json"; return; }
+  tracked=$(git -C "$REPO" ls-files '*.js' '*.mjs' '*.cjs' '*.jsx' '*.ts' '*.mts' '*.cts' '*.tsx' | sort) || { bad "list the tracked JS and TS files"; return; }
+  linted=$(cd "$REPO" && "$lint" --debug=files $args 2>/dev/null | sort)
+  [ -n "$linted" ] || { bad "oxlint listed the files the lint script selects"; return; }
+  missing=$(comm -23 <(printf '%s\n' "$tracked") <(printf '%s\n' "$linted") | tr '\n' ' ')
+  eq "$missing" "" "oxlint, run as the lint script runs it, selects every tracked JS and TS file"
 }
 
 counter_exit_fixtures() {
