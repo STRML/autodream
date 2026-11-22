@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import socketserver
 import stat
 import subprocess
 import sys
@@ -122,19 +123,46 @@ def verify_service(port, token):
         connection.close()
 
 
+HANDOFF_NAME = re.compile(r"web-login(-[0-9a-f]{16})?\.html")
+HANDOFF_ID = re.compile(r"[0-9a-f]{16}")
+HANDOFF_MAX_AGE = 600
+
+
+def sweep_stale_handoffs(install, now):
+    for path in Path(install).iterdir():
+        if not HANDOFF_NAME.fullmatch(path.name):
+            continue
+        try:
+            if now - path.lstat().st_mtime > HANDOFF_MAX_AGE:
+                path.unlink()
+        except OSError:
+            pass
+
+
 def open_browser(executable, url, install):
-    page = Path(install) / "web-login.html"
-    fd, temporary = tempfile.mkstemp(prefix=".web-login-", dir=install)
+    sweep_stale_handoffs(install, time.time())
+    handoff_id = secrets.token_hex(8)
+    page = Path(install) / f"web-login-{handoff_id}.html"
+    target = url + "&h=" + handoff_id
+    fd = os.open(page, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
+        os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            os.fchmod(stream.fileno(), 0o600)
+            fd = -1
             stream.write('<!doctype html><meta name="referrer" content="no-referrer">'
-                         '<meta http-equiv="refresh" content="0;url=' + html.escape(url, quote=True) + '">')
-        os.replace(temporary, page)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
-    result = run_bounded([executable, page.absolute().as_uri()])
+                         '<meta http-equiv="refresh" content="0;url=' + html.escape(target, quote=True) + '">')
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        page.unlink(missing_ok=True)
+        raise
+    try:
+        result = run_bounded([executable, page.absolute().as_uri()])
+    except BaseException:
+        page.unlink(missing_ok=True)
+        raise
     if result.returncode:
+        page.unlink(missing_ok=True)
         raise ValueError("browser opener failed; use autodream-web open --print")
 
 
@@ -230,7 +258,9 @@ class AutodreamHandler(BaseHTTPRequestHandler):
             if len(tokens) != 1 or not token_matches(tokens[0], self.server.token):
                 self.respond(401, "Run autodream-web open to sign in.\n")
                 return
-            self.server.login_page.unlink(missing_ok=True)
+            handoffs = parse_qs(target.query).get("h", [])
+            if len(handoffs) == 1 and HANDOFF_ID.fullmatch(handoffs[0]):
+                (self.server.install / f"web-login-{handoffs[0]}.html").unlink(missing_ok=True)
             self.respond(200, SAME_ORIGIN_HOP, content_type="text/html; charset=utf-8", headers={
                 "Set-Cookie": f"{COOKIE_NAME}={self.server.token}; HttpOnly; SameSite=Strict; Path=/",
             })
@@ -345,15 +375,24 @@ class AutodreamHandler(BaseHTTPRequestHandler):
             self.action_error(503, "command_failed", "Thread action failed; refresh to check state")
 
 
+class LoopbackServer(ThreadingHTTPServer):
+    # HTTPServer.server_bind calls socket.getfqdn(host), a reverse DNS lookup that can block
+    # for many seconds on a loopback address (the macOS CI runner, #223) before the server ever
+    # announces its port. Nothing here reads server_name.
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 def make_server(config, port):
     if config.get("host", "127.0.0.1") != "127.0.0.1":
         raise ValueError("only 127.0.0.1 binding is permitted")
     token = load_or_create_token(Path(config["autodream_dir"]) / "web-token")
-    server = ThreadingHTTPServer(("127.0.0.1", port), AutodreamHandler)
+    server = LoopbackServer(("127.0.0.1", port), AutodreamHandler)
     server.data = NightCache(config["autodream_dir"], config.get("dreams_dir",
         os.environ.get("DREAMS_DIR", Path.home() / ".claude/dreams")))
     server.token = token
-    server.login_page = Path(config["autodream_dir"]) / "web-login.html"
+    server.install = Path(config["autodream_dir"])
     server.web_dir = Path(config["web_dir"])
     server.canonical_host = f"127.0.0.1:{server.server_port}"
     server.origin = "http://" + server.canonical_host

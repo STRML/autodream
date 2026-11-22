@@ -115,6 +115,15 @@ if grep -qE '^  test:' "$WF" && grep -qE '^    needs: shards' "$WF"; then ok "th
 LWF="$REPO/.github/workflows/launchd.yml"
 check_matrix "$LWF" "full suite" launchd.yml
 grep -q '/bin/bash tests/run-all.sh' "$LWF" && ok "launchd.yml: the weekly suite runs under /bin/bash" || no "launchd.yml: the weekly suite does not run under /bin/bash"
+# A manual dispatch with suite=web must run only the web job: every job that can run on a dispatch
+# says so in its own if, or selecting web would also start it (the launchd job did, #235 review).
+job_if(){ awk -v job="  $1:" '$0 == job { f = 1; next } f && /^  [a-z]/ { f = 0 } f && /^    if:/ { print; exit }' "$LWF"; }
+for job in launchd full; do
+  case "$(job_if "$job")" in
+    *inputs.suite*) ok "launchd.yml: the $job job reads inputs.suite" ;;
+    *) no "launchd.yml: the $job job ignores inputs.suite, so suite=web would start it too" ;;
+  esac
+done
 
 echo "# parallel runner refuses an inaccessible real-dreams ancestor"
 mkdir -p "$D/parallel-runner"

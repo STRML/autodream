@@ -382,6 +382,42 @@ Bookmarks are marked read once a report has covered them, so each one gives you 
 idea once. Without that file the feature is simply off. When the cookies expire the
 report says so and tells you to re-paste; the run itself never fails over it.
 
+### Read the bookmarks from a logged-in browser instead (opt-in)
+
+The cookie path finds X's Bookmarks GraphQL queryId by grepping X's JS bundle. That grep is
+the part that has broken (ten nights in 2026-09). To skip it, set `AUTODREAM_X_FETCH=browser`
+in `~/.claude/autodream/config`. The nightly run then opens `x.com/i/bookmarks` in a
+dedicated `agent-browser` profile and reads the Bookmarks responses the page makes itself, so
+X picks the queryId and nothing is scraped.
+
+The cookie path stays the default and is the fallback. If the browser path fails for any
+reason and `x-credentials` exists, the run uses the cookies. `run-stats.txt` records which
+path served the night (`x_fetch_path: browser`, `graphql`, `fallback_graphql` or `failed`)
+and, after a browser failure, its cause.
+
+```bash
+~/.claude/autodream/x-bookmarks.sh browser-login   # log in once, by hand, in a visible window
+agent-browser --session autodream-x-login close    # then close it: the nightly run cannot share the profile
+echo 'AUTODREAM_X_FETCH=browser' >> ~/.claude/autodream/config
+./install.sh                                       # from the checkout, so the job's PATH gets agent-browser and node
+~/.claude/autodream/x-bookmarks.sh status          # shows the mode, the binary and the profile
+```
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `X_BROWSER_PROFILE` | `~/.claude/autodream/x-browser-profile` | the logged-in profile directory |
+| `X_BROWSER_BIN` | `agent-browser` | the binary, if it is not on `PATH` |
+| `X_BROWSER_SESSION` | `autodream-x` | the agent-browser session name |
+| `X_BROWSER_TIMEOUT` | `60` | seconds each browser command may run |
+| `X_BROWSER_LOCK_WAIT` | `120` | seconds a run waits for another run that is using the profile |
+
+`agent-browser` is a node script and the launchd job has its own `PATH`. With browser mode in
+the config, `install.sh` adds the directories of `agent-browser` (or of an absolute
+`X_BROWSER_BIN` in the config) and of `node` to it, which is why the re-install above is a step.
+The browser path cannot log in unattended. When X ends the session, the
+run falls back to the cookies and the report says so until you run `browser-login` again. It
+reads one page of bookmarks and scrolls `X_MAX_PAGES - 1` times for more.
+
 ## Pruning finished worktrees and branches
 
 Sessions leave worktrees under `<repo>/.claude/worktrees/` and `<repo>/.worktrees/`, and
@@ -465,7 +501,7 @@ going after you disconnect:
 ```bash
 ~/.claude/autodream/autodream-now.sh                    # yesterday, right now
 ~/.claude/autodream/autodream-now.sh 2026-05-29 --force # a specific date, rebuild
-~/.claude/autodream/autodream-now.sh 2026-05-29 --watch # follow the log until the report lands
+~/.claude/autodream/autodream-now.sh 2026-05-29 --watch # follow the log; exits 1 if the run ends without a report
 ```
 
 ## How it works (short version)

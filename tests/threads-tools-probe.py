@@ -6,10 +6,14 @@ import pathlib
 import subprocess
 import tempfile
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import sys
+from http.server import BaseHTTPRequestHandler
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from loopback_http import LoopbackHTTPServer
 
 
-class ReusableHTTPServer(HTTPServer):
+class ReusableHTTPServer(LoopbackHTTPServer):
     allow_reuse_address = True
 
 

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 from functools import partial
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from http.server import SimpleHTTPRequestHandler
 import json
 import os
 import pwd
+import re
 import selectors
 import socket
+import urllib.parse
 import urllib.request
 from pathlib import Path
 import shlex
@@ -13,10 +15,13 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import threading
 import unittest
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from loopback_http import ThreadingLoopbackHTTPServer
 
 
 def find_chrome():
@@ -37,7 +42,107 @@ def find_chrome():
     return chrome
 
 
+def has_result(dom):
+    return 'data-result=' in dom
+
+
+# (virtual-time budget in ms, subprocess deadline in seconds). --virtual-time-budget stops the
+# page when virtual time runs out, and a busy machine can reach that before the fetches the
+# checks wait for have returned; the headless process can also miss its deadline outright. Either
+# way the page never wrote data-result, which means unfinished, not failed (#202): try again with
+# more room and a fresh profile. A FAIL result is a real failure and is returned at once.
+CHROME_ATTEMPTS = ((1500, 25), (6000, 45), (20000, 60))
+# One budget for all Chrome time in this process. Per-attempt deadlines cannot be summed across
+# tests (a suite of 23 tests could spend 23 x 130s), so each attempt is clamped to what is left,
+# and tests/autodream-web.sh gives the process a deadline above this one: the suite then fails a
+# test with TimeoutExpired and still prints its counts, rather than being killed mid-run.
+SUITE_BUDGET = int(os.environ.get('ADWEB_BROWSER_BUDGET', '270'))
+SUITE_END = time.monotonic() + SUITE_BUDGET
+
+
+# A before_retry that restarts the live backend waits up to 30s for its origin line and 5s to stop
+# the old one, so a retry needs this much budget left before it may start.
+RESTART_RESERVE = 40
+
+
+def dump_dom(chrome, root, url, *, attempts=CHROME_ATTEMPTS, finished=has_result, before_retry=None,
+             until=None, restart_reserve=RESTART_RESERVE):
+    # A retry must start from the state the first attempt started from: before_retry puts back
+    # anything the page's own run changed (a killed backend, a deleted single-use file).
+    until = SUITE_END if until is None else until
+    last = None
+    for number, (budget, deadline) in enumerate(attempts):
+        if number and before_retry:
+            if until - time.monotonic() < restart_reserve:
+                break
+            before_retry()
+        remaining = until - time.monotonic()
+        if remaining < 1:
+            break
+        try:
+            result = subprocess.run([chrome, *(['--single-process'] if sys.platform == 'darwin' else []),
+                '--headless', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
+                '--user-data-dir=' + str(Path(root) / ('profile%d' % number)), '--dump-dom',
+                '--virtual-time-budget=%d' % budget, url],
+                capture_output=True, text=True, timeout=min(deadline, remaining))
+        except subprocess.TimeoutExpired:
+            continue
+        last = result
+        if result.returncode == 0 and finished(result.stdout):
+            return result
+    if last is None:
+        raise subprocess.TimeoutExpired('chrome', max(0, until - time.monotonic()))
+    return last
+
+
 class BrowserTests(unittest.TestCase):
+    def test_web_chrome_helper_retries_until_the_page_reports(self):
+        with tempfile.TemporaryDirectory(prefix='fake-chrome.') as root:
+            root = Path(root)
+            log = root / 'calls'
+            fake = root / 'chrome'
+            fake.write_text(
+                '#!/bin/sh\nfor a in "$@"; do case "$a" in --virtual-time-budget=*) budget=${a#*=};; esac; done\n'
+                'echo "$budget" >> "' + str(log) + '"\n'
+                'case "$FAKE_MODE" in\n'
+                'slow) if [ "$budget" -lt 6000 ]; then echo "<body>"; else echo "<body data-result=\\"PASS\\">"; fi;;\n'
+                'hang) if [ "$budget" -lt 6000 ]; then sleep 30; fi; echo "<body data-result=\\"PASS\\">";;\n'
+                'fail) echo "<body data-result=\\"FAIL: real\\">";;\n'
+                'never) echo "<body>";;\n'
+                'esac\n')
+            fake.chmod(0o755)
+            attempts = ((1500, 2), (6000, 10), (20000, 10))
+
+            def run(mode):
+                log.write_text('')
+                os.environ['FAKE_MODE'] = mode
+                try:
+                    result = dump_dom(str(fake), root, 'http://127.0.0.1:1/', attempts=attempts)
+                finally:
+                    del os.environ['FAKE_MODE']
+                return result, log.read_text().split()
+            result, calls = run('slow')
+            self.assertIn('data-result="PASS"', result.stdout)
+            self.assertEqual(calls, ['1500', '6000'], 'an unfinished page gets a larger budget')
+            resets = []
+            log.write_text('')
+            os.environ['FAKE_MODE'] = 'slow'
+            try:
+                dump_dom(str(fake), root, 'http://127.0.0.1:1/', attempts=attempts,
+                         before_retry=lambda: resets.append(log.read_text().split()))
+            finally:
+                del os.environ['FAKE_MODE']
+            self.assertEqual(resets, [['1500']], 'before_retry runs once, between the first and second attempt')
+            result, calls = run('hang')
+            self.assertIn('data-result="PASS"', result.stdout)
+            self.assertEqual(calls, ['1500', '6000'], 'a missed deadline gets another try')
+            result, calls = run('fail')
+            self.assertIn('data-result="FAIL: real"', result.stdout)
+            self.assertEqual(calls, ['1500'], 'a failing check is not retried')
+            result, calls = run('never')
+            self.assertNotIn('data-result', result.stdout)
+            self.assertEqual(calls, ['1500', '6000', '20000'], 'a page that never reports stops after the last try')
+
     def run_browser(self, script, standalone=None, live_backend=False):
         app = REPO / 'web/app.js'
         self.assertTrue(app.is_file(), 'safe DOM renderer has not been implemented')
@@ -88,7 +193,7 @@ document.body.dataset.result = 'PASS';
                     stderr=subprocess.DEVNULL, text=True)
                 with selectors.DefaultSelector() as selector:
                     selector.register(backend.stdout, selectors.EVENT_READ)
-                    if not selector.select(timeout=5):
+                    if not selector.select(timeout=30):
                         raise RuntimeError('backend did not start')
                     origin = backend.stdout.readline().strip()
                 token = (install / 'web-token').read_text().strip()
@@ -127,17 +232,12 @@ document.body.dataset.result = 'PASS';
             if live_backend:
                 start_backend()
             handler = partial(Handler, directory=str(root))
-            server = ThreadingHTTPServer(('127.0.0.1', 0), handler)
+            server = ThreadingLoopbackHTTPServer(('127.0.0.1', 0), handler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
-                result = subprocess.run([chrome, *(['--single-process'] if sys.platform == 'darwin' else []),
-                    '--headless', '--disable-gpu',
-                    '--no-first-run', '--no-default-browser-check',
-                    '--user-data-dir=' + str(root / 'profile'), '--dump-dom',
-                    '--virtual-time-budget=1500',
-                    'http://127.0.0.1:' + str(server.server_port)],
-                    capture_output=True, text=True, timeout=25)
+                result = dump_dom(chrome, root, 'http://127.0.0.1:' + str(server.server_port),
+                    before_retry=(lambda: (stop_backend(), start_backend())) if live_backend else None)
                 self.assertEqual(result.returncode, 0, result.stderr[-1000:])
                 self.assertIn('data-result="PASS"', result.stdout, result.stdout)
             finally:
@@ -162,7 +262,7 @@ document.body.dataset.result = 'PASS';
             try:
                 with selectors.DefaultSelector() as selector:
                     selector.register(backend.stdout, selectors.EVENT_READ)
-                    self.assertTrue(selector.select(timeout=5), 'backend did not start')
+                    self.assertTrue(selector.select(timeout=30), 'backend did not start')
                 origin = backend.stdout.readline().strip()
                 shim = root / 'shim'
                 shim.mkdir()
@@ -177,11 +277,12 @@ document.body.dataset.result = 'PASS';
                 self.assertEqual(opened.returncode, 0, opened.stderr)
                 handoff = capture.read_text()
                 self.assertTrue(handoff.startswith('file://'), handoff)
-                result = subprocess.run([chrome, *(['--single-process'] if sys.platform == 'darwin' else []),
-                    '--headless', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
-                    '--user-data-dir=' + str(root / 'profile'), '--dump-dom',
-                    '--virtual-time-budget=3000', handoff],
-                    capture_output=True, text=True, timeout=25)
+                # The server deletes the handoff on the first login, so every Chrome retry
+                # reads its own copy of the page instead of a file that is already gone.
+                copy = root / 'handoff-copy.html'
+                copy.write_bytes(Path(urllib.parse.unquote(urllib.parse.urlsplit(handoff).path)).read_bytes())
+                result = dump_dom(chrome, root, copy.as_uri(),
+                    finished=lambda dom: 'id="content"' in dom)
                 self.assertEqual(result.returncode, 0, result.stderr[-1000:])
                 self.assertNotIn('sign in', result.stdout, result.stdout[-1000:])
                 self.assertIn('id="content"', result.stdout, result.stdout[-1000:])
@@ -764,6 +865,106 @@ check(location.hash === '#dreams', 'the URL must remain on the selected Dreams v
 check(document.querySelector('nav a[aria-current="page"]')?.hash === '#dreams',
   'navigation selection must stay on Dreams');
 ''')
+
+    def test_web_overlapping_thread_refreshes_keep_the_newest_snapshot(self):
+        self.run_browser('''await new Promise(resolve => window.addEventListener('load', resolve, {once:true}));
+const content = document.getElementById('content');
+const snapshot = status => ({threads:[{id:'t-00000001',kind:'work',repo:'/repo',title:'Thread',goal:'Goal',
+  status,display_status:status,last_seen:'2026-11-01',sessions:[]}]});
+const pending = [];
+let reads = 0;
+window.fetch = async function(path) {
+  if (path !== '/api/threads') throw new Error('unexpected fetch ' + path);
+  if (++reads === 1) return {ok:true,status:200,json:async () => snapshot('dropped')};
+  return new Promise(resolve => pending.push(data => resolve({ok:true,status:200,json:async () => data})));
+};
+history.replaceState(null, '', '#threads');
+await loadView('threads');
+const tab = name => content.querySelector('nav button[data-view="' + name + '"]').textContent;
+check(tab('Dropped') === 'Dropped 1', 'the first snapshot is dropped');
+const older = refreshThreads();
+const newer = refreshThreads();
+check(pending.length === 2, 'both refreshes must be in flight');
+pending[1](snapshot('done'));
+await newer;
+check(tab('Done') === 'Done 1' && tab('Dropped') === 'Dropped 0', 'the newer snapshot must draw');
+pending[0](snapshot('dropped'));
+await older;
+check(tab('Done') === 'Done 1' && tab('Dropped') === 'Dropped 0',
+  'an older snapshot arriving last must not replace the newer one: ' + tab('Done') + ' / ' + tab('Dropped'));
+const last = refreshThreads();
+pending[2](snapshot('open'));
+await last;
+check(tab('Open') === 'Open 1', 'a refresh issued after both must still draw');
+''')
+
+    def test_web_stale_thread_snapshot_still_applies_the_requested_selection(self):
+        self.run_browser('''await new Promise(resolve => window.addEventListener('load', resolve, {once:true}));
+const content = document.getElementById('content');
+const row = (id, status) => ({id,kind:'work',repo:'/repo',title:id,goal:id,status,display_status:status,
+  last_seen:'2026-11-01',sessions:[]});
+const snapshot = {threads:[row('t-00000001','dropped'), row('t-00000002','done')]};
+const pending = [];
+let reads = 0;
+window.fetch = async function(path) {
+  if (path !== '/api/threads') throw new Error('unexpected fetch ' + path);
+  if (++reads === 1) return {ok:true,status:200,json:async () => snapshot};
+  return new Promise(resolve => pending.push(() => resolve({ok:true,status:200,json:async () => snapshot})));
+};
+history.replaceState(null, '', '#threads');
+await loadView('threads');
+const navigation = loadView('threads', 't-00000002');
+const refresh = refreshThreads();
+check(pending.length === 2, 'navigation and refresh must both be in flight');
+pending[1](); await refresh;
+pending[0](); await navigation;
+const done = content.querySelector('nav button[data-view="Done"]');
+check(done.getAttribute('aria-pressed') === 'true', 'the requested thread must stay selected');
+check(content.querySelector('article')?.id === 't-00000002', 'the requested thread must be shown');
+''')
+
+    def test_web_chrome_retry_restart_counts_against_the_budget(self):
+        with tempfile.TemporaryDirectory(prefix='fake-chrome.') as root:
+            root = Path(root)
+            log = root / 'calls'
+            fake = root / 'chrome'
+            fake.write_text('#!/bin/sh\necho x >> "' + str(log) + '"\necho "<body>"\n')
+            fake.chmod(0o755)
+            attempts = ((1500, 20), (6000, 20), (20000, 20))
+            restarts = []
+            log.write_text('')
+            result = dump_dom(str(fake), root, 'http://127.0.0.1:1/', attempts=attempts,
+                              until=time.monotonic() + 6, before_retry=lambda: restarts.append(1))
+            self.assertEqual(restarts, [], 'a restart that cannot finish inside the budget is not started')
+            self.assertEqual(len(log.read_text().split()), 1)
+            self.assertNotIn('data-result', result.stdout)
+            log.write_text('')
+            started = time.monotonic()
+            dump_dom(str(fake), root, 'http://127.0.0.1:1/', attempts=attempts, restart_reserve=0,
+                     until=started + 4, before_retry=lambda: time.sleep(5))
+            self.assertEqual(len(log.read_text().split()), 1,
+                             'time spent restarting counts: no attempt starts after the budget ran out')
+            self.assertLess(time.monotonic() - started, 7)
+
+    def test_web_chrome_retries_stop_at_the_suite_budget(self):
+        runner = (REPO / 'tests/autodream-web.sh').read_text()
+        match = re.search(r'^_run autodream-web-browser\.py (\d+)$', runner, re.M)
+        self.assertIsNotNone(match, 'tests/autodream-web.sh must give the browser suite its own deadline')
+        self.assertGreaterEqual(int(match[1]), SUITE_BUDGET + 15,
+            'the runner deadline must outlast the budget the suite spends on Chrome')
+        with tempfile.TemporaryDirectory(prefix='fake-chrome.') as root:
+            root = Path(root)
+            log = root / 'calls'
+            fake = root / 'chrome'
+            fake.write_text('#!/bin/sh\necho x >> "' + str(log) + '"\nsleep 30\n')
+            fake.chmod(0o755)
+            log.write_text('')
+            started = time.monotonic()
+            with self.assertRaises(subprocess.TimeoutExpired):
+                dump_dom(str(fake), root, 'http://127.0.0.1:1/', attempts=((1500, 20), (6000, 20), (20000, 20)),
+                         until=time.monotonic() + 3)
+            self.assertLess(time.monotonic() - started, 10, 'no attempt may run past the suite budget')
+            self.assertEqual(len(log.read_text().split()), 1, 'no new attempt starts once the budget is spent')
 
     def test_web_lately_renders_when_optional_threads_fetch_rejects(self):
         self.run_browser('''await new Promise(resolve => window.addEventListener('load', resolve, {once:true}));

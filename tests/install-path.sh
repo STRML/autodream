@@ -206,6 +206,35 @@ assert_eq "$rc" "0" "the install succeeds"
 P=$(plist_path "$(nightly_plist)")
 has_dir "$P" "$SANDBOX/rsync-home" && ok "rsync's dir is in the nightly PATH" || no "rsync's dir is in the nightly PATH ($P)"
 
+echo "# AUTODREAM_X_FETCH=browser in the config puts agent-browser's dir and node's dir in the PATH (#166)"
+new_sandbox
+mkdir -p "$SANDBOX/ab-home" "$SANDBOX/node-home" "$SANDBOX/target/autodream"
+fake "$SANDBOX/ab-home/agent-browser"; fake "$SANDBOX/node-home/node"
+printf 'AUTODREAM_X_FETCH=browser\n' > "$SANDBOX/target/autodream/config"
+run_install "$(basepath):$SANDBOX/bin:$SANDBOX/ab-home:$SANDBOX/node-home" AUTODREAM_EPHEMERAL_DIRS= -- "$SANDBOX/target"; rc=$?
+assert_eq "$rc" "0" "the install succeeds"
+P=$(plist_path "$(nightly_plist)")
+has_dir "$P" "$SANDBOX/ab-home" && ok "agent-browser's dir is in the nightly PATH" || no "agent-browser's dir is in the nightly PATH ($P)"
+has_dir "$P" "$SANDBOX/node-home" && ok "node's dir is in the nightly PATH (agent-browser is a node script)" || no "node's dir is in the nightly PATH ($P)"
+
+echo "# X_BROWSER_BIN in the config names the dir even when agent-browser is not on PATH"
+new_sandbox
+mkdir -p "$SANDBOX/ab-home" "$SANDBOX/node-home" "$SANDBOX/target/autodream"
+fake "$SANDBOX/ab-home/agent-browser"; fake "$SANDBOX/node-home/node"
+printf 'AUTODREAM_X_FETCH=browser\nX_BROWSER_BIN=%s\n' "$SANDBOX/ab-home/agent-browser" > "$SANDBOX/target/autodream/config"
+run_install "$(basepath):$SANDBOX/bin:$SANDBOX/node-home" AUTODREAM_EPHEMERAL_DIRS= -- "$SANDBOX/target"
+P=$(plist_path "$(nightly_plist)")
+has_dir "$P" "$SANDBOX/ab-home" && ok "the X_BROWSER_BIN dir is in the PATH" || no "the X_BROWSER_BIN dir is in the PATH ($P)"
+
+echo "# without browser mode in the config, neither dir is added"
+new_sandbox
+mkdir -p "$SANDBOX/ab-home" "$SANDBOX/node-home"
+fake "$SANDBOX/ab-home/agent-browser"; fake "$SANDBOX/node-home/node"
+run_install "$(basepath):$SANDBOX/bin:$SANDBOX/ab-home:$SANDBOX/node-home" AUTODREAM_EPHEMERAL_DIRS= -- "$SANDBOX/target"
+P=$(plist_path "$(nightly_plist)")
+has_dir "$P" "$SANDBOX/ab-home" && no "agent-browser's dir stays out of the PATH by default" || ok "agent-browser's dir stays out of the PATH by default"
+has_dir "$P" "$SANDBOX/node-home" && no "node's dir stays out of the PATH by default" || ok "node's dir stays out of the PATH by default"
+
 echo "# --adapters all reaches every real adapter, and never the _fixture one"
 new_sandbox
 mkdir -p "$SANDBOX/omp-home"; fake "$SANDBOX/omp-home/omp"

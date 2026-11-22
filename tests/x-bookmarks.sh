@@ -404,6 +404,602 @@ test_walk_reaches_every_suffix_variant(){
   rm -rf "$root"
 }
 
+# ---- The browser path (#166) ---------------------------------------------------------
+#
+# `agent-browser` is shimmed the way curl is. The shim logs every call (AB_LOG), strips the
+# global --session/--profile/--headed flags, serves MOCK_HAR on `network har stop <path>`,
+# and answers `get url` with AB_URL. AB_FAIL=<open|har-start|har-stop|get-url|wait|scroll>
+# makes that one command exit 1, and AB_HANG=<same> makes it block (exec, so the watchdog's
+# kill reaches the sleep). Nothing here touches x.com: the real browser path cannot be
+# exercised without a logged-in profile, which is what the PR's verify command is for.
+
+make_ab_shim(){ # $1=bindir
+  mkdir -p "$1"
+  cat > "$1/agent-browser" <<'SH'
+#!/bin/bash
+printf 'session=%s profile=%s :: %s\n' "${AGENT_BROWSER_SESSION:-}" "${AGENT_BROWSER_PROFILE:-}" "$*" >> "${AB_LOG:-/dev/null}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session|--profile) shift 2 ;;
+    --headed|--json) shift ;;
+    *) break ;;
+  esac
+done
+name="$1"
+case "$1 ${2:-}" in
+  "network har") name="har-$3" ;;
+  "get url") name="get-url" ;;
+esac
+if [ "$name" = open ] && [ -n "${AB_STEAL_LOCK:-}" ]; then printf '%s\n' "$AB_STEAL_PID" > "$AB_STEAL_LOCK/pid"; fi
+[ "${AB_HANG:-}" = "$name" ] && exec /bin/sleep 30
+if [ "${AB_FAIL:-}" = "$name" ]; then echo "agent-browser: simulated $name failure" >&2; exit 1; fi
+case "$name" in
+  har-stop) cp "${MOCK_HAR:-/dev/null}" "$4" ;;
+  get-url) printf '%s\n' "${AB_URL:-https://x.com/i/bookmarks}" ;;
+esac
+exit 0
+SH
+  chmod +x "$1/agent-browser"
+}
+
+# curl that records the call and fails: proves the browser path never reached for it.
+make_curl_trap(){ # $1=bindir
+  cat > "$1/curl" <<'SH'
+#!/bin/bash
+printf 'called\n' >> "${CURL_LOG:-/dev/null}"
+exit 7
+SH
+  chmod +x "$1/curl"
+}
+
+# make_har <out> <status:bodyfile>...  — a HAR with one Bookmarks entry per pair, in order,
+# between a BookmarkFolders call and an unrelated asset that must both be ignored.
+make_har(){
+  local out="$1"; shift
+  local entries='[{"request":{"method":"GET","url":"https://x.com/i/api/graphql/ZZZ/BookmarkFolders?variables=%7B%7D"},"response":{"status":200,"content":{"text":"{\"folders\":true}"}}},{"request":{"method":"GET","url":"https://abs.twimg.com/main.js"},"response":{"status":200,"content":{"text":"x"}}}]'
+  # Each pair is status:file[:cursor]. The cursor is the one the request carried in its variables:
+  # none for the first pair, CURSOR_END (the fixture page's bottom cursor) for the rest, "-" for none.
+  local pair status rest file cur i=0
+  for pair in "$@"; do
+    i=$((i + 1))
+    status="${pair%%:*}"; rest="${pair#*:}"; file="${rest%%:*}"
+    if [ "$rest" = "$file" ]; then
+      if [ "$i" -eq 1 ]; then cur=""; else cur="CURSOR_END"; fi
+    else
+      cur="${rest#*:}"; [ "$cur" != "-" ] || cur=""
+    fi
+    entries=$(jq -c --argjson s "$status" --rawfile b "$file" --arg c "$cur" \
+      '. + [{request:{method:"GET",url:("https://x.com/i/api/graphql/RANDOMQID/Bookmarks?variables=" + ((if $c == "" then {count:20,includePromotedContent:false} else {count:20,includePromotedContent:false,cursor:$c} end) | tojson | @uri) + "&features=%7B%22cursor_ui_enabled%22%3Atrue%7D")},response:{status:$s,content:{mimeType:"application/json",text:$b}}}]' <<<"$entries")
+  done
+  jq -n --argjson e "$entries" '{log:{version:"1.2",entries:$e}}' > "$out"
+}
+
+# A sandbox for the browser path: shims, a profile dir, a trapped curl, no queryId cache and
+# a HAR holding the fixture page. Credentials exist unless the test removes them.
+bsetup(){
+  local root; root=$(setup)
+  make_ab_shim "$root/bin"
+  make_curl_trap "$root/bin"
+  mkdir -p "$root/profile"
+  make_har "$root/har.json" "200:$root/page.json"
+  printf '%s' "$root"
+}
+run_br(){ # $1=root, rest = args
+  local root="$1"; shift
+  AUTODREAM_X_FETCH=browser X_BROWSER_PROFILE="${X_BROWSER_PROFILE:-$root/profile}" \
+  X_BROWSER_TIMEOUT="${X_BROWSER_TIMEOUT:-20}" AB_LOG="$root/ab.log" CURL_LOG="$root/curl.log" \
+  MOCK_HAR="${MOCK_HAR:-$root/har.json}" MOCK_BODY="${MOCK_BODY:-$root/page.json}" \
+    run_bm "$root" "$@"
+}
+fetch_path(){ head -1 "$1/x-bookmarks-fetch.txt" 2>/dev/null; }
+
+test_default_mode_never_touches_the_browser(){
+  echo "# AUTODREAM_X_FETCH unset -> the GraphQL path, and agent-browser is never called"
+  local root; root=$(bsetup)
+  make_curl_shim "$root/bin"
+  AB_LOG="$root/ab.log" run_bm "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "graphql" "x-bookmarks-fetch.txt names the graphql path"
+  [ ! -s "$root/ab.log" ] && ok "agent-browser was not invoked" || no "agent-browser was invoked in the default mode"
+  assert_grep "$root/findings/x-bookmarks.md" "the newer post" "the bookmarks came from the GraphQL fetch"
+  assert_eq "$(sed -n 2p "$root/findings/x-bookmarks-fetch.txt")" "" "no browser cause is recorded"
+  rm -rf "$root"
+}
+
+test_unknown_mode_is_graphql_with_a_warning(){
+  echo "# an unknown AUTODREAM_X_FETCH value is read as graphql, loudly"
+  local root; root=$(bsetup)
+  make_curl_shim "$root/bin"
+  AUTODREAM_X_FETCH=headless AB_LOG="$root/ab.log" run_bm "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "graphql" "an unknown mode runs the default path"
+  assert_grep "$root/out.txt" "AUTODREAM_X_FETCH" "the output names the variable it did not understand"
+  [ ! -s "$root/ab.log" ] && ok "and the browser stays untouched" || no "the browser ran for an unknown mode"
+  rm -rf "$root"
+}
+
+test_browser_mode_reads_the_response_from_the_har(){
+  echo "# browser mode: the Bookmarks response in the HAR becomes the bookmarks, with no curl and no credentials"
+  local root; root=$(bsetup)
+  X_CREDS_FILE="$root/does-not-exist" run_br "$root" collect "$root/findings"
+  assert_eq "$?" "0" "exits 0"
+  assert_eq "$(fetch_path "$root/findings")" "browser" "the path is recorded as browser"
+  assert_grep "$root/findings/x-bookmarks.md" "@newerauthor" "the author is parsed from the browser's response"
+  assert_grep "$root/findings/x-bookmarks.md" "the older post" "every bookmark in the response is present"
+  assert_eq "$(wc -l < "$root/findings/x-bookmarks-manifest.txt" | tr -d ' ')" "2" "both are in the manifest"
+  assert_eq "$(wc -l < "$root/state/seen.jsonl" | tr -d ' ')" "2" "and recorded in state"
+  [ ! -s "$root/curl.log" ] && ok "curl was never called" || no "the browser path called curl"
+  assert_eq "$(cat "$root/findings/x-bookmarks-queryid.txt")" "not_attempted" "the queryId walk is recorded as not run"
+  assert_grep "$root/ab.log" "har start" "the HAR recording starts before the page opens"
+  assert_grep "$root/ab.log" "x.com/i/bookmarks" "the bookmarks page is opened"
+  assert_eq "$(grep -vc "^session=autodream-x profile=$root/profile :: " "$root/ab.log")" "0" "every call runs in the dedicated session and profile"
+  rm -rf "$root"
+}
+
+test_browser_mode_orders_the_har_before_the_page(){
+  echo "# the HAR must start recording before open, or the first Bookmarks call is missed"
+  local root; root=$(bsetup)
+  run_br "$root" collect "$root/findings"
+  local start open
+  start=$(grep -n "har start" "$root/ab.log" | head -1 | cut -d: -f1)
+  open=$(grep -n " open " "$root/ab.log" | head -1 | cut -d: -f1)
+  { [ -n "$start" ] && [ -n "$open" ] && [ "$start" -lt "$open" ]; } && ok "har start precedes open" || no "har start ($start) does not precede open ($open)"
+  rm -rf "$root"
+}
+
+test_browser_mode_scrolls_for_more_pages(){
+  echo "# X_MAX_PAGES > 1: the browser scrolls, and every Bookmarks response in the HAR is read"
+  local root; root=$(bsetup)
+  # Page two holds one more bookmark, id 50.
+  jq -c '.data.bookmark_timeline_v2.timeline.instructions[0].entries =
+          [{"entryId":"tweet-50","content":{"itemContent":{"tweet_results":{"result":{"rest_id":"50","core":{"user_results":{"result":{"core":{"screen_name":"pagetwo"}}}},"legacy":{"full_text":"page two post","entities":{"urls":[]}}}}}}}]' \
+    "$root/page.json" > "$root/page2.json"
+  make_har "$root/har.json" "200:$root/page.json" "200:$root/page2.json"
+  X_MAX_PAGES=2 run_br "$root" collect "$root/findings"
+  assert_grep "$root/findings/x-bookmarks.md" "page two post" "the second response is read"
+  assert_eq "$(grep -c ' scroll ' "$root/ab.log")" "1" "one scroll for the second page"
+  rm -rf "$root"
+  root=$(bsetup)
+  X_MAX_PAGES=1 run_br "$root" collect "$root/findings"
+  assert_eq "$(grep -c ' scroll ' "$root/ab.log")" "0" "a one-page run never scrolls"
+  rm -rf "$root"
+}
+
+test_browser_mode_stops_at_a_known_bookmark(){
+  echo "# a response page is not read past the first already-seen bookmark, as on the GraphQL path"
+  local root; root=$(bsetup)
+  jq -c '.data.bookmark_timeline_v2.timeline.instructions[0].entries =
+          [{"entryId":"tweet-50","content":{"itemContent":{"tweet_results":{"result":{"rest_id":"50","core":{"user_results":{"result":{"core":{"screen_name":"pagetwo"}}}},"legacy":{"full_text":"page two post","entities":{"urls":[]}}}}}}}]' \
+    "$root/page.json" > "$root/page2.json"
+  make_har "$root/har.json" "200:$root/page.json" "200:$root/page2.json"
+  printf '{"id":"200","author":"newerauthor","url":"https://x.com/newerauthor/status/200","text":"the newer post","links":[],"read_on":"2026-08-01"}\n' > "$root/state/seen.jsonl"
+  X_MAX_PAGES=2 run_br "$root" collect "$root/findings"
+  assert_nogrep "$root/findings/x-bookmarks.md" "page two post" "nothing past the known bookmark is read"
+  rm -rf "$root"
+}
+
+test_browser_mode_decodes_a_base64_body(){
+  echo "# a HAR body stored as base64 is decoded before parsing"
+  local root; root=$(bsetup)
+  jq -n --rawfile b "$root/page.json" \
+    '{log:{entries:[{request:{method:"GET",url:"https://x.com/i/api/graphql/Q/Bookmarks?v=1"},response:{status:200,content:{encoding:"base64",text:($b|@base64)}}}]}}' > "$root/har.json"
+  run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "browser" "a base64 response still counts as the browser path"
+  assert_grep "$root/findings/x-bookmarks.md" "the newer post" "and parses"
+  rm -rf "$root"
+}
+
+# One fallback case: break the browser path in the named way, collect, and check the GraphQL
+# fallback served the bookmarks with the browser cause recorded.
+fallback_case(){ # $1=case name
+  local name="$1" root cause_re timeout=20
+  root=$(bsetup)
+  make_curl_shim "$root/bin"
+  local bin_override="" url="" ab_fail="" hang=""
+  case "$name" in
+    missing_bin)          bin_override="$root/no-such-agent-browser"; cause_re="not found" ;;
+    open)                 ab_fail=open; cause_re="open" ;;
+    har_stop)             ab_fail=har-stop; cause_re="HAR" ;;
+    no_bookmarks_request) printf '{"log":{"entries":[]}}' > "$root/har.json"; cause_re="no Bookmarks request" ;;
+    har_unparseable)      printf 'not json' > "$root/har.json"; cause_re="HAR" ;;
+    login_redirect)       url="https://x.com/i/flow/login"; cause_re="logged out" ;;
+    http_401)             make_har "$root/har.json" "401:$root/page.json"; cause_re="401" ;;
+    hung)                 hang=open; timeout=2; cause_re="timed out" ;;
+    no_profile)           rm -rf "$root/profile"; cause_re="no browser profile" ;;
+  esac
+  local t0=$SECONDS
+  X_BROWSER_BIN="$bin_override" AB_URL="$url" AB_FAIL="$ab_fail" AB_HANG="$hang" X_BROWSER_TIMEOUT="$timeout" \
+    run_br "$root" collect "$root/findings"
+  local elapsed=$((SECONDS - t0))
+  assert_eq "$(fetch_path "$root/findings")" "fallback_graphql" "$name: the GraphQL fallback served the bookmarks"
+  assert_grep "$root/findings/x-bookmarks-fetch.txt" "$cause_re" "$name: the browser cause is recorded"
+  assert_grep "$root/findings/x-bookmarks.md" "the newer post" "$name: the report still has the bookmarks"
+  if [ "$name" = hung ]; then
+    [ "$elapsed" -lt 15 ] && ok "hung: the watchdog cut a blocked browser call short" || no "hung: took ${elapsed}s"
+  fi
+  rm -rf "$root"
+}
+
+test_browser_failure_falls_back_to_graphql(){
+  echo "# every browser failure falls back to the GraphQL path when credentials exist, and the cause is kept"
+  local c
+  for c in missing_bin open har_stop no_bookmarks_request har_unparseable login_redirect http_401 hung no_profile; do
+    fallback_case "$c"
+  done
+}
+
+test_browser_failure_without_credentials_reports_the_browser_cause(){
+  echo "# browser fails and there is no GraphQL fallback -> a fetch-failed header naming the browser, exit 0"
+  local root; root=$(bsetup)
+  AB_FAIL=open X_CREDS_FILE="$root/does-not-exist" run_br "$root" collect "$root/findings"
+  assert_eq "$?" "0" "exits 0"
+  assert_grep "$root/findings/x-bookmarks.md" "^# x-bookmarks: fetch failed" "the failure header is written"
+  assert_grep "$root/findings/x-bookmarks.md" "browser" "and it names the browser path"
+  assert_eq "$(fetch_path "$root/findings")" "failed" "the path is failed"
+  assert_file "$root/findings/x-bookmarks-manifest.txt" "the manifest exists"
+  rm -rf "$root"
+}
+
+test_both_paths_failing_names_both(){
+  echo "# browser failure then GraphQL failure -> one header carrying both reasons, earlier unread bookmarks still served"
+  local root; root=$(bsetup)
+  make_curl_shim "$root/bin"
+  printf '{"id":"50","author":"earlier","url":"https://x.com/earlier/status/50","text":"earlier post","links":[],"read_on":null}\n' > "$root/state/seen.jsonl"
+  AB_FAIL=open MOCK_CODE=401 run_br "$root" collect "$root/findings"
+  assert_eq "$?" "0" "exits 0"
+  assert_eq "$(fetch_path "$root/findings")" "failed" "the path is failed"
+  assert_grep "$root/findings/x-bookmarks.md" "earlier post" "unread bookmarks captured earlier are still offered"
+  assert_grep "$root/findings/x-bookmarks.md" "browser" "the banner names the browser failure"
+  assert_grep "$root/findings/x-bookmarks.md" "credentials" "and the GraphQL one"
+  rm -rf "$root"
+}
+
+test_browser_mode_is_not_configured_without_profile_or_credentials(){
+  echo "# browser mode with neither a profile nor credentials is 'not configured', not a failure"
+  local root; root=$(bsetup)
+  rm -rf "$root/profile"
+  X_CREDS_FILE="$root/does-not-exist" run_br "$root" collect "$root/findings"
+  assert_eq "$?" "0" "exits 0"
+  assert_grep "$root/findings/x-bookmarks.md" "not configured" "the stub says not configured"
+  assert_nogrep "$root/findings/x-bookmarks.md" "fetch failed" "and not failed"
+  assert_eq "$(fetch_path "$root/findings")" "not_attempted" "the path is not_attempted"
+  [ ! -s "$root/ab.log" ] && ok "no browser was launched against a profile that does not exist" || no "the browser launched without a profile"
+  rm -rf "$root"
+}
+
+test_browser_is_closed_on_every_outcome(){
+  echo "# the dedicated browser session is closed after success and after failure"
+  local root; root=$(bsetup)
+  run_br "$root" collect "$root/findings"
+  assert_eq "$(grep -c ' close$' "$root/ab.log")" "1" "closed exactly once after a good run (the EXIT trap does not close it again)"
+  rm -rf "$root"
+  root=$(bsetup)
+  AB_FAIL=har-stop X_CREDS_FILE="$root/does-not-exist" run_br "$root" collect "$root/findings"
+  assert_eq "$(grep -c ' close$' "$root/ab.log")" "1" "closed exactly once after a failed run"
+  rm -rf "$root"
+  root=$(bsetup)
+  AB_FAIL=open run_br "$root" collect "$root/findings"
+  assert_eq "$(grep -c ' close$' "$root/ab.log")" "1" "closed exactly once when open failed before the page loaded"
+  rm -rf "$root"
+  root=$(bsetup)
+  AB_FAIL=close run_br "$root" collect "$root/findings"
+  assert_eq "$(grep -c ' close$' "$root/ab.log")" "1" "a close that itself fails is not retried by the EXIT trap"
+  assert_eq "$(fetch_path "$root/findings")" "browser" "and a failed close does not change the path that served the night"
+  rm -rf "$root"
+}
+
+test_watchdog_does_not_fire_after_a_command_that_finished(){
+  echo "# a command that finished in time is never reported as timed out, and does not wait out the limit"
+  local root; root=$(bsetup)
+  # The watchdog used to sleep the whole limit in one call and kill that sleep on a normal exit,
+  # so its subshell ran its next statements (flag a timeout, signal the pid) before the parent
+  # killed it, and a good command could come back as exit 124. That race cannot be reproduced
+  # deterministically here (pkill cannot enumerate processes under the sandbox), so this pins
+  # the properties of the polling shape instead: every command in a run is a success with a
+  # 30 second limit, none is reported as a timeout, and the run does not wait the limit out.
+  local t0=$SECONDS
+  X_BROWSER_TIMEOUT=30 run_br "$root" collect "$root/findings"
+  local elapsed=$((SECONDS - t0))
+  assert_eq "$(fetch_path "$root/findings")" "browser" "every command was a success, so the path is browser"
+  assert_nogrep "$root/findings/x-bookmarks-fetch.txt" "timed out" "and no timeout is recorded"
+  [ "$elapsed" -lt 20 ] && ok "finished commands do not wait for the watchdog (${elapsed}s)" || no "the run took ${elapsed}s against a 30s limit"
+  rm -rf "$root"
+}
+
+# A HAR whose page-2 response is bad must not be read as a success for page 1: the older bookmarks
+# on page 2 would never be fetched again once page 1 is marked seen (the next night stops at the
+# first known id).
+partial_har_case(){ # $1=name
+  local name="$1" root cause_re
+  root=$(bsetup)
+  make_curl_shim "$root/bin"
+  printf '{"data":{"bookmark_timeline_v2":{"timeline":{"instructions":[]}}}}' > "$root/good2.json"
+  case "$name" in
+    page2_429)         make_har "$root/har.json" "200:$root/page.json" "429:$root/good2.json"; cause_re="429" ;;
+    page2_truncated)   printf '{"data":{"bookmark_tim' > "$root/bad2.json"
+                       make_har "$root/har.json" "200:$root/page.json" "200:$root/bad2.json"; cause_re="not valid JSON" ;;
+    page1_wrong_shape) printf '{"errors":[{"message":"schema changed"}]}' > "$root/bad1.json"
+                       make_har "$root/har.json" "200:$root/bad1.json"; cause_re="expected shape" ;;
+  esac
+  X_MAX_PAGES=2 run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "fallback_graphql" "$name: a bad response among the pages falls back"
+  assert_grep "$root/findings/x-bookmarks-fetch.txt" "$cause_re" "$name: the cause says why"
+  rm -rf "$root"
+  root=$(bsetup)
+  case "$name" in
+    page2_429)         make_har "$root/har.json" "200:$root/page.json" "429:$root/page.json" ;;
+    page2_truncated)   printf '{"data":{"bookmark_tim' > "$root/bad2.json"
+                       make_har "$root/har.json" "200:$root/page.json" "200:$root/bad2.json" ;;
+    page1_wrong_shape) printf '{"errors":[{"message":"schema changed"}]}' > "$root/bad1.json"
+                       make_har "$root/har.json" "200:$root/bad1.json" ;;
+  esac
+  X_CREDS_FILE="$root/does-not-exist" X_MAX_PAGES=2 run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "failed" "$name: with no fallback the night fails"
+  assert_eq "$(wc -l < "$root/state/seen.jsonl" | tr -d ' ')" "0" "$name: nothing from the good page was recorded as seen"
+  rm -rf "$root"
+}
+
+test_a_bad_response_in_the_har_is_not_a_partial_success(){
+  echo "# a bad, truncated or wrong-shape Bookmarks response fails the browser path as a whole"
+  local c
+  for c in page2_429 page2_truncated page1_wrong_shape; do partial_har_case "$c"; done
+  local root; root=$(bsetup)
+  printf '{"errors":[]}' > "$root/bad.json"
+  make_har "$root/har.json" "200:$root/page.json" "429:$root/bad.json"
+  X_MAX_PAGES=1 run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "browser" "a bad response past the X_MAX_PAGES cap is never read, so it cannot fail the night"
+  rm -rf "$root"
+  root=$(bsetup)
+  printf '{"data":{"bookmark_timeline_v2":{"timeline":{"instructions":[]}}}}' > "$root/empty.json"
+  make_har "$root/har.json" "200:$root/empty.json"
+  run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "browser" "a well-formed empty timeline is a success"
+  rm -rf "$root"
+}
+
+# A second page that exists in the fixture world: one more bookmark (id 50) and no bottom cursor.
+make_page2(){ # $1=root
+  jq -c '.data.bookmark_timeline_v2.timeline.instructions[0].entries =
+          [{"entryId":"tweet-50","content":{"itemContent":{"tweet_results":{"result":{"rest_id":"50","core":{"user_results":{"result":{"core":{"screen_name":"pagetwo"}}}},"legacy":{"full_text":"page two post","entities":{"urls":[]}}}}}}}]' \
+    "$1/page.json" > "$1/page2.json"
+}
+
+test_an_incomplete_capture_is_not_a_success(){
+  echo "# a prefix of the timeline is committed only when it reaches a known bookmark, the cap or the end"
+  local root; root=$(bsetup)
+  make_curl_shim "$root/bin"
+  # X_MAX_PAGES=2 and a HAR that holds page one alone (the scroll or the wait did not load page two),
+  # page one has a bottom cursor and no known id: recording it as seen would hide page two for good.
+  X_MAX_PAGES=2 run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "fallback_graphql" "a capture that stops short of the cap falls back"
+  assert_grep "$root/findings/x-bookmarks-fetch.txt" "no response to" "and the cause says the next page never loaded"
+  rm -rf "$root"
+  root=$(bsetup)
+  X_CREDS_FILE="$root/does-not-exist" X_MAX_PAGES=2 run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "failed" "with no fallback it fails"
+  assert_eq "$(wc -l < "$root/state/seen.jsonl" | tr -d ' ')" "0" "and page one was not recorded as seen"
+  rm -rf "$root"
+  root=$(bsetup)
+  printf '{"id":"200","author":"newerauthor","url":"https://x.com/newerauthor/status/200","text":"the newer post","links":[],"read_on":"2026-08-01"}\n' > "$root/state/seen.jsonl"
+  X_MAX_PAGES=2 run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "browser" "a prefix that reaches a known bookmark is complete without page two"
+  rm -rf "$root"
+  root=$(bsetup)
+  make_page2 "$root"
+  make_har "$root/har.json" "200:$root/page.json" "200:$root/page2.json"
+  X_MAX_PAGES=3 run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "browser" "a timeline that ends (no bottom cursor on the last page) is complete under the cap"
+  rm -rf "$root"
+}
+
+test_duplicate_responses_do_not_count_as_pages(){
+  echo "# a retried or refreshed Bookmarks request is not a second page: pages follow the cursor chain"
+  local root; root=$(bsetup)
+  make_page2 "$root"
+  make_har "$root/har.json" "200:$root/page.json" "200:$root/page.json:-" "200:$root/page2.json"
+  X_MAX_PAGES=2 run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "browser" "page one twice then page two reads as two pages"
+  assert_grep "$root/findings/x-bookmarks.md" "page two post" "page two is read, not cut off by the duplicate"
+  rm -rf "$root"
+  root=$(bsetup)
+  printf '{"data":{"error":true}}' > "$root/bad.json"
+  make_har "$root/har.json" "200:$root/bad.json" "200:$root/page.json:-"
+  run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "browser" "a bad first response followed by a good retry of the same request is read"
+  rm -rf "$root"
+}
+
+test_the_cursor_is_matched_as_a_value_not_a_substring(){
+  echo "# the next page is the request whose variables carry the cursor, never one that merely contains its text"
+  local root; root=$(bsetup)
+  make_curl_shim "$root/bin"
+  # A bottom cursor of 20 is also the page size in every request URL (count%22%3A20). Matching the
+  # URL as a substring read page one as its own next page and accepted a capture that had no page two.
+  jq '(.. | objects | select(.cursorType? == "Bottom") | .value) = "20"' "$root/page.json" > "$root/page-c20.json"
+  make_har "$root/har.json" "200:$root/page-c20.json"
+  X_MAX_PAGES=2 run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "fallback_graphql" "page one is not taken for its own next page"
+  assert_grep "$root/findings/x-bookmarks-fetch.txt" "no response to" "and the cause says the next page never loaded"
+  rm -rf "$root"
+  root=$(bsetup)
+  jq '(.. | objects | select(.cursorType? == "Bottom") | .value) = "20"' "$root/page.json" > "$root/page-c20.json"
+  make_page2 "$root"
+  make_har "$root/har.json" "200:$root/page-c20.json" "200:$root/page2.json:20"
+  X_MAX_PAGES=2 run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "browser" "the real page two, whose request carries cursor 20, is found"
+  assert_grep "$root/findings/x-bookmarks.md" "page two post" "and read"
+  rm -rf "$root"
+  # A numeric entryId on a timeline entry must not hide the bottom cursor from next_cursor.
+  root=$(bsetup)
+  make_curl_shim "$root/bin"
+  jq '.data.bookmark_timeline_v2.timeline.instructions[0].entries += [{"entryId":5,"content":{"entryType":"TimelineTimelineItem"}}]' "$root/page.json" > "$root/page-num.json"
+  make_har "$root/har.json" "200:$root/page-num.json"
+  X_MAX_PAGES=2 run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "fallback_graphql" "a numeric entryId does not turn a cursor into 'end of timeline'"
+  rm -rf "$root"
+}
+
+test_x_max_pages_must_be_a_positive_number(){
+  echo "# a garbage X_MAX_PAGES is replaced, not read as 'the cap is already reached'"
+  local root; root=$(bsetup)
+  make_curl_shim "$root/bin"
+  X_MAX_PAGES=abc run_br "$root" collect "$root/findings"
+  assert_grep "$root/out.txt" "X_MAX_PAGES" "the output names the bad value"
+  assert_eq "$(fetch_path "$root/findings")" "fallback_graphql" "the default cap of 3 applies, so a one-page capture with a cursor is incomplete"
+  rm -rf "$root"
+  root=$(setup)
+  X_MAX_PAGES=0 run_bm "$root" collect "$root/findings"
+  assert_grep "$root/findings/x-bookmarks.md" "the newer post" "the GraphQL path reads pages with a replaced cap too"
+  rm -rf "$root"
+}
+
+test_unlock_only_removes_the_lock_it_holds(){
+  echo "# a lock another run now owns is left alone at the end of this one"
+  local root; root=$(bsetup)
+  mkdir -p "$root/other"; : > "$root/other/marker"
+  AB_STEAL_LOCK="$root/locks/x-browser.lock" AB_STEAL_PID="$$" run_br "$root" collect "$root/findings"
+  assert_eq "$(cat "$root/locks/x-browser.lock/pid" 2>/dev/null)" "$$" "the lock now owned by another pid survives this run's cleanup"
+  rm -rf "$root"
+}
+
+test_a_parse_error_is_not_an_empty_page(){
+  echo "# a response jq cannot parse fails the fetch instead of ending the paging as complete"
+  local root; root=$(bsetup)
+  printf '{"data":{"bookmark_timeline_v2":{"timeline":{"instructions":[{"entries":7}]}}}}' > "$root/weird.json"
+  make_har "$root/har.json" "200:$root/weird.json"
+  X_CREDS_FILE="$root/does-not-exist" run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "failed" "the browser path fails on an unparseable timeline"
+  assert_grep "$root/findings/x-bookmarks-fetch.txt" "could not parse" "and says it could not parse it"
+  rm -rf "$root"
+  root=$(setup)
+  printf '{"data":{"bookmark_timeline_v2":{"timeline":{"instructions":[{"entries":7}]}}}}' > "$root/weird.json"
+  MOCK_BODY="$root/weird.json" run_bm "$root" collect "$root/findings"
+  assert_grep "$root/findings/x-bookmarks.md" "^# x-bookmarks: fetch failed" "the GraphQL path reports it as a failure too"
+  assert_nogrep "$root/findings/x-bookmarks.md" "no unread bookmarks" "and never as an empty inbox"
+  rm -rf "$root"
+  root=$(bsetup)
+  # An entry whose url is not a string, after a valid one: the extraction must not stop half way.
+  jq '.log.entries += [{"request":{"method":"GET","url":5},"response":{"status":200,"content":{"text":"x"}}}]' "$root/har.json" > "$root/har2.json"
+  MOCK_HAR="$root/har2.json" run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "browser" "a HAR entry with a non-string url is skipped, not fatal"
+  rm -rf "$root"
+}
+
+test_a_failed_graphql_page_leaves_no_partial_state(){
+  echo "# a later page that fails does not leave the earlier pages recorded as seen (the next night would stop at them)"
+  local root; root=$(setup)
+  cat > "$root/bin/curl" <<'SH'
+#!/bin/bash
+out=""; prev=""
+for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
+n=$(cat "$MOCK_COUNT" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$MOCK_COUNT"
+if [ "$n" -eq 1 ]; then cat "$MOCK_BODY" > "$out"; printf '200'; else printf '{}' > "$out"; printf '429'; fi
+exit 0
+SH
+  chmod +x "$root/bin/curl"
+  MOCK_COUNT="$root/count" X_MAX_PAGES=2 run_bm "$root" collect "$root/findings"
+  assert_grep "$root/findings/x-bookmarks.md" "^# x-bookmarks: fetch failed" "the failure is reported"
+  assert_eq "$(wc -l < "$root/state/seen.jsonl" | tr -d ' ')" "0" "page one was not recorded as seen"
+  rm -rf "$root"
+}
+
+test_two_runs_do_not_share_the_browser(){
+  echo "# a second run waits for the browser lock, and falls back rather than closing the first run's session"
+  local root; root=$(bsetup)
+  make_curl_shim "$root/bin"
+  mkdir -p "$root/locks/x-browser.lock"; printf '%s\n' "$$" > "$root/locks/x-browser.lock/pid"
+  X_BROWSER_LOCK_WAIT=1 run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "fallback_graphql" "a live holder makes the run fall back"
+  assert_grep "$root/findings/x-bookmarks-fetch.txt" "another" "and the cause names the other run"
+  [ ! -s "$root/ab.log" ] && ok "the held browser was not touched" || no "the browser ran while the lock was held"
+  [ -d "$root/locks/x-browser.lock" ] && ok "the other run's lock is left alone" || no "the lock of a live holder was removed"
+  rm -rf "$root"
+  root=$(bsetup)
+  ( exit 0 ) & local dead=$!; wait "$dead"
+  mkdir -p "$root/locks/x-browser.lock"; printf '%s\n' "$dead" > "$root/locks/x-browser.lock/pid"
+  X_BROWSER_LOCK_WAIT=1 run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "browser" "a dead holder's lock is reclaimed"
+  [ ! -d "$root/locks/x-browser.lock" ] && ok "and the lock is released at the end" || no "the lock outlived the run"
+  rm -rf "$root"
+}
+
+test_a_terminated_collector_closes_the_browser(){
+  echo "# SIGTERM runs the cleanup: the session is closed and the lock released"
+  local root; root=$(bsetup)
+  PATH="$root/bin:$PATH" AUTODREAM_DIR="$root" AUTODREAM_CONFIG="$root/no-such-config" \
+    X_CREDS_FILE="$root/does-not-exist" X_STATE_DIR="$root/state" X_MAX_PAGES=1 \
+    AUTODREAM_X_FETCH=browser X_BROWSER_PROFILE="$root/profile" X_BROWSER_TIMEOUT=30 \
+    AB_LOG="$root/ab.log" AB_HANG=open MOCK_HAR="$root/har.json" \
+    bash "$BIN" collect "$root/findings" > "$root/out.txt" 2>&1 &
+  local pid=$! i=0
+  while [ "$i" -lt 50 ] && ! grep -q ' open ' "$root/ab.log" 2>/dev/null; do /bin/sleep 0.2; i=$((i + 1)); done
+  assert_grep "$root/ab.log" ' open ' "the collector was inside the hung open when it was terminated"
+  kill -TERM "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  assert_eq "$?" "143" "the collector exits 143 on TERM"
+  assert_grep "$root/ab.log" ' close$' "the browser session was closed"
+  [ ! -d "$root/locks/x-browser.lock" ] && ok "and the browser lock was released" || no "the lock survived a TERM"
+  rm -rf "$root"
+}
+
+test_a_failed_close_is_reported(){
+  echo "# a browser that will not close is named in the fetch record, not discarded"
+  local root; root=$(bsetup)
+  AB_FAIL=close run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "browser" "the bookmarks it captured still count"
+  assert_grep "$root/findings/x-bookmarks-fetch.txt" "did not close cleanly" "and the cause line names the unclean close"
+  assert_grep "$root/findings/x-bookmarks-fetch.txt" "close" "but the record says the close failed"
+  rm -rf "$root"
+}
+
+test_credentials_are_read_only_when_the_fallback_runs(){
+  echo "# a good browser run never sources x-credentials, and a failed one does"
+  local root; root=$(bsetup)
+  make_curl_shim "$root/bin"
+  printf 'touch "%s/creds-were-read"\nX_AUTH_TOKEN=a\nX_CT0=b\n' "$root" > "$root/creds"; chmod 600 "$root/creds"
+  run_br "$root" collect "$root/findings"
+  assert_eq "$(fetch_path "$root/findings")" "browser" "the browser served the night"
+  [ ! -e "$root/creds-were-read" ] && ok "the credentials file was not sourced" || no "the credentials file was sourced although the browser worked"
+  AB_FAIL=open run_br "$root" collect "$root/findings2"
+  assert_eq "$(fetch_path "$root/findings2")" "fallback_graphql" "a browser failure falls back"
+  [ -e "$root/creds-were-read" ] && ok "and then the credentials are read" || no "the fallback never read the credentials"
+  rm -rf "$root"
+}
+
+test_no_credential_reaches_the_browser_argv(){
+  echo "# credentials never go in argv: the browser path does not carry the cookie values anywhere"
+  local root; root=$(bsetup)
+  printf 'X_AUTH_TOKEN=SECRETAUTHTOKEN\nX_CT0=SECRETCT0VALUE\n' > "$root/creds"; chmod 600 "$root/creds"
+  make_curl_shim "$root/bin"
+  AB_FAIL=open run_br "$root" collect "$root/findings"
+  assert_nogrep "$root/ab.log" "SECRET" "no cookie value in any agent-browser call, fallback included"
+  assert_nogrep "$root/findings/x-bookmarks-fetch.txt" "SECRET" "none in the recorded cause"
+  rm -rf "$root"
+}
+
+test_browser_login_opens_a_headed_profile(){
+  echo "# browser-login opens the dedicated profile headed, on the login page, and touches no credentials"
+  local root; root=$(bsetup)
+  rm -rf "$root/profile"
+  AB_LOG="$root/ab.log" X_BROWSER_PROFILE="$root/profile" run_bm "$root" browser-login
+  assert_eq "$?" "0" "exits 0"
+  assert_grep "$root/ab.log" "[-][-]headed" "the window is shown"
+  assert_grep "$root/ab.log" "[-][-]profile $root/profile" "the dedicated profile is used"
+  assert_grep "$root/ab.log" "[-][-]session autodream-x-login " "in a session of its own, so a nightly run never closes the window being logged in to"
+  assert_grep "$root/out.txt" "[-][-]session autodream-x-login close" "and the output names that session in the close command"
+  assert_grep "$root/ab.log" "x.com" "it opens x.com"
+  assert_grep "$root/out.txt" "close" "the output says how to finish"
+  rm -rf "$root"
+}
+
+test_status_names_the_fetch_mode(){
+  echo "# status says which fetch mode and browser profile are configured"
+  local root; root=$(bsetup)
+  run_br "$root" status
+  assert_grep "$root/out.txt" "fetch mode" "the mode is printed"
+  assert_grep "$root/out.txt" "browser" "browser mode is named"
+  assert_grep "$root/out.txt" "$root/profile" "the profile path is shown"
+  rm -rf "$root"
+}
+
 echo "x-bookmarks.sh tests"
 test_pages_are_paced_and_the_last_one_is_not_waited_on
 test_not_configured
@@ -425,6 +1021,34 @@ test_state_write_failure_is_not_no_unread
 test_state_write_failure_after_failed_fetch
 test_state_write_failure_keeps_earlier_unread
 test_walk_reaches_every_suffix_variant
+test_default_mode_never_touches_the_browser
+test_unknown_mode_is_graphql_with_a_warning
+test_browser_mode_reads_the_response_from_the_har
+test_browser_mode_orders_the_har_before_the_page
+test_browser_mode_scrolls_for_more_pages
+test_browser_mode_stops_at_a_known_bookmark
+test_browser_mode_decodes_a_base64_body
+test_browser_failure_falls_back_to_graphql
+test_browser_failure_without_credentials_reports_the_browser_cause
+test_both_paths_failing_names_both
+test_browser_mode_is_not_configured_without_profile_or_credentials
+test_browser_is_closed_on_every_outcome
+test_watchdog_does_not_fire_after_a_command_that_finished
+test_a_bad_response_in_the_har_is_not_a_partial_success
+test_an_incomplete_capture_is_not_a_success
+test_duplicate_responses_do_not_count_as_pages
+test_the_cursor_is_matched_as_a_value_not_a_substring
+test_x_max_pages_must_be_a_positive_number
+test_unlock_only_removes_the_lock_it_holds
+test_a_parse_error_is_not_an_empty_page
+test_a_failed_graphql_page_leaves_no_partial_state
+test_two_runs_do_not_share_the_browser
+test_a_terminated_collector_closes_the_browser
+test_a_failed_close_is_reported
+test_credentials_are_read_only_when_the_fallback_runs
+test_no_credential_reaches_the_browser_argv
+test_browser_login_opens_a_headed_profile
+test_status_names_the_fetch_mode
 
 echo
 echo "----------------------------------------"
