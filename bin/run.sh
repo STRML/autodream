@@ -3881,6 +3881,16 @@ report_collector_fingerprint() {
   done
 }
 
+# $1=a fingerprint function, $2=the fingerprint taken before. True only when the function succeeds
+# and prints the same thing. Comparing "$(fn)" directly discards fn's exit status, so a fingerprint
+# that printed the matching rows and then failed on the next file read as unchanged.
+fingerprint_unchanged() {
+  local now
+  [ -n "$2" ] || return 1
+  now=$("$1") || return 1
+  [ "$now" = "$2" ]
+}
+
 # What the collector wrote for L2 to read: the index and every report-<name>.md, one "name sha256"
 # line each, in name order. Fails when the directory cannot be entered or any file cannot be hashed,
 # so a failed hash is never "unchanged". The runner holds the output of the first call in memory and
@@ -3903,7 +3913,9 @@ report_output_fingerprint() {
 # stops the run, because L2 would otherwise read last night's rows as tonight's.
 report_scripts_unavailable() { # $1=why
   log "report scripts unavailable: $1"
-  find "$FINDINGS_DIR" -maxdepth 1 \( -name 'report-*.md' -o -name report-index.txt \) -exec rm -f {} + || return 1
+  # -rf: a worker that is not confined can plant a directory with a report name, and rm -f would
+  # leave it standing and stop the night over a file the runner is entitled to clear.
+  find "$FINDINGS_DIR" -maxdepth 1 \( -name 'report-*.md' -o -name report-index.txt \) -exec rm -rf {} + || return 1
   printf '# report-scripts: unavailable (%s); nothing was collected\n' "$1" > "$FINDINGS_DIR/report-index.txt" || return 1
 }
 
@@ -4384,7 +4396,7 @@ EOF
   REPORT_OUT_FP=""
   if [ ! -x "$REPORT_SCRIPTS" ]; then
     report_scripts_unavailable "report-scripts.sh not found at $REPORT_SCRIPTS" || REPORT_SEAM_OK=0
-  elif [ -z "$REPORT_COLLECTOR_FP" ] || [ "$(report_collector_fingerprint)" != "$REPORT_COLLECTOR_FP" ]; then
+  elif ! fingerprint_unchanged report_collector_fingerprint "$REPORT_COLLECTOR_FP"; then
     report_scripts_unavailable "report-scripts.sh or portable.sh changed since the run started, or could not be hashed" || REPORT_SEAM_OK=0
   else
     REPORT_SNAPSHOT_FILE=$(mktemp "${TMPDIR:-/tmp}/report-snapshot.XXXXXX") \
@@ -5164,7 +5176,7 @@ PY
   # so any difference from the hashes the runner took right after collection (or a failure to hash
   # them then) replaces them with an `unavailable` index. The earlier run's files are removed by the
   # same call, and the run stops only if that cannot be done.
-  if [ -z "$REPORT_OUT_FP" ] || [ "$(report_output_fingerprint)" != "$REPORT_OUT_FP" ]; then
+  if ! fingerprint_unchanged report_output_fingerprint "$REPORT_OUT_FP"; then
     report_scripts_unavailable "the report files changed after collection or could not be hashed (an L1 worker that is not confined can write here)" || {
       log_fatal "cannot clear the report files in $FINDINGS_DIR after they changed; refusing to let L2 read them"
       fatal_exit; return 1

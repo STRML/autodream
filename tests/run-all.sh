@@ -4354,6 +4354,17 @@ test_report_scripts_a_worker_that_rewrites_a_collected_report_file_is_replaced_b
     rm -rf "$root"
   done
 }
+test_report_scripts_a_file_that_cannot_be_hashed_after_l1_is_unavailable_not_unchanged(){
+  echo "# report scripts: a failed fingerprint is never read as unchanged, even when the rows it did print match"
+  local root f; root=$(setup_env); mk_session "$root" sess1; rs_forge_setup "$root"
+  f=$(fdir "$root")
+  # report-z.md sorts after the collected files, so the rows before it hash and match; shasum then fails on it.
+  FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_DIRS="$f/report-z.md" run_dream "$root"
+  assert_grep "$f/report-index.txt" '^# report-scripts: unavailable' "the index says unavailable"
+  assert_no_file "$f/report-good.md" "and the collected report file is gone"
+  assert_grep "$f/run-stats.txt" '^report_scripts: unavailable$' "run-stats says unavailable"
+  rm -rf "$root"
+}
 test_report_scripts_untouched_files_keep_their_rows_through_l1(){
   echo "# report scripts: a worker that writes elsewhere in the findings dir leaves the collected files alone"
   local root f; root=$(setup_env); mk_session "$root" sess1; rs_forge_setup "$root"
@@ -4404,9 +4415,16 @@ EOF
 test_report_scripts_earlier_files_that_cannot_be_cleared_stop_the_run(){
   echo "# report scripts: stale files from an earlier run that cannot be removed stop the run instead of reaching L2"
   local root; root=$(setup_env); mk_session "$root" sess1
-  # A non-empty directory where the index belongs: rm -f cannot remove it.
-  mkdir -p "$(fdir "$root")/report-index.txt/x"
-  run_dream "$root"
+  # A stale index that nothing can replace or remove: an rm and an mv that refuse it, so the collector
+  # cannot write the new index and the cleanup cannot clear the old one. (The cleanup uses rm -rf, so a
+  # planted directory with a report name no longer works as the unremovable thing, and a read-only
+  # findings dir would stop the run long before this seam.)
+  mkdir -p "$(fdir "$root")"
+  printf '# stale index\n' > "$(fdir "$root")/report-index.txt"
+  mkdir -p "$root/shim-rm"
+  printf '#!/bin/bash\nfor a in "$@"; do case "$a" in *report-index.txt) exit 1 ;; esac; done\nexec /bin/${0##*/} "$@"\n' > "$root/shim-rm/rm"
+  cp "$root/shim-rm/rm" "$root/shim-rm/mv"; chmod +x "$root/shim-rm/rm" "$root/shim-rm/mv"
+  PATH="$root/shim-rm:$PATH" run_dream "$root"
   assert_grep    "$root/autodream/logs/run-$DATE.log" 'refusing to let L2 read them' "the log says why the run stopped"
   assert_no_file "$root/dreams/$DATE.md" "no report is written over a stale index"
   rm -rf "$root"
@@ -11344,6 +11362,7 @@ _run test_report_scripts_a_broken_or_missing_collector_never_aborts_the_run
 _run test_report_scripts_a_conf_rewritten_after_the_snapshot_runs_nothing_new
 _run test_report_scripts_run_before_any_worker_so_a_rewritten_script_or_dependency_cannot_change_tonights_output
 _run test_report_scripts_a_worker_that_rewrites_a_collected_report_file_is_replaced_by_unavailable
+_run test_report_scripts_a_file_that_cannot_be_hashed_after_l1_is_unavailable_not_unchanged
 _run test_report_scripts_untouched_files_keep_their_rows_through_l1
 _run test_report_scripts_a_confined_worker_cannot_write_the_allowlist_or_a_listed_script
 _run test_report_scripts_a_collector_changed_after_the_run_started_is_not_executed
