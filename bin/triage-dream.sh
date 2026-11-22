@@ -103,6 +103,7 @@ GROUNDING=$(find_file dream-grounding.sh) || { log "ERROR: dream-grounding.sh no
 ADAPTERS_LIB=$(find_file adapters.sh) || { log "ERROR: adapters.sh not found"; exit 2; }
 # shellcheck source=/dev/null
 . "$ADAPTERS_LIB"
+: "${ADAPTERS_REJECT_LOG:=/dev/null}"
 
 ACCEPTED=$(adapters_list 2>/dev/null)
 ENABLED=$(printf '%s' "${AUTODREAM_ADAPTERS:-claude}" | tr ',' ' ')
