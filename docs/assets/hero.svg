@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" width="1200" height="300" role="img" aria-labelledby="t d">
+  <title id="t">autodream</title>
+  <desc id="d">A night sky banner with the word autodream and a card showing a ranked list of patterns.</desc>
+  <style>
+    :root {
+      --bg1: #0a0f26; --bg2: #1d2358; --fg: #eef1ff; --muted: #a3aedd;
+      --accent: #8ea2ff; --teal: #5eead4; --amber: #fbbf24; --rose: #fb7185;
+      --card: #111739; --stroke: #3b4796; --star: #ffffff; --moon: #f3efd2;
+      --chip: #1a2150;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg1: #f6f8ff; --bg2: #d9e1ff; --fg: #121838; --muted: #47528a;
+        --accent: #3f53d6; --teal: #0b8a78; --amber: #b45309; --rose: #be123c;
+        --card: #ffffff; --stroke: #aab5ea; --star: #7d8be0; --moon: #f1c75b;
+        --chip: #e7ecff;
+      }
+    }
+    .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .g1 { stop-color: var(--bg1); }
+    .g2 { stop-color: var(--bg2); }
+    .title { fill: var(--fg); font-weight: 800; font-size: 84px; letter-spacing: -2px; }
+    .sub { fill: var(--fg); font-size: 25px; font-weight: 500; }
+    .small { fill: var(--muted); font-size: 15px; }
+    .chip { fill: var(--chip); stroke: var(--stroke); stroke-width: 1; }
+    .chipt { fill: var(--fg); font-size: 14px; font-weight: 600; }
+    .card { fill: var(--card); stroke: var(--stroke); stroke-width: 1.5; }
+    .ct { fill: var(--muted); font-size: 13px; font-weight: 600; letter-spacing: 1px; }
+    .rank { fill: var(--accent); font-size: 17px; font-weight: 700; }
+    .bar { fill: var(--stroke); opacity: .75; }
+    .star { fill: var(--star); animation: tw 4s ease-in-out infinite; }
+    .s2 { animation-delay: 1.3s; } .s3 { animation-delay: 2.6s; }
+    @keyframes tw { 0%, 100% { opacity: .15; } 50% { opacity: .9; } }
+    @media (prefers-reduced-motion: reduce) { .star { animation: none; opacity: .5; } }
+  </style>
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" class="g1"/>
+      <stop offset="1" class="g2"/>
+    </linearGradient>
+    <mask id="crescent">
+      <rect x="1090" y="20" width="90" height="90" fill="#fff"/>
+      <circle cx="1148" cy="56" r="25" fill="#000"/>
+    </mask>
+  </defs>
+
+  <rect width="1200" height="300" rx="16" fill="url(#sky)"/>
+
+  <g>
+    <circle class="star" cx="70" cy="40" r="1.6"/>
+    <circle class="star s2" cx="190" cy="66" r="1.2"/>
+    <circle class="star s3" cx="330" cy="30" r="1.8"/>
+    <circle class="star" cx="470" cy="58" r="1.2"/>
+    <circle class="star s2" cx="560" cy="26" r="1.6"/>
+    <circle class="star s3" cx="640" cy="70" r="1.2"/>
+    <circle class="star" cx="930" cy="34" r="1.6"/>
+    <circle class="star s2" cx="1010" cy="62" r="1.2"/>
+    <circle class="star s3" cx="1060" cy="24" r="1.8"/>
+    <circle class="star" cx="620" cy="268" r="1.2"/>
+    <circle class="star s2" cx="40" cy="270" r="1.4"/>
+  </g>
+
+  <circle cx="1130" cy="65" r="30" fill="var(--moon)" mask="url(#crescent)"/>
+
+  <text class="sans title" x="56" y="140">autodream</text>
+  <text class="sans sub" x="60" y="184">Your agent sessions, reviewed while you sleep.</text>
+  <text class="sans small" x="60" y="212">Claude Code and OMP transcripts in. One ranked report out.</text>
+
+  <g class="sans">
+    <rect class="chip" x="60"  y="236" width="92"  height="30" rx="15"/>
+    <text class="chipt" x="106" y="256" text-anchor="middle">triage</text>
+    <rect class="chip" x="162" y="236" width="82"  height="30" rx="15"/>
+    <text class="chipt" x="203" y="256" text-anchor="middle">rank</text>
+    <rect class="chip" x="254" y="236" width="78"  height="30" rx="15"/>
+    <text class="chipt" x="293" y="256" text-anchor="middle">pin</text>
+    <rect class="chip" x="342" y="236" width="104" height="30" rx="15"/>
+    <text class="chipt" x="394" y="256" text-anchor="middle">threads</text>
+    <rect class="chip" x="456" y="236" width="118" height="30" rx="15"/>
+    <text class="chipt" x="515" y="256" text-anchor="middle">dashboard</text>
+  </g>
+
+  <g class="sans">
+    <rect class="card" x="700" y="96" width="400" height="166" rx="14"/>
+    <text class="ct" x="724" y="126">TOP PATTERNS, RANKED</text>
+
+    <text class="rank" x="724" y="161">1</text>
+    <rect class="bar" x="750" y="148" width="210" height="9" rx="4.5"/>
+    <rect x="1000" y="144" width="76" height="22" rx="11" fill="var(--rose)" opacity=".22"/>
+    <text class="mono" x="1038" y="159" text-anchor="middle" font-size="12" font-weight="700" fill="var(--rose)">high</text>
+
+    <text class="rank" x="724" y="199">2</text>
+    <rect class="bar" x="750" y="186" width="158" height="9" rx="4.5"/>
+    <rect x="1000" y="182" width="76" height="22" rx="11" fill="var(--amber)" opacity=".22"/>
+    <text class="mono" x="1038" y="197" text-anchor="middle" font-size="12" font-weight="700" fill="var(--amber)">medium</text>
+
+    <text class="rank" x="724" y="237">3</text>
+    <rect class="bar" x="750" y="224" width="112" height="9" rx="4.5"/>
+    <rect x="1000" y="220" width="76" height="22" rx="11" fill="var(--teal)" opacity=".22"/>
+    <text class="mono" x="1038" y="235" text-anchor="middle" font-size="12" font-weight="700" fill="var(--teal)">low</text>
+  </g>
+</svg>

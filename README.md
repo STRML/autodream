@@ -1,672 +1,258 @@
-# autodream
+<p align="center">
+  <img src="docs/assets/hero.svg" alt="autodream: your agent sessions, reviewed while you sleep" width="100%">
+</p>
 
-Nightly review of your coding-agent sessions. While you sleep it reads yesterday's
-transcripts from Claude Code and Oh My Pi (OMP) and leaves you one short report: the
-mistakes you keep making, where you lost time, and what's worth remembering.
+<p align="center">
+  <a href="https://github.com/STRML/autodream/actions/workflows/tests.yml"><img src="https://img.shields.io/github/actions/workflow/status/STRML/autodream/tests.yml?branch=main&label=tests" alt="tests"></a>
+  <a href="https://github.com/STRML/autodream/actions/workflows/launchd.yml"><img src="https://img.shields.io/github/actions/workflow/status/STRML/autodream/launchd.yml?branch=main&label=launchd" alt="launchd"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/STRML/autodream" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20(core)-lightgrey" alt="platform: macOS, Linux for the core pipeline">
+  <img src="https://img.shields.io/badge/bash-3.2%20compatible-4eaa25" alt="bash 3.2 compatible">
+  <a href="https://strml.github.io/autodream/"><img src="https://img.shields.io/badge/demo-dashboard-blue" alt="dashboard demo"></a>
+</p>
 
-One repo, one nightly, one report. Each harness is a directory under `adapters/`, so
-adding another means writing one directory and touching no shared code. This repo was
-`cc-autodream` until 2026-10-03, when the OMP port (`omp-autodream`) folded back into it.
+**autodream reads yesterday's Claude Code and OMP sessions overnight and leaves one ranked report: what keeps going wrong, what you dropped, and what is worth remembering.**
 
-![Lately: each night as one table per repo, with sessions, time, outcome counts and the newest goal; a goal expands to one line per session](docs/screenshots/lately.png)
+[What you wake up to](#what-you-wake-up-to) · [How it works](#how-it-works) · [Quick start](#quick-start) · [Dashboard](#dashboard) · [Configuration](#configuration) · [Safety](#safety-and-sandboxing) · [FAQ](#faq)
 
-Lately, the local dashboard's front page: a week of sessions at a glance, one row per repo per
-night. The data in these screenshots is made up. [Try the demo](https://strml.github.io/autodream/)
-to click through every view with that same made-up data; `docs/demo/build.py` builds it.
+## What you wake up to
 
-## Why
-
-You have dozens of agent sessions a week. The useful lessons — a wrong
-assumption you made twice, a flag that always trips you up, a fix worth pinning to
-memory — are buried in transcripts you'll never reread. Each session starts fresh
-and rediscovers the same friction.
-
-autodream does the rereading for you. Every night it looks across **all** of
-yesterday's sessions, ranks what recurs by frequency × severity (so you see the
-patterns, not the one-offs), and writes a dated digest you can skim in a minute. The
-highest-confidence, highest-severity findings get pinned to your shared Mnemopi
-memory store, so the next session already knows.
-
-This is the cross-session view the built-in per-project auto-memory doesn't give you.
-autodream reads full transcripts and tells you what happened, then hands the
-lessons to Mnemopi to hold.
-
-## What you get
-
-A report at `~/.claude/dreams/YYYY-MM-DD.md`. See
-[`example/2026-05-25.md`](example/2026-05-25.md) for a real one (60 sessions, seven
-ranked patterns, five open questions). The shape:
+A dated markdown report in `~/.claude/dreams/`, a file of open questions that opens in your editor, and a dashboard on `127.0.0.1`. The shape of the report (the numbers are illustrative, the headings and fields are the real ones):
 
 ```markdown
-# Dream report — 2026-05-29   (21 sessions)
-
-## Top patterns
-1. **Editing files before reading them** ×6  ·  high
-   Six sessions hit "File has not been read yet". Read-before-Edit isn't sticking.
-   → Pin: always Read a file in-session before the first Edit.
-2. **$() in Bash triggers permission prompts** ×4  ·  medium
-3. **Assuming the host TZ is Pacific** ×2  ·  medium
+## Activity snapshot
+- 21 sessions (18 top-level, 3 nested workers under 2 parents) across 6 projects
+- Outcomes: 12 fully, 3 mostly, 1 partial, 2 unclear
 
 ## Upstream harness changes
-- Claude Code v2.x.y added `--foo`; relevant to the rush project's deploy script.
-- No releases in the window: Codex, OMP.
+### Claude Code
+- **2.x.y** - added `--foo` -> relevant to the deploy script in project X
+No releases in the window: Codex, OMP.
+
+## Top patterns (ranked)
+### Editing files before reading them
+- **Category**: tool_loop
+- **Count**: 6
+- **Severity**: high
+- **Examples**: "File has not been read yet" in six sessions, with paths
+- **Proposed action**: pin "Read a file in-session before the first Edit"
+- **Grounded against**: the file the proposal would change, with file:line
+- **Confidence**: high
+- **Pin proposed**: yes
 
 ## Open questions for the user
-1. Add a Read-before-Edit reminder to the project CLAUDE.md?
+1. **Read-before-Edit reminder** - add one to the project CLAUDE.md?
+<!-- autodream:open-questions=1 -->
 ```
 
-Three ways you actually interact with it:
+The report also carries per-project notes, skill coverage gaps and a self-audit of the pipeline. Conditional sections cover operator notes, command output you asked for, ideas from X bookmarks and repos worth triaging. A longer one is in [`example/2026-05-25.md`](example/2026-05-25.md).
 
-- **It runs unattended.** A launchd job fires overnight (with morning catch-up
-  triggers in case the Mac was asleep). You do nothing.
-- **It opens itself.** When a report lands, `notify.sh` writes its open questions to a
-  text file and pops it open in your editor — so it's in front of you with morning
-  coffee, not waiting to be discovered.
-- **It has an interactive suggestion solver.** `review.sh` opens a Claude session
-  preloaded with the report and walks the open questions one at a time — restate,
-  recommend, then **approve / modify / skip / discuss** — executing the ones you
-  approve and logging each decision back into the report.
-- **It stays quiet when there's nothing to say.** Most nights the report has no
-  open questions, and opening a session just to be told "nothing to do" costs a
-  session's tokens to print one line. `review.sh` detects that itself and prints
-  the line instead. Same for a report you've already triaged. Anything it can't
-  classify still opens the session — a wasted session is cheaper than a buried
-  question. `--force` overrides.
+![Lately: each night as one table per repo, with sessions, time, outcome counts and the newest goal](docs/screenshots/lately.png)
 
-## Install
+The dashboard's front page, on made-up data. [Click through the demo](https://strml.github.io/autodream/) to see every view.
+
+## How it works
+
+<p align="center">
+  <img src="docs/assets/pipeline.svg" alt="Pipeline: sessions, run.sh, sandboxed Layer 1 workers, findings files, read-only Layer 2 aggregator, then report, pins, threads and dashboard" width="100%">
+</p>
+
+```text
+03:15  run.sh DATE
+       enumerate sessions    keep those with a record inside the local day
+       L1: one cheap-model call per session       -> findings/DATE/<hash>.json
+       rollup: the runner counts sessions, categories, failures
+                                                  -> rollup.tsv, categories.tsv
+       L2: one aggregator call, tools Glob + Read -> report on stdout
+       run.sh writes dreams/DATE.md, pins to Mnemopi, threads.jsonl, the notification
+```
+
+| Part | Role |
+|---|---|
+| Layer 1, `prompts/SESSION_TRIAGE.md` | Reads one transcript, writes one findings JSON. Default model on the claude engine is `claude-haiku-5-5` at effort `high` (`deepseek/deepseek-flash` on omp) |
+| Layer 2, `prompts/PROMPT.md` | Reads every findings file, ranks by frequency and severity. No Write tool: the runner parses its stdout |
+| Adapters, `adapters/<name>/` | The only code that knows a harness. `claude` and `omp` ship, and a new harness is one directory |
+| State | Everything is on disk and every step is idempotent, so any date can be rebuilt |
+
+## Features
+
+| Feature | What it does | Details |
+|---|---|---|
+| Every Claude config dir | Scans each `~/.claude*/projects`; asks once whether to index each | `bin/root-probe.sh`, `SESSION_ROOTS` |
+| OMP sessions | Reads the live branch of OMP's append-only session tree | `adapters/omp/` |
+| Remote hosts | One-way rsync of another machine's transcripts before the scan | [Remote hosts](#remote-hosts) |
+| Report-day window | Places a session by the timestamps inside it, not its file mtime | `bin/session-window.sh` |
+| Long sessions | Opt-in chunked triage reads a whole transcript, not its head and tail | `AUTODREAM_L1_CHUNK_BYTES` |
+| Ranked report | Frequency times severity; eval sandboxes count at a quarter weight | `prompts/PROMPT.md` |
+| Grounded proposals | A proposal that edits a file must cite the `file:line` it read | `prompts/PROMPT.md` |
+| Open questions | `review.sh` walks them one at a time; a question asked three reports running is flagged | `bin/review.sh`, `bin/question-streaks.sh` |
+| Memory pins | High-confidence findings become Mnemopi memories | `bin/apply-pins.sh` |
+| Dropped threads | A cross-day index of work that stopped before it finished, plus ideas | [Dropped threads](#dropped-threads) |
+| Upstream watch | Diffs the Claude Code, Codex and OMP changelogs over the day | `AUTODREAM_CHANGELOG_SOURCES` |
+| Notes in | Terminal notes, a synced-vault inbox, and a focus tag on a Claude Code, OMP or Codex turn | `bin/autodream-note.sh`, `bin/autodream-focus.sh`, `mods/autodream-focus/`, `extensions/omp/` |
+| Report scripts | An operator note can ask for a command's output: list the command in `$AUTODREAM_DIR/report-scripts.conf` (`<name> <path> [args...]`) and Layer 2 reads the result | `bin/report-scripts.sh` |
+| X bookmarks | Idea fuel from unread bookmarks. `AUTODREAM_X_FETCH=browser` reads them through a logged-in `agent-browser` profile (log in once with `x-bookmarks.sh browser-login`) and falls back to the GraphQL path when `x-credentials` exists | `bin/x-bookmarks.sh` |
+| Other extras | Finished worktree and branch pruning (opt-in, `AUTODREAM_PRUNE_ROOTS`); repos worth triaging (on by default, read-only) | `bin/prune-worktrees.sh`, `bin/triage-candidates.sh` |
+| Comment ratchet | CI fails a PR that raises a file's comment count above `.comment-baseline` | `tests/comment-ratchet.sh`, `bin/comment-count.sh` |
+| Self-audit | The report lists its own failures: unsynced hosts, failed workers, unconfined runs | `run-stats.txt` |
+
+## Quick start
+
+You need macOS and `claude` on PATH. The nightly schedule is a launchd job.
 
 ```bash
 git clone https://github.com/STRML/autodream ~/git/autodream
 cd ~/git/autodream
-./install.sh                                              # Claude Code only
-./install.sh --adapters claude,omp --l2-engine omp        # both harnesses, OMP writes the report
-./install.sh --dry-run --adapters claude,omp              # print what it would do, change nothing
+./install.sh --dry-run                               # print every change, make none
+./install.sh                                         # Claude Code only
+./install.sh --adapters claude,omp --l2-engine omp   # both harnesses, OMP runs L2
 ```
 
-`--adapters` lists the harnesses to read, and `--l2-engine` names the one whose CLI runs the
-aggregation pass. That engine also reviews every harness's sessions in L1 unless `config` says
-otherwise: `AUTODREAM_L1_ENGINE_<NAME>=<name>` keeps one harness on its own engine (for example
-`AUTODREAM_L1_ENGINE_CLAUDE=claude`). Pin a model per engine with `AUTODREAM_L1_MODEL_<NAME>` and
-`AUTODREAM_L2_MODEL_<NAME>` (for example `AUTODREAM_L1_MODEL_OMP`, the model of every L1 call the
-omp engine makes). A host with only one harness installed needs none of this.
+Install symlinks the scripts in `bin/`, the files in `prompts/`, `adapters/` and `web/` into `~/.claude/autodream/`, so editing the repo takes effect at once. It also installs the nightly job, a review agent and the dashboard service. `--no-schedule`, `--no-review`, `--no-web` and `--no-skill` skip one each.
 
-This symlinks `bin/*.sh`, `prompts/*.md` and the `adapters/` tree into `~/.claude/autodream/`, creates
-`~/.claude/dreams/`, and on macOS installs and bootstraps the nightly launchd
-schedule for you (auto-detecting your username, paths, and `claude`/`git` location —
-no plist editing). Because the scripts are symlinks, editing the repo copy takes
-effect immediately. Requires the CLI of each enabled harness on PATH: `claude` (override with `CLAUDE_BIN`) and `omp` (override with `OMP_BIN`).
+Run the first night yourself instead of waiting for 03:15:
 
-Install also detects every Claude config dir on the machine — `~/.claude-nous`,
-`~/.claude-ds4`, `~/.claude-sigint`, and any other `~/.claude*/projects` bucket — and
-asks whether to index each one (on a non-interactive install it indexes them all and
-says so). The choices land in `~/.claude/autodream/root-choices.conf`, and the enabled
-set is written to `config` as `SESSION_ROOTS`. You can add or remove a folder later by
-editing that file and re-running `./install.sh`.
+```bash
+~/.claude/autodream/autodream-now.sh --watch              # yesterday; exits 1 if no report lands
+~/.claude/autodream/autodream-now.sh 2026-05-29 --force   # rebuild a date
+~/.claude/autodream/autodream-web open                    # sign in to the dashboard
+~/.claude/autodream/review.sh                             # walk the latest report's open questions
+```
 
-Sessions that run on another Mac, such as a Studio running headless Claude sessions, live in
-that machine's `~/.claude/projects`. Name each host in `config`, and the nightly copies its
-transcripts over ssh before it scans:
+`autodream-now.sh` hands the run to launchd, so a closed terminal or a task time limit cannot kill it. In any Claude Code session, `/autodream` prints what is waiting, starts yesterday's run and walks the unanswered questions of older reports.
+
+launchd does not wake a sleeping Mac. To guarantee the 03:15 trigger, run `sudo pmset repeat wake MTWRFSU 03:10:00`. Catch-up triggers at 06:15, 09:15 and 12:15 cover the rest, and they do nothing once a date has its report.
+
+### Remote hosts
+
+Name each host in `~/.claude/autodream/config`. An entry is `label=ssh-target:path`, entries are separated by spaces, and the path is relative to the remote home:
 
 ```bash
 AUTODREAM_REMOTE_ROOTS="studio2=studio2:.claude/projects"
 ```
 
-Each entry is `label=ssh-target:path`, and several hosts are separated by spaces. A label is
-letters, digits, `.`, `_` and `-`; `invalid` and any name ending in `_cause` or `_last_ok` are
-reserved, because `run-stats.txt` builds its lines from the label. The path
-is relative to the remote home. The ssh login must work without a prompt (a key in the agent,
-or one with no passphrase), because launchd runs the job. A host that is asleep or unreachable
-costs only its own sessions. The report names it, and when every host fails a warning banner
-does too. Hosts sync in parallel, so several unreachable hosts cost one timeout, not several.
+The pull is read-only on the remote and needs only sshd and a login that works without a prompt. A host that is down costs only its own sessions. The report names it, and a warning banner fires when every host fails.
 
-A night whose host was down is not retried: its report is already written, and the next night
-skips what it missed. The first night the host syncs again, the report lists the earlier dates
-(the last seven days) that were missing it, with the command for each,
-`autodream-now.sh <date> --force`. Nothing rebuilds by itself, because a rebuild replaces the
-report, including any triage decisions you wrote into it. A date drops off the list once a
-rebuild has delivered a report that read the host. The list comes from a line each report carries
-(`<!-- autodream:remote-short=studio2 -->`), so it is only as old as the reports.
+### Dropped threads
 
-The local copy of each host's transcripts, `~/.claude/autodream/remote/<label>/projects`, is an
-archive and is never pruned, so it keeps transcripts the host has since deleted. Its transcript
-count and size are written to `run-stats.txt` every night (`remote_mirror_files_<label>`,
-`remote_mirror_bytes_<label>`), so you can read its growth before you decide to trim it.
-
-The schedule fires `run.sh` at 03:15 with morning catch-up triggers (06:15/09:15/12:15)
-in case the Mac was asleep; the idempotency guard makes all but the first a one-second
-no-op. To skip scheduling and only symlink the scripts:
+The nightly run links sessions into `~/.claude/autodream/threads.jsonl`. An open work thread whose newest session ended unfinished shows as dropped after `AUTODREAM_THREADS_DROPPED_DAYS` (default 7) of silence. Ideas are never dropped.
 
 ```bash
-./install.sh --no-schedule
+~/.claude/autodream/threads.sh list
+~/.claude/autodream/threads.sh move t-0123abcd done      # or open, or idea
+~/.claude/autodream/threads.sh resume t-0123abcd --launch
 ```
 
-Install also provisions a second LaunchAgent, `<label>-review`, that opens a cmux triage workspace
-when a report has open questions (08:00, 09:15, 12:15, 15:30, 18:15). `./install.sh --no-review`
-installs the nightly without it, and removes one an earlier install wrote. The flag applies to that
-run only; put `AUTODREAM_REVIEW_AGENT=0` in `~/.claude/autodream/config` (or the environment) to keep
-a re-install from provisioning it again.
+## Dashboard
 
-Install also provisions a local web dashboard LaunchAgent, `<label>-web`, on
-`127.0.0.1:47823`. Run `~/.claude/autodream/autodream-web open` to sign in from
-this Mac. Set `AUTODREAM_WEB_PORT` to change the port. Use `./install.sh --no-web`
-for one install, or set `AUTODREAM_WEB=0` in the environment or config to keep
-the dashboard disabled across installs. The service restarts after failures and
-stays stopped after a successful exit, including when another process owns its port.
-
-| View | Shows |
-|---|---|
-| Lately | Recent projects and top-level sessions |
-| Dreams | The nightly report archive |
-| Threads | Dropped, Open, Ideas and Done tabs with counts; search, repo, latest outcome and last-seen filters; sort by last seen, sessions, repo or title; each card has Resume and Move to |
-| Progress | Live lock ownership and elapsed time, refreshed every 5 seconds |
-| Stats | Nightly activity, outcomes, category findings and pipeline health |
-
-Progress shows the last log line as text. A lost connection shows “server not reachable”
-and retries while Progress is visible. Stats uses gaps for missing measurements.
-“Finished that day” counts current done threads whose `last_seen` is that day;
-reopening a thread changes the count. See [CLAUDE.md](CLAUDE.md#local-web-dashboard)
-for data and security details.
+`autodream-web` serves five views on `127.0.0.1:47823`: Lately, Dreams, Threads, Progress and Stats. Requests need the canonical Host and a session cookie, and `autodream-web open` signs you in. Stats shows a gap, never a zero, for anything that was not measured.
 
 ![Stats: nightly user messages and tool calls as line charts, with a table of values per night](docs/screenshots/stats.png)
 
-The screenshots come from `docs/screenshots/fixture.py`, which writes a made-up install of
-public repos; its docstring has the steps to retake them.
+`docs/screenshots/fixture.py` writes the made-up install behind both screenshots, and `docs/demo/build.py` builds the [Pages demo](https://strml.github.io/autodream/) from it. Design notes: [`docs/design/autodream-web-2026-11-15.md`](docs/design/autodream-web-2026-11-15.md).
 
-launchd starts the job with no login shell, so the plist carries a fixed PATH. Install builds it
-from the directories of `claude`, `git` and `bash`, plus the CLI of every enabled adapter (`omp`
-when `--adapters` includes it, or `OMP_BIN` from the config), and the L2 engine's (`--l2-engine`). A directory under a temp location is
-left out and the install says so: a tool shim such as the one cmux puts first on PATH in every
-terminal is gone by the time launchd runs the job. `AUTODREAM_EPHEMERAL_DIRS` replaces the list of
-temp prefixes (default `$TMPDIR`, `/tmp` and `/var/folders`); set but empty, it turns the check off.
-The PATH is written at install time. If you enable an adapter later by editing the config, re-run
-`./install.sh`, or set that adapter's `<NAME>_BIN` (`OMP_BIN`) in the config, which `run.sh` reads at
-run time and which does not depend on the plist PATH.
+## Configuration
 
-launchd won't *wake* the Mac, so to guarantee the 03:15 trigger runs at all, add a
-scheduled wake:
+Put settings in `~/.claude/autodream/config` as plain `KEY=value` bash (see [`example/config.example`](example/config.example)). An exported environment variable wins over the file. The full list is in [`docs/run-knobs.md`](docs/run-knobs.md).
 
-```bash
-sudo pmset repeat wake MTWRFSU 03:10:00
-```
-
-The hand-editable template lives at `launchd/com.user.autodream.plist.example` if you'd
-rather install the job yourself.
-
-## Running it by hand
-
-```bash
-~/.claude/autodream/run.sh $(date -v-1d +%Y-%m-%d)       # process yesterday
-AUTODREAM_FORCE=1 ~/.claude/autodream/run.sh 2026-05-29  # rebuild a date
-~/.claude/autodream/review.sh                            # solve the latest report's questions
-~/.claude/autodream/review.sh 2026-05-29                 # triage a specific report
-~/.claude/autodream/review.sh --force 2026-05-29         # open it even if there's nothing to triage
-~/.claude/autodream/pending-triage.sh                    # how many questions are still unanswered, and from which dates
-```
-
-### `/autodream` in any Claude Code session
-
-`install.sh` links `skills/autodream` into `~/.claude/skills/`, so `/autodream` works in every project. It does three things:
-
-1. Prints what is waiting: `now triaging 5 issues from dates 2026-10-12 to 2026-10-17`, or `no issues to address!`.
-2. Starts yesterday's dream in the background through `autodream-now.sh`.
-3. Walks the open questions of every report that has no `## Triage decisions` heading, oldest first. A session logs under `## Triage in progress` and renames the heading after the last question, so a session that stops half way leaves the rest in the queue.
-
-Variants: `/autodream today` runs today so far, and `/autodream force` rebuilds yesterday.
-
-Triage runs the fixes you approve, so permission prompts interrupt it. The skill recommends a `claude --dangerously-skip-permissions` session to avoid them.
-
-Only the last `AUTODREAM_PENDING_DAYS` days (default 14) count, so a report nobody triaged stops nagging after two weeks. To skip the link, pass `install.sh --no-skill`. An install into a directory other than `~/.claude` does not link the skill, because the skill looks for the scripts in `~/.claude/autodream`; set `AUTODREAM_SKILLS_DIR` to link it anyway, and export `AUTODREAM_DIR` (and `DREAMS_DIR`, if the reports are not in its sibling `dreams/`) in the shell that runs Claude Code.
-
-### Which sessions belong to a day
-
-A session belongs to the day its records say, not the day its file was last written.
-`run.sh` takes every transcript modified since the day began and keeps the ones holding a
-record timestamped inside that local day (midnight to midnight, so a daylight-saving day is
-23 or 25 hours). A session resumed after its day closed is therefore still in that day's
-rebuild, and stats and triage for the day read only that day's records of a transcript that
-spans several (the worker is told it holds a slice). A transcript with no timestamps at all is
-placed by its mtime, as before. Files modified since the day began that hold no record in it
-are counted as `sessions_out_of_window` in `run-stats.txt`. `AUTODREAM_WINDOW=0` puts
-the old mtime-only placement back. `install.sh` links the helper, `bin/session-window.sh`;
-until it has run again after an update the runner finds it in the checkout, and a runner that
-finds it nowhere reads the old way and says `session_window: off`.
-
-### Long sessions are read in chunks
-
-Layer 1 used to give a worker the first 400 and last 200 lines of an oversized transcript, bookkeeping
-records included. On a real 3,479-line session only 36% of the lines were conversation, so the worker
-saw about 2% of it. With `AUTODREAM_L1_CHUNK_BYTES=300000` (**off by default**, `0`) a transcript over that many bytes is cleaned
-of Claude Code bookkeeping, split at line boundaries, read by one worker per chunk, and merged into the
-one findings JSON per session that Layer 2 already reads: the goal from the first chunk, the outcome from
-the last, the findings unioned. A chunk answer is untrusted, so only one findings object with no `error`
-counts; anything else is redone on its own, and a session is merged only when every chunk answered.
-
-**It costs more.** An oversized session now takes up to `AUTODREAM_L1_MAX_CHUNKS` worker calls (default
-8) instead of one, so a night costs up to *oversized sessions x 8* calls plus one per other session, and
-a session takes up to 8 x `AUTODREAM_L1_TIMEOUT` of wall time because its chunks run in sequence. On
-this host's 2026-10-02 (70 oversized sessions) that was 73 calls instead of 70: two sessions needed more
-than one chunk. Over the cap the middle is dropped and counted (`l1_chunks_elided`). `run-stats.txt`
-records `l1_chunks`, `l1_chunk_calls`, `l1_chunked_sessions` and `l1_chunks_elided`. Unset or `0`
-is the old head/tail view exactly.
-
-`review.sh` exits without opening a session when the report has no open questions
-or already carries a `## Triage decisions` section, printing where the report is
-and the `--force` line to open it anyway. It reads the
-`<!-- autodream:open-questions=N -->` marker that `PROMPT.md` makes the nightly run
-emit; reports written before that marker existed fall back to a prose check, and
-anything ambiguous opens the session as before.
-
-By default `review.sh` runs the triage session inline in the current terminal —
-and if you launch it as a shell script, macOS hands it to whatever app is the
-default handler for shell scripts (often iTerm2). To make it open in its own
-cmux workspace instead, drop a config file at `~/.claude/autodream/config`
-(see `example/config.example`):
-
-```bash
-AUTODREAM_TRIAGE_SURFACE=cmux    # inline (default) | cmux
-```
-
-### A morning band inside Claude Code (optional)
-
-If you live in Claude Code, `mods/autodream-band/` brings the report to you instead of waiting for you to run
-`review.sh`. When the newest report has open questions or a medium/high pattern, a one-line band appears above the
-prompt with **Triage**, **View** and **Dismiss**, and `/dream` opens the report's key sections in a pane. **Triage**
-(or `/dream triage`) runs `review.sh` in a fresh session in a cmux split beside the one you are in. The mod reads the
-same `DREAMS_DIR`, `AUTODREAM_DIR` and `CMUX_BIN` variables as `review.sh`, so it needs no config of its own.
-
-```bash
-claude --plugin-dir /path/to/autodream/mods/autodream-band
-```
-
-Commands, fallbacks and how to test it are in [`mods/autodream-band/README.md`](mods/autodream-band/README.md).
-
-## Moving from omp-autodream
-
-`omp-autodream` is archived. Its fixes live here (the provider-refusal deferral, bounded workers,
-the changelog window, the review popup dedup) and the OMP session reader is `adapters/omp/`.
-To move an existing OMP install: unload its launchd jobs, run
-`./install.sh --adapters claude,omp --l2-engine omp`, and carry its L1 model over as
-`AUTODREAM_L1_MODEL_OMP`. With omp as the L2 engine it reviews the Claude Code sessions too, on
-that model; add `AUTODREAM_L1_ENGINE_CLAUDE=claude` to keep them on Claude Code's own engine and
-model. Do not copy its `SESSION_ROOTS` line: the omp adapter finds
-`~/.omp/agent/sessions` itself, and a stray root would make the Claude adapter parse OMP files.
-The full runbook, with rollback, is in `docs/plans/2026-10-03-omp-adapter.md`.
-
-## Leaving notes for the next run
-
-Notes you leave get answered in the report's **Operator notes** section, with evidence
-from that night's sessions — "how often did I actually use /graphify, and did it work?"
-comes back as a count and a verdict, not a guess.
-
-From a terminal:
-
-```bash
-~/.claude/autodream/autodream-note.sh "evaluate how often /graphify is used"
-~/.claude/autodream/autodream-note.sh --expires 2026-10-01 "check the codemaps hook overhead"
-```
-
-From anywhere else, including your phone, point autodream at a folder in a synced
-vault and drop a markdown file in its inbox:
-
-```bash
-# in ~/.claude/autodream/config — quote it, the iCloud path has spaces
-AUTODREAM_VAULT_DIR="$HOME/Library/Mobile Documents/iCloud~md~obsidian/Documents/vault/autodream"
-```
-
-The run creates the rest on its own:
-
-| path | what it holds |
-| --- | --- |
-| `<vault>/inbox/*.md` | drop a note here; one file per note, any filename |
-| `<vault>/processed/<date>/` | where a note moves once a report has read it |
-| `<vault>/reports/<date>.md` | the nightly report, copied in so you can read it in bed |
-
-Add `expires: YYYY-MM-DD` as YAML frontmatter to a note that should retire itself. A
-note is only archived after a report actually read it, so a failed run leaves your
-inbox alone, and so does a note you write while a run is in flight.
-
-### Asking a note to run a command: report scripts
-
-The model that writes the report can read files and nothing else, so a note that says
-"run `review-gate-raises.sh` and quote the rows" cannot be answered by running it. Instead,
-the run executes an allowlist of commands before the model starts and the model reads what
-they printed. A note that asks for a command's output has to name an allowlisted entry.
-When it names none, the report's Operator notes section says so and names the line to add.
-
-The allowlist is `~/.claude/autodream/report-scripts.conf`, one entry per line. A missing
-file means no reports. `install.sh` does not create it.
-
-```bash
-# <name> <absolute path, or ~/...> [args...]       # a `#` line is a comment
-review-gate-raises ~/.claude/scripts/review-gate-raises.sh --since-hours 36
-stop-check-counts  ~/.claude/autodream/stop-check-counts.sh
-```
-
-To add a report script:
-
-1. Write an executable script that prints its rows to stdout and exits 0 when it worked. It
-   runs with no stdin, from `$HOME`, and is killed after 60 seconds (`AUTODREAM_REPORT_TIMEOUT`).
-2. Add one line to `report-scripts.conf`. The name is `[A-Za-z0-9._-]` and unique. Arguments
-   are literal words split on whitespace: no quotes, no `$VAR`, no globs, no `;`.
-3. Nothing else changes: no edit to `run.sh` or the prompt. Check it with
-   `~/.claude/autodream/report-scripts.sh collect <an existing findings dir>` and read
-   `report-index.txt` and `report-<name>.md` there.
-
-Each night's findings directory then holds `report-<name>.md` per entry (a header line with the
-command, exit code and UTC time, then stdout, capped at `AUTODREAM_REPORT_MAX_BYTES`, 100000) and
-`report-index.txt`, which lists every entry and its status. A script that exits non-zero, times
-out, is missing or is not executable still gets its file, with `FAILED:` on the first line and
-its stderr, so the report shows the failure instead of nothing. A failing script never stops the run.
-A script that ignores the timeout's TERM is killed five seconds later, and no file it writes can
-grow past four times the cap.
-A note, which can come from a phone, cannot make the run execute anything new. Neither can the
-model workers that read your transcripts. Before any model starts, the run snapshots the conf and
-the sha256 of each listed script, then runs those scripts at once. If a script changed after the
-snapshot, or did not exist then, the run skips it and the index shows `changed`, so edit the conf
-or a script between nights, not during a run. Before it writes the report, the run checks the files
-the scripts wrote. If any changed, the index becomes `unavailable`. A script reports the machine as
-it was when the run started.
-
-`stop-check-counts.sh [--since-hours N]` ships as one such script: it counts the
-`~/.claude/stop-check/verdicts.jsonl` verdicts by kind inside the window (default 36 hours),
-then prints an eight-week table by UTC week. It prints counts only, never the quoted text.
-
-## Ideas from your X bookmarks
-
-Point autodream at your X bookmarks and the report gains an **Ideas from bookmarks**
-section: what you saved, crossed against what you actually worked on that day. A
-bookmark that connects to nothing gets left out — the section is the intersection, not
-a reading list.
-
-X's official API can't do this (the bookmarks endpoint needs the $200/mo Basic tier),
-so this reads the same web endpoint your browser does, with your session cookies:
-
-1. Open x.com in a browser, logged in. DevTools → Application → Cookies → `https://x.com`.
-2. Copy the values of `auth_token` and `ct0`.
-3. Put them in `~/.claude/autodream/x-credentials`:
-
-```bash
-X_AUTH_TOKEN=paste_auth_token_here
-X_CT0=paste_ct0_here
-```
-
-```bash
-chmod 600 ~/.claude/autodream/x-credentials
-~/.claude/autodream/x-bookmarks.sh status   # check it took
-```
-
-Bookmarks are marked read once a report has covered them, so each one gives you an
-idea once. Without that file the feature is simply off. When the cookies expire the
-report says so and tells you to re-paste; the run itself never fails over it.
-
-### Read the bookmarks from a logged-in browser instead (opt-in)
-
-The cookie path finds X's Bookmarks GraphQL queryId by grepping X's JS bundle. That grep is
-the part that has broken (ten nights in 2026-09). To skip it, set `AUTODREAM_X_FETCH=browser`
-in `~/.claude/autodream/config`. The nightly run then opens `x.com/i/bookmarks` in a
-dedicated `agent-browser` profile and reads the Bookmarks responses the page makes itself, so
-X picks the queryId and nothing is scraped.
-
-The cookie path stays the default and is the fallback. If the browser path fails for any
-reason and `x-credentials` exists, the run uses the cookies. `run-stats.txt` records which
-path served the night (`x_fetch_path: browser`, `graphql`, `fallback_graphql` or `failed`)
-and, after a browser failure, its cause.
-
-```bash
-~/.claude/autodream/x-bookmarks.sh browser-login   # log in once, by hand, in a visible window
-agent-browser --session autodream-x-login close    # then close it: the nightly run cannot share the profile
-echo 'AUTODREAM_X_FETCH=browser' >> ~/.claude/autodream/config
-./install.sh                                       # from the checkout, so the job's PATH gets agent-browser and node
-~/.claude/autodream/x-bookmarks.sh status          # shows the mode, the binary and the profile
-```
-
-| Variable | Default | Meaning |
+| Variable | Default | Effect |
 |---|---|---|
-| `X_BROWSER_PROFILE` | `~/.claude/autodream/x-browser-profile` | the logged-in profile directory |
-| `X_BROWSER_BIN` | `agent-browser` | the binary, if it is not on `PATH` |
-| `X_BROWSER_SESSION` | `autodream-x` | the agent-browser session name |
-| `X_BROWSER_TIMEOUT` | `60` | seconds each browser command may run |
-| `X_BROWSER_LOCK_WAIT` | `120` | seconds a run waits for another run that is using the profile |
+| `AUTODREAM_ADAPTERS` | `claude` | Harnesses a run scans: names, or `all`. `install.sh --adapters` writes it |
+| `AUTODREAM_L2_ENGINE` | first enabled adapter | Engine that runs Layer 2, and Layer 1 too unless `AUTODREAM_L1_ENGINE[_<NAME>]` says otherwise |
+| `AUTODREAM_L1_MODEL_<NAME>`, `AUTODREAM_L2_MODEL_<NAME>` | the adapter manifest's model | Pin a model per engine |
+| `AUTODREAM_L1_EFFORT` | `high` | Claude Layer 1 effort: `low`, `medium`, `high`, `xhigh`, `max` or `off` |
+| `FANOUT` | `8` | Layer 1 workers in parallel |
+| `AUTODREAM_L1_TIMEOUT` | `1200` | Seconds before a worker and its process group are killed |
+| `AUTODREAM_L1_ROUNDS` | `5` | Retry rounds for sessions with no findings |
+| `AUTODREAM_L1_CONFINE` | `1` | `0` runs workers without the OS sandbox |
+| `AUTODREAM_L1_CHUNK_BYTES` | `0` (off) | Split a transcript larger than this into chunks. Costs up to `AUTODREAM_L1_MAX_CHUNKS` (8) calls per long session |
+| `AUTODREAM_WINDOW` | `1` | `0` places sessions by file mtime alone |
+| `SESSION_ROOTS` | every indexed `~/.claude*/projects` | Colon-separated roots; `install.sh` writes the indexed set |
+| `AUTODREAM_REMOTE_ROOTS` | unset (off) | Hosts to pull, as above |
+| `AUTODREAM_CHANGELOG` | `1` | `0` skips the upstream changelog check |
+| `AUTODREAM_VAULT_DIR` | unset (off) | A synced-vault folder: note inbox, and a copy of each report |
+| `AUTODREAM_PRUNE_ROOTS` | unset (off) | Repo roots whose provably finished worktrees and branches are removed nightly |
+| `AUTODREAM_TRIAGE_SURFACE` | `inline` | `cmux` opens the question walk-through in its own workspace |
+| `AUTODREAM_THREADS_DROPPED_DAYS` | `7` | Days of silence before an open thread counts as dropped |
+| `AUTODREAM_QUESTION_ESCALATE_AT` | `3` | Consecutive reports before a repeated question is escalated |
+| `AUTODREAM_REQUIRE_LOGIN` | record only | For example `provider=firstParty auth=claude.ai`. A Layer 1 engine that does not match triages nothing, and a Layer 2 engine that does not match stops the run |
+| `AUTODREAM_L1_REQUIRE_SERVED` | `0` | `1` discards a Layer 1 answer from a model other than the one requested |
+| `AUTODREAM_WEB_PORT` | `47823` | Dashboard port |
+| `AUTODREAM_WEB` | on | `0` makes `install.sh` skip the dashboard service (`--no-web` does the same) |
+| `AUTODREAM_FORCE` | `0` | `1` rebuilds a date that already has a report |
 
-`agent-browser` is a node script and the launchd job has its own `PATH`. With browser mode in
-the config, `install.sh` adds the directories of `agent-browser` (or of an absolute
-`X_BROWSER_BIN` in the config) and of `node` to it, which is why the re-install above is a step.
-The browser path cannot log in unattended. When X ends the session, the
-run falls back to the cookies and the report says so until you run `browser-login` again. It
-reads one page of bookmarks and scrolls `X_MAX_PAGES - 1` times for more.
+## Safety and sandboxing
 
-## Pruning finished worktrees and branches
+Transcripts hold whatever your sessions held, including text from web pages and tool output. The pipeline assumes a transcript can contain instructions aimed at the model reading it, and limits what that model can do.
 
-Sessions leave worktrees under `<repo>/.claude/worktrees/` and `<repo>/.worktrees/`, and
-branches on GitHub, long after the PR merged. Set `AUTODREAM_PRUNE_ROOTS` and each
-nightly run removes the ones that are provably finished. Without it the step does nothing.
-
+```text
+L1 engine call
+  runs under    sandbox-exec (macOS) or bwrap (Linux)
+  can write     its own staging dir under $AUTODREAM_DIR/staging/, plus the engine's short write list (claude: its CLI cache; omp: none)
+  cannot write  findings/, dreams/, $AUTODREAM_DIR, config, settings, hooks, skills, plugins
+  runner        copies the answer out after the engine exits, only if it is a regular file
 ```
-~/.claude/autodream/config
-AUTODREAM_PRUNE_ROOTS="$HOME/git"      # colon-separated, searched 3 levels deep
-```
 
-A branch counts as finished when a PR from the same repo into the default branch is merged
-and the PR's head commit is the branch tip (squash merges count), or when such a PR was
-closed unmerged at least 7 days ago with its head at the tip and the branch fully on the
-remote. A repo with no remote at all uses plain ancestry: the tip is already in the default
-branch. A repo whose origin is not on GitHub is left alone. Everything else stays, and the
-report says why:
+| Boundary | What holds | When it cannot |
+|---|---|---|
+| Layer 1 writes | The sandbox above. Reads, network and exec are unchanged, because a worker must read the transcript and reach its provider | No working sandbox: workers run unconfined, `run-stats.txt` says `l1_confined: no`, and the log warns. An engine whose adapter declares no write list (`l1-writes`) is reported as `l1_confined_<engine>: no`. The claude and omp adapters both declare one, so both engines are confined |
+| omp Layer 1 state | Each confined omp worker runs with a throwaway `HOME` inside its stage. The databases are copied there with the OAuth credential rows left out, so a worker cannot rotate your refresh token. omp's memory backend is off for these calls | A model whose only credential is OAuth leaves omp unconfined (`l1_confined_omp: no`, with the reason) |
+| Layer 1 probe | Each run checks that a write beside the staging dir is refused | A tool that accepts a profile and confines nothing counts as no sandbox |
+| Layer 2 | `Glob` and `Read` only, on both engines. The runner takes the report from stdout only when the end sentinel is present, and pins only from a closed block after it | A capture with no sentinel is kept as a partial and retried |
+| Pins | `apply-pins.sh` refuses a pin for a project with no sessions that night, and keeps a ledger so a rerun never stores one twice | A failed call writes no ledger row, so a rerun retries it |
+| Counts | Session, category and failure tallies come from `rollup.tsv`, built from the runner's own session rows | A model's number never replaces one of these |
+| Self-pollution | Workers run with `--no-session-persistence`, from a working directory that is wiped before and after, and enumeration drops any transcript whose first turn is one of autodream's own prompts. Without these, 215 sessions were enumerated on 2026-05-29 against 21 real ones | Older stubs in the real bucket are removed by `bin/prune-self-sessions.sh --delete` |
+| Dead network | The date is left unassembled and a later trigger retries it | Never publishes a report from a short corpus |
 
-| Reason | Meaning |
+The sandbox bounds what a worker can write. Layer 2's grounding and triviality gates check what a bad transcript can make a worker say, so read open questions before you approve anything. Layer 1 workers run with `bypassPermissions`: do not run autodream in a shared environment.
+
+## FAQ
+
+### Do my transcripts leave the machine?
+
+Yes, to the model provider of the engine you configure: Anthropic through the `claude` CLI by default, OMP's configured provider for the `omp` engine. Remote hosts are pulled to your machine over ssh and read from the local copy.
+
+### What does it cost?
+
+The repo has no measured nightly total, because it scales with how many sessions you ran. One data point: a real triage run on a 250 KB slice cost $0.159 with Layer 1's replaced system prompt, against $0.215 before it (2026-10-07). Chunked triage is off by default because it multiplies calls on long sessions. `run-stats.txt` records the calls made.
+
+### Does it read Codex sessions?
+
+Not today. Codex is in the upstream changelog watch only. A Codex adapter would be a new directory under `adapters/`.
+
+### Does it run on Linux?
+
+The pipeline and its tests do: Linux CI runs the suite against a mock engine. Install, the launchd schedule, notifications and the review agent are macOS. On Linux, run `bin/run.sh DATE` from your own scheduler.
+
+### What if the Mac is asleep at 03:15?
+
+launchd runs the job on the next wake and the later triggers cover the morning. A date that already has a report makes the rest a one-second no-op.
+
+### How do I rebuild a date?
+
+`autodream-now.sh DATE --force`. For a clean start, remove that date's `findings/` directory and its report first.
+
+### How do I add a harness?
+
+Add `adapters/<name>/` with `manifest.json`, `adapter.sh` (enumerate, normalize, project, stats, slim, is-self, skills-inventory) and `facts.md`. The contract is in [`docs/design/unify-harness-adapters-2026-08-23.md`](docs/design/unify-harness-adapters-2026-08-23.md), and `tests/adapter-contract.sh` checks it.
+
+### How do I leave a note for tonight's run?
+
+`autodream-note.sh "evaluate how often /graphify fires"`, or drop a markdown file in `<vault>/inbox/` from your phone. The report answers it under Operator notes, and a note is archived only after a report read it.
+
+## How it's built
+
+Bash 3.2 for the pipeline, so it runs under macOS's stock shell. Python for the dashboard's data layer and server. TypeScript for the optional Claude Code mods in `mods/` and the OMP extension in `extensions/omp/`.
+
+| Where | What |
 |---|---|
-| `open-pr`, `base-of-open-pr`, `base-of-pr` | a PR for the branch is open, an open PR targets it, or any PR ever targeted it (a long-lived branch) |
-| `dirty` | uncommitted or untracked files in the worktree |
-| `recent` | a file changed in the last 12 hours (`AUTODREAM_PRUNE_GRACE_MIN`) |
-| `rebase-or-bisect`, `locked`, `submodules` | a rebase or bisect is running; `git worktree lock`; the worktree has a `.gitmodules` |
-| `protected` | main, master, develop, dev, development, trunk, staging, stage, production, prod, next, canary, gh-pages, release\*, v\<digit\>\*, the default branch, and `AUTODREAM_PRUNE_PROTECT` (colon-separated globs) |
-| `ignored-files`, `trash-failed` | ignored files other than build output and no Trash to put them in; `trash` failed |
-| `gh-unavailable` | `gh` is missing, logged out or failed, or the repo has `AUTODREAM_PRUNE_OPEN_LIMIT` (200) open PRs or more |
-| `cap`, `time-budget` | `AUTODREAM_PRUNE_MAX` removals (25) or `AUTODREAM_PRUNE_BUDGET_SEC` (1200 seconds) used up tonight |
-
-Every removal is written to `~/.claude/autodream/prune-ledger.tsv` before anything changes. The file
-is append-only. Per removal it gets an `intent` line (repo, branch, local tip, remote tip, worktree
-path, the PR URL that proves it, and the exact commands that put the branch back), then one line per
-step, then `complete`. If the ledger cannot be written, nothing is removed. Before the first change
-the tip is pinned as `refs/prune-ledger/<run id>/<branch>` in the repo, so `git gc` cannot prune it,
-and a failed pin also means nothing is removed. To undo a removal, run the `recover` column of its
-`intent` line (it works in bash, zsh and fish):
-
-```
-git -C <repo> branch <branch> <tip> ; git -C <repo> push origin <tip>:refs/heads/<branch>
-```
-
-The push half is there only when the branch existed on the remote. Pins cost a few bytes each. When
-you no longer need to undo anything, delete them with
-`git for-each-ref --format='%(refname)' refs/prune-ledger | xargs -n1 git update-ref -d`.
-
-The remote branch is deleted by a push that names the proven commit as the lease, so a push
-that landed after the fetch makes GitHub refuse the delete. The worktree directory goes to
-the Trash (`AUTODREAM_PRUNE_TRASH=0` deletes it with git instead). Read the result in
-`findings/<date>/worktree-prune.md`, or try it first with
-`~/.claude/autodream/prune-worktrees.sh --dry-run <out-dir>`. The step needs `gh`, `jq` and
-`git`, and a failure in it never costs the report: every network call and `trash` has a timeout (`AUTODREAM_PRUNE_CALL_SEC`, 60), and a hard stop at the budget plus `AUTODREAM_PRUNE_KILL_SLACK` (120) writes the report and exits.
-
-## Suggesting a triage
-
-When tonight's sessions ran in a GitHub repo with a pile of untriaged issues, the report says so under
-"Repos to triage" and names the checkout to run `/triage` in. The runner counts, because the aggregator
-has no shell or `gh`; the aggregator only copies the table.
-
-```
-sessions' cwds ─► repo root + owner/repo ─► gh issue list ─► untriaged >= 3 ─► cooldown ─► report
-                  (worktree = its repo)      (open, 200 max)  (no state label    (7 days, or
-                                                              or needs-triage)   +3 issues)
-```
-
-An issue is untriaged when it has none of `needs-info`, `ready-for-agent`, `ready-for-human` and
-`wontfix`, or when it carries `needs-triage`. A repo that was never triaged has none of those labels, so
-all its open issues count and its first triage gets suggested. Skipped, with the reason in
-`findings/<date>/triage-candidates.tsv`: a removed or non-git working directory, an origin that is not on
-GitHub, issues turned off, a repo you cannot triage in (read-only access, so an upstream project) or an archived one, and any `gh` failure (the step never fails the run). A repo already suggested
-in the last `AUTODREAM_TRIAGE_COOLDOWN_DAYS` (7) days is held back unless its untriaged count grew by
-`AUTODREAM_TRIAGE_GROW` (3). The record is `~/.claude/autodream/triage-suggested.tsv`. A suggestion never
-counts as an open question. It is on by default and only reads; set `AUTODREAM_TRIAGE_SUGGEST=0` to turn it off.
-
-## Running long jobs
-
-A full run usually takes more than 10 minutes. If you're kicking it off from
-something that kills long jobs (a Claude Code background task, a flaky ssh session),
-use `autodream-now.sh` — it hands the run to launchd, which has no time cap and keeps
-going after you disconnect:
-
-```bash
-~/.claude/autodream/autodream-now.sh                    # yesterday, right now
-~/.claude/autodream/autodream-now.sh 2026-05-29 --force # a specific date, rebuild
-~/.claude/autodream/autodream-now.sh 2026-05-29 --watch # follow the log; exits 1 if the run ends without a report
-```
-
-## How it works (short version)
-
-Two layers: a cheap per-session pass (`claude-haiku-5-5`, effort `high`; set `AUTODREAM_L1_EFFORT` to `low|medium|high|xhigh|max|off`) extracts structured findings from each
-transcript, then a single smarter pass (`opus`) ranks them across the whole day and
-writes the report. It also diffs the changelog of each harness you work across (Claude
-Code, Codex, OMP) over the day, so the report can flag releases that change how you work.
-Each source has its own cache and its own section, so one unreachable remote never
-silences the others. Override the watched set with `AUTODREAM_CHANGELOG_SOURCES`.
-The caches it owns fetch anonymously over https with your git config ignored, so a
-`url.insteadOf` rewrite to ssh cannot break them. A failed fetch quotes git's reason in
-its section, and a night where every source fails posts a warning banner.
-
-Everything lives on disk (findings JSON, the report, run logs, stats) and every step
-is idempotent, so you can rerun any date. Configuration knobs are documented in
-[docs/run-knobs.md](docs/run-knobs.md).
-
-Reading sessions is done through a **harness adapter**, so the runner does not know
-which agent produced a transcript. Two ship today, `claude` and `omp`; the seam is what lets a
-third arrive without forking the pipeline.
-
-## Dropped threads
-
-The nightly run links eligible sessions into a local thread index at
-`~/.claude/autodream/threads.jsonl`. Each JSONL record stores `id`, `kind`, `repo`,
-`title`, `goal`, `sessions` (date, session hash, transcript path and outcome),
-`status`, `done_by`, `last_seen` and, after a move to Open, `kept_open`. Dropped status
-is computed when read: an open work thread is dropped when its newest outcome is
-unfinished and both that session and `kept_open` are older than
-`AUTODREAM_THREADS_DROPPED_DAYS` (default 7). An idea is never dropped, so the nightly
-report's Dropped section lists work only. No watermark is stored; every run catches up
-eligible unlinked sessions from the trailing 14 days.
-
-`move` files a thread under one view:
-
-| Target | Stored change | Shown as |
-|---|---|---|
-| `open` | `kind=work`, `status=open`, no `done_by`, `kept_open=<today>` | Open until 7 days pass with no newer session or move |
-| `idea` | `kind=idea`, `status=open`, no `done_by` or `kept_open` | Ideas, the "someday, not in my queue" list |
-| `done` | `status=closed_by_sam`, `done_by=sam` | Done |
-
-`close` and `reopen` are aliases for `move ID done` and `move ID open`. A move also
-writes each session's own `kind` when the record has neither a kind nor a candidate
-handle, so the linker still knows a work session from an idea after the thread's kind
-changes.
-
-```sh
-~/.claude/autodream/threads.sh list
-~/.claude/autodream/threads.sh search 'release plan'
-~/.claude/autodream/threads.sh move t-0123abcd idea
-~/.claude/autodream/threads.sh move t-0123abcd done
-~/.claude/autodream/threads.sh resume t-0123abcd
-~/.claude/autodream/threads.sh resume t-0123abcd --launch
-~/.claude/autodream/threads.sh explore
-~/.claude/autodream/threads.sh backfill 2026-07-17 2026-11-13 --engine omp --model MODEL --max-calls 120
-```
-
-`resume` prints a brief with runner-owned dates, outcomes, repo and available transcript
-paths. `--launch` starts Claude with default permission mode in the repo when it exists,
-otherwise `$HOME`. Backfill reads findings and stats sidecars directly, so it works for
-dates without rollups. It prints `planned_calls` and `max_calls` before calls, then
-`actual_calls`; calls that fail still count against the budget. Dates without usable
-sidecars or left beyond the budget are named for catch-up later.
-
-`explore` opens the local `threads.html` dashboard and starts Claude in a right cmux
-split. The session has Read and Bash tools, uses the normal permission mode, disables
-MCP servers, slash commands and hooks, and automatically permits Bash calls only
-through the installed `threads.sh` command. It points Claude to the index and dashboard
-files instead of loading their contents into the launch prompt.
-
-Each eligible session can contribute one work candidate and up to three explicitly
-deferred idea candidates. Ideas retain their source transcript reference and use a
-separate candidate handle derived from the normalized (idea, quote) pair. Ordinary
-catch-up retries rejected or omitted handles from the first offer. The runner records
-all first-offer handles and their idea text and quote for each (date, hash) in
-`threads-idea-offers.tsv` before calling the linker, under the index lock with an
-atomic rename. Its five TSV columns are date, hash, handle, idea text, and quote;
-the text fields are JSON strings so tabs and newlines round-trip. Re-triage replaces
-only work candidates and leaves existing ideas and their sources untouched. Reworded ideas have
-new handles and are suppressed on both re-triage and later catch-up. Sessions with no
-ledger rows are seeded from indexed idea deferrals when present; otherwise they
-can contribute their first ideas. Retries read the original payload from the ledger.
-An unreadable or malformed ledger skips linking and reports `threads_state: unreadable`.
-
-Work candidates can attach to an idea thread and complete it with an achieved outcome
-and `finished:true` when their (date, hash) is absent from that thread's deferring
-sessions. The originating session's completed work can attach while the idea stays
-open. The thread
-keeps kind `idea`. An idea candidate's finished flag is refused and counted
-in `threads_close_refused`. Closed idea threads remain closed when later sessions
-describe the idea differently.
-
-A day split across linker calls can rarely create duplicate threads. Use
-`threads.sh move <id> done` to close the duplicate.
-
-The linker settings are `AUTODREAM_THREADS_ENGINE` (default `claude`),
-`AUTODREAM_THREADS_MODEL` (default `claude-haiku-5-5`),
-`AUTODREAM_THREADS_TIMEOUT` (300 seconds), `AUTODREAM_THREADS_MAX_INPUT` (262144
-bytes before requests split by repo hint), and `AUTODREAM_THREADS_DROPPED_DAYS` (7).
-Nightly `run-stats.txt` records `threads_state`, `threads_link`, `threads_linked`,
-`threads_rejected`, `threads_close_refused`, `threads_unmeasured`, `threads_calls`,
-`threads_groups_failed`, `threads_unassigned`, and `threads_skipped` when the merge
-lock is held. Each successful group contributes its validated assignments to one
-atomic index update. `threads_link: partial` means assignments were published and
-some groups failed; their candidates stay unassigned for catch-up. `failed` means
-no assignments were published, including setup failures and a busy merge lock.
-`ok` means every group succeeded and its assignments were published.
-
-Findings written before explicit deferred-idea capture do not contain idea candidates.
-The ordinary `threads.sh backfill` only links facets already on disk; it does not
-re-triage transcripts. Recovering historical ideas is a separate opt-in operation.
-Start with a small representative sample in an isolated `AUTODREAM_DIR`, `DREAMS_DIR`
-and session root. Record actual L1 and chunk calls, elapsed time, and cost telemetry
-when the engine provides it. Use that sample and the eligible historical session count
-to estimate full-run cost, then quote that estimate and scope to Sam before re-triaging
-the full history. Keep that operation separate from facet-only backfill.
-
-- `adapters/<name>/` — one directory per harness: `manifest.json` (data, read with
-  `jq`, never sourced), `adapter.sh` (enumerate, normalize, project, stats, slim,
-  is-self, skills-inventory), and `facts.md` (the remedy vocabulary for that harness, so
-  a fix is phrased in terms the harness actually has) → `adapters/claude/facts.md`
-- `bin/adapters.sh` — adapter discovery, identity validation and containment
-- `bin/lib-project.sh` — the canonical project encoding and artifact hash every
-  adapter must agree on
-- `bin/l1-confine.sh` — the OS sandbox each L1 worker runs under, so it can write
-  only its own staging directory → `CLAUDE.md`, "A worker writes only its staging directory"
-- `bin/lib-flock.sh` — the flock `question-streaks.sh` and `threads.sh` take on their state
-  files, so a dead holder frees the lock with no reclaim
-- `bin/preflight.sh` — the shared-dependency gate, run before anything is enumerated
-
-For the internals — data flow, file map, state layout, environment overrides, the
-lean-query pattern, the adapter contract, and the "don't eat your own tail"
-self-pollution defenses — see **`codemaps/architecture.md`**, **`CLAUDE.md`**, and
-**`docs/design/unify-harness-adapters-2026-08-23.md`** for the subcommand table
-the adapter contract is defined by.
-
-## Caveats
-
-- macOS-only as written (BSD `date`, `launchd`, `osascript`/`open`). The core pipeline
-  is portable; the scheduling and notify bits are mac-specific. The morning
-  open-questions file opens with your default `.md` app; set `AUTODREAM_OPEN`
-  (e.g. `subl`, `code -g`, `open -a Obsidian`) to pick a specific editor.
-- Runs in `bypassPermissions` mode (workers Write findings). Don't run it in a
-  shared environment.
-- The first run clones the watched harness repos for the changelog window (the OMP one
-  is a sparse, blob-less clone of one file); it degrades gracefully with no git/network.
+| [`CLAUDE.md`](CLAUDE.md) | The agent map: operating notes for working on this repo |
+| [`codemaps/architecture.md`](codemaps/architecture.md) | Data flow and file map |
+| [`docs/design/`](docs/design/), [`docs/plans/`](docs/plans/) | Design notes and implementation plans |
+| [`docs/adr/`](docs/adr/) | Decision records for the code |
+| `tests/run-all.sh` | Drives the real `run.sh` against a mock engine: no network, no model. `RUNALL_SHARD=i/n` splits it, and `tests/run-parallel.sh` runs the shards locally |
+| `mods/autodream-band`, `mods/autodream-focus` | Optional Claude Code mods: a band above the prompt when a report has open questions, and a button that tags a turn for the next run. Load with `claude --plugin-dir` |
 
 ## License
 
-MIT — see LICENSE.
+MIT. See [LICENSE](LICENSE).
