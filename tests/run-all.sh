@@ -28,6 +28,9 @@ THREADS_TEST_TIMEOUT_BIN=$(command -v timeout 2>/dev/null || command -v gtimeout
 # Point every run at a path that does not exist; the pin tests override it with
 # tests/mock-shared-memory.sh.
 export SHARED_MEMORY_BIN="$HERE/no-such-shared-memory"
+# The mock engines write capture files wherever they like, so the suite runs L1 unconfined (#169); the
+# L1 confinement tests turn it on for the runs that need it.
+export AUTODREAM_L1_CONFINE=0
 # A developer's own remote roots must never reach a test run: the remote_sync tests set it themselves.
 unset AUTODREAM_REMOTE_ROOTS
 DATE=2020-01-02          # fixed target date; sessions are touched into this day
@@ -3080,6 +3083,164 @@ mk_lock(){ # $1=root $2=pid -> a lock directory held by that pid (with its real 
   ps -o lstart= -p "$2" 2>/dev/null | tr -s ' ' > "$d/start" || true
 }
 
+# ---- L1 write confinement (#169): staging, the copy, and the sandbox ----------------------------
+# Every test above runs with AUTODREAM_L1_CONFINE=0 (the suite exports it), so the mock engines can
+# write their capture files wherever they like; the answer still goes through a staging directory
+# and the runner's copy, which is what these tests pin. The ones that need a real sandbox run it only
+# where the probe says one works, and say so when they skip.
+l1_confine_real(){ [ "$(env TMPDIR="${TMPDIR:-/tmp}" bash "$REPO/bin/l1-confine.sh" probe 2>/dev/null | cut -f1)" = yes ]; }
+
+test_l1_answers_are_staged_then_copied(){
+  echo "# L1 confinement: the worker writes its answer in a staging directory and the runner copies it in"
+  local root; root=$(setup_env); mk_session "$root" s1
+  local h; h=$(hash_of "$root/projects/proj-a/s1.jsonl")
+  mkdir -p "$root/autodream/staging"
+  true & local dead=$!; wait "$dead" 2>/dev/null
+  mkdir -p "$root/autodream/staging/run-$dead/leftover" "$root/autodream/staging/run-$$/alive" "$root/autodream/staging/not-a-run"
+  MOCK_CAPTURE_DIR="$root/cap" run_dream "$root"
+  assert_grep "$root/cap/l1-stdin-$h.txt" "^Write your findings JSON to this literal absolute path: .*/autodream/staging/run-[0-9]*/$h\.$h\.json/$h\.json\$" "the prompt names a path under the run's staging directory, not the findings dir"
+  assert_nogrep "$root/cap/l1-stdin-$h.txt" "Write your findings JSON to this literal absolute path: .*/findings/" "and never the findings dir"
+  assert_file "$(fdir "$root")/$h.json" "the runner copied the answer into the findings dir"
+  assert_eq "$(jq -r '.outcome' "$(fdir "$root")/$h.json")" "fully_achieved" "and it is the worker's answer"
+  assert_eq "$(cat "$root/cap/l1-bucket-$h.txt" 2>/dev/null)" "yes" "the work bucket exists when the worker starts, so bwrap can bind it"
+  assert_file "$(fdir "$root")/$h.json.served" "with its served verdict beside it"
+  assert_no_file "$(fdir "$root")/$h.json.stage" "and no half-copied temp file"
+  assert_eq "$(ls -A "$root/autodream/staging/run-$$" 2>/dev/null | wc -l | tr -d ' ')" "1" "a live run's staging root is left alone"
+  assert_no_file "$root/autodream/staging/run-$dead" "a staging root whose run is gone is swept"
+  [ -d "$root/autodream/staging/not-a-run" ] && ok "and a directory that is not a run's is not touched" || no "and a directory that is not a run's is not touched"
+  assert_eq "$(ls "$root/autodream/staging" | grep -c '^run-[0-9]*$')" "1" "this run removed its own staging root when its rounds ended"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: no$' "run-stats says the workers were not confined"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_reason: disabled (AUTODREAM_L1_CONFINE=0)$' "and why"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_tool: none$' "with no tool named"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_extra: none$' "and no operator additions to the write list"
+  rm -rf "$root"
+}
+
+test_l1_confine_extra_is_in_run_stats(){
+  echo "# L1 confinement: a widened write list is visible in run-stats"
+  local root; root=$(setup_env); mk_session "$root" s1
+  AUTODREAM_L1_WRITES_EXTRA="/extra/one:/extra/two*" run_dream "$root"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_extra: /extra/one:/extra/two\*$' "the operator's extra paths are named"
+  rm -rf "$root"
+}
+
+test_l1_confine_degrades_loudly_when_the_tool_rejects_the_profile(){
+  echo "# L1 confinement: a sandbox tool that rejects the profile means an unconfined run that says so"
+  local root; root=$(setup_env); mk_session "$root" s1
+  local h; h=$(hash_of "$root/projects/proj-a/s1.jsonl")
+  mkdir -p "$root/shim-sb"
+  printf '#!/bin/sh\necho "sandbox-exec: profile rejected" >&2\nexit 65\n' > "$root/shim-sb/sandbox-exec"; chmod +x "$root/shim-sb/sandbox-exec"
+  PATH="$root/shim-sb:$PATH" AUTODREAM_L1_CONFINE=1 L1_CONFINE_TOOL=sandbox-exec run_dream "$root"
+  assert_file "$(fdir "$root")/$h.json" "the night still triaged the session"
+  assert_file "$root/dreams/$DATE.md" "and wrote its report"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: no$' "run-stats says unconfined"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_reason: .*rejected' "with the tool's own reason"
+  assert_grep "$root/run.out" 'WARNING: L1 workers run unconfined' "and the log carries a WARNING"
+  rm -rf "$root"
+}
+
+test_l1_confine_off_is_silent_and_a_working_tool_is_reported(){
+  echo "# L1 confinement: the explicit off switch is not a warning; a working sandbox is reported as such"
+  local root; root=$(setup_env); mk_session "$root" s1
+  run_dream "$root"
+  assert_nogrep "$root/run.out" 'WARNING: L1 workers run unconfined' "AUTODREAM_L1_CONFINE=0 logs no warning"
+  rm -rf "$root"
+  if ! l1_confine_real; then echo "  skip - no working sandbox on this host"; return 0; fi
+  root=$(setup_env); mk_session "$root" s1
+  AUTODREAM_L1_CONFINE=1 run_dream "$root"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined: yes$' "a host with a working sandbox reports l1_confined: yes"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confine_tool: [a-z][a-z-]*$' "and the tool"
+  assert_nogrep "$(fdir "$root")/run-stats.txt" '^l1_confine_tool: none$' "which is not none"
+  assert_grep "$(fdir "$root")/run-stats.txt" '^l1_confined_claude: yes$' "the claude engine is confined"
+  rm -rf "$root"
+}
+
+test_l1_forged_writes_are_refused_when_confined(){
+  echo "# L1 confinement: a worker cannot write outside staging (and could, before, which this proves)"
+  local root; root=$(setup_env); mk_session "$root" s1; mk_session "$root" s2
+  local h1 h2 cfg_before
+  h1=$(hash_of "$root/projects/proj-a/s1.jsonl"); h2=$(hash_of "$root/projects/proj-a/s2.jsonl")
+  printf '# original config\n' > "$root/autodream/config"
+  cfg_before=$(cat "$root/autodream/config")
+  # Unconfined first: the same hostile worker lands every write, so the next run's refusals mean something.
+  FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_HASHES="$h1 $h2" run_dream "$root"
+  assert_file "$(fdir "$root")/forged-new.json" "unconfined, a worker plants a new *.json in the findings dir"
+  assert_file "$root/autodream/forged-marker" "and a file under AUTODREAM_DIR"
+  assert_grep "$root/autodream/config" '# FORGED' "and edits the config the next run sources"
+  if [ "$(cat "$(fdir "$root")/$h1.json" "$(fdir "$root")/$h2.json" 2>/dev/null | grep -c FORGED)" -ge 1 ]; then
+    ok "and forges the other session's answer"
+  else
+    no "and forges the other session's answer"
+  fi
+  rm -rf "$root"
+  if ! l1_confine_real; then echo "  skip - no working sandbox on this host: the refusals below are untested here"; return 0; fi
+  root=$(setup_env); mk_session "$root" s1; mk_session "$root" s2
+  h1=$(hash_of "$root/projects/proj-a/s1.jsonl"); h2=$(hash_of "$root/projects/proj-a/s2.jsonl")
+  printf '# original config\n' > "$root/autodream/config"
+  FANOUT=1 MOCK_MODE=l1_forge MOCK_FORGE_HASHES="$h1 $h2" AUTODREAM_L1_CONFINE=1 run_dream "$root"
+  assert_no_file "$(fdir "$root")/forged-new.json" "confined, no new *.json appears in the findings dir"
+  assert_no_file "$root/autodream/forged-marker" "and nothing is created under AUTODREAM_DIR"
+  assert_eq "$(cat "$root/autodream/config")" "$cfg_before" "and the config is unchanged"
+  assert_eq "$(jq -r .session_path "$(fdir "$root")/$h1.json")" "x" "session 1 keeps its own answer"
+  assert_eq "$(jq -r .session_path "$(fdir "$root")/$h2.json")" "x" "and session 2 keeps its own, not the forgery"
+  rm -rf "$root"
+}
+
+test_l1_work_bucket_is_wiped_before_l2(){
+  echo "# L1 confinement: the work bucket a worker may write is wiped when L1 ends, before L2 launches from it"
+  local root; root=$(setup_env); mk_session "$root" s1
+  MOCK_MODE=l1_plant_bucket MOCK_CAPTURE_DIR="$root/cap" run_dream "$root"
+  assert_file "$root/cap/l2-bucket.txt" "L2 ran and recorded what it found"
+  assert_eq "$(cat "$root/cap/l2-bucket.txt" 2>/dev/null)" "absent" "a file a worker left in the work bucket is gone by the time L2 starts"
+  rm -rf "$root"
+}
+
+test_l1_symlink_answer_is_not_read(){
+  echo "# L1 confinement: an answer path that is a symlink is not copied, and fails like any missing answer"
+  local root; root=$(setup_env); mk_session "$root" s1
+  local h; h=$(hash_of "$root/projects/proj-a/s1.jsonl")
+  printf '{"session_path":"SECRET","findings":[]}\n' > "$root/secret.json"
+  MOCK_MODE=l1_symlink_answer MOCK_SYMLINK_TARGET="$root/secret.json" AUTODREAM_L1_ROUNDS=1 run_dream "$root"
+  assert_nogrep "$(fdir "$root")/$h.json" 'SECRET' "what the symlink pointed at never reaches the findings dir"
+  assert_grep "$(fdir "$root")/$h.json" 'worker exited without findings JSON after 1 rounds' "the session gets the same stub as any worker that wrote nothing"
+  assert_grep "$(fdir "$root")/$h.json.err" 'the answer path was a symlink' "the evidence names the symlink"
+  assert_grep "$(fdir "$root")/$h.json.err" 'worker produced no findings JSON' "beside the usual no-answer line"
+  rm -rf "$root"
+}
+
+test_l1_staging_failure_is_a_worker_failure_with_evidence(){
+  echo "# L1 confinement: a staging directory that cannot be made fails the attempt and names why"
+  local root; root=$(setup_env); mk_session "$root" s1
+  local h; h=$(hash_of "$root/projects/proj-a/s1.jsonl")
+  mkdir -p "$root/autodream/staging"; chmod 500 "$root/autodream/staging"
+  AUTODREAM_L1_ROUNDS=1 run_dream "$root"
+  chmod 700 "$root/autodream/staging" 2>/dev/null
+  assert_grep "$(fdir "$root")/$h.json.err" 'could not make the staging directory' "the .err says the staging directory could not be made"
+  assert_grep "$(fdir "$root")/$h.json" 'worker exited without findings JSON after 1 rounds' "and the session is stubbed like any failed worker"
+  rm -rf "$root"
+}
+
+test_l1_confine_names_the_engine_without_a_write_profile(){
+  echo "# L1 confinement: an engine whose adapter declares no write profile is reported unconfined"
+  local out
+  # CLAUDE_CONFIG_DIR and the extras are the caller's, so the list is read with both unset.
+  out=$(env -u CLAUDE_CONFIG_DIR -u AUTODREAM_L1_WRITES_EXTRA -u AUTODREAM_WORK_BUCKET bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1); local rc=$?
+  assert_eq "$rc" "0" "the claude adapter answers l1-writes"
+  case "$out" in *"claude-cli-nodejs"*) ok "and lists the CLI cache" ;; *) no "and lists the CLI cache (got: $out)" ;; esac
+  case "$out" in *".claude.json"*|*"session-env"*|*"backups"*|*"/settings"*|*"/hooks"*|*"/skills"*|*"/plugins"*|*"/autodream"*) no "and none of the config, state or code a later session reads or runs (got: $out)" ;; *) ok "and none of the config, state or code a later session reads or runs" ;; esac
+  out=$(env -u CLAUDE_CONFIG_DIR AUTODREAM_L1_WRITES_EXTRA="/extra/one:/extra/two*" bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1)
+  case "$out" in *"/extra/one"*"/extra/two*"*) ok "an operator's AUTODREAM_L1_WRITES_EXTRA entries are added, a trailing * kept" ;; *) no "AUTODREAM_L1_WRITES_EXTRA entries are added (got: $out)" ;; esac
+  # A prefix that matches existing files must stay a prefix, not expand to them.
+  mkdir -p "$SUITE_TMP/globx"; : > "$SUITE_TMP/globx/a.json"; : > "$SUITE_TMP/globx/a.json.lock"
+  out=$(env -u CLAUDE_CONFIG_DIR AUTODREAM_L1_WRITES_EXTRA="$SUITE_TMP/globx/a.json*" bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1)
+  case "$out" in *"$SUITE_TMP/globx/a.json*"*) ok "an extra entry that matches files on disk stays a prefix" ;; *) no "an extra entry that matches files on disk stays a prefix (got: $out)" ;; esac
+  case "$out" in *"a.json.lock"*) no "and is not expanded to the files that match it" ;; *) ok "and is not expanded to the files that match it" ;; esac
+  out=$(env -u CLAUDE_CONFIG_DIR AUTODREAM_WORK_BUCKET=/work/bucket bash "$REPO/adapters/claude/adapter.sh" l1-writes 2>&1)
+  case "$out" in *"/work/bucket"*) ok "the work bucket is writable when the runner names it" ;; *) no "the work bucket is writable when the runner names it (got: $out)" ;; esac
+  bash "$REPO/adapters/omp/adapter.sh" l1-writes >/dev/null 2>&1; rc=$?
+  assert_eq "$rc" "2" "the omp adapter declares no write profile, so its workers stay unconfined and run-stats says so"
+}
+
 test_run_lock_is_per_date_and_live_holders_win(){
   echo "# a second run for a date does not start while a live run holds the date's lock (#55)"
   local root; root=$(setup_env); mk_session "$root" sess1
@@ -4309,6 +4470,15 @@ _run test_l1_retry
 _run test_idempotency_guard
 _run test_idempotency_guard_needs_a_complete_report
 _run test_run_lock_is_per_date_and_live_holders_win
+_run test_l1_answers_are_staged_then_copied
+_run test_l1_confine_degrades_loudly_when_the_tool_rejects_the_profile
+_run test_l1_confine_extra_is_in_run_stats
+_run test_l1_confine_off_is_silent_and_a_working_tool_is_reported
+_run test_l1_forged_writes_are_refused_when_confined
+_run test_l1_symlink_answer_is_not_read
+_run test_l1_work_bucket_is_wiped_before_l2
+_run test_l1_staging_failure_is_a_worker_failure_with_evidence
+_run test_l1_confine_names_the_engine_without_a_write_profile
 _run test_run_lock_is_reclaimed_from_a_dead_holder
 _run test_killed_run_temps_are_swept_at_the_start_of_the_next_run
 _run test_self_audit_stats
@@ -4674,6 +4844,7 @@ test_install_deploys_the_adapter_runtime(){
     bash "$REPO/install.sh" --no-schedule > "$T/install.out" 2>&1 || true
   local target="$T/home/.claude/autodream"
   assert_file "$target/lib-project.sh" "lib-project.sh is installed"
+  assert_file "$target/lib-flock.sh" "lib-flock.sh is installed"
   assert_file "$target/adapters.sh"    "adapters.sh is installed"
   assert_file "$target/preflight.sh"   "preflight.sh is installed"
   assert_file "$target/session-window.sh" "session-window.sh is installed"
@@ -7430,8 +7601,8 @@ test_chunking_is_off_when_the_knob_is_unset(){
   assert_grep "$fdu/run-stats.txt" 'l1_chunk_bytes: 0$' "unset means off: run-stats says 0"
   assert_grep "$rootu/cap/l1-read-$hu.txt" 'lines elided by autodream for size' "the worker read the head/tail slim"
   if cmp -s "$root0/cap/l1-read-$h0.txt" "$rootu/cap/l1-read-$hu.txt"; then ok "the transcript the worker read is byte for byte the one read with the knob at 0"; else no "the transcript the worker read is byte for byte the one read with the knob at 0"; fi
-  sed "s#$root0#R#g; s#$h0#H#g" "$root0/cap/l1-stdin-$h0.txt" > "$rootu/p0.txt"
-  sed "s#$rootu#R#g; s#$hu#H#g" "$rootu/cap/l1-stdin-$hu.txt" > "$rootu/pu.txt"
+  sed "s#$root0#R#g; s#$h0#H#g; s#/run-[0-9]*/#/run-N/#g" "$root0/cap/l1-stdin-$h0.txt" > "$rootu/p0.txt"
+  sed "s#$rootu#R#g; s#$hu#H#g; s#/run-[0-9]*/#/run-N/#g" "$rootu/cap/l1-stdin-$hu.txt" > "$rootu/pu.txt"
   diff "$rootu/p0.txt" "$rootu/pu.txt" > "$rootu/prompt.diff" 2>&1; if [ ! -s "$rootu/prompt.diff" ]; then ok "and so is the prompt it was given"; else no "and so is the prompt it was given ($(head -c 300 "$rootu/prompt.diff"))"; fi
   assert_eq "$(jq -S 'del(.session_path)' "$fdu/$hu.json" | sed "s#$hu#H#g")" "$(jq -S 'del(.session_path)' "$fd0/$h0.json" | sed "s#$h0#H#g")" "and so is the findings JSON"
   assert_no_file "$fdu/.chunks" "no chunk directory"
@@ -7866,7 +8037,7 @@ if [ -z "$_list" ]; then
 fi
 # The suites that drive launchd need plutil and launchctl, so they run on macOS only (CI runs
 # them in launchd.yml, when a launchd file changes).
-_suites="portable report-scripts stop-check-counts rollup lib-project preflight adapters adapter-claude adapter-omp adapter-contract threads-state slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux review-prompt notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt autodream-web shard ci-scope"
+_suites="portable report-scripts stop-check-counts rollup l1-confine lib-project preflight adapters adapter-claude adapter-omp adapter-contract threads-state slim-transcript session-window merge-chunks chunk-transcript apply-pins review-skip review-cmux review-prompt notes-path tmp-cleanup dream-triage cookie-cadence x-bookmarks prune-worktrees triage-candidates pending-triage report-format l2-prompt autodream-web shard ci-scope"
 [ "$(uname -s)" = Darwin ] && _suites="$_suites scheduler-label autodream-now install-review-agent install-web-agent install-dry-run install-dir install-skill"
 for _suite in $_suites; do
   _owns || continue
@@ -7891,6 +8062,26 @@ for _suite in $_suites; do
 done
 
 streak_rows(){ awk '!/^#/ && NF' "$1" 2>/dev/null | wc -l | tr -d ' '; }
+
+hold_flock(){ # $1=lock file -> a python process holds its flock; sets HOLD_PID once it does
+  local ready="$1.ready" i=0
+  rm -f "$ready"
+  python3 -c 'import fcntl, sys, time
+f = open(sys.argv[1], "a")
+fcntl.flock(f, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close()
+time.sleep(600)' "$1" "$ready" &
+  HOLD_PID=$!
+  while [ ! -e "$ready" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+}
+flock_free(){ # $1=lock file: 0 when a non-blocking flock on it succeeds
+  python3 -c 'import fcntl, sys
+f = open(sys.argv[1], "a")
+try:
+    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    sys.exit(1)' "$1"
+}
 
 test_question_streaks_state_lives_with_the_install(){
   echo "# question streaks: the store is the install's, one file holds the watermark, clear takes the lock"
@@ -7940,13 +8131,13 @@ test_question_streaks_state_lives_with_the_install(){
   # clear takes the same lock as update, or an update that already read the old state puts
   # the cleared streak back when it writes.
   printf 'k\t1\t2026-03-03\t2026-03-03\tHeld?\n' > "$st"
-  mkdir "$st.lock"
+  hold_flock "$st.flock"; local holder=$HOLD_PID
   # AUTODREAM_QUESTION_LOCK_WAIT=1: the default is 15 one-second tries, and this case and the next
   # each held a lock on purpose for all of them (32 of the suite's seconds, one test in 46).
   local t0=$SECONDS
   AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" bash "$QS" clear all >/dev/null 2>&1; local rc=$?
   local waited=$((SECONDS - t0))
-  rmdir "$st.lock" 2>/dev/null
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
   assert_eq "$rc" "1" "clear fails while an update holds the lock"
   [ "$waited" -le 6 ] && ok "and gives up after the configured wait, not the default 15 tries (${waited}s)" || no "and gives up after the configured wait, not the default 15 tries (took ${waited}s)"
   assert_eq "$(streak_rows "$st")" "1" "and leaves the state for that update"
@@ -7954,9 +8145,9 @@ test_question_streaks_state_lives_with_the_install(){
   # An EMPTY board is not a reason to skip the lock: an update holding it may be about to
   # write the first streak, which clear would then report as cleared (Codex review of 4eea84d).
   : > "$st"
-  mkdir "$st.lock"
+  hold_flock "$st.flock"; holder=$HOLD_PID
   AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" bash "$QS" clear all >/dev/null 2>&1; rc=$?
-  rmdir "$st.lock" 2>/dev/null
+  kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
   assert_eq "$rc" "1" "clear on an empty board still waits for the lock and fails while it is held"
 
   # A state file that exists but cannot be read is not an empty board. Reading it as empty
@@ -8165,9 +8356,164 @@ test_question_streaks_reruns_and_mismatch(){
   rm -rf "$root"
 }
 
+test_question_streaks_lock_is_a_kernel_flock(){
+  echo "# question streaks: the lock is an flock; a live holder keeps it, a dead one loses it at once (#192)"
+  command -v python3 >/dev/null 2>&1 || { echo "  skip - python3 not available"; return 0; }
+  local root; root=$(setup_env)
+  local QS="$REPO/bin/question-streaks.sh"
+  [ -x "$QS" ] || { no "question-streaks.sh executable"; return 0; }
+  local st="$root/own.tsv" lk="$root/own.tsv.flock" out rc t0
+  qs(){ AUTODREAM_QUESTION_LOCK_WAIT="${QS_WAIT:-1}" AUTODREAM_QUESTION_STATE="$st" AUTODREAM_NOTIFY_DRYRUN=1 /bin/bash "$QS" "$@" 2>&1; }
+  local body; body=$(printf '## Open questions for the user\n\n1. **Owned?** body\n\n<!-- autodream:open-questions=1 -->\n')
+  local d; for d in 2026-04-01 2026-04-02 2026-04-03; do printf '%s\n' "$body" > "$root/$d.md"; done
+  qs update "$root/2026-04-01.md" >/dev/null
+  cp "$st" "$root/own.before"
+
+  # 1. A live holder keeps the lock however old its lock file looks. The old mkdir lock was reclaimed by age.
+  hold_flock "$lk"; local holder=$HOLD_PID
+  touch -t 200001010000 "$lk"
+  out=$(qs update "$root/2026-04-02.md"); rc=$?
+  assert_eq "$rc" "0" "update beside a live holder exits 0"
+  case "$out" in *"another run holds"*) ok "and skips loudly" ;; *) no "and skips loudly (got: $out)" ;; esac
+  cmp -s "$st" "$root/own.before" && ok "and the state is untouched" || no "and the state is untouched"
+  out=$(qs clear all); rc=$?
+  assert_eq "$rc" "1" "clear beside a live holder fails"
+  case "$out" in *"FAILED to clear: another run holds"*) ok "with its message unchanged" ;; *) no "with its message unchanged (got: $out)" ;; esac
+  t0=$SECONDS
+  out=$(QS_WAIT=0 qs update "$root/2026-04-02.md")
+  [ $((SECONDS - t0)) -le 2 ] && ok "a zero-second wait returns at once" || no "a zero-second wait took $((SECONDS - t0))s"
+  case "$out" in *"another run holds"*) ok "with the skip message" ;; *) no "with the skip message (got: $out)" ;; esac
+
+  # 2. A holder killed with SIGKILL loses the lock at once: no age to wait out, nothing to reclaim.
+  kill -9 "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+  t0=$SECONDS
+  out=$(qs update "$root/2026-04-02.md")
+  case "$out" in *"1 question(s) in 2026-04-02"*) ok "after the holder is killed the next update runs" ;; *) no "after the holder is killed the next update runs (got: $out)" ;; esac
+  [ $((SECONDS - t0)) -le 3 ] && ok "at once, not after an age bound" || no "took $((SECONDS - t0))s"
+  flock_free "$lk" && ok "and releases the lock when it finishes" || no "and releases the lock when it finishes"
+  case "$out" in *"lost the lock"*|*"no longer ours"*) no "a clean update does not claim it lost the lock" ;; *) ok "a clean update does not claim it lost the lock" ;; esac
+
+  # 3. The script itself is the holder. A shim mktemp stalls it inside its critical section: from outside the
+  # lock is taken, clear is refused, and the state is not touched.
+  mkdir -p "$root/shim"
+  local real_mktemp; real_mktemp=$(command -v mktemp)
+  # shellcheck disable=SC2016 # the dollar signs belong to the shim
+  printf '#!/bin/sh\ncase "$*" in *.tsv.XXXXXX) echo $$ > "$SHIM_READY"; exec sleep 600 ;; esac\nexec "%s" "$@"\n' "$real_mktemp" > "$root/shim/mktemp"
+  chmod +x "$root/shim/mktemp"
+  cp "$st" "$root/own.before"
+  rm -f "$root/ready"
+  ( PATH="$root/shim:$PATH" SHIM_READY="$root/ready" AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" AUTODREAM_NOTIFY_DRYRUN=1 \
+      /bin/bash "$QS" update "$root/2026-04-03.md" >/dev/null 2>&1 ) &
+  local upid=$!
+  local i=0; while [ ! -s "$root/ready" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -s "$root/ready" ] && ok "the update is stalled inside its critical section" || no "the update never reached its critical section"
+  flock_free "$lk" && no "the running update holds the lock" || ok "the running update holds the lock"
+  out=$(qs clear all); rc=$?
+  assert_eq "$rc" "1" "clear is refused while an update is mid-write"
+  cmp -s "$st" "$root/own.before" && ok "and the state is untouched" || no "and the state is untouched"
+  kill "$(cat "$root/ready" 2>/dev/null)" 2>/dev/null; kill "$upid" 2>/dev/null; wait "$upid" 2>/dev/null
+  rm -rf "$root/shim"
+
+  # 4. A child that outlives the holder must not keep the lock: the banner runs with fd 9 closed. An osascript shim
+  # stalls the banner; killing the script leaves the shim running and the lock free.
+  mkdir -p "$root/shim2"
+  printf '#!/bin/sh\necho $$ > "$SHIM_PID"\nexec sleep 600\n' > "$root/shim2/osascript"; chmod +x "$root/shim2/osascript"
+  rm -f "$root/ospid"
+  printf '%s\n' "$body" > "$root/2026-04-04.md"
+  ( PATH="$root/shim2:$PATH" SHIM_PID="$root/ospid" AUTODREAM_QUESTION_ESCALATE_AT=1 AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" \
+      /bin/bash "$QS" update "$root/2026-04-04.md" >/dev/null 2>&1 ) &
+  upid=$!
+  i=0; while [ ! -s "$root/ospid" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+  [ -s "$root/ospid" ] && ok "the banner is stalled in osascript" || no "the banner never reached osascript"
+  kill -9 "$upid" 2>/dev/null; wait "$upid" 2>/dev/null
+  flock_free "$lk" && ok "a killed update leaves no lock behind even with osascript still running" || no "osascript kept the lock after the update was killed"
+  kill "$(cat "$root/ospid" 2>/dev/null)" 2>/dev/null; rm -rf "$root/shim2"
+
+  # 5. A lock path that cannot be opened is a loud permanent refusal, not a wait and not a held lock.
+  rm -f "$lk"; mkdir "$lk"
+  cp "$st" "$root/own.before"
+  t0=$SECONDS
+  out=$(qs update "$root/2026-04-04.md"); rc=$?
+  assert_eq "$rc" "0" "update with an unopenable lock path exits 0"
+  case "$out" in *"cannot lock"*) ok "and says it cannot lock" ;; *) no "and says it cannot lock (got: $out)" ;; esac
+  [ $((SECONDS - t0)) -le 2 ] && ok "without waiting out the deadline" || no "waited $((SECONDS - t0))s"
+  out=$(qs clear all); rc=$?
+  assert_eq "$rc" "1" "clear with an unopenable lock path fails"
+  [ -d "$lk" ] && ok "and the directory is untouched" || no "the directory at the lock path was removed"
+  cmp -s "$st" "$root/own.before" && ok "and the state is untouched" || no "and the state is untouched"
+  rmdir "$lk"
+
+  # 6. An older version's mkdir lock: a young directory blocks, an old one is ignored and left in place.
+  mkdir "$st.lock"
+  out=$(qs update "$root/2026-04-04.md")
+  case "$out" in *"another run holds"*) ok "a young older-version lock directory blocks" ;; *) no "a young older-version lock directory blocks (got: $out)" ;; esac
+  t0=$SECONDS; out=$(QS_WAIT=0 qs update "$root/2026-04-04.md")
+  [ $((SECONDS - t0)) -le 2 ] && ok "and a zero-second wait returns at once" || no "a zero-second wait took $((SECONDS - t0))s"
+  flock_free "$lk" && ok "the flock is released after a refusal" || no "the flock stayed held after a refusal"
+  touch -t 200001010000 "$st.lock"
+  out=$(qs update "$root/2026-04-04.md")
+  case "$out" in *"another run holds"*) no "an old older-version lock directory is ignored (got: $out)" ;; *) ok "an old older-version lock directory is ignored" ;; esac
+  [ -d "$st.lock" ] && ok "and never removed" || no "and was removed"
+  rmdir "$st.lock"
+
+  # 6b. An older version's lock path that cannot be read (a symlink loop) is a permanent refusal that says so,
+  # not a live older writer: a quiet skip every night would freeze the streaks with no banner.
+  ln -s "$(basename "$st.lock")" "$st.lock"
+  cp "$st" "$root/own.before"
+  out=$(qs update "$root/2026-04-04.md"); rc=$?
+  assert_eq "$rc" "0" "update with an unreadable older-version lock path exits 0"
+  case "$out" in *"cannot lock"*) ok "and reports cannot lock, not a routine hold" ;; *) no "and reports cannot lock (got: $out)" ;; esac
+  case "$out" in *"banner"*) ok "and attempts a banner" ;; *) no "and attempts a banner (got: $out)" ;; esac
+  out=$(qs clear all); rc=$?
+  assert_eq "$rc" "1" "clear with an unreadable older-version lock path fails"
+  cmp -s "$st" "$root/own.before" && ok "and the state is untouched" || no "and the state is untouched"
+  rm -f "$st.lock"
+
+  # 7. A missing python3 is loud and permanent: update skips with the reason and a banner is attempted, clear fails.
+  mkdir -p "$root/bare"
+  local t
+  for t in bash sh awk sed grep sort tail head tr cut wc cat cp mv rm mkdir mktemp dirname basename readlink date stat shasum env uname touch printf ls; do
+    local tp; tp=$(command -v "$t" 2>/dev/null) && [ -x "$tp" ] && ln -sf "$tp" "$root/bare/$t"
+  done
+  cp "$st" "$root/own.before"
+  out=$(PATH="$root/bare" AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" AUTODREAM_NOTIFY_DRYRUN=1 /bin/bash "$QS" update "$root/2026-04-04.md" 2>&1); rc=$?
+  assert_eq "$rc" "0" "update without python3 exits 0"
+  case "$out" in *"python3 is required"*) ok "and says why" ;; *) no "and says why (got: $out)" ;; esac
+  case "$out" in *"no banner"*|*"posted banner"*|*"banner"*) ok "and a banner is attempted for a permanent refusal" ;; *) no "and a banner is attempted for a permanent refusal (got: $out)" ;; esac
+  out=$(PATH="$root/bare" AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" /bin/bash "$QS" clear all 2>&1); rc=$?
+  assert_eq "$rc" "1" "clear without python3 fails"
+  cmp -s "$st" "$root/own.before" && ok "and the state is untouched" || no "and the state is untouched"
+  # A python3 that fails, or exits with a number the lock code once used for a holder, is not a held lock.
+  mkdir -p "$root/badpy"
+  local code
+  for code in 1 7 11 15; do
+    printf '#!/bin/sh\nexit %s\n' "$code" > "$root/badpy/python3"; chmod +x "$root/badpy/python3"
+    out=$(PATH="$root/badpy:$PATH" AUTODREAM_QUESTION_LOCK_WAIT=1 AUTODREAM_QUESTION_STATE="$st" AUTODREAM_NOTIFY_DRYRUN=1 /bin/bash "$QS" update "$root/2026-04-04.md" 2>&1)
+    case "$out" in *"cannot lock"*) ok "a python3 that exits $code is reported as cannot lock, not as a held lock" ;; *) no "a python3 that exits $code is reported as cannot lock (got: $out)" ;; esac
+  done
+  # A FIFO at the lock path would block the open before any deadline exists.
+  rm -f "$lk"; mkfifo "$lk" 2>/dev/null
+  t0=$SECONDS
+  out=$(QS_WAIT=0 qs update "$root/2026-04-04.md")
+  [ $((SECONDS - t0)) -le 2 ] && ok "a FIFO at the lock path is refused at once, not blocked on" || no "a FIFO at the lock path blocked for $((SECONDS - t0))s"
+  case "$out" in *"cannot lock"*) ok "and reported as cannot lock" ;; *) no "and reported as cannot lock (got: $out)" ;; esac
+  rm -f "$lk"
+
+  # 8. A second acquire in one process is refused and does not drop the first lock.
+  out=$( ( . "$REPO/bin/lib-flock.sh"; flock_acquire "$root/dbl.flock" 0; first=$?; flock_acquire "$root/dbl.flock" 0; second=$?
+           flock_free_probe=$(python3 -c 'import fcntl,sys
+f=open(sys.argv[1],"a")
+try: fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB); print("free")
+except BlockingIOError: print("held")' "$root/dbl.flock")
+           echo "$first $second $flock_free_probe" ) )
+  assert_eq "$out" "0 4 held" "a second flock_acquire in one process is refused and the first lock stays held"
+  rm -rf "$root"
+}
+
 _run test_question_streaks
 _run test_question_streaks_reruns_and_mismatch
 _run test_question_streaks_state_lives_with_the_install
+_run test_question_streaks_lock_is_a_kernel_flock
 
 # ---- L2 attempt diagnostics (issue 42): a signal-shaped L2 death leaves evidence ----
 # Exit 143 on the aggregator was seen on 2026-08-01, 08-31, 09-02, 09-04, 09-19 and 10-02 with
