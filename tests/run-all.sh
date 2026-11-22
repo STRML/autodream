@@ -986,6 +986,19 @@ test_partial_report_does_not_consume(){
   rm -rf "$root"
 }
 
+test_a_prose_question_with_no_block_is_named_in_the_retry_log(){
+  echo "# a report that ends in a prose question and has no questions block is retried, and the log says why"
+  local root; root=$(setup_env); mk_session "$root" s1
+  export MOCK_MODE=l2_prose_question AUTODREAM_L2_ATTEMPTS=2
+  vault_run "$root"
+  unset MOCK_MODE AUTODREAM_L2_ATTEMPTS
+  assert_grep "$root/run.out" "no open-questions marker, and the report ends in a question written as prose outside an AUTODREAM_QUESTIONS_BEGIN/END block" "the log names the prose question and the missing block"
+  assert_grep "$root/run.out" 'it ends with: "Should .claude in .adapters-rejected be cleaned up?"' "and quotes what the capture ends with"
+  assert_grep "$root/run.out" "L2 aggregation attempt 2" "and the report is retried"
+  assert_no_file "$root/dreams/$DATE.md" "no truncated report stands as the night's report"
+  rm -rf "$root"
+}
+
 test_run_outcome_is_written_only_for_a_delivered_or_untouched_report(){
   echo "# autodream-now --watch reads logs/run-<date>.outcome: the runner writes it, under the launch's token, only when it delivered or left a finished report alone"
   local root o sh; root=$(setup_env); mk_session "$root" s1; o="$root/autodream/logs/run-$DATE.outcome"
@@ -4410,6 +4423,7 @@ _run test_focus_tag_uses_the_recorded_harness_and_transcript
 _run test_force_rebuild_failed_l2_does_not_consume
 _run test_unmovable_stale_report_disarms_consuming
 _run test_partial_report_does_not_consume
+_run test_a_prose_question_with_no_block_is_named_in_the_retry_log
 _run test_partial_report_keeps_previous
 _run test_run_outcome_is_written_only_for_a_delivered_or_untouched_report
 _run test_partial_report_does_not_block_retry
