@@ -12,4 +12,4 @@ One chatty monorepo must not crowd the other harnesses out of L2's context, so t
 
 ## Consequences
 
-Truncation must stay explicit, never silent. Keep the cap per section. Do not validate the cap by pattern alone.
+Truncation must stay explicit, never silent. Keep the cap per section. Do not validate the cap by pattern alone. `test_changelog_refuses_foreign_cache_dir` pins that `abc` and `00` fall back to 400.

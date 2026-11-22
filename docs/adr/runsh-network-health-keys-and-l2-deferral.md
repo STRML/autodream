@@ -10,7 +10,7 @@ Status: accepted · Date: 2026-11-22 · Code: `bin/run.sh` (the `network_*` keys
 - The last attempt is classified too: the probe in the retry loop only runs between attempts, so a route that dropped before the final attempt was never seen and the run would record `network_deferred_l2: no`. The probe runs only when L2 failed; a delivered report needs no explanation.
 
 ## Decision
-The keys, the deferral-branch defaults and the post-loop probe exist as described. The L2 delta is `NET_DOWN_SECONDS - NET_DOWN_SECONDS_PRE_L2`. See CLAUDE.md, "A dead network or a refusing provider defers the date; it never publishes a short corpus (#37)".
+`NET_DOWN_SECONDS_PRE_L2` is captured when the run-stats block closes; after the L2 loop `network_down_seconds_l2` is `NET_DOWN_SECONDS - NET_DOWN_SECONDS_PRE_L2` and `network_deferred_l2` is the final `NET_DEFERRED`. The deferral branch (taken when L1 left the date deferred) appends `0` / `no`, calls `clean_work_bucket` and returns 1 before any L2 attempt. Both L2 network checks use `l2_probe_url`. See CLAUDE.md, "A dead network or a refusing provider defers the date; it never publishes a short corpus (#37)".
 
 ## Consequences
 Removing the explicit zero/no append on the deferral path makes the keys vanish exactly when a reader most needs them. The L2 probe is gated on `AUTODREAM_NETCHECK` (tests set it to 0).

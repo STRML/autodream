@@ -12,4 +12,5 @@ A report written from a run that could not reach the model looks complete, ships
 ## Consequences
 - Moving the decision into the round loop turns every flap into a deferred night.
 - Dropping the "still missing" condition defers recovered runs.
+- The stop itself (log the shortfall, append `network_down_seconds_l2: 0` and `network_deferred_l2: no`, clean the work bucket, return 1 before L2) is recorded in `defer-date-when-network-or-provider-fails`. `NET_DEFERRED` is also set later by the L2 retry loop (`wait_for_network "$(l2_probe_url)"` between attempts), a separate trigger of the same flag. A `staging` row in `l1-netdown.txt` is checked first and is a fatal, not a deferral.
 - Related: `l1-setup-failure-is-fatal-not-deferral` (a runner that cannot set up its workers is not an outage).

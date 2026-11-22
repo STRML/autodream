@@ -8,7 +8,7 @@ A laptop that sleeps mid-run loses the network and whole batches of workers fail
 
 ## Decision
 
-The L1 worker is idempotent, since a session with a findings JSON is skipped, so the run re-dispatches only the still-missing sessions across wake and sleep cycles until they land, and retries L2 until a report exists. The knobs are tunable; the network wait and the sleeps are disabled in tests.
+The L1 worker is idempotent, since a session with a findings JSON is skipped, so the run re-dispatches only the still-missing sessions across wake and sleep cycles until they land, and retries L2 until a report exists. The knobs are tunable (`AUTODREAM_L1_ROUNDS` default 5, `AUTODREAM_L2_ATTEMPTS` default 3, `AUTODREAM_RETRY_WAIT` default 60 seconds); the network wait and the sleeps are disabled in tests.
 
 ## Consequences
 

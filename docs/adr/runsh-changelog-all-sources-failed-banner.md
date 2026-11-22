@@ -8,7 +8,7 @@ Every source failing is a broken fetch path on this host (lost credentials, a re
 
 ## Decision
 
-When `failed` equals `sources` (and is above zero), `changelog_warn_all_failed` logs and runs `notify.sh --warning <date> "upstream changelog check failed for all N source(s); first: <first error>"`. A notify failure is logged and not fatal. `--warning` is used so the banner does not say FAILED or drop a `<date>-FAILED.txt` into the inbox for a run that still writes its report.
+When `failed` equals `sources` (and is above zero), `changelog_warn_all_failed` logs and runs `notify.sh --warning <date> "upstream changelog check failed for all N source(s); first: <first error>"`. A notify failure is logged and not fatal. It posts nothing when no source was configured or when `$AUTODREAM_DIR/notify.sh` is not executable (the failure is still logged). `--warning` is used so the banner does not say FAILED or drop a `<date>-FAILED.txt` into the inbox for a run that still writes its report.
 
 ## Consequences
 

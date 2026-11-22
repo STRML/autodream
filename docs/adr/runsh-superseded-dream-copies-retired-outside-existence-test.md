@@ -9,7 +9,7 @@ Status: accepted · Date: 2026-11-22 · Code: `bin/run.sh` (`run()`: `STALE_REPO
 - Partials are prefixes of a report that now exists in full, so a complete report supersedes every one for this date, including partials from earlier nights, which the `.stale-*` rule can never reach. Without this they pile up with nothing to remove them.
 
 ## Decision
-`rm` the run's `STALE_REPORT` when `report_complete`; call `drop_stale_report_copies` on a delivered, complete report; delete every `$REPORT_PATH.partial-*` when complete, else name the readable partial. See CLAUDE.md, "Remote hosts" (`drop_stale_report_copies`) and "The consume gate" (the `.partial-*` paragraph).
+`rm` the run's `STALE_REPORT` when `report_complete`; call `drop_stale_report_copies` on a delivered, complete report; delete every `$REPORT_PATH.partial-*` when complete, else name the readable partial. See CLAUDE.md, "Remote hosts" (`drop_stale_report_copies`) and "What the consume gate actually has to check (PR #37 review)" (the `.partial-*` paragraph). `drop_stale_report_copies` deletes a copy, except one holding a `## Triage decisions` heading, which is renamed to `<report>.triaged-<epoch>` because it holds the user's own writing.
 
 ## Consequences
 Do not nest this under the `-f` check. A copy left in the `.stale-*` glob means nothing has been delivered since, which the remote-short lookup relies on.

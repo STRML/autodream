@@ -1,6 +1,6 @@
 # runsh: in the tab-separated session lists the adapter name comes first and the path last
 
-Status: accepted · Date: 2026-11-22 · Code: `bin/run.sh` (`scan_roots` writing `sessions.txt.src`, `build_source_sidecar` reading it)
+Status: accepted · Date: 2026-11-22 · Code: `bin/run.sh` (`scan_one_adapter` writing `sessions.txt.src`, `build_source_sidecar` reading it)
 
 ## Context
 
@@ -8,7 +8,7 @@ The adapter name is a validated safe identifier with no tab, but a session path 
 
 ## Decision
 
-`scan_roots` writes `<src><TAB><path>` and `build_source_sidecar` reads it with `IFS=$'\t' read -r src sp`, so the path is absorbed whole by the last variable.
+`scan_one_adapter` writes `<src><TAB><path>` to `sessions.txt.src` and `build_source_sidecar` reads it with `IFS=$'\t' read -r src sp`, so the path is absorbed whole by the last variable.
 
 ## Consequences
 

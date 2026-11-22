@@ -9,7 +9,7 @@ The prompt asks the worker to copy `skills_invoked`, `skills_invoked_count`, `sk
 
 ## Decision
 - The loop runs on every valid findings JSON (`L1_FINDINGS_OK` under `jq -s`). If the sidecar lacks any of the four keys, all four are deleted from the findings JSON and counted in `SKILLS_DROPPED`; otherwise the four are overwritten from the sidecar (`SKILLS_ENFORCED`).
-- Rewrites that fail (full disk, unwritable dir) are counted in `SKILLS_FAILED`: the worker's own skill fields survive in those files, so the count has to be visible or L2 ranks guesses as measurements.
+- Rewrites that fail (full disk, unwritable dir), whether the delete or the overwrite, are counted in `SKILLS_FAILED`: the worker's own skill fields survive in those files, so the count has to be visible or L2 ranks guesses as measurements. `SKILLS_DROPPED` and `SKILLS_FAILED` reach run-stats as `skills_unmeasured` and `skills_enforcement_failed`.
 
 ## Consequences
 - Keep this step independent of python3.

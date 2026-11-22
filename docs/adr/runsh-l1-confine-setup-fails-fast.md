@@ -7,9 +7,9 @@ The sandbox probe builds a prefix with no paths. The real prefix carries an engi
 
 ## Decision
 For each engine with work, setup:
-1. Runs `adapter.sh l1-writes`. Exit 2 means the adapter declares no write profile (the engine is recorded `l1_confined_<engine>: no` with a reason and a WARNING). Any other nonzero exit is a write list the adapter refused: a fatal (`L1_CONFINE_FATAL`) with the reason, never an engine that quietly runs unconfined.
-2. Builds the real prefix once with `l1-confine.sh engine-prefix` against a `.setup-<engine>` stage; a failure is a fatal before any worker starts.
-3. Runs `adapter.sh l1-stage-env` once with the model the engine's sessions use. Exit 0 or 2 (no such verb) confines the engine. Exit 4 (a model a throwaway state cannot serve) leaves this engine unconfined with the reason and a WARNING. Any other exit is a fatal.
+1. Runs `adapter.sh l1-writes`. Exit 2 means the adapter declares no write profile (the engine is recorded `l1_confined_<engine>: no` with a reason and a WARNING). Any other result goes on to step 2, so a write list the adapter refused is not an engine that quietly runs unconfined: it surfaces there as a fatal with the reason.
+2. Builds the real prefix once with `l1-confine.sh engine-prefix` (which reads the same `l1-writes` list) against a `.setup-<engine>` stage; a failure, including a refused write list, sets `L1_CONFINE_FATAL` ("the <engine> engine's sandbox cannot be built") and stops the run before any worker starts.
+3. Runs `adapter.sh l1-stage-env` once with the model the engine's sessions use. Exit 0 or 2 (no such verb) confines the engine. Exit 4 (a model a throwaway state cannot serve) leaves this engine unconfined with the reason and a WARNING. Any other exit is a fatal ("the <engine> engine's state directory cannot be prepared"). The reason in each fatal and WARNING is cut to 300 characters with newlines and tabs replaced by spaces.
 
 ## Consequences
 The "(omp)" in the original comment on exit 2 is out of date: both the claude and omp adapters now declare `l1-writes`, so exit 2 reaches this branch only for an adapter with no such verb. Exit 2 from `l1-stage-env` means "no state directory needed" (claude). Do not turn a nonzero `l1-writes` exit into "unconfined": the denial is the safe answer. See CLAUDE.md, "A host with no working sandbox says so".

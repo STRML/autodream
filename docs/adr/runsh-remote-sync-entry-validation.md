@@ -13,4 +13,4 @@ Pass 1 refuses, before any ssh: an entry with no `label=target`, a label outside
 See CLAUDE.md, "Remote hosts" (Validation before ssh).
 
 ## Consequences
-A new run-stats suffix per label must be added to the reserved-name test. `tests/run-all.sh` has `test_remote_sync_refused_when_the_claude_adapter_is_off`.
+A new run-stats suffix per label must also be added to the reserved-label `case` pattern in pass 1, or a host named like it prints as another line. `tests/run-all.sh` pins this with `test_remote_sync_reserved_labels_are_refused` and `test_remote_sync_refused_when_the_claude_adapter_is_off`.

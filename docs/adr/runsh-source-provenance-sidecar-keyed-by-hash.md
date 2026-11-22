@@ -1,12 +1,12 @@
 # runsh: source provenance lives in a sidecar keyed by artifact hash, and sessions.txt stays one bare path per line
 
-Status: accepted · Date: 2026-11-22 · Code: `bin/run.sh` (`build_source_sidecar`, `session_hash`)
+Status: accepted · Date: 2026-11-22 · Code: `bin/run.sh` (`build_source_sidecar`; `session_hash` is in `bin/lib-project.sh`)
 
 ## Context
 
 The hash assignments in `l1_missing_count()` and `dispatch_l1()` key each artifact by the sha1 of the WHOLE `sessions.txt` line, `oversized-gate.sh` recomputes the same hash from it, and every archived findings dir depends on that shape. Adding a source field to `sessions.txt`, or including the source in the hash formula, would silently invalidate all of them. See CLAUDE.md, "Where state lives" (`sessions.txt`, `<hash>.json`).
 
-Two adapters can still land on one artifact in two ways. Nearly every duplicate seen is the same transcript reached through two entries of `SESSION_ROOTS`, which is ordinary on a host where `root-probe` autodetects each `$HOME/.claude*/projects` and one is a symlink of another. `sessions.txt.src` is not deduplicated while `.raw` is `sort -u`'d.
+Two sources can still land on one artifact in two ways: the same path claimed twice, and two different paths truncating to one 12-character hash. The original header comment called the first a misconfiguration of two adapters; a later comment in the same function corrected that. `sessions.txt.src` is not deduplicated while `.raw` is `sort -u`'d, so every duplicate seen is one transcript reached through two entries of `SESSION_ROOTS`, which is ordinary on a host where `root-probe` autodetects each `$HOME/.claude*/projects` and one is a symlink of another.
 
 ## Decision
 

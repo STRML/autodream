@@ -3,7 +3,7 @@
 Status: accepted · Date: 2026-11-22 · Code: `bin/run.sh` (`run`: `compute_session_stats`, `compute_overlap_stats`)
 
 ## Context
-Overlap is a cross-session computation, not a per-session one. Gated sessions' sidecars still exist and still participate in overlap (see `bin/overlap-stats.sh`).
+Overlap is a cross-session computation, not a per-session one. Gated sessions' sidecars still exist and still participate in overlap (see `bin-a-overlap-stats-corpus-and-pair-semantics.md`: the script cannot see the gate decision, and the stat deliberately includes every gated top-level session).
 
 ## Decision
 - `compute_session_stats` runs once from the final enumeration. Retry rounds reuse those sidecars and intentionally do not regenerate them during dispatch retries.
@@ -11,6 +11,6 @@ Overlap is a cross-session computation, not a per-session one. Gated sessions' s
 - `FANOUT_ROWS` is taken from the findings dir after that.
 
 ## Consequences
-- Moving overlap after dispatch drops gated sessions from the overlap measurement.
-- Moving it before `compute_session_stats` computes overlap over missing sidecars.
-- Regenerating sidecars per retry round changes the numbers the noise gate and oversized gate read mid-run.
+- Overlap must run after `compute_session_stats` has written every sidecar; run before it, it measures over missing sidecars.
+- Placement before the noise gate is deliberate, so a later move must keep gated sessions in the measurement.
+- Retry rounds reuse the sidecars; they are not regenerated during dispatch retries.

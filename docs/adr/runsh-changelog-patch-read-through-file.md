@@ -8,8 +8,8 @@ In a `blob:none` cache `git log -p` fetches old blobs from the remote, and a fai
 
 ## Decision
 
-`changelog_patch` writes `git log -p --reverse --since --until -- <path>` to a `mktemp` file under `${TMPDIR:-/tmp}`, run through `changelog_step` so git's stderr goes to the run log and a failure writes `Git log failed (<cause>)` into the source's section and fails the source. Only then do the `grep`/`awk` filters read the file. No scratch file is its own failure section.
+`changelog_one` makes a `mktemp` file under `${TMPDIR:-/tmp}` and runs `changelog_patch`, which writes `git log -p --reverse --since --until -- <path>` to it, through `changelog_step`, so git's stderr goes to the run log and a failure writes `Git log failed (<cause>)` into the source's section, removes the scratch file and fails the source. Only then do the `grep`/`awk` filters read the file. Failing to make the scratch file is its own failure section (`No scratch file for the changelog diff`).
 
 ## Consequences
 
-Do not pipe `git log -p` straight into the filters. A failed log must never read as a quiet night. See CLAUDE.md, "Upstream changelog window".
+Do not pipe `git log -p` straight into the filters. A failed log must never read as a quiet night; `test_changelog_log_failure_is_not_a_quiet_night` pins it with a git shim that fails only `log -p`. See CLAUDE.md, "Upstream changelog window".

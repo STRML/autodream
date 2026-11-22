@@ -7,7 +7,7 @@ Claude Code writes a one-line `{"type":"ai-title",...}` stub into the launch cwd
 
 ## Decision
 - Every `claude --print` worker reads and writes by absolute path, so its cwd is functionally irrelevant; it is pointed at `$AUTODREAM_DIR/work` (`WORK_DIR`) purely to redirect the session bucket. Claude maps the launch cwd to `~/.claude/projects/<cwd with / and . replaced by ->`, so `WORK_BUCKET` is that path under `PROJECTS_DIR`.
-- `clean_work_bucket` empties the bucket before and after the run's workers, so stubs never accumulate.
+- `clean_work_bucket` (`rm -rf "$WORK_BUCKET"`) runs before L1, after L1 and after L2, so stubs never accumulate.
 - `WORK_BUCKET` stays keyed off the PRIMARY projects dir even when extra session roots are scanned: the lean workers run under the default config, so their stubs land in the default bucket, which the isolation and the wipe are built around. Scanning extra roots does not change that.
 
 ## Consequences

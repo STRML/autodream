@@ -8,7 +8,7 @@ See CLAUDE.md, "Which day a session belongs to (the report-day window, #113)". T
 
 ## Decision
 
-With `WINDOW_ON=1`, `scan_roots` runs `session-window.sh in-window <path> <start epoch> <end epoch>`. Exit 1 is the verdict: records with clocks and none in the day, or no clock at all and modified after the day (its mtime decides, as the bounded find decided). That session is counted in `OUT_OF_WINDOW` and skipped, so it cannot read as a quiet night. Any other status is the helper failing and the session is kept. `enumerate_for` passes `ENUM_END` as the upper date: the day after the report day with the window off, far in the future with it on, where the in-transcript timestamps decide instead.
+With `WINDOW_ON=1`, `scan_roots` runs `session-window.sh in-window <path> <start epoch> <end epoch>`. Exit 1 is the verdict: records with clocks and none in the day, or no clock at all and modified after the day (its mtime decides, as the bounded find decided). That session is counted in `OUT_OF_WINDOW` and skipped, so it cannot read as a quiet night. Any other status is the helper failing and the session is kept. `enumerate_for` passes `ENUM_END` as the upper date: the day after the report day with the window off, the report day plus five years with it on (`pdate_shift ... 5 y`, so the mtime test is only a lower bound), where the in-transcript timestamps decide instead.
 
 ## Consequences
 

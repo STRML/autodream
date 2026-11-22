@@ -10,7 +10,7 @@ Staging matters: `producer || exit 1 | sort -u` is masked, because without `pipe
 
 ## Decision
 
-`SIDECAR_STALE_ROWS` is computed once, after all rewrites: the dropped hashes are staged in `$FINDINGS_DIR/.stale-hashes.$$`, then `sort -u`'d, then each unique hash is looked up in the final sidecar (`grep -q`, 0 stale, 1 absent). A `grep` status above 1, a staging failure or a sort failure sets `SIDECAR_STALE_ROWS=unknown` rather than 0, with a WARNING. `SESSIONS_BY_SOURCE` is likewise counted from the final sidecar with `awk | sort | uniq -c`, not during the walk, and is `none` when empty. The metric is reported in run-stats as `sidecar_stale_rows` and `sessions_by_source`.
+`SIDECAR_STALE_ROWS` is computed once, after all rewrites: the dropped hashes are staged in `$FINDINGS_DIR/.stale-hashes.$$`, then `sort -u`'d, then each unique hash is looked up in the final sidecar (`grep -q`, 0 stale, 1 absent). A `grep` status above 1 sets `SIDECAR_STALE_ROWS=unknown` (an error is not "absent", the same refusal of a false-clean reading as `overlap_measured`); a staging or sort failure sets it to `unknown` too, with a WARNING ("reporting it as unknown rather than zero"). `SESSIONS_BY_SOURCE` is likewise counted from the final sidecar with `awk | sort | uniq -c`, not during the walk, and is `none` when empty. The metric is reported in run-stats as `sidecar_stale_rows` and `sessions_by_source`.
 
 ## Consequences
 

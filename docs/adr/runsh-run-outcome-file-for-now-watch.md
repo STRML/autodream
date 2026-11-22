@@ -8,8 +8,8 @@ Status: accepted · Date: 2026-11-22 · Code: `bin/run.sh` (`write_run_outcome`)
 
 ## Decision
 
-`write_run_outcome <delivered|noop>` appends `<token> <state>` to `logs/run-<date>.outcome`. The token is the watcher's own id for the launch (`AUTODREAM_RUN_TOKEN`), so a line from an earlier run is never mistaken for this one and no clock is involved. A token outside `[0-9A-Za-z._-]` or no token writes nothing, which is every scheduled run. `delivered` means a validated report stands; `noop` means a finished report already existed and nothing was rebuilt. A run that ends any other way writes nothing.
+`write_run_outcome <delivered|noop>` appends `<token> <state>` to `logs/run-<date>.outcome`. The token is the watcher's own id for the launch (`AUTODREAM_RUN_TOKEN`), so a line from an earlier run is never mistaken for this one and no clock is involved. A token outside `[0-9A-Za-z._-]` or no token writes nothing, which is every scheduled run. `delivered` means a validated report stands (the L2 report, or the no-sessions stub when it was written and passes `report_complete`; a stub that could not be written logs a warning and writes nothing); `noop` means a finished report already existed and nothing was rebuilt. A run that ends any other way writes nothing.
 
 ## Consequences
 
-Do not infer readiness in the watcher from the log, the mtime or a re-evaluated predicate. A new way a run can legitimately end with a report must write one of the two states.
+Do not infer readiness in the watcher from the log, the mtime or a re-evaluated predicate. A new way a run can legitimately end with a report must write one of the two states. `test_run_outcome_is_written_only_for_a_delivered_or_untouched_report` pins it.

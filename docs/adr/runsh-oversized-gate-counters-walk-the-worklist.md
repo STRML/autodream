@@ -19,4 +19,4 @@ Status: accepted · Date: 2026-11-22 · Code: `bin/run.sh` (`run`, the `OVERSIZE
 ## Consequences
 - Keep the runner and `bin/oversized-gate.sh` in agreement on what is unmeasurable.
 - Never pad the denominator with sessions whose size was not read, and never clamp an unreadable size to 0.
-- The comments being replaced carry stale pointers: "line ~309" for the dispatch-time `sz` (now `sz=$(wc -c ...)` near `run.sh:3560`) and `oversized-gate.sh:105` for the unmeasurable handling (now around `oversized-gate.sh:127`); cite functions, not lines.
+- The comments being replaced pointed at line numbers ("line ~309" for the dispatch-time `sz`, `oversized-gate.sh:105` for the unmeasurable handling) that had already gone stale; refer to the `dispatch_l1` worker's size read and to `oversized-gate.sh`'s `session_hash ... || unmeasurable` branch by name, not by line.

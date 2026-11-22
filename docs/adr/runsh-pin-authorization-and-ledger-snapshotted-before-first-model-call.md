@@ -3,7 +3,7 @@
 Status: accepted · Date: 2026-11-22 · Code: `bin/run.sh` (`run`: `PIN_PROJECTS_*`, `SESSION_ROWS`, `PINS_LEDGER_*`)
 
 ## Context
-L1 and L2 both run with the Write tool (L1 with `bypassPermissions`), so any file they can reach they can rewrite: `sessions.txt`, `sessions-source.txt`, findings JSON. A worker could also empty `pins-applied.tsv`, after which the apply step would store every pin again. See CLAUDE.md, 'findings/YYYY-MM-DD/pin-projects.tsv' and '`pins-applied.tsv`'.
+L1 workers run with the Write tool and `bypassPermissions`, so any file they can reach they can rewrite: `sessions.txt`, `sessions-source.txt`, findings JSON. (The original code comment says L2 holds Write too; that is stale, L2 is read-only (`Glob Read`) now, which is why only L1 is the writer here.) A worker could also empty `pins-applied.tsv`, after which the apply step would store every pin again. See CLAUDE.md, 'findings/YYYY-MM-DD/pin-projects.tsv' and '`pins-applied.tsv`'.
 
 ## Decision
 - Before the first model call, `session_rows` builds `SESSION_ROWS`, and `PIN_PROJECTS_TSV` and `SESSION_CWDS_TSV` are derived from it; they stay in this shell's memory until the pins are applied after the report. If any step fails, `PIN_PROJECTS_BUILT` stays 0 and the run stores no memory pins.

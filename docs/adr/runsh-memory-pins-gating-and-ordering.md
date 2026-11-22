@@ -8,7 +8,7 @@ Status: accepted · Date: 2026-11-22 · Code: `bin/run.sh` (`run()`: the `PINS` 
 - `pin-projects.tsv` is the authorization list. It holds only projects this run triaged, each with the working directory its session's adapter resolved, so a pin naming any other project is refused and memory is never scoped by a path the model wrote.
 
 ## Decision
-The chain of `elif`s skips, with a logged reason, when the gates fail, when `pin-projects.tsv` cannot be written, or when the ledger cannot be restored (duplicates cannot be ruled out); otherwise it runs `apply-pins.sh` and logs the counters. See CLAUDE.md, "Where state lives" (`pin-projects.tsv`, `pins-applied.tsv`).
+The chain of `elif`s skips, with a logged reason, when the gates fail, when `pin-projects.tsv` cannot be written, or when the ledger cannot be restored (duplicates cannot be ruled out); otherwise it runs `apply-pins.sh` and logs the counters; if `apply-pins.sh` exits non-zero it logs that the counters are unavailable (check `pins-applied.tsv` for what was stored) and the unstored pins stay in `pins.jsonl`. See CLAUDE.md, "Where state lives" (`pin-projects.tsv`, `pins-applied.tsv`).
 
 ## Consequences
 Do not apply pins from a stale or unvalidated `pins.jsonl`. Do not gate them on the normal-nightly-date rule used for consuming.

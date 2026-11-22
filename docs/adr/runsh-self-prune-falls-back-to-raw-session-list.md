@@ -9,5 +9,5 @@ Autodream's own headless worker and aggregator transcripts must not be re-triage
 If `$PRUNE` is executable, `sessions.txt.raw` is filtered through `"$PRUNE" --filter` into `sessions.txt`. If the helper is missing, or the filter fails, `sessions.txt.raw` is copied unchanged.
 
 ## Consequences
-- The fallback is deliberate: failing open re-triages some of autodream's own transcripts (a wasted call), while failing closed would silently drop real sessions from the night.
+- The fallback is deliberate: failing open re-triages some of autodream's own transcripts left by runs predating the fix, while failing closed would silently drop real sessions from the night.
 - Do not change the fallback to an error without deciding which loss is worse.

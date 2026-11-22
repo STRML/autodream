@@ -14,4 +14,4 @@ The same three-line grep-then-mv pattern was patched site by site across four re
 
 ## Consequences
 
-Do not inline a new `grep ... > tmp && mv` variant at a call site. The caller decides survivability: the worklist rewrite is fatal, the provenance-row rewrites are `|| :` (see `collided-sessions-dropped-both-and-verified`). The block of comments above `sort_unique_inplace` that begins "Source provenance" belongs to `build_source_sidecar` and is separated from it by these helpers.
+Do not inline a new `grep ... > tmp && mv` variant at a call site. The caller decides survivability: the worklist rewrite is fatal, the provenance-row rewrites are `|| :` (see `collided-sessions-dropped-both-and-verified`).

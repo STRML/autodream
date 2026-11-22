@@ -12,4 +12,4 @@ For an owned cache `changelog_sync` runs `fetch --quiet origin` then `reset --ha
 
 ## Consequences
 
-Do not use `reset --hard` on anything `cache_owns` has not approved (see `changelog-cache-ownership-resolved-physically`). A fork that is rebased makes `pull --ff-only` the wrong tool for any cache we own.
+Do not use `reset --hard` on anything `cache_owns` has not approved (see `changelog-cache-ownership-resolved-physically`). A fork that is rebased makes `pull --ff-only` the wrong tool for any cache we own. `test_changelog_survives_a_force_pushed_remote` pins it.

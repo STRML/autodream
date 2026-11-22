@@ -11,5 +11,5 @@ A source's engine choice that names no accepted adapter must not fall through to
 - Each engine in use is checked with `engine_login_ok`. One that fails has its column blanked in `AUTODREAM_L1_ENGINES`, so its sessions take the same path as a choice naming no accepted adapter (error records, no model call).
 
 ## Consequences
-- Do not resolve the model first or default a missing engine to the reviewer: that sent omp sessions to the claude CLI with a model id from another engine once (PR #165 review, per CLAUDE.md).
+- Do not resolve the model first, and do not let a pinned engine that is not an accepted adapter fall through to another engine. An unset engine does default (`AUTODREAM_L1_ENGINE_<SOURCE>`, then `AUTODREAM_L1_ENGINE`, then the run's reviewer, passed as `_reviewer`), but the model is keyed by the resolved engine: a source-keyed model pin once sent omp sessions to the claude CLI with a model id from another engine (PR #165 review, per CLAUDE.md).
 - The login failure is a config problem for this run, so those records are dropped and retried on a later run that resolves an engine.

@@ -8,7 +8,7 @@ Status: accepted · Date: 2026-11-22 · Code: `bin/run.sh` (`changelog_clone`)
 
 ## Decision
 
-`changelog_clone` adds `--filter=blob:none --sparse` only when the remote looks real (`*://*` or `*@*:*`). Blobs for the logged path are fetched on demand. After a sparse clone it runs `sparse-checkout set --no-cone "/$path"`, with the pattern anchored by a leading slash, output sent to the run log and the status ignored. A local fixture gets a plain clone and no sparse step.
+`changelog_clone` adds `--filter=blob:none --sparse` only when the remote looks real (`*://*` or `*@*:*`). Blobs for the logged path are fetched on demand. After a sparse clone it runs `sparse-checkout set --no-cone "/$path"`, with the pattern anchored by a leading slash, stdout discarded, stderr appended to the run log and the status ignored (`|| true`). A local fixture gets a plain clone and no sparse step.
 
 ## Consequences
 

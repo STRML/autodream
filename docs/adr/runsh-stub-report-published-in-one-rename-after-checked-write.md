@@ -10,6 +10,7 @@ Status: accepted · Date: 2026-11-22 · Code: `bin/run.sh` (`run`, the stub here
 ## Decision
 - The stub is written to `$REPORT_PATH.tmp`; the heredoc's status is kept in `STUB_WRITTEN` for both the publish step and the outcome.
 - Dropped-thread input is spliced in before `AUTODREAM_QUESTIONS_BEGIN` through `$REPORT_PATH.threads`, then renamed over the tmp.
+- The dates a remote host missed (#230) are an open question inside the stub's questions block on this path: the-dates question is counted in the open-questions marker, so the streak store sees it and escalates it instead of reading the night as question-free.
 - The report is published with `mv -f` only when `STUB_WRITTEN` is 0. On failure the temp files are removed, `log_fatal` and `fatal_exit` run, and the run returns 1; a report already at the path stays the old one.
 - `write_run_outcome delivered` is written only when `STUB_WRITTEN` is 0 and `report_complete` holds; otherwise a WARNING says the stub was not written and it is not reported as delivered.
 

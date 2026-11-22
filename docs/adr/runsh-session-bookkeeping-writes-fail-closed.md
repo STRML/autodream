@@ -1,6 +1,6 @@
 # runsh: every write and read of the session worklist and its provenance index fails closed
 
-Status: accepted · Date: 2026-11-22 · Code: `bin/run.sh` (`scan_roots`, `build_source_sidecar`)
+Status: accepted · Date: 2026-11-22 · Code: `bin/run.sh` (`scan_one_adapter`, `build_source_sidecar`)
 
 ## Context
 
@@ -14,7 +14,7 @@ Collision detection exists so two sessions never reach dispatch onto one `<hash>
 
 ## Decision
 
-The paired session-list writes are both checked (`log_fatal` and `rm -f` of the staging file on failure). `build_source_sidecar` truncates `sessions-source.txt`, `.hash-to-path` and `.collided` up front and refuses to run blind if any cannot be written. The worklist membership check switches on grep's status (0 present, 1 skip, other fatal). The `.hash-to-path` lookup checks awk's status. The sidecar append is checked. Each failure is `log_fatal` plus `return 1`.
+The paired session-list writes in `scan_one_adapter` are both checked (`log_fatal`, and `rm -f` of the `.enum.*` staging file on that exit too: under `AUTODREAM_FORCE=1` the findings dir is reused across reruns, so repeated failures would pile up `.enum.*` files in the directory the aggregator globs). `build_source_sidecar` truncates `sessions-source.txt`, `.hash-to-path` and `.collided` up front and refuses to run blind if any cannot be written. The worklist membership check switches on grep's status (0 present, 1 skip, other fatal). The `.hash-to-path` lookup checks awk's status. The sidecar append is checked, and so is the read of `sessions.txt.src` itself (`done < ... || { log_fatal ...; return 1; }`). Each failure is `log_fatal` plus `return 1`.
 
 ## Consequences
 

@@ -8,6 +8,8 @@ Issue #113. An orphaned `.err` is a failed triage nobody has finished: no findin
 ## Decision
 `scan_worklist_leftovers` sets `L1_ERR_ORPHANED` and `ORPHAN_ERR_NAMES` for each `*.json.err` with no findings JSON whose hash is outside `worklist_hashes`, and logs a WARNING. It reads `SESSIONS_LIST`, which is empty on a night that found nothing, so the same scan serves the early stub exit. It counts and names; it does not retry, because the `.err` is the only record of which session it was, and a worker with the Write tool could have put any path in it. A findings JSON outside the worklist is handled by `findings-outside-worklist-set-aside`.
 
+`worklist_hashes` prints each hash on its own line, because `session_hash` prints no trailing newline and the `grep -x` match against whole lines would never match two hashes run together.
+
 See CLAUDE.md, "Which day a session belongs to" (Both halves of #113).
 
 ## Consequences

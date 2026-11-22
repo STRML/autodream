@@ -10,13 +10,13 @@ Other earlier faults, each fixed: `grep -v` exits 1 when it removes the only lin
 
 ## Decision
 
-On a collision the helper appends both paths to `.collided` and logs `COLLISION`. After the walk, if the drop set is non-empty:
+On a collision (two different paths on one hash; the same path reached twice is only a counted duplicate and the first is kept) the helper appends both paths to `.collided`, logs `COLLISION` and removes the hash's sidecar row, and a failed append is fatal (`log_fatal`, return 1). After the walk, if the drop set is non-empty:
 
 - it is deduplicated with `sort_unique_inplace`; both the worklist filter and the post-filter verification read it, so a damaged one would let a collided path through while everything reports success;
 - the worklist (`sessions.txt.raw`) is rewritten with `rewrite_filtered -vxF -f` and that rewrite FAILS CLOSED (`log_fatal`, return 1), because leaving it unchanged means two workers on one artifact;
 - the drop is verified rather than trusted: `grep -qxF -f` must exit exactly 1; anything above 1 is an I/O error and refuses, because grep's "not found" is the wanted answer and the same code path would otherwise take success on an error;
 - `RAW` stays the ENUMERATED count; `COLLIDED_DROPPED` counts the dropped paths separately;
-- the provenance rows of the dropped hashes are removed, but only for COLLISION drops: the sidecar is built before the self-prune and the empty-session filter, so it still carries rows for worker transcripts and 0-turn shells that are later excluded. Nothing consumes it yet; the first consumer that joins it against `<hash>.json` must expect hashes with no findings record;
+- the provenance rows of the dropped hashes are removed, but only for COLLISION drops: the sidecar is built before the self-prune and the empty-session filter, so it still carries rows for worker transcripts and 0-turn shells that are later excluded. The original comment said nothing consumes the sidecar yet; that is stale (`AUTODREAM_SOURCE_MAP`, `rollup.sh` and `threads.sh` read it), so any consumer that joins it against `<hash>.json` must expect hashes with no findings record;
 - sidecar row rewrites are DELIBERATELY survivable (`|| :`): a stale row overstates `sessions_by_source` by one and the helper has already logged why. The row rewrite is not counted at the attempt, see `sidecar-stale-row-count-measured-from-final-sidecar`.
 
 ## Consequences

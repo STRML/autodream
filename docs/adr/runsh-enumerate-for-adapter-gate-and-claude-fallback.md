@@ -10,8 +10,8 @@ Checking only that `adapter.sh` is executable would run a directory that failed 
 
 ## Decision
 
-`enumerate_for` calls `adapter_run <adapter> enumerate` only when the adapter is in `ACCEPTED_ADAPTERS` and its `adapter.sh` is executable. `scan_roots` assigns `ACCEPTED_ADAPTERS` once, from `adapters_list`. Anything else falls to the inline `find`, which is claude-only: for any other adapter name it logs "no adapter for ... no fallback that knows its session format" and returns 1, so the root counts as failed (see `enumeration-judged-by-output-not-status`).
+`enumerate_for` calls `adapter_run <adapter> enumerate <root> $TARGET_DATE $ENUM_END` and returns its status unchanged (`return $?`, never a constant; see `enumeration-judged-by-output-not-status`) only when all three hold: the `adapter_run` function is defined (`declare -F adapter_run`, false on an install whose `adapters/` tree predates the loader), the adapter is in `ACCEPTED_ADAPTERS`, and its `adapter.sh` is executable. `scan_roots` assigns `ACCEPTED_ADAPTERS` once, from `adapters_list`. Anything else falls to the inline `find`, which is claude-only: for any other adapter name it logs "no adapter for ... no fallback that knows its session format" and returns 1, so the root counts as failed (see `enumeration-judged-by-output-not-status`).
 
 ## Consequences
 
-The comment on the fallback calls it unreachable "because only claude is ever enabled"; that stopped being true once the omp adapter shipped, and the live case is exactly the stale-link skew it describes. Do not give the fallback a non-claude glob. Do not move the `adapters_list` call back inside the per-root loop.
+The comment on the fallback called it unreachable "because only claude is ever enabled" and said it becomes live once a second adapter ships beside a stale `adapters/` link. The omp adapter is now accepted and can be enabled through `AUTODREAM_ADAPTERS`, so that skew is reachable (this is the ADR's reading, not the comment's). Do not give the fallback a non-claude glob. Do not move the `adapters_list` call back inside the per-root loop.

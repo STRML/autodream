@@ -12,4 +12,4 @@ Ownership gates two things: `rm -rf` of a cache path before cloning, and running
 
 ## Consequences
 
-`test_changelog_nested_cache_path_is_owned_on_first_clone` pins the nested case and the symlink refusals. Do not replace the physical resolve with a prefix test.
+`test_changelog_refuses_foreign_cache_dir` pins that a non-git directory, a path that climbs out with `..` and a path through a symlink inside the cache are never deleted. `test_changelog_nested_cache_path_is_owned_on_first_clone` pins the nested case and a symlink out of the cache with a missing remainder behind it. Do not replace the physical resolve with a prefix test.

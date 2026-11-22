@@ -10,4 +10,4 @@ Status: accepted · Date: 2026-11-22 · Code: `bin/run.sh` (`run()`: `XQID_SOURC
 Both keys default to `not_attempted` when their record file is empty or missing; `x_fetch_browser_cause` is written only when a cause exists (tabs and CRs flattened). See CLAUDE.md, "X bookmarks as idea fuel" (`x_queryid_source`, "The browser fetch path").
 
 ## Consequences
-`fallback_graphql` and `cache` are the states to watch because the night looks fine while the opted-in path or the walk is dead. PROMPT.md's self-audit names them. The queryId walk stays untested on purpose (a fixture would assert a regex matches a string we wrote).
+`fallback_graphql` and `cache` are the states to watch because the night looks fine while the opted-in path or the walk is dead. PROMPT.md's self-audit names `fallback_graphql` every night it appears, and flags a stretch of `cache` with no `fresh` in it (`failed` is flagged on its own). The queryId walk stays untested on purpose (a fixture would assert a regex matches a string we wrote).

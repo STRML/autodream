@@ -8,6 +8,8 @@ The L1 workers run inside `xargs` subshells that share no state with the runner,
 ## Decision
 - `L1_CHUNKING` is the one switch for chunked triage, exported with `CHUNKER`, `MERGER`, `AUTODREAM_L1_CHUNK_BYTES` and `AUTODREAM_L1_MAX_CHUNKS`: 0 leaves the slimmer in its default mode and never reaches the chunker or the merge.
 - Which adapter runs each session (`AUTODREAM_SOURCE_MAP`) and which model each adapter's workers use (`AUTODREAM_L1_MODELS`) are fixed before the first model call and held in the environment. The models are resolved once per adapter, not per session.
+- The report-day window (`WINDOW_ON`, `SESSION_WINDOW`, `WIN_START_EPOCH`, `WIN_END_EPOCH`, `TARGET_DATE`) is exported for the dispatcher subshell, which uses it to cut a multi-day transcript.
+- `AUTODREAM_L1_ROUNDS` is exported so the dispatcher can tell whether this is the last retry round, which gates the metadata-stub fallback.
 - `TIMEOUT_BIN` is empty when no timeout binary exists, which the worker treats as run-unbounded (recorded as `l1_timeout_bin: none`).
 
 ## Consequences
