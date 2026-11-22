@@ -75,7 +75,8 @@ reap_marked() {
     marked_pids "$tok" > /dev/null || return 0
     sleep 0.1; i=$((i + 1))
   done
-  kill -s KILL $(marked_pids "$tok") 2>/dev/null || true
+  pids=$(marked_pids "$tok")
+  kill -s KILL $pids 2>/dev/null || true
   sleep 0.2
   if marked_pids "$tok" > /dev/null; then printf 'alive\n' > "$leftflag"; fi
 }
